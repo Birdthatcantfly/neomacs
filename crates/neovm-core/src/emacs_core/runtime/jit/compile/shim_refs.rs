@@ -168,6 +168,13 @@ pub(crate) enum Shim {
     UnobservedCollectionOwner,
     /// Appended JIT-only throw; the original ThrowFlow identity stays bare.
     ThrowFlowWithSymbols,
+    /// Collection-aware CABI alternatives, appended after all existing IDs.
+    AsetCollection,
+    VarsetCollection,
+    VarbindCollection,
+    UnbindCollection,
+    SetcarCollection,
+    SetcdrCollection,
 }
 
 /// The parameter shapes of the shim signatures.
@@ -253,6 +260,12 @@ impl Shim {
             Shim::HofAbort => "neovm_jit_hof_abort",
             Shim::StringCollectionWrite => "neovm_jit_string_collection_write",
             Shim::UnobservedCollectionOwner => "neovm_jit_unobserved_collection_owner",
+            Shim::AsetCollection => "neovm_jit_aset_collection",
+            Shim::VarsetCollection => "neovm_jit_varset_collection",
+            Shim::VarbindCollection => "neovm_jit_varbind_collection",
+            Shim::UnbindCollection => "neovm_jit_unbind_collection",
+            Shim::SetcarCollection => "neovm_jit_setcar_collection",
+            Shim::SetcdrCollection => "neovm_jit_setcdr_collection",
         }
     }
 
@@ -262,7 +275,13 @@ impl Shim {
             Shim::ThrowFlowWithSymbols => ShimGroup::ContextThrow,
             Shim::SqrtBindingValid => ShimGroup::OptSink,
             Shim::T2RecordArrayUse => ShimGroup::Tier2ArrayProfile,
-            Shim::StringCollectionWrite => ShimGroup::CollectionJournal,
+            Shim::StringCollectionWrite
+            | Shim::AsetCollection
+            | Shim::VarsetCollection
+            | Shim::VarbindCollection
+            | Shim::UnbindCollection
+            | Shim::SetcarCollection
+            | Shim::SetcdrCollection => ShimGroup::CollectionJournal,
             Shim::UnobservedCollectionOwner => ShimGroup::CollectionObservationGate,
             Shim::CallSubrSpec | Shim::PredSpec | Shim::EqInclPropsSpec | Shim::ArithSpec => {
                 ShimGroup::SubrSpec
@@ -380,9 +399,11 @@ impl Shim {
                 (&[Ptr, I64, Ptr], true)
             }
             // (vmctx, sym_id, val) -> status
-            Shim::Varset | Shim::Varbind => (&[Ptr, I64, I64], true),
+            Shim::Varset | Shim::Varbind | Shim::VarsetCollection | Shim::VarbindCollection => {
+                (&[Ptr, I64, I64], true)
+            }
             // (vmctx, n) -> status
-            Shim::Unbind => (&[Ptr, I64], true),
+            Shim::Unbind | Shim::UnbindCollection => (&[Ptr, I64], true),
             // (vmctx) -> status; (vmctx) -> vmctx or null
             Shim::Backedge | Shim::StackCheck => (&[Ptr], true),
             // (vmctx) -> (): the infallible Save* records and pop-handler
@@ -403,11 +424,15 @@ impl Shim {
             Shim::Builtin2 => (&[Ptr, I64, I64, I64, Ptr], true),
             Shim::Builtin3 => (&[Ptr, I64, I64, I64, I64, Ptr], true),
             // (vmctx, array, index) -> bits | VALUE_SHIM_SIGNAL
-            Shim::Aref | Shim::Memq | Shim::Assq | Shim::Setcar | Shim::Setcdr => {
-                (&[Ptr, I64, I64], true)
-            }
+            Shim::Aref
+            | Shim::Memq
+            | Shim::Assq
+            | Shim::Setcar
+            | Shim::Setcdr
+            | Shim::SetcarCollection
+            | Shim::SetcdrCollection => (&[Ptr, I64, I64], true),
             // (vmctx, array, index, value) -> bits | VALUE_SHIM_SIGNAL
-            Shim::Aset => (&[Ptr, I64, I64, I64], true),
+            Shim::Aset | Shim::AsetCollection => (&[Ptr, I64, I64, I64], true),
             // (vmctx, target, stack_len) -> ()
             Shim::PushCc => (&[Ptr, I64, I64], false),
             // (vmctx, target, stack_len, conditions/tag) -> ()
@@ -567,6 +592,12 @@ pub(crate) struct RtRefs {
     /// group), so the lowering's "refs exist iff the site kind exists" rule
     /// is independent of the module.
     groups: ShimGroups,
+    // Optimization only: leaves compiled before any collection observations
+    // retain the original hull predicate. Future captures widen that live
+    // window and still journal through its shim. This immutable compiler fact
+    // neither caches an owner nor controls correctness; all negative proofs
+    // used by an optimized leaf are reloaded from its executing heap.
+    observation_exclusions: bool,
     /// The calling convention of every shim: a site that calls a leaf
     /// builtin's trampoline by address (`call_indirect`) builds its
     /// signature with it.
@@ -589,6 +620,8 @@ impl RtRefs {
         let refs = RtRefs {
             ids,
             groups,
+            observation_exclusions: groups.collection_observation_gate
+                && crate::tagged::gc::has_collection_observations(),
             call_conv,
             ptr_ty,
             imported: std::array::from_fn(|_| Cell::new(None)),
@@ -609,6 +642,10 @@ impl RtRefs {
         self.groups.contains(group)
     }
 
+    pub(crate) fn observation_exclusions_enabled(&self) -> bool {
+        self.observation_exclusions
+    }
+
     /// The callable ref of a base shim (always declared).
     pub(crate) fn get(&self, func: &mut Function, shim: Shim) -> FuncRef {
         debug_assert!(
@@ -617,6 +654,19 @@ impl RtRefs {
         );
         let shim = if shim == Shim::CallSpec && self.groups.call_census {
             Shim::CallSpecCensus
+        } else if self.groups.collection_journal {
+            // Immutable frontend policy selects a different import, rather
+            // than inserting a runtime check into the legacy host entry.
+            // Worker payloads carry this actual Shim identity unchanged.
+            match shim {
+                Shim::Aset => Shim::AsetCollection,
+                Shim::Varset => Shim::VarsetCollection,
+                Shim::Varbind => Shim::VarbindCollection,
+                Shim::Unbind => Shim::UnbindCollection,
+                Shim::Setcar => Shim::SetcarCollection,
+                Shim::Setcdr => Shim::SetcdrCollection,
+                _ => shim,
+            }
         } else {
             shim
         };

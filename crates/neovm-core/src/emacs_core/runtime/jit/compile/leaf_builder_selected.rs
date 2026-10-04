@@ -78,6 +78,7 @@ pub(super) fn build_selected_leaf_fn<S: LeafSink>(
     );
     let variable_raw = uniform_raw_osr_slots(cfg, known_fixnum_slots, osr_pc);
     let has_raw_slots = variable_raw.iter().any(|&raw| raw);
+    let cons_store_probe_order = heap_inline::ConsStoreProbeOrder::for_ops(ops);
     lowering::imm_pool_reset();
     cold_exits::begin_function();
     LAST_IR_STATS.with(|c| c.set((0, 0, 0, 0)));
@@ -137,7 +138,7 @@ pub(super) fn build_selected_leaf_fn<S: LeafSink>(
                 direct_shapes: !aot && (shapes.optional || shapes.rest),
                 call_census: !aot && jit_call_census_on(),
                 direct_framed: !aot && shapes.framed,
-                collection_journal: !aot && jit_gen0_collection_journal_on(),
+                collection_journal: jit_gen0_collection_journal_on(),
                 collection_observation_gate: !aot
                     && super::shim_refs::collection_observation_gate_enabled(),
                 hof: inline::active_fused().is_some_and(|body| {
@@ -177,6 +178,10 @@ pub(super) fn build_selected_leaf_fn<S: LeafSink>(
             ));
             let call_result_slot =
                 fb.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
+            let inline_alloc = !aot && jit_inline_alloc_on();
+            // Direct &rest calls can allocate a list without an Op::Cons.
+            let inline_cons_allocating_body =
+                inline_alloc && ops.iter().any(|op| matches!(op, Op::Cons | Op::Call(_)));
             Some(RtCtx {
                 refs,
                 vmctx_var,
@@ -188,7 +193,9 @@ pub(super) fn build_selected_leaf_fn<S: LeafSink>(
                 call_result_slot,
                 rootwin: None,
                 heap: None,
-                inline_alloc: !aot && jit_inline_alloc_on(),
+                cons_store_probe_order,
+                inline_cons_allocating_body,
+                inline_alloc,
                 generational: std::cell::Cell::new(aot.then_some(false)),
                 direct_sites: std::cell::Cell::new(0),
                 self_direct_source: direct_call::source_for_abi(abi),

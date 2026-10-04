@@ -1173,6 +1173,70 @@ fn emit_inline_string_aref(
     true
 }
 
+/// Compiler-only operands after the String and fixnum shape guards.
+/// `basic_ok` is the I8 zero/one conjunction of range and owned-storage checks.
+struct StringAsetAdmissionValues {
+    object: ClifValue,
+    size: ClifValue,
+    size_byte: ClifValue,
+    code: ClifValue,
+    basic_ok: ClifValue,
+}
+
+/// Observed GEN0 admission keeps the normal unibyte path separate from the
+/// ASCII-multibyte predicates. Every nonzero atomic owner mark refuses before
+/// the store; no callback or safepoint separates that test from the byte write.
+/// Returns the unsealed common store block, whose caller emits one data load,
+/// byte store and result. Off, Eager and GEN1 retain their existing admission.
+fn emit_observed_string_aset_admission(
+    fb: &mut FunctionBuilder,
+    values: StringAsetAdmissionValues,
+    slow: Block,
+) -> Block {
+    use super::jit_layout::heap::GC_HEADER_COLLECTION_OBSERVED_OFFSET;
+    use crate::heap_types::LispString;
+    let StringAsetAdmissionValues {
+        object,
+        size,
+        size_byte,
+        code,
+        basic_ok,
+    } = values;
+    let flags = MemFlagsData::trusted();
+    let mark_address = iadd_imm_p(fb, object, GC_HEADER_COLLECTION_OBSERVED_OFFSET as i64);
+    let marked = fb.ins().atomic_load(types::I8, flags, mark_address);
+    // I8 comparisons/Boolean operations produce zero or one. Unsigned
+    // comparison therefore admits exactly basic_ok == 1 and marked == 0.
+    let admitted = fb.ins().icmp(IntCC::UnsignedGreaterThan, basic_ok, marked);
+    let classify = fb.create_block();
+    let unibyte = fb.create_block();
+    let multibyte = fb.create_block();
+    fb.set_cold_block(multibyte);
+    let store = fb.create_block();
+    fb.ins().brif(admitted, classify, &[], slow, &[]);
+    fb.switch_to_block(classify);
+    fb.seal_block(classify);
+    let normally_unibyte = icmp_imm_p(
+        fb,
+        IntCC::Equal,
+        size_byte,
+        LispString::JIT_SIZE_BYTE_UNIBYTE,
+    );
+    fb.ins()
+        .brif(normally_unibyte, unibyte, &[], multibyte, &[]);
+    fb.switch_to_block(unibyte);
+    fb.seal_block(unibyte);
+    let byte_fits = icmp_imm_p(fb, IntCC::UnsignedLessThanOrEqual, code, 0xff);
+    fb.ins().brif(byte_fits, store, &[], slow, &[]);
+    fb.switch_to_block(multibyte);
+    fb.seal_block(multibyte);
+    let all_ascii = fb.ins().icmp(IntCC::Equal, size_byte, size);
+    let ascii_fits = icmp_imm_p(fb, IntCC::UnsignedLessThanOrEqual, code, 0x7f);
+    let fits = fb.ins().band(all_ascii, ascii_fits);
+    fb.ins().brif(fits, store, &[], slow, &[]);
+    store
+}
+
 /// I2: `aset` of a character into a string without changing its width,
 /// inline -- exactly `aset_fast`'s string arm where it stores in place:
 /// owned storage (a borrowed or read-only string is copied by the shim
@@ -1230,55 +1294,50 @@ fn emit_inline_string_aset(
     let observed_gen0 = super::jit_gen0_collection_journal_on()
         && !rt.generational_enabled()
         && !super::jit_gen0_collection_journal_eager();
-    let capacity = if observed_gen0 {
-        let at = iadd_imm_p(
-            fb,
-            object,
-            (base + LispString::JIT_STORAGE_CAPACITY_OFFSET) as i64,
-        );
-        fb.ins().atomic_load(types::I64, flags, at)
-    } else {
-        // Preserve the original OFF/GEN1 load and ownership predicate.
-        fb.ins().load(
-            types::I64,
-            flags,
-            object,
-            (base + LispString::JIT_STORAGE_CAPACITY_OFFSET) as i32,
-        )
-    };
+    // Capacity is ordinary exclusive payload state, exactly as in OFF/GEN1.
+    let capacity = fb.ins().load(
+        types::I64,
+        flags,
+        object,
+        (base + LispString::JIT_STORAGE_CAPACITY_OFFSET) as i32,
+    );
     let i = sshr_imm_p(fb, index, FIXNUM_SHIFT as i64);
     let code = sshr_imm_p(fb, value, FIXNUM_SHIFT as i64);
     // Unsigned: a negative index or code is out of range too.
     let in_range = fb.ins().icmp(IntCC::UnsignedLessThan, i, size);
-    // Owned Vec<u8> capacities fit below the sign bit. The sticky observed
-    // mirror occupies that bit, folding its rejection into the existing
-    // ownership check without another hot-path load, test or branch.
-    let owned = icmp_imm_p(
-        fb,
-        if observed_gen0 {
-            IntCC::SignedGreaterThan
-        } else {
-            IntCC::NotEqual
-        },
-        capacity,
-        0,
-    );
-    let unibyte = icmp_imm_p(
-        fb,
-        IntCC::Equal,
-        size_byte,
-        LispString::JIT_SIZE_BYTE_UNIBYTE,
-    );
-    let byte = icmp_imm_p(fb, IntCC::UnsignedLessThanOrEqual, code, 0xff);
-    let unibyte_fits = fb.ins().band(unibyte, byte);
-    let all_ascii = fb.ins().icmp(IntCC::Equal, size_byte, size);
-    let ascii = icmp_imm_p(fb, IntCC::UnsignedLessThanOrEqual, code, 0x7f);
-    let ascii_fits = fb.ins().band(all_ascii, ascii);
-    let fits = fb.ins().bor(unibyte_fits, ascii_fits);
-    let ok = fb.ins().band(in_range, owned);
-    let ok = fb.ins().band(ok, fits);
-    let store = fb.create_block();
-    fb.ins().brif(ok, store, &[], slow, &[]);
+    let owned = icmp_imm_p(fb, IntCC::NotEqual, capacity, 0);
+    let store = if observed_gen0 {
+        let basic_ok = fb.ins().band(in_range, owned);
+        emit_observed_string_aset_admission(
+            fb,
+            StringAsetAdmissionValues {
+                object,
+                size,
+                size_byte,
+                code,
+                basic_ok,
+            },
+            slow,
+        )
+    } else {
+        let unibyte = icmp_imm_p(
+            fb,
+            IntCC::Equal,
+            size_byte,
+            LispString::JIT_SIZE_BYTE_UNIBYTE,
+        );
+        let byte = icmp_imm_p(fb, IntCC::UnsignedLessThanOrEqual, code, 0xff);
+        let unibyte_fits = fb.ins().band(unibyte, byte);
+        let all_ascii = fb.ins().icmp(IntCC::Equal, size_byte, size);
+        let ascii = icmp_imm_p(fb, IntCC::UnsignedLessThanOrEqual, code, 0x7f);
+        let ascii_fits = fb.ins().band(all_ascii, ascii);
+        let fits = fb.ins().bor(unibyte_fits, ascii_fits);
+        let ok = fb.ins().band(in_range, owned);
+        let ok = fb.ins().band(ok, fits);
+        let store = fb.create_block();
+        fb.ins().brif(ok, store, &[], slow, &[]);
+        store
+    };
     fb.switch_to_block(store);
     fb.seal_block(store);
     let data = fb.ins().load(
@@ -3264,7 +3323,7 @@ pub(crate) fn build_mir_leaf_fn<S: LeafSink>(
                 direct_shapes: !aot && (shapes.optional || shapes.rest),
                 call_census: !aot && jit_call_census_on(),
                 direct_framed: !aot && shapes.framed,
-                collection_journal: !aot && jit_gen0_collection_journal_on(),
+                collection_journal: jit_gen0_collection_journal_on(),
                 collection_observation_gate: !aot
                     && super::shim_refs::collection_observation_gate_enabled(),
                 hof: false,
@@ -3284,6 +3343,20 @@ pub(crate) fn build_mir_leaf_fn<S: LeafSink>(
             ));
             let call_result_slot =
                 fb.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
+            let inline_alloc = !aot && super::jit_inline_alloc_on();
+            // Use final MIR: scalar-replaced Cons emits no allocation, while
+            // a remaining Call may construct a direct callee's &rest list.
+            let inline_cons_allocating_body = inline_alloc
+                && m.blocks
+                    .iter()
+                    .flat_map(|b| b.insts.iter())
+                    .any(|inst| match &inst.op {
+                        MirOp::Cons(..) => plan.cons_repl[inst.result.0 as usize].is_none(),
+                        MirOp::Opaque {
+                            op: Op::Call(_), ..
+                        } => true,
+                        _ => false,
+                    });
             Some(RtCtx {
                 refs,
                 vmctx_var,
@@ -3295,7 +3368,9 @@ pub(crate) fn build_mir_leaf_fn<S: LeafSink>(
                 call_result_slot,
                 rootwin: None,
                 heap: None,
-                inline_alloc: !aot && super::jit_inline_alloc_on(),
+                cons_store_probe_order: super::heap_inline::ConsStoreProbeOrder::default(),
+                inline_cons_allocating_body,
+                inline_alloc,
                 generational: std::cell::Cell::new(aot.then_some(false)),
                 direct_sites: std::cell::Cell::new(0),
                 self_direct_source: super::direct_call::source_for_abi(abi),
@@ -4167,6 +4242,14 @@ pub(crate) struct RtCtx {
     /// block for a body whose inline heap sites justify it
     /// (`heap_inline::hoist_heap_ptr`); `None` makes each site load it.
     pub(crate) heap: Option<ClifValue>,
+    /// Compiler-only branch order from decoded explicit Cons store sites.
+    /// This carries no Lisp identity and is not published into native state.
+    pub(crate) cons_store_probe_order: super::heap_inline::ConsStoreProbeOrder,
+    /// Compiler-only conservative fact about inline Cons allocation, including
+    /// direct calls that may construct &rest lists. Allocating bodies already
+    /// retain the heap on their hot path; splitting its cold SSA would instead
+    /// extend vmctx's lifetime and spill loop values. No runtime state is added.
+    pub(crate) inline_cons_allocating_body: bool,
     /// Allocate conses and box floats inline (`heap_inline`): JIT code with
     /// `NEOVM_JIT_INLINE_ALLOC` on; never AOT, whose leaves keep the shims.
     pub(crate) inline_alloc: bool,
@@ -8471,30 +8554,17 @@ fn lower_simple_op_arms(
                     let merge = fb.create_block();
                     let slow = fb.create_block();
                     let res = fb.declare_var(types::I64);
-                    if matches!(cons_proof, super::heap_inline::ConsStoreProof::Dynamic) {
-                        super::heap_inline::emit_inline_cons_store(
-                            fb,
-                            rt,
-                            operands[0],
-                            operands[1],
-                            matches!(other, Op::Setcdr),
-                            slow,
-                            res,
-                            merge,
-                        );
-                    } else {
-                        super::heap_inline::emit_inline_cons_store_with_proof(
-                            fb,
-                            rt,
-                            operands[0],
-                            operands[1],
-                            matches!(other, Op::Setcdr),
-                            slow,
-                            res,
-                            merge,
-                            cons_proof,
-                        );
-                    }
+                    super::heap_inline::emit_explicit_cons_store_with_proof(
+                        fb,
+                        rt,
+                        operands[0],
+                        operands[1],
+                        matches!(other, Op::Setcdr),
+                        slow,
+                        res,
+                        merge,
+                        cons_proof,
+                    );
                     fb.switch_to_block(slow);
                     fb.seal_block(slow);
                     fb.set_cold_block(slow);

@@ -132,7 +132,9 @@ pub(crate) const ABI_TAG: u32 = compute_abi_tag();
 // ByteCodeFunction layout, moving the baked `runtime` and `constants` offsets.
 // v47: stable World storage views replace inline Obarray/buffer storage;
 // canonical dispatch-cell and selected-buffer pointers have separate offsets.
-const ABI_TAG_VERSION: u32 = 47;
+// v49: native observation geometry extends the heap protocol and enabled
+// leaves use specialized observation imports; invalidate prior AOT images.
+const ABI_TAG_VERSION: u32 = 49;
 
 /// Format version of the AOT descriptor spec-section + the runtime spec ABI
 /// (`SpecSlot`/`spec_expected` sidecar bases, the loader re-classify+arm protocol).
@@ -154,14 +156,30 @@ const SPEC_ENCODING_VERSION: u32 = 1;
 // MUST match the shim DEFINITIONS in `compile.rs` + the `JIT_SHIM_TABLE` array.
 include!("shim_names.rs");
 
-/// ABI26 AOT import and salt set: the original prefix of the single-source
-/// `NEOVM_JIT_SHIM_NAMES`. Additive selected-only exports remain JIT-only.
-pub(crate) const MIR_SHIM_NAMES: &[&str] = NEOVM_JIT_SHIM_NAMES
-    .split_at(NEOVM_JIT_AOT_ABI_SHIM_COUNT)
-    .0;
+/// AOT imports retain the original ABI26 prefix and add the ABI31 collection
+/// stores. Selected Opt and cold refinement exports remain JIT-only.
+const AOT_SHIM_NAMES: [&str;
+    NEOVM_JIT_AOT_ABI_SHIM_COUNT + NEOVM_JIT_AOT_COLLECTION_SHIM_INDICES.len()] = {
+    let mut names =
+        [""; NEOVM_JIT_AOT_ABI_SHIM_COUNT + NEOVM_JIT_AOT_COLLECTION_SHIM_INDICES.len()];
+    let mut i = 0;
+    while i < NEOVM_JIT_AOT_ABI_SHIM_COUNT {
+        names[i] = NEOVM_JIT_SHIM_NAMES[i];
+        i += 1;
+    }
+    let mut extra = 0;
+    while extra < NEOVM_JIT_AOT_COLLECTION_SHIM_INDICES.len() {
+        names[i] = NEOVM_JIT_SHIM_NAMES[NEOVM_JIT_AOT_COLLECTION_SHIM_INDICES[extra]];
+        i += 1;
+        extra += 1;
+    }
+    names
+};
+
+pub(crate) const MIR_SHIM_NAMES: &[&str] = &AOT_SHIM_NAMES;
 
 /// Complete host-exported JIT shim set, including additive selected-only names.
-/// AOT continues to use the unchanged ABI26 MIR prefix above. This alias adds
+/// AOT uses the separately selected import/salt set above. This alias adds
 /// no runtime state and is immutable for every mutator/compiler worker.
 #[cfg(test)]
 pub(crate) const JIT_SHIM_NAMES: &[&str] = NEOVM_JIT_SHIM_NAMES;
@@ -585,6 +603,21 @@ pub(crate) fn leaf_content_hash(ops: &[Op], constants: &[Value], arity: usize) -
     test_support::note_hash_call();
     let mut h = Sha256::new();
     h.update(ABI_TAG.to_le_bytes());
+    // Generated store imports and inline journal predicates depend on this
+    // immutable process policy. Qualify each content key before preload or
+    // per-leaf lookup, so a differently compiled policy cannot be reused.
+    use crate::tagged::collection_reads::{CompiledJournalMode, compiled_journal_mode};
+    let journal_policy: &[u8] = match compiled_journal_mode() {
+        CompiledJournalMode::Off => b"collection-off",
+        CompiledJournalMode::Observed => b"collection-observed",
+        CompiledJournalMode::Eager => b"collection-eager",
+    };
+    h.update(journal_policy);
+    if compiled_journal_mode() == CompiledJournalMode::Observed {
+        // Cold heap operands and the split String admission CFG are part
+        // of Observed emission, independently of the unchanged ABI49.
+        h.update(b"gen0-observed-admission-v3");
+    }
     h.update((arity as u64).to_le_bytes());
     h.update((ops.len() as u64).to_le_bytes());
     // Ops: their Debug form is deterministic for this enum (Constant(idx)/Add/
@@ -4336,8 +4369,8 @@ pub(crate) fn try_load_leaf(
     ops: &[Op],
     constants: &[Value],
     arity: usize,
-    // Prewarm-stashed manifest hash (see Runtime::aot_manifest_hash): skips
-    // the SHA-256 body hash for the marked loadup class. `None` → hash here.
+    // Prewarm-stashed manifest membership key (Runtime::aot_manifest_hash).
+    // Requalify against the current body and emission policy before lookup.
     precomputed_hash: Option<u128>,
     // R2 increment B2: the LIVE obarray, for RE-CLASSIFYING the descriptor's
     // `Op::Call` spec sites at load. `None` (shim-free test bodies with a null
@@ -4347,21 +4380,21 @@ pub(crate) fn try_load_leaf(
     if !aot_enabled() {
         return None;
     }
+    // A manifest may originate under another emission policy. Its supplied
+    // key cannot authorize that policy's native body. Keep preload membership
+    // lookup, but use the current qualified key (also for per-leaf fallback).
+    let content_hash = leaf_content_hash(ops, constants, arity)?;
     // A prewarm-marked preload member: `mark_preload_members_prewarmed`
     // stashed its manifest hash, and its entry lives in the PRELOAD unit,
     // which the per-hash `NEOVM_AOT_DIR` index below never lists (P4.2 A1;
     // before this the lazy prewarm JIT-compiled every marked member). The
     // entry dlsym inside `load_leaf_from_unit` stays the membership ground
     // truth; a miss falls through to the index, then to the JIT.
-    if let Some(hash) = precomputed_hash
-        && let Some(leaf) = try_load_preload_member(ops, constants, arity, hash, obarray)
+    if precomputed_hash.is_some()
+        && let Some(leaf) = try_load_preload_member(ops, constants, arity, content_hash, obarray)
     {
         return Some(leaf);
     }
-    let content_hash = match precomputed_hash {
-        Some(h) => h,
-        None => leaf_content_hash(ops, constants, arity)?,
-    };
     let unit = load_unit(content_hash)?;
     load_leaf_from_unit(&unit, content_hash, arity, constants, obarray)
 }
@@ -4410,10 +4443,9 @@ pub(crate) fn jit_would_compile_now(
         || !super::compile::body_is_call_heavy(ops, constants)
 }
 
-/// [`try_load_leaf`]'s preload leg for a marked member whose manifest hash is
-/// `hash`. The hash is exact by construction: marking runs on the image as it
-/// was dumped, before `after-pdump-load-hook` or any other Lisp can rebind a
-/// name (see [`mark_preload_members_prewarmed`]); debug builds re-derive it.
+/// [`try_load_leaf`]'s preload leg for a marked member, using its current
+/// qualified content hash rather than trusting the supplied manifest key.
+/// Debug builds re-derive it as an assertion of the caller contract.
 fn try_load_preload_member(
     ops: &[Op],
     constants: &[Value],
@@ -5582,6 +5614,9 @@ mod descriptor_v3_tests;
 #[cfg(test)]
 #[path = "aot/tests/lazy_prewarm_test.rs"]
 mod lazy_prewarm_tests;
+#[cfg(test)]
+#[path = "aot/tests/policy_qualification_test.rs"]
+mod policy_qualification_tests;
 #[cfg(test)]
 #[path = "aot/tests/aot_test.rs"]
 mod tests;

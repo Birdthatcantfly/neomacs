@@ -560,7 +560,7 @@ pub extern "C" fn neovm_jit_assq(ctx: *mut u8, key: i64, list: i64) -> i64 {
 /// SAFETY: same vmctx contract as [`neovm_jit_call`]; only read here.
 #[allow(clippy::not_unsafe_ptr_arg_deref)] // C-ABI shim: raw ptrs per documented SAFETY contract; only ever called from generated code.
 #[unsafe(no_mangle)]
-pub extern "C" fn neovm_jit_setcar(ctx: *mut u8, cell: i64, new_car: i64) -> i64 {
+pub extern "C" fn neovm_jit_setcar_collection(ctx: *mut u8, cell: i64, new_car: i64) -> i64 {
     #[cfg(test)]
     LIST_STORE_SHIM_CALLS.with(|c| c.set(c.get() + 1));
     let cell = Value::from_bits(cell as usize);
@@ -571,16 +571,46 @@ pub extern "C" fn neovm_jit_setcar(ctx: *mut u8, cell: i64, new_car: i64) -> i64
     list_slow(ctx, pure_setcar, cell, new_car)
 }
 
+// The legacy host entry retains the original full setter without a compiled
+// observation-policy check. Enabled leaves import its specialized twin.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[unsafe(no_mangle)]
+pub extern "C" fn neovm_jit_setcar(ctx: *mut u8, cell: i64, new_car: i64) -> i64 {
+    #[cfg(test)]
+    LIST_STORE_SHIM_CALLS.with(|c| c.set(c.get() + 1));
+    let cell = Value::from_bits(cell as usize);
+    let new_car = Value::from_bits(new_car as usize);
+    if crate::tagged::mutate::set_cons_car(cell, new_car) {
+        return new_car.bits() as i64;
+    }
+    list_slow(ctx, pure_setcar, cell, new_car)
+}
+
 /// `Op::Setcdr` (GNU `Bsetcdr`): [`neovm_jit_setcar`]'s twin.
 /// SAFETY: same vmctx contract as [`neovm_jit_call`]; only read here.
 #[allow(clippy::not_unsafe_ptr_arg_deref)] // C-ABI shim: raw ptrs per documented SAFETY contract; only ever called from generated code.
+#[unsafe(no_mangle)]
+pub extern "C" fn neovm_jit_setcdr_collection(ctx: *mut u8, cell: i64, new_cdr: i64) -> i64 {
+    #[cfg(test)]
+    LIST_STORE_SHIM_CALLS.with(|c| c.set(c.get() + 1));
+    let cell = Value::from_bits(cell as usize);
+    let new_cdr = Value::from_bits(new_cdr as usize);
+    if compiled_cons_store(cell, new_cdr, true) {
+        return new_cdr.bits() as i64;
+    }
+    list_slow(ctx, pure_setcdr, cell, new_cdr)
+}
+
+// The legacy host entry retains the original full setter without a compiled
+// observation-policy check. Enabled leaves import its specialized twin.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 #[unsafe(no_mangle)]
 pub extern "C" fn neovm_jit_setcdr(ctx: *mut u8, cell: i64, new_cdr: i64) -> i64 {
     #[cfg(test)]
     LIST_STORE_SHIM_CALLS.with(|c| c.set(c.get() + 1));
     let cell = Value::from_bits(cell as usize);
     let new_cdr = Value::from_bits(new_cdr as usize);
-    if compiled_cons_store(cell, new_cdr, true) {
+    if crate::tagged::mutate::set_cons_cdr(cell, new_cdr) {
         return new_cdr.bits() as i64;
     }
     list_slow(ctx, pure_setcdr, cell, new_cdr)
@@ -667,7 +697,7 @@ fn list_slow(ctx: *mut u8, builtin: JitBuiltin2Pure, a: Value, b_: Value) -> i64
 /// [`builtin_aset_args`](b::builtin_aset_args) then handles (or signals).
 /// Must agree with it wherever it stores.
 #[inline(always)]
-fn aset_fast(ctx: &Context, array: Value, index: Value, value: Value) -> bool {
+fn aset_collection_fast(ctx: &Context, array: Value, index: Value, value: Value) -> bool {
     use crate::tagged::collection_reads::{CompiledJournalMode, compiled_journal_mode};
     let Some(idx) = index.as_fixnum().and_then(|i| usize::try_from(i).ok()) else {
         return false;
@@ -680,6 +710,15 @@ fn aset_fast(ctx: &Context, array: Value, index: Value, value: Value) -> bool {
     {
         return stored;
     }
+    aset_fast(array, index, value)
+}
+
+// Exact legacy setter tier: Off calls the original host entry below.
+#[inline(always)]
+fn aset_fast(array: Value, index: Value, value: Value) -> bool {
+    let Some(idx) = index.as_fixnum().and_then(|i| usize::try_from(i).ok()) else {
+        return false;
+    };
     if array.veclike_type() == Some(crate::tagged::header::VecLikeType::Vector) {
         // One pass over what `set_vector_slot` would check again: owned
         // storage (a mapped pdump vector copies itself on the slow path),
@@ -802,7 +841,12 @@ fn aset_journaled_vector(
 /// SAFETY: same vmctx contract as [`neovm_jit_call`].
 #[allow(clippy::not_unsafe_ptr_arg_deref)] // C-ABI shim: raw ptrs per documented SAFETY contract; only ever called from generated code.
 #[unsafe(no_mangle)]
-pub extern "C" fn neovm_jit_aset(ctx: *mut u8, array: i64, index: i64, value: i64) -> i64 {
+pub extern "C" fn neovm_jit_aset_collection(
+    ctx: *mut u8,
+    array: i64,
+    index: i64,
+    value: i64,
+) -> i64 {
     #[cfg(test)]
     ASET_SHIM_CALLS.with(|c| c.set(c.get() + 1));
     let array = Value::from_bits(array as usize);
@@ -810,7 +854,24 @@ pub extern "C" fn neovm_jit_aset(ctx: *mut u8, array: i64, index: i64, value: i6
     let value = Value::from_bits(value as usize);
     // SAFETY: seam-provided dormant Context; read-only heap policy access.
     let ctx_ref = unsafe { &*(ctx as *const Context) };
-    if aset_fast(ctx_ref, array, index, value) {
+    if aset_collection_fast(ctx_ref, array, index, value) {
+        return value.bits() as i64;
+    }
+    aset_slow(ctx, array, index, value)
+}
+
+/// The original primitive array setter host entry. Knob-off generated code
+/// imports this name; collection-aware code selects its separate export.
+/// Like GNU Baset, neither entry consults the aset function cell.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+#[unsafe(no_mangle)]
+pub extern "C" fn neovm_jit_aset(ctx: *mut u8, array: i64, index: i64, value: i64) -> i64 {
+    #[cfg(test)]
+    ASET_SHIM_CALLS.with(|c| c.set(c.get() + 1));
+    let array = Value::from_bits(array as usize);
+    let index = Value::from_bits(index as usize);
+    let value = Value::from_bits(value as usize);
+    if aset_fast(array, index, value) {
         return value.bits() as i64;
     }
     aset_slow(ctx, array, index, value)

@@ -220,6 +220,8 @@ fn cons_store_clif(
             call_result_slot: result_slot,
             rootwin: None,
             heap: Some(params[0]),
+            cons_store_probe_order: Default::default(),
+            inline_cons_allocating_body: false,
             inline_alloc: false,
             generational: std::cell::Cell::new(Some(false)),
             direct_sites: std::cell::Cell::new(0),

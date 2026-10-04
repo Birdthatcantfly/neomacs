@@ -294,7 +294,7 @@ fn gen0_aset_vector_shim_invalidates_collection_read_certificates() {
     context.push_specpdl_root(owner);
     let (_, reads) = capture(|| owner.as_vector_data().map(|items| items[0]));
     let value = Value::make_int(7);
-    let result = super::super::dispatch::neovm_jit_aset(
+    let result = super::super::dispatch::neovm_jit_aset_collection(
         &mut context as *mut Context as *mut u8,
         owner.bits() as i64,
         Value::make_int(0).bits() as i64,
@@ -306,7 +306,7 @@ fn gen0_aset_vector_shim_invalidates_collection_read_certificates() {
         "the owned-vector shim fast path must journal its store"
     );
     let mut store = || {
-        super::super::dispatch::neovm_jit_aset(
+        super::super::dispatch::neovm_jit_aset_collection(
             &mut context as *mut Context as *mut u8,
             owner.bits() as i64,
             Value::make_int(0).bits() as i64,

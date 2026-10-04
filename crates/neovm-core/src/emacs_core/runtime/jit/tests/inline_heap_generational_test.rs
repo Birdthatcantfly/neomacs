@@ -522,3 +522,7 @@ mod gen0_observed_multi_unbind;
 #[cfg(test)]
 #[path = "gen0_observed_blv_cold_capture_test.rs"]
 mod gen0_observed_blv_cold_capture;
+
+#[cfg(test)]
+#[path = "gen0_observed_interior_gap.rs"]
+mod gen0_observed_interior_gap;
