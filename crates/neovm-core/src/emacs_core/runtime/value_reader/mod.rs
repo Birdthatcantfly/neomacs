@@ -860,6 +860,10 @@ impl<'a> Reader<'a> {
                 self.bump();
                 Err(self.error("."))
             }
+            x if x == b']' as u32 => {
+                self.bump();
+                Err(self.error("]"))
+            }
             x if x == b'[' as u32 => self.read_vector(),
             x if x == b'\'' as u32 => {
                 self.bump();
@@ -1018,7 +1022,7 @@ impl<'a> Reader<'a> {
                             return Ok(acc);
                         }
                         _ => {
-                            return Err(self.error("expected ')' after dotted pair"));
+                            return Err(self.error_after_current("expected )"));
                         }
                     }
                 }
@@ -1810,7 +1814,16 @@ impl<'a> Reader<'a> {
                     CharTableSyntax::Table
                 };
                 if self.current_code() != Some(b'[' as u32) {
-                    return Err(self.error("#^"));
+                    // GNU buffers the offending character, then unreads it
+                    // before signalling (src/lread.c:3889-3906).
+                    let offending_position = self.pos;
+                    if self.current_code().is_some() {
+                        self.bump();
+                    }
+                    let message = self.source_slice_string(syntax_start, self.pos);
+                    self.pos = offending_position;
+
+                    return Err(self.error(&message));
                 }
 
                 let _roots = callable::RootScope::new();
@@ -2266,7 +2279,13 @@ impl<'a> Reader<'a> {
             list_to_vec(&data_value).ok_or_else(|| {
                 self.signal_error(
                     "wrong-type-argument",
-                    vec![Value::symbol("listp"), data_value],
+                    vec![Value::symbol("listp"), {
+                        let mut tail = data_value;
+                        while tail.is_cons() {
+                            tail = tail.cons_cdr();
+                        }
+                        tail
+                    }],
                     "listp",
                 )
             })?

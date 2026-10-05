@@ -59,3 +59,15 @@ fn reader_syntax_rea33() {
         expect,
     );
 }
+
+#[test]
+fn reader_syntax_rea34() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    let expect = expect_test::expect![[
+        r##""OK ((invalid-read-syntax \"#24x\") (invalid-read-syntax \"#1 \") (invalid-read-syntax \"#^x\") (invalid-read-syntax \"#^^x\") (invalid-read-syntax \"]\") (invalid-read-syntax \"expected )\") (invalid-read-syntax \"Invalid string property list\") (wrong-type-argument listp 2))""##
+    ]];
+    assert_oracle_parity_expect(
+        r###"(mapcar (lambda (s) (condition-case e (read-from-string s) (error e))) '("#24x" "#1 =(a)" "#^x" "#^^x" "(a]" "(a . b c)" "#(\"abc\" 0 1)" "#s(hash-table data (a 1 . 2))"))"###,
+        expect,
+    );
+}

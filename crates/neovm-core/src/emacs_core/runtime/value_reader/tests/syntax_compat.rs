@@ -92,3 +92,27 @@ fn rea33_sub_chartable_validation_order_and_condition() {
         "Invalid minimum character in sub-char-table"
     );
 }
+
+#[test]
+fn rea34_reader_error_data_retains_offending_input() {
+    for (input, message) in [
+        ("#24x", "#24x"),
+        ("#1 =(a)", "#1 "),
+        ("#^x", "#^x"),
+        ("#^^x", "#^^x"),
+        ("(a]", "]"),
+        ("(a . b c)", "expected )"),
+        (r#"#("abc" 0 1)"#, "Invalid string property list"),
+    ] {
+        assert_eq!(read_result(input).unwrap_err().message, message, "{input}");
+    }
+    for (input, position) in [("#^x", 2), ("#^^x", 3), ("(a . b c)", 8)] {
+        assert_eq!(
+            read_result(input).unwrap_err().position,
+            position,
+            "{input}"
+        );
+    }
+    let error = read_result("#s(hash-table data (a 1 . 2))").unwrap_err();
+    assert_eq!(error.signal_data[1].as_fixnum(), Some(2));
+}
