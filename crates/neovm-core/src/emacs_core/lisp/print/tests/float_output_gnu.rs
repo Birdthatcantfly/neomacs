@@ -52,7 +52,7 @@ fn expectation() -> String {
 fn float_output_gnu_oracle() {
     crate::test_utils::init_test_tracing();
     let expected = expectation();
-    let mut context = crate::emacs_core::Context::new();
+    let mut context = crate::test_utils::runtime_startup_context();
     let value = context.eval_str(PROGRAM).expect("oracle evaluation");
     assert_eq!(print_value(&value), expected.trim_end());
 }

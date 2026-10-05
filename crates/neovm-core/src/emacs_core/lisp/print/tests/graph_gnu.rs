@@ -189,3 +189,29 @@ fn closure_sharing_preserves_slot_identity() {
         include_str!("graph_closure_sharing.expect"),
     );
 }
+
+#[test]
+fn hash_callbacks_read_live_physical_slots() {
+    compare(
+        "hash_mutation",
+        r###"(list
+  (let* ((h (make-hash-table :test 'eq))
+         (print-unreadable-function (lambda (_o _e) (puthash 'second 'after h) "Q")))
+    (puthash 'first (make-marker) h) (puthash 'second 'before h)
+    (prin1-to-string h))
+  (let* ((h (make-hash-table :test 'eq)) (key (make-marker))
+         (print-unreadable-function (lambda (_o _e) (puthash key 'after h) (puthash 'inserted 'later h) "Q")))
+    (puthash key 'before h)
+    (prin1-to-string h))
+  (let* ((h (make-hash-table :test 'eq)) (key (make-marker))
+         (print-unreadable-function (lambda (o _e) (remhash o h) (setq key nil) (garbage-collect) "Q")))
+    (puthash key 'before h)
+    (prin1-to-string h))
+  (let* ((h (make-hash-table :test 'eq))
+         (print-unreadable-function (lambda (_o _e) (puthash 'inserted 'earlier-slot h) (puthash 'second 'after h) "Q")))
+    (puthash 'vacant 'removed h) (puthash 'first (make-marker) h) (puthash 'second 'before h)
+    (remhash 'vacant h)
+    (prin1-to-string h)))"###,
+        include_str!("graph_hash_mutation.expect"),
+    );
+}

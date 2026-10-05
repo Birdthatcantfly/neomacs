@@ -937,3 +937,7 @@ mod float_output_gnu;
 #[cfg(test)]
 #[path = "raw_hash_test_names.rs"]
 mod raw_hash_test_names;
+
+#[cfg(test)]
+#[path = "compiled_settings_gnu.rs"]
+mod compiled_settings_gnu;

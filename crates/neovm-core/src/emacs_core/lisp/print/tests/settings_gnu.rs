@@ -34,7 +34,7 @@ fn oracle(name: &str, form: &str, fixture: &str) {
     } else {
         fixture.to_owned()
     };
-    let mut context = crate::emacs_core::Context::new();
+    let mut context = crate::test_utils::runtime_startup_context();
     let actual = crate::emacs_core::format_eval_result(&context.eval_str(form));
     assert_eq!(actual, format!("OK {}", expected.trim_end()), "{name}");
 }
@@ -238,5 +238,44 @@ fn printer_settings_gnu_shorthand_refresh() {
         (print-unreadable-function (lambda (_o _e) (setq print-quoted nil) "Q")))
     (prin1-to-string (vector (list 'quote (vector (make-marker) '(quote a))) '(quote b)))))"###,
         include_str!("settings_gnu/shorthand_refresh.expect"),
+    );
+}
+
+#[test]
+fn printer_settings_gnu_format_source_ownership() {
+    oracle(
+        "format_source_ownership",
+        r###"(list
+ (let* ((fmt (copy-sequence "%s:%s:%s")) (calls 0)
+        (print-unreadable-function (lambda (_o _e) (setq calls (1+ calls)) (aset fmt (if (= calls 1) 4 7) ?d) "Q")))
+   (list (format fmt (make-marker) (make-marker) "tail") fmt calls))
+ (let* ((fmt (string-to-unibyte (copy-sequence "%s:%s")))
+        (print-unreadable-function (lambda (_o _e) (aset fmt 2 ?X) (aset fmt 4 ?d) "Q")))
+   (list (format fmt (make-marker) "tail") fmt))
+ (let* ((fmt (copy-sequence "%sé%s"))
+        (print-unreadable-function (lambda (_o _e) (aset fmt 4 ?d) (garbage-collect) "Q")))
+   (list (format fmt (make-marker) "tail") fmt))
+ (let* ((fmt (copy-sequence "%Sé%s"))
+        (print-unreadable-function (lambda (_o _e) (aset fmt 4 ?d) (garbage-collect) "Q")))
+   (list (format-message fmt (make-marker) "tail") fmt))
+ (let* ((fmt (unibyte-string 37 115 128 37 115))
+        (print-unreadable-function (lambda (_o _e) (aset fmt 2 255) (aset fmt 4 ?d) "Q")))
+   (list (append (format fmt (make-marker) "tail") nil) (append fmt nil)))
+ (let* ((fmt (propertize "%S|%s" 'tag 'before))
+        (print-unreadable-function (lambda (_o _e) (aset fmt 4 ?d) (set-text-properties 0 5 '(tag after) fmt) "Q")))
+   (let ((result (format fmt (make-marker) "tail")))
+     (list (substring-no-properties result) (text-properties-at 0 result) (text-properties-at 3 result))))
+ (let* ((fmt (copy-sequence "%S:%s"))
+        (print-escape-nonascii nil)
+        (print-unreadable-function nil)
+        (watcher (lambda (_symbol _value operation _where)
+                   (when (eq operation 'let)
+                     (aset fmt 4 ?d)
+                     (setq print-unreadable-function (lambda (_o _e) "W"))))))
+   (unwind-protect
+       (progn (add-variable-watcher 'print-escape-nonascii watcher)
+              (list (format fmt (make-marker) "tail") fmt))
+     (remove-variable-watcher 'print-escape-nonascii watcher))))"###,
+        include_str!("settings_gnu/format_source_ownership.expect"),
     );
 }

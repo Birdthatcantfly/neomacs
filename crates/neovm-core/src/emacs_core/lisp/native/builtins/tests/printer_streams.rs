@@ -110,3 +110,67 @@ fn terpri_ensure_validates_marker_before_checking_line_start() {
         r#"(list (condition-case e (terpri (make-marker) t) (error (list (car e) (cadr e)))) (with-temp-buffer (insert "abc") (let ((m (copy-marker 1))) (narrow-to-region 2 4) (condition-case e (terpri m t) (error (list (car e) (cadr e)))))))"#,
     );
 }
+
+#[test]
+fn resolved_callable_stream_survives_standard_output_replacement_and_gc() {
+    assert_gnu(
+        "callback-root",
+        r#"(mapcar (lambda (printer) (let ((captured (list nil))) (let ((standard-output (eval (read "(lambda (c) (setcar captured (cons c (car captured))))") (list (cons 'captured captured)))) (print-unreadable-function (lambda (_o _e) (setq standard-output nil) (garbage-collect) "Q"))) (funcall printer (make-marker))) (nreverse (car captured)))) '(princ prin1 print))"#,
+    );
+}
+
+#[test]
+fn resolved_marker_stream_survives_standard_output_replacement_and_gc() {
+    assert_gnu(
+        "marker-root",
+        r#"(mapcar (lambda (printer) (with-temp-buffer (insert "a") (let ((standard-output (point-marker)) (print-unreadable-function (lambda (_o _e) (setq standard-output nil) (garbage-collect) "Q"))) (funcall printer (make-marker))) (buffer-string))) '(princ prin1 print))"#,
+    );
+}
+
+#[test]
+fn error_message_string_preserves_noescape_object_encoding() {
+    assert_gnu(
+        "error-message-objects",
+        r#"(let* ((raw (make-symbol (string-to-multibyte (unibyte-string 128))))
+       (table (make-hash-table))
+       (strings (list "ascii" (string-as-multibyte "ascii") "é" (unibyte-string 128) (string-to-multibyte (unibyte-string 128)))))
+  (puthash 1 "x" table)
+  (let ((values (append strings (mapcar (lambda (s) (propertize s 'face 'bold)) strings)
+                       (list raw (list raw "é" (unibyte-string 128)) (vector raw "é" (unibyte-string 128)) table))))
+    (mapcar (lambda (condition)
+              (mapcar (lambda (value)
+                        (string-to-list (error-message-string (list condition value)))) values))
+            '(end-of-file error))))"#,
+    );
+}
+
+#[test]
+fn print_prepare_saves_buffer_after_overrides_before_escape_bindings() {
+    assert_gnu(
+        "prepare-watch-order",
+        r#"(let ((caller (current-buffer))
+      (other (generate-new-buffer " *streams-watch-other*")))
+  (unwind-protect
+      (list
+       (let ((watch (lambda (_symbol _value operation _where)
+                      (when (eq operation 'let) (set-buffer other)))))
+         (unwind-protect
+             (progn
+               (add-variable-watcher 'print-length watch)
+               (prin1 '(a b) (lambda (_c)) '((length . 1)))
+               (eq (current-buffer) other))
+           (remove-variable-watcher 'print-length watch)
+           (set-buffer caller)))
+       (let ((print-escape-nonascii nil)
+             (watch (lambda (_symbol _value operation _where)
+                      (when (eq operation 'let) (set-buffer other)))))
+         (unwind-protect
+             (progn
+               (add-variable-watcher 'print-escape-nonascii watch)
+               (princ "x" caller)
+               (eq (current-buffer) caller))
+           (remove-variable-watcher 'print-escape-nonascii watch)
+           (set-buffer caller))))
+    (kill-buffer other)))"#,
+    );
+}
