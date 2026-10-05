@@ -1377,3 +1377,6 @@ fn string_literal_representation_matches_gnu_at_the_closing_quote() {
 
 #[cfg(test)]
 mod symbol_contract;
+
+#[cfg(test)]
+mod syntax_compat;

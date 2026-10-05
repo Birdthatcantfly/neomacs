@@ -328,3 +328,4 @@ mod window_redisplay;
 
 #[cfg(target_os = "linux")]
 mod dbus_native_marshalling;
+mod reader_syntax_compat;

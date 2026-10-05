@@ -1248,7 +1248,7 @@ fn plist_pairs(plist: &Value) -> Result<Vec<(Value, Value)>, Flow> {
         let rest = tail.cons_cdr();
         if !rest.is_cons() {
             return Err(signal(
-                "error",
+                LispCondition::Error,
                 vec![Value::string("Odd length text property list")],
             ));
         }
@@ -2841,26 +2841,11 @@ pub(crate) fn builtin_set_text_properties_in_buffers(
     };
 
     if let Some(str_val) = is_string_object(args.get(3)) {
-        let s = str_val
-            .as_lisp_string()
-            .expect("string object must carry LispString payload");
-        let full_string = beg == 0 && end == s.schars() as i64;
-        let had_intervals = string_has_text_property_interval_tree(str_val);
-        let Some(char_range) = validate_string_range(s, beg, end, args[0], args[1])? else {
-            return Ok(Value::NIL);
-        };
-        if pairs.is_empty() && !had_intervals {
-            return Ok(Value::NIL);
-        }
-        if pairs.is_empty() && full_string {
-            clear_string_text_properties_for_value(str_val);
-            return Ok(Value::T);
-        }
-        let len = string_char_len(s.schars());
-        crate::emacs_core::value::mutate_string_text_properties(str_val, |table| {
-            table.set_properties_for_object_char_len(char_range, len, pairs);
-        });
-        return Ok(Value::T);
+        return StringTextPropertyTarget::try_from(str_val)?.replace_at_positions(
+            (beg, end),
+            [args[0], args[1]],
+            pairs,
+        );
     }
 
     let buf_id = resolve_text_property_buffer_id_in_buffers(buffers, args.get(3))?;
@@ -2874,6 +2859,78 @@ pub(crate) fn builtin_set_text_properties_in_buffers(
     let _ = buffers.set_buffer_text_properties_in_emacs_byte_range(buf_id, byte_range, pairs);
     let _ = buffers.record_buffer_text_property_modification(buf_id, byte_range);
     Ok(Value::T)
+}
+
+/// A validated string target for native property replacement and the reader.
+/// Carries no shared cache; mutations obey the owning Lisp mutator's heap rules.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StringTextPropertyTarget {
+    value: Value,
+    _mutator: std::marker::PhantomData<*const ()>,
+}
+
+static_assertions::assert_not_impl_any!(StringTextPropertyTarget: Send, Sync);
+
+impl TryFrom<Value> for StringTextPropertyTarget {
+    type Error = Flow;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        if value.is_string() {
+            Ok(Self {
+                value,
+                _mutator: std::marker::PhantomData,
+            })
+        } else {
+            Err(signal(
+                LispCondition::WrongTypeArgument,
+                vec![Value::symbol("stringp"), value],
+            ))
+        }
+    }
+}
+
+impl StringTextPropertyTarget {
+    /// Match GNU src/textprop.c:1404-1424: validate the plist, then endpoints.
+    pub(crate) fn set_properties(self, begin: Value, end: Value, plist: Value) -> EvalResult {
+        let pairs = plist_pairs(&plist)?;
+        let positions = (
+            expect_integer_or_marker(&begin)?,
+            expect_integer_or_marker(&end)?,
+        );
+        self.replace_at_positions(positions, [begin, end], pairs)
+    }
+
+    fn replace_at_positions(
+        self,
+        (beg, end): (i64, i64),
+        original: [Value; 2],
+        pairs: Vec<(Value, Value)>,
+    ) -> EvalResult {
+        let str_val = self.value;
+        let s = str_val.as_lisp_string().ok_or_else(|| {
+            signal(
+                LispCondition::WrongTypeArgument,
+                vec![Value::symbol("stringp"), str_val],
+            )
+        })?;
+        let full_string = beg == 0 && end == s.schars() as i64;
+        let had_intervals = string_has_text_property_interval_tree(str_val);
+        let Some(char_range) = validate_string_range(s, beg, end, original[0], original[1])? else {
+            return Ok(Value::NIL);
+        };
+        if pairs.is_empty() && !had_intervals {
+            return Ok(Value::NIL);
+        }
+        if pairs.is_empty() && full_string {
+            clear_string_text_properties_for_value(str_val);
+            return Ok(Value::T);
+        }
+        let len = string_char_len(s.schars());
+        crate::emacs_core::value::mutate_string_text_properties(str_val, |table| {
+            table.set_properties_for_object_char_len(char_range, len, pairs);
+        });
+        Ok(Value::T)
+    }
 }
 
 /// (remove-list-of-text-properties BEG END LIST &optional OBJECT)

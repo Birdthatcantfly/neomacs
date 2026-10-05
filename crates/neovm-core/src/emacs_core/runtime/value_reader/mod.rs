@@ -487,6 +487,13 @@ impl ReaderSourceSemantics {
     }
 }
 
+/// The container grammar controls whether a dotted tail is permitted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ListSyntax {
+    Cons,
+    StringProperties,
+}
+
 struct Reader<'a> {
     source: ReaderSource<'a>,
     source_semantics: ReaderSourceSemantics,
@@ -939,6 +946,10 @@ impl<'a> Reader<'a> {
     // -- Lists and dotted pairs ----------------------------------------------
 
     fn read_list_or_dotted(&mut self) -> Result<Value, ReadError> {
+        self.read_list(ListSyntax::Cons)
+    }
+
+    fn read_list(&mut self, syntax: ListSyntax) -> Result<Value, ReadError> {
         self.expect('(')?;
         let _roots = callable::RootScope::new();
         let mut items = Vec::new();
@@ -948,20 +959,27 @@ impl<'a> Reader<'a> {
                 Some(code) if code == b')' as u32 => {
                     self.bump();
                     let result = Value::list(items);
-
                     return Ok(result);
                 }
                 Some(code) if code == b'.' as u32 && self.is_dot_separator() => {
-                    if items.is_empty() {
-                        self.bump();
-
-                        return Err(self.error("."));
+                    match syntax {
+                        ListSyntax::StringProperties => {
+                            self.bump();
+                            return Err(self.error("."));
+                        }
+                        ListSyntax::Cons => {
+                            if items.is_empty() {
+                                self.bump();
+                                return Err(self.error("."));
+                            }
+                        }
                     }
                     // Dotted pair
                     self.bump(); // consume '.'
                     let cdr = self.read_form()?;
                     push_scratch_gc_root(cdr);
                     self.skip_ws_and_comments();
+
                     match self.current_code() {
                         Some(code) if code == b')' as u32 => {
                             self.bump();
@@ -972,7 +990,6 @@ impl<'a> Reader<'a> {
                                 acc = Value::cons(item, acc);
                                 push_scratch_gc_root(acc);
                             }
-
                             return Ok(acc);
                         }
                         _ => {
@@ -1697,67 +1714,30 @@ impl<'a> Reader<'a> {
                 )))
             }
             x if x == b'(' as u32 => {
-                // #("string" START END (PROPS...) ...) — propertized string.
-                //
-                // GNU `src/lread.c:string_props_from_rev_list' reads a string
-                // followed by START END PLIST triplets and applies each triplet
-                // with `Fset_text_properties'.  Keep the same representation as
-                // ordinary string intervals so redisplay sees properties like
-                // `(display (space :align-to ...))' on package string literals.
+                // GNU src/lread.c:3347-3368 applies each triple using
+                // set-text-properties, including replacement and Lisp signals.
                 let _roots = callable::RootScope::new();
-                let list = self.read_list_or_dotted()?;
-                push_scratch_gc_root(list);
-                let Some(items) = list_to_vec(&list) else {
-                    return Err(self.error("#"));
-                };
-                let Some((&string, rest)) = items.split_first() else {
-                    return Err(self.error("#"));
-                };
-                if !string.is_string() {
-                    return Err(self.error("#"));
-                }
-                if rest.len() % 3 != 0 {
-                    return Err(self.error("#(: invalid string property list"));
-                }
-                let string_len = string
-                    .as_lisp_string()
-                    .map(|s| s.schars() as i64)
-                    .unwrap_or(0);
-                let mut runs = Vec::with_capacity(rest.len() / 3);
-                for chunk in rest.chunks(3) {
-                    let Some(start) = chunk[0].as_fixnum() else {
-                        return Err(self.error("#(: invalid string property start"));
+                let result = (|| {
+                    let list = self.read_list(ListSyntax::StringProperties)?;
+                    push_scratch_gc_root(list);
+                    let items = list_to_vec(&list).ok_or_else(|| self.error("#"))?;
+                    let Some((&string, rest)) = items.split_first() else {
+                        return Err(self.error("#"));
                     };
-                    let Some(end) = chunk[1].as_fixnum() else {
-                        return Err(self.error("#(: invalid string property end"));
-                    };
-                    if !(0 <= start && start <= end && end <= string_len) {
-                        // GNU read1 signals `args-out-of-range' with the START
-                        // and END of the offending interval (not an
-                        // invalid-read-syntax).
-                        return Err(self.signal_error(
-                            "args-out-of-range",
-                            vec![Value::fixnum(start), Value::fixnum(end)],
-                            "args-out-of-range",
-                        ));
+                    let target =
+                        crate::emacs_core::textprop::StringTextPropertyTarget::try_from(string)
+                            .map_err(|_| self.error("#"))?;
+                    for chunk in rest.chunks(3) {
+                        if chunk.len() != 3 {
+                            return Err(self.error("Invalid string property list"));
+                        }
+                        target
+                            .set_properties(chunk[0], chunk[1], chunk[2])
+                            .map_err(|flow| self.property_signal_error(flow))?;
                     }
-                    let Some(plist_items) = list_to_vec(&chunk[2]) else {
-                        return Err(self.error("Invalid string property list"));
-                    };
-                    if plist_items.len() % 2 != 0 {
-                        return Err(self.error("Invalid string property list"));
-                    }
-                    runs.push(StringTextPropertyRun {
-                        start: start as usize,
-                        end: end as usize,
-                        plist: chunk[2],
-                    });
-                }
-                if !runs.is_empty() {
-                    set_string_text_properties_for_value(string, runs);
-                }
-
-                Ok(string)
+                    Ok(string)
+                })();
+                result
             }
             x if x == b'[' as u32 => {
                 // #[...] — compiled-function literal in .elc.
@@ -2027,6 +2007,28 @@ impl<'a> Reader<'a> {
             }
         }
         self.read_form()
+    }
+
+    fn property_signal_error(&self, flow: crate::emacs_core::error::Flow) -> ReadError {
+        use crate::emacs_core::error::FlowRef;
+        match flow.kind() {
+            FlowRef::Signal(signal) => {
+                let symbol = signal.symbol;
+                let message = signal
+                    .data
+                    .first()
+                    .and_then(|value| value.as_str_owned())
+                    .unwrap_or_else(|| "Invalid text property argument".to_string());
+                self.signal_error(
+                    super::intern::resolve_sym(symbol),
+                    signal.data.clone(),
+                    &message,
+                )
+            }
+            FlowRef::Throw(_) | FlowRef::ThreadBlocked(_) | FlowRef::Shutdown(_) => {
+                self.ordinary_error("Invalid text property control flow")
+            }
+        }
     }
 
     fn read_bool_vector_literal(&mut self) -> Result<Value, ReadError> {
