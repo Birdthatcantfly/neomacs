@@ -2134,6 +2134,69 @@ pub(crate) fn builtin_print_impl(
     Ok(args[0])
 }
 
+// GNU src/print.c:627-653 (ENSURE); 149-162 (validated marker point).
+/// Scalar line state derived from the resolved stream's validated point.
+/// It holds no heap references and is safe to copy between threads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerpriLineState {
+    BeginningOfLine,
+    NeedsNewline,
+}
+static_assertions::assert_impl_all!(TerpriLineState: Send, Sync);
+
+/// Destination-relative line state; marker printing temporarily moves point
+/// in GNU, so testing the caller's buffer point would be incorrect.
+fn terpri_line_state(
+    ctx: &crate::emacs_core::eval::Context,
+    target: Value,
+) -> Result<TerpriLineState, Flow> {
+    let buffer_id = if super::marker::is_marker(&target) {
+        Some(print_target_buffer_id(ctx, target).ok_or_else(|| {
+            signal(
+                LispCondition::Error,
+                vec![Value::string("Marker does not point anywhere")],
+            )
+        })?)
+    } else {
+        print_target_buffer_id(ctx, target).or_else(|| ctx.buffers.current_buffer_id())
+    };
+    let Some(buffer_id) = buffer_id else {
+        return Ok(TerpriLineState::BeginningOfLine);
+    };
+    let Some(buffer) = ctx.buffers.get(buffer_id) else {
+        return Err(signal(
+            LispCondition::Error,
+            vec![Value::string("Output buffer no longer exists")],
+        ));
+    };
+    let point = if super::marker::is_marker(&target) {
+        let pos = super::marker::marker_position_as_int_with_buffers(&ctx.buffers, &target)?;
+        let min = buffer.point_min_lisp_char_pos().as_i64();
+        let max = buffer.point_max_lisp_char_pos().as_i64();
+        if pos < min || pos > max {
+            return Err(signal(
+                LispCondition::Error,
+                vec![
+                    Value::string("Marker is outside the accessible part of the buffer"),
+                    target,
+                ],
+            ));
+        }
+        buffer.lisp_pos_to_emacs_byte_pos(LispCharPos1::new(pos))
+    } else {
+        buffer.point_emacs_byte_pos()
+    };
+    Ok(
+        if point == buffer.point_min_emacs_byte_pos()
+            || buffer.char_code_before_emacs_byte_pos(point) == Some(u32::from(b'\n'))
+        {
+            TerpriLineState::BeginningOfLine
+        } else {
+            TerpriLineState::NeedsNewline
+        },
+    )
+}
+
 pub(crate) fn builtin_terpri(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {
     if let Some(result) = builtin_terpri_impl(eval, args.clone())? {
         return Ok(result);
@@ -2148,6 +2211,14 @@ pub(crate) fn builtin_terpri_impl(
     expect_max_args("terpri", &args, 2)?;
     let target = resolve_print_target_in_state(ctx, args.first());
     if print_target_is_direct(target) {
+        if args.get(1).copied().is_some_and(Value::is_truthy)
+            && !(ctx.noninteractive() && (target.is_t() || target.is_nil()))
+        {
+            match terpri_line_state(ctx, target)? {
+                TerpriLineState::BeginningOfLine => return Ok(Some(Value::NIL)),
+                TerpriLineState::NeedsNewline => {}
+            }
+        }
         write_print_output_from_ctx(ctx, args.first(), "\n")?;
         return Ok(Some(Value::T));
     }
@@ -2157,6 +2228,18 @@ pub(crate) fn builtin_terpri_impl(
 pub(crate) fn finish_terpri_in_eval(eval: &mut super::eval::Context, args: &[Value]) -> EvalResult {
     expect_max_args("terpri", args, 2)?;
     let target = resolve_print_target(eval, args.first());
+    if args.get(1).copied().is_some_and(Value::is_truthy) {
+        if super::types::builtin_functionp_1(eval, target)?.is_truthy() {
+            return Err(signal(
+                LispCondition::Error,
+                vec![Value::string("Unsupported function argument"), target],
+            ));
+        }
+        match terpri_line_state(eval, target)? {
+            TerpriLineState::BeginningOfLine => return Ok(Value::NIL),
+            TerpriLineState::NeedsNewline => {}
+        }
+    }
     write_terpri_output(eval, target)?;
     Ok(Value::T)
 }
@@ -2396,3 +2479,7 @@ pub(crate) fn builtin_current_idle_time(
     expect_args("current-idle-time", &args, 0)?;
     Ok(eval.current_idle_time_value())
 }
+
+#[cfg(test)]
+#[path = "tests/terpri_units.rs"]
+mod terpri_units;
