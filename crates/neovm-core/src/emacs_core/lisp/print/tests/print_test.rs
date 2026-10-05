@@ -953,3 +953,7 @@ mod packed_char_header_units;
 #[cfg(test)]
 #[path = "charset_units.rs"]
 mod charset_units;
+
+#[cfg(test)]
+#[path = "graph_closure_units.rs"]
+mod graph_closure_units;

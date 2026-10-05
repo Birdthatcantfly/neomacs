@@ -702,7 +702,12 @@ fn print_preprocess(value: &Value, state: &mut PrintCircleState, options: PrintO
                     }
                 }
             }
-            ValueKind::Veclike(VecLikeType::Lambda) | ValueKind::Veclike(VecLikeType::Macro) => {
+            ValueKind::Veclike(VecLikeType::Lambda) => {
+                if let Some(slots) = obj.closure_slots() {
+                    stack.extend(slots.iter().rev().copied());
+                }
+            }
+            ValueKind::Veclike(VecLikeType::Macro) => {
                 if let Some(doc) = obj.closure_doc_value() {
                     stack.push(doc);
                 }
@@ -808,7 +813,12 @@ fn print_preprocess_external_with_t_removal(
                     }
                 }
             }
-            ValueKind::Veclike(VecLikeType::Lambda) | ValueKind::Veclike(VecLikeType::Macro) => {
+            ValueKind::Veclike(VecLikeType::Lambda) => {
+                if let Some(slots) = obj.closure_slots() {
+                    stack.extend(slots.iter().rev().copied());
+                }
+            }
+            ValueKind::Veclike(VecLikeType::Macro) => {
                 if let Some(doc) = obj.closure_doc_value() {
                     stack.push(doc);
                 }
@@ -1549,12 +1559,7 @@ fn write_interpreted_closure_stateful(
 ) {
     out.push_str("#[");
     if let Some(slots) = value.closure_slots() {
-        for (idx, item) in slots.iter().enumerate() {
-            if idx > 0 {
-                out.push(' ');
-            }
-            write_value_stateful(item, out, state);
-        }
+        write_vector_slots_stateful(&slots, LiteralSlotStart::First, out, state);
     }
     out.push(']');
 }
