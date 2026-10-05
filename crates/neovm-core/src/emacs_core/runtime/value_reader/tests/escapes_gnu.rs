@@ -13,7 +13,7 @@ fn gnu_expect(name: &str, form: &str, fixture: &str) -> String {
         .join(format!("escapes-{name}-{}.el", std::process::id()));
     std::fs::write(
         &script,
-        format!("(let ((print-length nil) (print-level nil)) (prin1 {form}))\n"),
+        format!("(unless (equal emacs-version \"31.1\") (error \"Expected GNU Emacs 31.1\"))\n(let ((print-length nil) (print-level nil)) (prin1 {form}))\n"),
     )
     .unwrap();
     let emacs = std::env::var_os("EMACS").unwrap_or_else(|| {
@@ -46,7 +46,7 @@ fn gnu_expect(name: &str, form: &str, fixture: &str) -> String {
     output.trim_end().to_owned()
 }
 
-fn check(name: &str, form: &str, fixture: &str) {
+pub(super) fn check(name: &str, form: &str, fixture: &str) {
     crate::test_utils::init_test_tracing();
     let expected = gnu_expect(name, form, fixture);
     let actual = crate::test_utils::runtime_startup_eval_one(form);
@@ -80,6 +80,24 @@ fn rea04_character_backslash_newline_is_error() {
         r#"(mapcar (lambda (source) (condition-case e (read-from-string source) (error e)))
         (list (concat "?\\" (string 10)) (concat "?\\" (string 10) "x")))"#,
         include_str!("escapes-newline.expect"),
+    );
+}
+
+#[test]
+fn rea05_named_characters_use_gnu_names() {
+    check(
+        "names",
+        r#"(mapcar (lambda (name)
+       (list (condition-case e (read-from-string (concat "?\\N{" name "}")) (error e))
+             (condition-case e (append (car (read-from-string (concat "\"\\N{" name "}\""))) nil) (error e))))
+       '("CJK IDEOGRAPH-4E00" "cjk ideograph-4e00" "CJK UNIFIED IDEOGRAPH-4E00"
+         "TANGUT IDEOGRAPH-17000" "tangut ideograph-17000" "CJK IDEOGRAPH-3400"
+         "CJK IDEOGRAPH-30000" "CJK IDEOGRAPH-4DFF" "CJK IDEOGRAPH-04E00"
+         "VARIATION SELECTOR-17" "variation selector-256" "VARIATION SELECTOR-257"
+         "BACKSPACE" "BELL" "BELL (BEL)" "GREEK SMALL LETTER LAMBDA"
+         "TANGUT COMPONENT-001" "KHITAN SMALL SCRIPT CHARACTER-18B00"
+         "CJK COMPATIBILITY IDEOGRAPH-F900"))"#,
+        include_str!("escapes-names.expect"),
     );
 }
 

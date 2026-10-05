@@ -2,6 +2,9 @@ use super::*;
 use crate::emacs_core::intern::resolve_sym;
 use crate::emacs_core::value::{Value, ValueKind};
 
+#[cfg(test)]
+mod old_unicode_names_gnu;
+
 /// Helper: read one form from a string, panic on error.
 fn read1(input: &str) -> Value {
     let ob = crate::emacs_core::symbol::Obarray::new();

@@ -11,6 +11,8 @@
 //! #^^[...]), read labels (#N= / #N#), radix integers (#x, #o, #b),
 //! propertized strings, reader skip (#@N).
 
+mod old_unicode_names;
+
 use super::eval::push_scratch_gc_root;
 use super::intern::intern;
 use malachite::base::num::conversion::traits::FromStringBase;
@@ -2693,7 +2695,9 @@ fn is_reader_whitespace_code(code: u32) -> bool {
 }
 
 fn is_ascii_whitespace_code(code: u32) -> bool {
-    code <= 0x7F && (code as u8).is_ascii_whitespace()
+    // GNU c_isspace includes vertical tab; Rust's ASCII predicate does not.
+    // This predicate is used only by Unicode character-name normalization.
+    matches!(code, 0x09..=0x0D | 0x20)
 }
 
 fn is_ascii_digit_code(code: u32) -> bool {
@@ -2820,9 +2824,9 @@ fn character_name_to_code(name: &str) -> Option<u32> {
         return parse_unicode_codepoint(hex);
     }
 
-    lookup_primary_unicode_name(name)
-        .or_else(|| lookup_lambda_spelling_alias(name))
-        .or_else(|| lookup_gnu_old_unicode_name(name))
+    lookup_algorithmic_unicode_name(name)
+        .or_else(|| lookup_primary_unicode_name(name))
+        .or_else(|| lookup_gnu_cached_name_alias(name))
 }
 
 fn parse_unicode_codepoint(hex: &str) -> Option<u32> {
@@ -2837,120 +2841,71 @@ fn valid_unicode_scalar(value: u32) -> bool {
     value <= 0x10FFFF && !(0xD800..=0xDFFF).contains(&value)
 }
 
-fn lookup_primary_unicode_name(name: &str) -> Option<u32> {
-    let ch = unicode_names2::character(name)?;
-    let primary = unicode_names2::name(ch)?;
-    primary
-        .to_string()
-        .eq_ignore_ascii_case(name)
-        .then_some(ch as u32)
+fn strip_ascii_case_prefix<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
+    name.get(..prefix.len())?
+        .eq_ignore_ascii_case(prefix)
+        .then(|| &name[prefix.len()..])
 }
 
-fn lookup_lambda_spelling_alias(name: &str) -> Option<u32> {
-    let upper = name.to_ascii_uppercase();
-    if !upper.contains("LAMBDA") {
+/// GNU char-from-name (mule-cmds.el:3188-3207) validates algorithmic
+/// names against the name property, including its exact hex spelling.
+fn lookup_algorithmic_unicode_name(name: &str) -> Option<u32> {
+    if let Some(hex) = strip_ascii_case_prefix(name, "CJK IDEOGRAPH-") {
+        let code = parse_unicode_codepoint(hex)?;
+        let ch = char::from_u32(code)?;
+        let primary = unicode_names2::name(ch)?.to_string();
+        return (primary == format!("CJK UNIFIED IDEOGRAPH-{code:X}")
+            && name.eq_ignore_ascii_case(&format!("CJK IDEOGRAPH-{code:X}")))
+        .then_some(code);
+    }
+    if let Some(hex) = strip_ascii_case_prefix(name, "TANGUT IDEOGRAPH-") {
+        let code = parse_unicode_codepoint(hex)?;
+        // GNU UnicodeData.txt:30502-30503 and 31743-31744 (Unicode 17).
+        return (((0x17000..=0x187FF).contains(&code) || (0x18D00..=0x18D1E).contains(&code))
+            && name.eq_ignore_ascii_case(&format!("TANGUT IDEOGRAPH-{code:X}")))
+        .then_some(code);
+    }
+    None
+}
+
+fn lookup_primary_unicode_name(name: &str) -> Option<u32> {
+    // GNU's name property spells these "CJK IDEOGRAPH-", not Unicode's
+    // "CJK UNIFIED IDEOGRAPH-". Its char-from-name rejects the latter.
+    if strip_ascii_case_prefix(name, "CJK UNIFIED IDEOGRAPH-").is_some() {
         return None;
     }
-    let lamda = replace_ascii_word(&upper, "LAMBDA", "LAMDA")?;
-    lookup_primary_unicode_name(&lamda)
-}
-
-fn replace_ascii_word(input: &str, needle: &str, replacement: &str) -> Option<String> {
-    let mut out = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let needle_bytes = needle.as_bytes();
-    let mut cursor = 0;
-    let mut changed = false;
-
-    while cursor < bytes.len() {
-        if bytes[cursor..].starts_with(needle_bytes)
-            && cursor
-                .checked_sub(1)
-                .and_then(|idx| bytes.get(idx))
-                .is_none_or(|b| !b.is_ascii_alphanumeric())
-            && bytes
-                .get(cursor + needle_bytes.len())
-                .is_none_or(|b| !b.is_ascii_alphanumeric())
-        {
-            out.push_str(replacement);
-            cursor += needle_bytes.len();
-            changed = true;
-        } else {
-            out.push(bytes[cursor] as char);
-            cursor += 1;
+    let ch = unicode_names2::character(name)?;
+    let primary = unicode_names2::name(ch)?;
+    let canonical = primary.to_string();
+    if !canonical.eq_ignore_ascii_case(name) {
+        return None;
+    }
+    let code = ch as u32;
+    // The table deliberately omits algorithmically named ranges. Outside
+    // its ranges char-from-name's NAME-HEX fallback must round-trip the
+    // suffix through the name property (mule-cmds.el:3195-3207). In
+    // particular, TANGUT COMPONENT-001 is not a character named U+0001.
+    if !gnu_ucs_names_cached_code(code) {
+        let (_, suffix) = canonical.rsplit_once('-')?;
+        if parse_unicode_codepoint(suffix)? != code {
+            return None;
         }
     }
-
-    changed.then_some(out)
+    Some(code)
 }
 
-fn lookup_gnu_old_unicode_name(name: &str) -> Option<u32> {
-    match name.to_ascii_uppercase().as_str() {
-        "NULL" => Some(0x00),
-        "START OF HEADING" => Some(0x01),
-        "START OF TEXT" => Some(0x02),
-        "END OF TEXT" => Some(0x03),
-        "END OF TRANSMISSION" => Some(0x04),
-        "ENQUIRY" => Some(0x05),
-        "ACKNOWLEDGE" => Some(0x06),
-        "BELL (BEL)" => Some(0x07),
-        "BACKSPACE" => Some(0x08),
-        "CHARACTER TABULATION" => Some(0x09),
-        "LINE FEED (LF)" => Some(0x0A),
-        "LINE TABULATION" => Some(0x0B),
-        "FORM FEED (FF)" => Some(0x0C),
-        "CARRIAGE RETURN (CR)" => Some(0x0D),
-        "SHIFT OUT" => Some(0x0E),
-        "SHIFT IN" => Some(0x0F),
-        "DATA LINK ESCAPE" => Some(0x10),
-        "DEVICE CONTROL ONE" => Some(0x11),
-        "DEVICE CONTROL TWO" => Some(0x12),
-        "DEVICE CONTROL THREE" => Some(0x13),
-        "DEVICE CONTROL FOUR" => Some(0x14),
-        "NEGATIVE ACKNOWLEDGE" => Some(0x15),
-        "SYNCHRONOUS IDLE" => Some(0x16),
-        "END OF TRANSMISSION BLOCK" => Some(0x17),
-        "CANCEL" => Some(0x18),
-        "END OF MEDIUM" => Some(0x19),
-        "SUBSTITUTE" => Some(0x1A),
-        "ESCAPE" => Some(0x1B),
-        "INFORMATION SEPARATOR FOUR" => Some(0x1C),
-        "INFORMATION SEPARATOR THREE" => Some(0x1D),
-        "INFORMATION SEPARATOR TWO" => Some(0x1E),
-        "INFORMATION SEPARATOR ONE" => Some(0x1F),
-        "DELETE" => Some(0x7F),
-        "BREAK PERMITTED HERE" => Some(0x82),
-        "NO BREAK HERE" => Some(0x83),
-        "NEXT LINE (NEL)" => Some(0x85),
-        "START OF SELECTED AREA" => Some(0x86),
-        "END OF SELECTED AREA" => Some(0x87),
-        "CHARACTER TABULATION SET" => Some(0x88),
-        "CHARACTER TABULATION WITH JUSTIFICATION" => Some(0x89),
-        "LINE TABULATION SET" => Some(0x8A),
-        "PARTIAL LINE FORWARD" => Some(0x8B),
-        "PARTIAL LINE BACKWARD" => Some(0x8C),
-        "REVERSE LINE FEED" => Some(0x8D),
-        "SINGLE SHIFT TWO" => Some(0x8E),
-        "SINGLE SHIFT THREE" => Some(0x8F),
-        "DEVICE CONTROL STRING" => Some(0x90),
-        "PRIVATE USE ONE" => Some(0x91),
-        "PRIVATE USE TWO" => Some(0x92),
-        "SET TRANSMIT STATE" => Some(0x93),
-        "CANCEL CHARACTER" => Some(0x94),
-        "MESSAGE WAITING" => Some(0x95),
-        "START OF GUARDED AREA" => Some(0x96),
-        "END OF GUARDED AREA" => Some(0x97),
-        "START OF STRING" => Some(0x98),
-        "SINGLE CHARACTER INTRODUCER" => Some(0x9A),
-        "CONTROL SEQUENCE INTRODUCER" => Some(0x9B),
-        "STRING TERMINATOR" => Some(0x9C),
-        "OPERATING SYSTEM COMMAND" => Some(0x9D),
-        "PRIVACY MESSAGE" => Some(0x9E),
-        "APPLICATION PROGRAM COMMAND" => Some(0x9F),
-        "NON-BREAKING SPACE" => Some(0x00A0),
-        "BYTE ORDER MARK" => Some(0xFEFF),
-        _ => None,
-    }
+/// The ranges selected by GNU `ucs-names`, mule-cmds.el:3096-3127.
+fn gnu_ucs_names_cached_code(code: u32) -> bool {
+    matches!(code,
+        0x0000..=0x33FF | 0x4DC0..=0x4DFF | 0xA000..=0xD7FF
+        | 0xFB00..=0x143FA | 0x14400..=0x14646 | 0x16100..=0x16139
+        | 0x16800..=0x16F9F | 0x16FE0..=0x16FF6 | 0x1AFF0..=0x1B122
+        | 0x1B132 | 0x1B150..=0x1B16F | 0x1B170..=0x1B2FF
+        | 0x1BC00..=0x1BCAF | 0x1CC00..=0x1FFFF | 0xE0000..=0xE01FF)
+}
+
+fn lookup_gnu_cached_name_alias(name: &str) -> Option<u32> {
+    old_unicode_names::lookup(name)
 }
 
 fn source_code_for_error(code: u32) -> String {
