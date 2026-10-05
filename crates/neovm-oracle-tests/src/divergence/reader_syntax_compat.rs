@@ -35,3 +35,15 @@ fn reader_syntax_rea13() {
         expect,
     );
 }
+
+#[test]
+fn reader_syntax_rea32() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    let expect = expect_test::expect![[
+        r#""OK ((invalid-read-syntax \".\") (invalid-read-syntax \".\") (invalid-read-syntax \".\") (invalid-read-syntax \".\") ((a . 120) . 7) ((a . 1) . 8) (invalid-read-syntax \".\") (\\. . 1) ([a .b] . 6))""#
+    ]];
+    assert_oracle_parity_expect(
+        r###"(mapcar (lambda (s) (condition-case e (read-from-string s) (error e))) '(".?" ".#x" "[a .?x]" "[a .#x]" "(a .?x)" "(a .#x1)" "." ".)" "[a .b]"))"###,
+        expect,
+    );
+}

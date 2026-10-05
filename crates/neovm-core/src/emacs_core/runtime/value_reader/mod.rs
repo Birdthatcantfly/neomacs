@@ -849,6 +849,10 @@ impl<'a> Reader<'a> {
                 self.bump();
                 Err(self.error(")"))
             }
+            x if x == b'.' as u32 && self.is_dot_separator() => {
+                self.bump();
+                Err(self.error("."))
+            }
             x if x == b'[' as u32 => self.read_vector(),
             x if x == b'\'' as u32 => {
                 self.bump();

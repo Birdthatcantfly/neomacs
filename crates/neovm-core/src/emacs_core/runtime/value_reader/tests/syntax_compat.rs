@@ -56,3 +56,20 @@ fn rea13_radix_underscore_terminates_integer() {
         "integer, radix 16"
     );
 }
+
+#[test]
+fn rea32_dot_tokens_require_list_context() {
+    for input in [
+        ".?",
+        ".#x",
+        "[a .?x]",
+        "[a .#x]",
+        ".",
+        ". ",
+        r#"#("a" . nil)"#,
+    ] {
+        assert_eq!(read_result(input).unwrap_err().message, ".", "{input}");
+    }
+    assert!(read1("(a .?x)").is_cons());
+    assert!(read1("(a .#x1)").is_cons());
+}
