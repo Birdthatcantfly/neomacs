@@ -1811,6 +1811,10 @@ pub(crate) fn builtin_intern_fn(eval: &mut super::eval::Context, args: Vec<Value
         }
     }
     let name = eval.expect_lisp_string(args[0])?;
+    let name_value = intern_shorthand_name(eval, name)
+        .map(Value::heap_string)
+        .unwrap_or(args[0]);
+    let name = eval.expect_lisp_string(name_value)?;
 
     let effective_obarray = effective_obarray_arg(eval, &args);
 
@@ -1842,7 +1846,7 @@ pub(crate) fn builtin_intern_fn(eval: &mut super::eval::Context, args: Vec<Value
         // `obarray_bucket_find`), so identity does not depend on the name
         // object's representation.
         let sym = Value::from_sym_id(
-            crate::emacs_core::intern::make_uninterned_symbol_with_name_value(args[0]),
+            crate::emacs_core::intern::make_uninterned_symbol_with_name_value(name_value),
         );
         let new_bucket = Value::cons(sym, bucket);
         let _ = set_obarray_bucket(obarray_val, bucket_idx, new_bucket);
@@ -1854,7 +1858,7 @@ pub(crate) fn builtin_intern_fn(eval: &mut super::eval::Context, args: Vec<Value
     // Global obarray path. Pass the string OBJECT, not just its bytes: when
     // this call creates the symbol that object becomes its name, so
     // `symbol-name` returns it with the text properties it was read from.
-    let sym = eval.obarray_mut().intern_lisp_value(args[0]);
+    let sym = eval.obarray_mut().intern_lisp_value(name_value);
     Ok(Value::from_sym_id(sym))
 }
 
@@ -1869,7 +1873,7 @@ pub(crate) fn builtin_intern_soft_2(
     intern_soft_impl(eval, &args)
 }
 
-/// A string requests spelling lookup; a symbol
+/// A string requests spelling lookup and shorthand expansion; a symbol
 /// requests that exact identity and never expands. Views stay local to the
 /// evaluator's mutator and introduce no shared mutable Lisp state.
 #[derive(Debug)]
@@ -1905,6 +1909,39 @@ impl InternSoftQuery<'_> {
     }
 }
 
+/// GNU oblookup_considering_shorthand (lread.c:4966-5010) scans valid
+/// pairs in source order. Nil, the overwhelmingly common binding, allocates
+/// nothing. The rewritten builtin name is multibyte (Fintern, 4793-4796).
+fn intern_shorthand_name(
+    eval: &super::eval::Context,
+    name: &crate::heap_types::LispString,
+) -> Option<crate::heap_types::LispString> {
+    static SHORTHANDS: std::sync::OnceLock<SymId> = std::sync::OnceLock::new();
+    let id = *SHORTHANDS.get_or_init(|| intern("read-symbol-shorthands"));
+    let value = eval
+        .visible_runtime_variable_value_by_id(id)
+        .ok()
+        .flatten()
+        .unwrap_or(Value::NIL);
+    if value.is_nil() {
+        return None;
+    }
+    crate::emacs_core::value::list_iter(value).find_map(|pair| {
+        if !pair.is_cons() {
+            return None;
+        }
+        let short = pair.cons_car();
+        let long = pair.cons_cdr();
+        let short = short.as_lisp_string()?;
+        let long = long.as_lisp_string()?;
+        let suffix = name.as_bytes().strip_prefix(short.as_bytes())?;
+        let mut rewritten = Vec::with_capacity(long.sbytes() + suffix.len());
+        rewritten.extend_from_slice(long.as_bytes());
+        rewritten.extend_from_slice(suffix);
+        Some(crate::heap_types::LispString::from_emacs_bytes(rewritten))
+    })
+}
+
 pub(crate) fn intern_soft_impl(eval: &super::eval::Context, args: &[Value]) -> EvalResult {
     expect_min_args("intern-soft", args, 1)?;
     expect_max_args("intern-soft", args, 2)?;
@@ -1922,7 +1959,10 @@ pub(crate) fn intern_soft_impl(eval: &super::eval::Context, args: &[Value]) -> E
         }
     } else {
         let name = eval.expect_lisp_string(args[0])?;
-        InternSoftQuery::Spelling(std::borrow::Cow::Borrowed(name))
+        let name = intern_shorthand_name(eval, name)
+            .map(std::borrow::Cow::Owned)
+            .unwrap_or(std::borrow::Cow::Borrowed(name));
+        InternSoftQuery::Spelling(name)
     };
     let found = if !is_global_obarray_proxy(eval, &effective_obarray) {
         let obarray_val = check_obarray_value(effective_obarray)?;

@@ -51,3 +51,38 @@ fn symbols_gnu_identity() {
         include_str!("symbol_reader_gnu/identity.expect"),
     );
 }
+
+#[test]
+fn symbols_gnu_shorthand_intern() {
+    assert_gnu(
+        "shorthand_intern",
+        r###"(let ((read-symbol-shorthands '(("s-" . "string-")))) (list (intern "s-trim") (intern-soft "s-trim") (let ((ob (obarray-make))) (list (symbol-name (intern "s-probe" ob)) (eq (intern-soft "s-probe" ob) (intern "s-probe" ob)))) (let ((read-symbol-shorthands '(("-" . "x-")))) (intern "-"))))"###,
+        include_str!("symbol_reader_gnu/shorthand_intern.expect"),
+    );
+}
+
+#[test]
+fn symbols_gnu_buffer_local_shorthands() {
+    assert_gnu(
+        "buffer_local_shorthands",
+        r###"(with-temp-buffer
+       (setq-local read-symbol-shorthands '(("gdj-local-" . "car")))
+       (list (intern "gdj-local-") (intern-soft "gdj-local-")
+             (car (read-from-string "gdj-local-"))))"###,
+        include_str!("symbol_reader_gnu/buffer_local_shorthands.expect"),
+    );
+}
+
+#[test]
+fn symbols_gnu_compiled_intern_soft_identity() {
+    assert_gnu(
+        "compiled_intern_soft_identity",
+        r###"(progn (require 'bytecomp)
+      (let ((f (byte-compile (lambda (x) (intern-soft x))))
+            (read-symbol-shorthands '(("gdj-compiled-" . "car"))))
+        (let ((i 0)) (while (< i 1000) (funcall f "gdj-compiled-") (setq i (1+ i))))
+        (list (funcall f (make-symbol "car")) (funcall f 'car)
+              (funcall f "gdj-compiled-"))))"###,
+        include_str!("symbol_reader_gnu/compiled_intern_soft_identity.expect"),
+    );
+}
