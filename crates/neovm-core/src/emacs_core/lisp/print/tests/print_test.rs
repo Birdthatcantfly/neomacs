@@ -921,3 +921,15 @@ fn hash_table_printer_omits_default_eql_test_like_gnu() {
         "OK \"#s(hash-table data (1 2))\"",
     );
 }
+
+#[cfg(test)]
+#[path = "graph_gnu.rs"]
+mod graph_gnu;
+
+#[cfg(test)]
+#[path = "settings_gnu.rs"]
+mod settings_gnu;
+
+#[cfg(test)]
+#[path = "float_output_gnu.rs"]
+mod float_output_gnu;
