@@ -110,3 +110,133 @@ fn printer_settings_gnu_unreadable_fallback() {
         include_str!("settings_gnu/unreadable_fallback.expect"),
     );
 }
+
+#[test]
+fn printer_settings_gnu_override_scopes() {
+    oracle(
+        "override_scopes",
+        r###"(let ((print-length 99) (print-quoted nil) (print-escape-nonascii nil)) (list (prin1-to-string (make-marker) nil (list (cons 'length 7) (cons 'quoted t) (cons 'unreadable-function (lambda (_o _e) (concat (number-to-string print-length) (if print-quoted "q" "-") (if print-escape-nonascii "e" "-") (if print-unreadable-function "u" "-")))))) (list print-length print-quoted print-escape-nonascii) (condition-case e (prin1-to-string (make-marker) nil (list (cons 'length 7) (cons 'unreadable-function (lambda (_o _e) (error "scope"))))) (error e)) print-length (prin1-to-string (make-marker) nil (list t (cons 'unreadable-function (lambda (_o _e) (concat (if print-length "l" "-") (if print-quoted "q" "-") (if print-charset-text-property "c" "-"))))))))"###,
+        include_str!("settings_gnu/override_scopes.expect"),
+    );
+}
+
+#[test]
+fn printer_settings_gnu_callback_buffer() {
+    oracle(
+        "callback_buffer",
+        r###"(with-temp-buffer (let ((origin (current-buffer)) (print-unreadable-function (lambda (_o _e) (set-buffer (get-buffer-create "printer-callback-target")) "Q"))) (list (prin1-to-string (vector (make-marker) (make-marker))) (eq origin (current-buffer)) (condition-case e (let ((print-unreadable-function (lambda (_o _e) (set-buffer (get-buffer-create "printer-callback-target")) (error "changed")))) (prin1-to-string (make-marker))) (error e)) (eq origin (current-buffer)))))"###,
+        include_str!("settings_gnu/callback_buffer.expect"),
+    );
+}
+
+#[test]
+fn printer_settings_gnu_buffer_princ() {
+    oracle(
+        "buffer_princ",
+        r###"(with-temp-buffer (rename-buffer "printer buffer") (let ((print-unreadable-function (lambda (_o _e) nil))) (list (prin1-to-string (current-buffer) t) (format "%s" (list (current-buffer))) (format "%S" (list (current-buffer))))))"###,
+        include_str!("settings_gnu/buffer_princ.expect"),
+    );
+}
+
+#[test]
+fn printer_settings_gnu_callback_gc_plists() {
+    oracle(
+        "callback_gc_plists",
+        r###"(let* ((tail (list (make-marker) 'after)) (object (propertize "ab" 'charset 'ascii 'payload tail)) (print-unreadable-function (lambda (_o _e) (set-text-properties 0 2 nil object) (garbage-collect) "Q"))) (list (prin1-to-string object) (text-properties-at 0 object)))"###,
+        include_str!("settings_gnu/callback_gc_plists.expect"),
+    );
+}
+
+#[test]
+fn printer_settings_gnu_override_watchers() {
+    oracle(
+        "override_watchers",
+        r###"(let* ((print-length 99)
+        (print-quoted nil)
+        (events nil)
+        (overrides (list (cons 'length 3) (cons 'quoted t)
+                         (cons 'unreadable-function (lambda (_object _escaping) "kept"))))
+        (watcher (lambda (_symbol value operation _where)
+                   (when (memq operation '(let unlet)) (push (list operation value) events))
+                   (when (eq operation 'let)
+                     (setcdr overrides nil)
+                     (garbage-collect)))))
+   (unwind-protect
+       (progn
+         (add-variable-watcher 'print-quoted watcher)
+         (let ((text (prin1-to-string (make-marker) nil overrides)))
+           (list text print-length print-quoted (nreverse events))))
+     (remove-variable-watcher 'print-quoted watcher)))"###,
+        include_str!("settings_gnu/override_watchers.expect"),
+    );
+}
+
+#[test]
+fn printer_settings_gnu_live_options() {
+    oracle(
+        "live_options",
+        r###"(list
+  (let ((print-quoted t)
+        (print-unreadable-function (lambda (_o _e) (setq print-quoted nil) "Q")))
+    (prin1-to-string (vector (make-marker) '(quote a))))
+  (let ((print-length nil)
+        (print-unreadable-function (lambda (_o _e) (setq print-length 1) "Q")))
+    (prin1-to-string (vector (make-marker) '(1 2) '(3 4))))
+  (let ((print-length nil)
+        (print-unreadable-function (lambda (_o _e) (setq print-length 1) "Q")))
+    (prin1-to-string (list (make-marker) '(1 2) '(3 4))))
+  (let ((print-level nil)
+        (print-unreadable-function (lambda (_o _e) (setq print-level 1) "Q")))
+    (prin1-to-string (vector (make-marker) '(1 2) (vector 3 4))))
+  (let ((print-circle nil)
+        (print-unreadable-function (lambda (_o _e) (setq print-circle t) "Q")))
+    (condition-case e (prin1-to-string (vector (make-marker) '(a))) (error e)))
+  (let ((print-circle t)
+        (print-unreadable-function (lambda (_o _e) (let ((print-circle nil)) (prin1 1 #'ignore)) "Q")))
+    (condition-case e (let ((shared '(a))) (prin1-to-string (vector (make-marker) shared shared))) (error e)))
+  (let ((print-length nil)
+        (print-unreadable-function (lambda (_o _e) (setq print-length 1) "Q"))
+        (h (make-hash-table :test 'eq)))
+    (puthash (make-marker) '(1 2) h)
+    (puthash 'next '(3 4) h)
+    (prin1-to-string h)))"###,
+        include_str!("settings_gnu/live_options.expect"),
+    );
+}
+
+#[test]
+fn printer_settings_gnu_callback_string_flags() {
+    oracle(
+        "callback_string_flags",
+        r###"(list
+  (let ((print-unreadable-function (lambda (_o _e) (setq print-escape-nonascii nil) (unibyte-string 200))))
+    (append (prin1-to-string (make-marker)) nil))
+  (let ((print-unreadable-function (lambda (_o _e) (setq print-escape-nonascii t) (unibyte-string 200))))
+    (append (prin1-to-string (make-marker)) nil))
+  (let ((print-circle nil)
+        (print-unreadable-function (lambda (_o _e) (setq print-circle t) "Q")))
+    (condition-case e (prin1-to-string (vector (make-marker) 3)) (error e)))
+  (let ((print-escape-newlines nil)
+        (print-unreadable-function (lambda (_o _e) (setq print-escape-newlines t) "Q")))
+    (prin1-to-string (vector (make-marker) "a\nb"))))"###,
+        include_str!("settings_gnu/callback_string_flags.expect"),
+    );
+}
+
+#[test]
+fn printer_settings_gnu_shorthand_refresh() {
+    oracle(
+        "shorthand_refresh",
+        r###"(list
+  (let ((print-quoted t)
+        (print-unreadable-function (lambda (_o _e) (setq print-quoted nil) "Q")))
+    (prin1-to-string (vector (list 'quote (make-marker)) '(quote a))))
+  (let ((print-quoted t)
+        (print-unreadable-function (lambda (_o _e) (setq print-quoted nil) "Q")))
+    (prin1-to-string (vector (list '\` (make-marker)) '(quote a))))
+  (let ((print-quoted t)
+        (print-unreadable-function (lambda (_o _e) (setq print-quoted nil) "Q")))
+    (prin1-to-string (vector (list 'quote (vector (make-marker) '(quote a))) '(quote b)))))"###,
+        include_str!("settings_gnu/shorthand_refresh.expect"),
+    );
+}

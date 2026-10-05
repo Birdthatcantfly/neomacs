@@ -74,7 +74,7 @@ fn general_float_rounding_preserves_exponent() {
         let actual = format_float_with_output_format(value, Some(fields[0]));
         assert_eq!(
             actual,
-            fields[1].as_str().unwrap(),
+            fields[1].as_lisp_string().unwrap().as_utf8_str().unwrap(),
             "row {row_index}: {value}"
         );
         assert!(actual.parse::<f64>().is_ok(), "readable output: {actual}");

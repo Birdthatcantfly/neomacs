@@ -174,6 +174,18 @@ fn standalone_circular_tail_uses_gnu_brent_identity() {
     .zip(expected)
     {
         let value = ctx.eval_str(form).unwrap();
-        assert_eq!(print_value(&value), expected.as_str().unwrap());
+        assert_eq!(
+            print_value(&value),
+            expected.as_lisp_string().unwrap().as_utf8_str().unwrap()
+        );
     }
+}
+
+#[test]
+fn closure_sharing_preserves_slot_identity() {
+    compare(
+        "closure_sharing",
+        r###"(let ((print-circle t)) (prin1-to-string (car (read-from-string "(#1=(x) #[#1# ((list x)) (t)])"))))"###,
+        include_str!("graph_closure_sharing.expect"),
+    );
 }
