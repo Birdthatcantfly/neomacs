@@ -410,11 +410,11 @@ fn char_literal_hex_byte8_is_canonicalized_like_gnu() {
     assert_eq!(read1(r"?\346").as_fixnum(), Some(0xE6));
     assert_eq!(
         read1(r"?\M-\xE6").as_fixnum(),
-        Some((CHAR_META_MODIFIER | 0xE6) as i64)
+        Some((CharacterModifiers::META.bits() | 0xE6) as i64)
     );
     assert_eq!(
         read1(r"?\C-\xE6").as_fixnum(),
-        Some((CHAR_CTRL_MODIFIER | 0xE6) as i64)
+        Some((CharacterModifiers::CONTROL.bits() | 0xE6) as i64)
     );
 }
 
@@ -1380,3 +1380,6 @@ mod symbol_contract;
 
 #[cfg(test)]
 mod syntax_compat;
+
+#[cfg(test)]
+mod escapes_gnu;

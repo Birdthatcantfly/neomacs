@@ -32,23 +32,19 @@ use super::value::{
 
 const UNICODE_CHARACTER_NAME_LENGTH_BOUND: usize = 200;
 const CHAR_CODE_MASK: u32 = 0x3F_FFFF;
-const CHAR_CTRL_MODIFIER: u32 = 1 << 26;
-const CHAR_META_MODIFIER: u32 = 1 << 27;
-const CHAR_SHIFT_MODIFIER: u32 = 1 << 25;
-
-fn apply_control_modifier(value: u32) -> u32 {
-    let code = value & CHAR_CODE_MASK;
-    let modifiers = value & !CHAR_CODE_MASK;
-
-    if code == b'?' as u32 {
-        0x7F | modifiers
+fn apply_control_modifier(value: DecodedCharacter) -> DecodedCharacter {
+    let (code, mut modifiers) = value.parts();
+    let code = if code == b'?' as u32 {
+        0x7F
     } else if (b'@' as u32..=b'_' as u32).contains(&code)
         || (b'a' as u32..=b'z' as u32).contains(&code)
     {
-        (code & 0x1F) | modifiers
+        code & 0x1F
     } else {
-        code | modifiers | CHAR_CTRL_MODIFIER
-    }
+        modifiers.insert(CharacterModifiers::CONTROL);
+        code
+    };
+    DecodedCharacter(code | modifiers.bits())
 }
 
 fn plist_get(plist: &[Value], key: HashTableLiteralKey) -> Option<Value> {
@@ -1145,145 +1141,14 @@ impl<'a> Reader<'a> {
                         return Err(self.end_of_file_error());
                     };
                     self.bump();
+                    // GNU lread.c:3060-3077 applies only these string
+                    // rules before using the common character decoder.
                     match esc {
-                        x if x == b'n' as u32 => {
-                            buf.push(b'\n');
-                        }
-                        x if x == b'r' as u32 => {
-                            buf.push(b'\r');
-                        }
-                        x if x == b't' as u32 => {
-                            buf.push(b'\t');
-                        }
-                        x if x == b'\\' as u32 => {
-                            buf.push(b'\\');
-                        }
-                        x if x == b'"' as u32 => {
-                            buf.push(b'"');
-                        }
-                        x if x == b'a' as u32 => {
-                            buf.push(0x07);
-                        }
-                        x if x == b'b' as u32 => {
-                            buf.push(0x08);
-                        }
-                        x if x == b'f' as u32 => {
-                            buf.push(0x0C);
-                        }
-                        x if x == b'e' as u32 => {
-                            buf.push(0x1B);
-                        }
-                        x if x == b'v' as u32 => {
-                            buf.push(0x0B);
-                        }
-                        x if x == b's' as u32 => {
-                            buf.push(b' ');
-                        }
-                        // Modifier escapes in strings
-                        x if x == b'C' as u32 && self.current_code() == Some(b'-' as u32) => {
-                            self.bump(); // consume '-'
-                            let base = self.parse_string_char_value(0)?;
-                            self.push_string_escape_value(
-                                &mut buf,
-                                &mut flags,
-                                apply_control_modifier(base),
-                            )?;
-                        }
-                        x if x == b'^' as u32 => {
-                            let base = self.parse_string_char_value(0)?;
-                            self.push_string_escape_value(
-                                &mut buf,
-                                &mut flags,
-                                apply_control_modifier(base),
-                            )?;
-                        }
-                        x if x == b'M' as u32 && self.current_code() == Some(b'-' as u32) => {
-                            self.bump(); // consume '-'
-                            let val = self.parse_string_char_value(CHAR_META_MODIFIER)?;
-                            self.push_string_escape_value(&mut buf, &mut flags, val)?;
-                        }
-                        x if x == b'S' as u32 && self.current_code() == Some(b'-' as u32) => {
-                            self.bump(); // consume '-'
-                            let val = self.parse_string_char_value(CHAR_SHIFT_MODIFIER)?;
-                            self.push_string_escape_value(&mut buf, &mut flags, val)?;
-                        }
-                        x if x == b'A' as u32 && self.current_code() == Some(b'-' as u32) => {
-                            self.bump(); // consume '-'
-                            let val = self.parse_string_char_value(1 << 22)?;
-                            self.push_string_escape_value(&mut buf, &mut flags, val)?;
-                        }
-                        x if x == b'H' as u32 && self.current_code() == Some(b'-' as u32) => {
-                            self.bump(); // consume '-'
-                            let val = self.parse_string_char_value(1 << 24)?;
-                            self.push_string_escape_value(&mut buf, &mut flags, val)?;
-                        }
-                        x if x == b'd' as u32 => {
-                            buf.push(0x7F);
-                        }
-                        x if x == b'x' as u32 => {
-                            let (mut hex, digit_count) = self.read_hex_digits()?;
-                            if hex <= emacs_char::MAX_CHAR {
-                                if digit_count < 3 && (0x80..0x100).contains(&hex) {
-                                    hex = emacs_char::byte8_to_char(hex as u8);
-                                }
-                                Self::push_string_char(&mut buf, &mut flags, hex);
-                            } else {
-                                return Err(self.error(
-                                    "invalid codepoint in \\x escape (exceeds Emacs 22-bit limit)",
-                                ));
-                            }
-                        }
-                        x if x == b'u' as u32 => {
-                            let hex = self.read_fixed_hex(4)?;
-                            Self::push_string_char(&mut buf, &mut flags, hex);
-                        }
-                        x if x == b'U' as u32 => {
-                            let hex = self.read_fixed_hex(8)?;
-                            if hex <= emacs_char::MAX_CHAR {
-                                Self::push_string_char(&mut buf, &mut flags, hex);
-                            } else {
-                                return Err(self.error("invalid unicode codepoint in \\U escape"));
-                            }
-                        }
-                        x if x == b'N' as u32 && self.current_code() == Some(b'{' as u32) => {
-                            let value = self.read_unicode_name_escape()?;
-                            if char::from_u32(value).is_some() {
-                                Self::push_string_char(&mut buf, &mut flags, value);
-                            } else {
-                                return Err(self.error("invalid unicode codepoint in \\N{...}"));
-                            }
-                        }
-                        x if (b'0' as u32..=b'7' as u32).contains(&x) => {
-                            // Octal escape
-                            let mut val = esc - b'0' as u32;
-                            for _ in 0..2 {
-                                match self.current_code() {
-                                    Some(c) if (b'0' as u32..=b'7' as u32).contains(&c) => {
-                                        self.bump();
-                                        val = val * 8 + (c - b'0' as u32);
-                                    }
-                                    _ => break,
-                                }
-                            }
-                            if val <= emacs_char::MAX_CHAR {
-                                if (0x80..0x100).contains(&val) {
-                                    val = emacs_char::byte8_to_char(val as u8);
-                                }
-                                Self::push_string_char(&mut buf, &mut flags, val);
-                            }
-                        }
-                        x if x == b'\n' as u32 || x == b' ' as u32 => {
-                            // `\<LF>` and `\<SPC>` generate no characters at
-                            // all (line/whitespace continuation). Matches GNU
-                            // `read_string_literal` in `src/lread.c`:
-                            //   case ' ': case '\n': ... continue;
-                            // Note: `\<TAB>`/`\<CR>` are NOT dropped by GNU;
-                            // they fall through to `read_char_escape` and keep
-                            // the literal char, so they stay in `other`.
-                        }
-                        other => {
-                            // Unknown escape — keep the escaped source character.
-                            Self::push_string_char(&mut buf, &mut flags, other);
+                        x if x == b's' as u32 => buf.push(b' '),
+                        x if x == b'\n' as u32 || x == b' ' as u32 => {}
+                        _ => {
+                            let value = self.read_char_escape(esc)?;
+                            self.push_string_escape_value(&mut buf, &mut flags, value)?;
                         }
                     }
                 }
@@ -1291,70 +1156,6 @@ impl<'a> Reader<'a> {
                     self.push_source_string_code(&mut buf, &mut flags, other);
                 }
             }
-        }
-    }
-
-    /// Parse the next character in a string, applying accumulated modifiers.
-    /// Handles recursive modifiers (e.g. `\M-\C-x`) and escape sequences.
-    fn parse_string_char_value(&mut self, modifiers: u32) -> Result<u32, ReadError> {
-        let Some(ch) = self.current_code() else {
-            return Err(self.error("expected character after modifier escape in string"));
-        };
-        self.bump();
-        if ch == b'\\' as u32 {
-            let Some(esc) = self.current_code() else {
-                return Err(self.error("unterminated escape in string modifier"));
-            };
-            self.bump();
-            match esc {
-                x if x == b'C' as u32 && self.current_code() == Some(b'-' as u32) => {
-                    self.bump();
-                    let base = self.parse_string_char_value(modifiers)?;
-                    Ok(apply_control_modifier(base))
-                }
-                x if x == b'M' as u32 && self.current_code() == Some(b'-' as u32) => {
-                    self.bump();
-                    self.parse_string_char_value(modifiers | CHAR_META_MODIFIER)
-                }
-                x if x == b'S' as u32 && self.current_code() == Some(b'-' as u32) => {
-                    self.bump();
-                    self.parse_string_char_value(modifiers | CHAR_SHIFT_MODIFIER)
-                }
-                x if x == b's' as u32 && self.current_code() == Some(b'-' as u32) => {
-                    self.bump();
-                    self.parse_string_char_value(modifiers | (1 << 23))
-                }
-                x if x == b'A' as u32 && self.current_code() == Some(b'-' as u32) => {
-                    self.bump();
-                    self.parse_string_char_value(modifiers | (1 << 22))
-                }
-                x if x == b'H' as u32 && self.current_code() == Some(b'-' as u32) => {
-                    self.bump();
-                    self.parse_string_char_value(modifiers | (1 << 24))
-                }
-                x if x == b'n' as u32 => Ok(b'\n' as u32 | modifiers),
-                x if x == b'r' as u32 => Ok(b'\r' as u32 | modifiers),
-                x if x == b't' as u32 => Ok(b'\t' as u32 | modifiers),
-                x if x == b'a' as u32 => Ok(0x07 | modifiers),
-                x if x == b'b' as u32 => Ok(0x08 | modifiers),
-                x if x == b'f' as u32 => Ok(0x0C | modifiers),
-                x if x == b'v' as u32 => Ok(0x0B | modifiers),
-                x if x == b'e' as u32 => Ok(0x1B | modifiers),
-                x if x == b's' as u32 => Ok(b' ' as u32 | modifiers),
-                x if x == b'd' as u32 => Ok(0x7F | modifiers),
-                x if x == b'\\' as u32 => Ok(b'\\' as u32 | modifiers),
-                x if x == b'"' as u32 => Ok(b'"' as u32 | modifiers),
-                x if x == b'N' as u32 && self.current_code() == Some(b'{' as u32) => {
-                    Ok(self.read_unicode_name_escape()? | modifiers)
-                }
-                x if x == b'^' as u32 => {
-                    let base = self.parse_string_char_value(modifiers)?;
-                    Ok(apply_control_modifier(base))
-                }
-                other => Ok(other | modifiers),
-            }
-        } else {
-            Ok(ch | modifiers)
         }
     }
 
@@ -1389,34 +1190,33 @@ impl<'a> Reader<'a> {
         &self,
         buf: &mut Vec<u8>,
         flags: &mut StringLiteralFlags,
-        val: u32,
+        val: DecodedCharacter,
     ) -> Result<(), ReadError> {
-        let mut modifiers = val & !CHAR_CODE_MASK;
-        let mut code = val & CHAR_CODE_MASK;
+        let (mut code, mut modifiers) = val.parts();
 
         if !emacs_char::char_byte8_p(code) && code < 0x80 {
-            if modifiers == CHAR_CTRL_MODIFIER && code == ' ' as u32 {
+            if modifiers == CharacterModifiers::CONTROL && code == ' ' as u32 {
                 code = 0;
-                modifiers = 0;
+                modifiers = CharacterModifiers::empty();
             }
 
-            if (modifiers & CHAR_SHIFT_MODIFIER) != 0 {
+            if modifiers.contains(CharacterModifiers::SHIFT) {
                 if ('A' as u32..='Z' as u32).contains(&code) {
-                    modifiers &= !CHAR_SHIFT_MODIFIER;
+                    modifiers.remove(CharacterModifiers::SHIFT);
                 } else if ('a' as u32..='z' as u32).contains(&code) {
                     code -= 'a' as u32 - 'A' as u32;
-                    modifiers &= !CHAR_SHIFT_MODIFIER;
+                    modifiers.remove(CharacterModifiers::SHIFT);
                 }
             }
 
-            if (modifiers & CHAR_META_MODIFIER) != 0 {
-                modifiers &= !CHAR_META_MODIFIER;
+            if modifiers.contains(CharacterModifiers::META) {
+                modifiers.remove(CharacterModifiers::META);
                 code = emacs_char::unibyte_to_char((code as u8) | 0x80);
             }
         }
 
-        if modifiers != 0 {
-            return Err(self.error("Invalid modifier in string"));
+        if !modifiers.is_empty() {
+            return Err(self.escape_error(CharacterEscapeError::InvalidStringModifier));
         }
 
         Self::push_string_char(buf, flags, code);
@@ -1443,41 +1243,6 @@ impl<'a> Reader<'a> {
         Self::push_string_char(buf, flags, code);
     }
 
-    fn read_hex_digits(&mut self) -> Result<(u32, usize), ReadError> {
-        let start = self.pos;
-        while let Some(c) = self.current_code() {
-            if is_ascii_hexdigit_code(c) {
-                self.bump();
-            } else {
-                if c == b';' as u32 {
-                    self.bump(); // consume terminating semicolon
-                }
-                break;
-            }
-        }
-        let hex_storage = self.source_slice_string(start, self.pos);
-        let hex_str = hex_storage.trim_end_matches(';');
-        if hex_str.is_empty() {
-            return Err(self.error("expected hex digits after \\x"));
-        }
-        let digits = hex_str.len();
-        let value =
-            u32::from_str_radix(hex_str, 16).map_err(|_| self.error("invalid hex escape"))?;
-        Ok((value, digits))
-    }
-
-    fn read_fixed_hex(&mut self, count: usize) -> Result<u32, ReadError> {
-        let start = self.pos;
-        for _ in 0..count {
-            match self.current_code() {
-                Some(c) if is_ascii_hexdigit_code(c) => self.bump(),
-                _ => return Err(self.error(&format!("expected {} hex digits", count))),
-            }
-        }
-        let hex_storage = self.source_slice_string(start, self.pos);
-        u32::from_str_radix(&hex_storage, 16).map_err(|_| self.error("invalid hex escape"))
-    }
-
     fn read_char_hex_escape(&mut self) -> Result<u32, ReadError> {
         let mut value = 0u32;
         let mut digits = 0usize;
@@ -1487,18 +1252,14 @@ impl<'a> Reader<'a> {
             };
             self.bump();
             value = (value << 4) + digit;
-            if value > (CHAR_META_MODIFIER | (CHAR_META_MODIFIER - 1)) {
-                return Err(
-                    self.ordinary_error(&format!("Hex character out of range: \\x{value:x}..."))
-                );
+            if value > (CharacterModifiers::META.bits() | (CharacterModifiers::META.bits() - 1)) {
+                return Err(self.escape_error(CharacterEscapeError::HexOutOfRange { value }));
             }
             digits += 1;
         }
 
         if digits == 0 {
-            return Err(
-                self.ordinary_error("Invalid escape char syntax: \\x not followed by hex digit")
-            );
+            return Err(self.escape_error(CharacterEscapeError::MissingHexDigit));
         }
 
         if digits < 3 && (0x80..0x100).contains(&value) {
@@ -1508,43 +1269,68 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
-    fn read_char_unicode_escape(&mut self, count: usize, prefix: char) -> Result<u32, ReadError> {
+    fn read_char_unicode_escape(&mut self, kind: UnicodeEscapeKind) -> Result<u32, ReadError> {
         let mut value = 0u32;
-        for _ in 0..count {
+        for _ in 0..kind.digit_count() {
             let Some(c) = self.current_code() else {
                 return Err(
-                    self.ordinary_error(&format!("Malformed Unicode escape: \\{prefix}{value:x}"))
+                    self.escape_error(CharacterEscapeError::MalformedUnicode { kind, value })
                 );
             };
             self.bump();
             let Some(digit) = ascii_hex_digit_value(c) else {
-                return Err(self.ordinary_error(&format!(
-                    "Non-hex character used for Unicode escape: {} ({})",
-                    source_code_for_error(c),
-                    c
-                )));
+                return Err(self.escape_error(CharacterEscapeError::NonHexUnicode {
+                    character: source_code_for_error(c),
+                    code: c,
+                }));
             };
             value = (value << 4) + digit;
         }
 
         if value > 0x10FFFF {
-            return Err(self.ordinary_error(&format!("Non-Unicode character: 0x{value:x}")));
+            return Err(self.escape_error(CharacterEscapeError::NonUnicode { value }));
         }
 
         Ok(value)
     }
 
-    fn read_unicode_name_escape(&mut self) -> Result<u32, ReadError> {
-        if self.current_code() != Some(b'{' as u32) {
-            return Err(self.error("Expected opening brace after \\N"));
+    /// Only GNU-shaped error data crosses the reader boundary. Every new
+    /// escape failure originates in a typed error with explicit GNU text.
+    #[cold]
+    #[deny(clippy::wildcard_enum_match_arm)]
+    fn escape_error(&self, error: CharacterEscapeError) -> ReadError {
+        let message = error.to_string();
+        match error {
+            CharacterEscapeError::InvalidStringModifier
+            | CharacterEscapeError::MissingNameOpeningBrace
+            | CharacterEscapeError::InvalidNameCharacter { .. }
+            | CharacterEscapeError::NameTooLong
+            | CharacterEscapeError::EmptyName
+            | CharacterEscapeError::UnknownName { .. } => self.error(&message),
+            CharacterEscapeError::HexOutOfRange { .. }
+            | CharacterEscapeError::MissingHexDigit
+            | CharacterEscapeError::MalformedUnicode { .. }
+            | CharacterEscapeError::NonHexUnicode { .. }
+            | CharacterEscapeError::NonUnicode { .. }
+            | CharacterEscapeError::ModifierWithoutHyphen { .. }
+            | CharacterEscapeError::EscapedNewline => self.ordinary_error(&message),
         }
-        self.bump();
+    }
+
+    fn read_unicode_name_escape(&mut self) -> Result<u32, ReadError> {
+        let opening_brace = self.current_code();
+        if opening_brace.is_some() {
+            self.bump();
+        }
+        if opening_brace != Some(b'{' as u32) {
+            return Err(self.escape_error(CharacterEscapeError::MissingNameOpeningBrace));
+        }
         let mut name = String::new();
         let mut whitespace = false;
 
         loop {
             let Some(ch) = self.current_code() else {
-                return Err(self.error("unterminated \\N{...} escape"));
+                return Err(self.end_of_file_error());
             };
             self.bump();
 
@@ -1553,7 +1339,9 @@ impl<'a> Reader<'a> {
             }
 
             if ch >= 0x80 {
-                return Err(self.error(&format!("Invalid character U+{ch:04X} in character name")));
+                return Err(
+                    self.escape_error(CharacterEscapeError::InvalidNameCharacter { code: ch })
+                );
             }
 
             let ch = if is_ascii_whitespace_code(ch) {
@@ -1568,37 +1356,37 @@ impl<'a> Reader<'a> {
             };
 
             if name.len() >= UNICODE_CHARACTER_NAME_LENGTH_BOUND {
-                return Err(self.error("Character name too long"));
+                return Err(self.escape_error(CharacterEscapeError::NameTooLong));
             }
-            name.push(char::from_u32(ch).expect("ASCII character name byte"));
+            name.push(char::from(ch as u8));
         }
 
         if name.is_empty() {
-            return Err(self.error("Empty character name"));
+            return Err(self.escape_error(CharacterEscapeError::EmptyName));
         }
 
-        character_name_to_code(&name).ok_or_else(|| self.error(&format!("\\N{{{name}}}")))
+        character_name_to_code(&name)
+            .ok_or_else(|| self.escape_error(CharacterEscapeError::UnknownName { name }))
     }
 
     // -- Character literals ?a -----------------------------------------------
 
     fn read_char_literal(&mut self) -> Result<Value, ReadError> {
         self.expect('?')?;
-        if matches!(self.current_code(), Some(code) if code == b' ' as u32 || code == b'\t' as u32)
+        if let Some(ch) = self.current_code()
+            && (ch == b' ' as u32 || ch == b'\t' as u32)
         {
-            let ch = self
-                .current_code()
-                .expect("matched whitespace char literal");
             self.bump();
             return Ok(Value::fixnum(ch as i64));
         }
 
-        let val = self.parse_char_value(0)?;
-        if matches!(self.current_code(), Some(ch) if !is_char_literal_delimiter_code(ch)) {
+        let value = self.parse_char_value()?;
+        let following = self.current_code();
+
+        if matches!(following, Some(ch) if !is_char_literal_delimiter_code(ch)) {
             return Err(self.error("?"));
         }
-        let modifiers = val & !CHAR_CODE_MASK;
-        let mut code = val & CHAR_CODE_MASK;
+        let (mut code, modifiers) = value.parts();
         if emacs_char::char_byte8_p(code) {
             code = emacs_char::char_to_byte8(code) as u32;
         }
@@ -1606,42 +1394,94 @@ impl<'a> Reader<'a> {
         // Character literals with modifier bits produce values beyond Unicode
         // range.  Emit them as fixnums, matching GNU Emacs where characters
         // are integers.
-        Ok(Value::fixnum((code | modifiers) as i64))
+        Ok(Value::fixnum(i64::from(code | modifiers.bits())))
     }
 
-    /// Parse the value part of a character literal, accumulating modifier bits.
-    fn parse_char_value(&mut self, modifiers: u32) -> Result<u32, ReadError> {
+    /// Character and string literals share GNU's escape decoder. Only the
+    /// caller decides how decoded modifier bits project into its domain.
+    fn parse_char_value(&mut self) -> Result<DecodedCharacter, ReadError> {
         let Some(ch) = self.current_code() else {
             return Err(self.end_of_file_error());
         };
         self.bump();
+        if ch != b'\\' as u32 {
+            return Ok(DecodedCharacter(ch));
+        }
+        let Some(esc) = self.current_code() else {
+            return Err(self.end_of_file_error());
+        };
+        self.bump();
+        self.read_char_escape(esc)
+    }
 
-        if ch == b'\\' as u32 {
-            let Some(esc) = self.current_code() else {
-                return Err(self.end_of_file_error());
+    /// GNU `read_char_escape`, lread.c:2604-2864. Modifier chains are
+    /// iterative, so their source length cannot become Rust stack depth.
+    fn read_char_escape(&mut self, mut esc: u32) -> Result<DecodedCharacter, ReadError> {
+        let mut modifiers = CharacterModifiers::empty();
+        let mut controls = 0usize;
+        let mut value = DecodedCharacter(loop {
+            let modifier = match esc {
+                x if x == b'M' as u32 => Some(CharacterModifiers::META),
+                x if x == b'S' as u32 => Some(CharacterModifiers::SHIFT),
+                x if x == b'A' as u32 => Some(CharacterModifiers::ALT),
+                x if x == b'H' as u32 => Some(CharacterModifiers::HYPER),
+                x if x == b's' as u32 && self.current_code() == Some(b'-' as u32) => {
+                    Some(CharacterModifiers::SUPER)
+                }
+                _ => None,
             };
-            self.bump();
-            let val = match esc {
+            let control = esc == b'C' as u32 || esc == b'^' as u32;
+            if modifier.is_some() || control {
+                if esc != b'^' as u32 {
+                    let separator = self.current_code();
+                    if separator.is_some() {
+                        self.bump();
+                    }
+                    if separator != Some(b'-' as u32) {
+                        return Err(self.escape_error(
+                            CharacterEscapeError::ModifierWithoutHyphen {
+                                prefix: char::from(esc as u8),
+                            },
+                        ));
+                    }
+                }
+                if let Some(modifier) = modifier {
+                    modifiers |= modifier;
+                }
+                if control {
+                    controls += 1;
+                }
+                let Some(ch) = self.current_code() else {
+                    return Err(self.end_of_file_error());
+                };
+                self.bump();
+                if ch != b'\\' as u32 {
+                    break ch;
+                }
+                let Some(next) = self.current_code() else {
+                    return Err(self.end_of_file_error());
+                };
+                self.bump();
+                esc = next;
+                continue;
+            }
+            break match esc {
                 x if x == b'n' as u32 => b'\n' as u32,
                 x if x == b'r' as u32 => b'\r' as u32,
                 x if x == b't' as u32 => b'\t' as u32,
-                x if x == b'\\' as u32 => b'\\' as u32,
-                x if x == b'\'' as u32 => b'\'' as u32,
-                x if x == b'"' as u32 => b'"' as u32,
-                x if x == b'a' as u32 => 0x07, // BEL
-                x if x == b'b' as u32 => 0x08, // BS
-                x if x == b'f' as u32 => 0x0C, // FF
-                x if x == b'v' as u32 => 0x0B, // VT
-                x if x == b'e' as u32 => 0x1B, // ESC
-                x if x == b'd' as u32 => 0x7F, // DEL
-                x if x == b's' as u32 && self.current_code() == Some(b'-' as u32) => {
-                    self.bump();
-                    return self.parse_char_value(modifiers | (1 << 23)); // super bit
-                }
+                x if x == b'a' as u32 => 0x07,
+                x if x == b'b' as u32 => 0x08,
+                x if x == b'f' as u32 => 0x0C,
+                x if x == b'v' as u32 => 0x0B,
+                x if x == b'e' as u32 => 0x1B,
+                x if x == b'd' as u32 => 0x7F,
                 x if x == b's' as u32 => b' ' as u32,
+                x if x == b'\n' as u32 => {
+                    return Err(self.escape_error(CharacterEscapeError::EscapedNewline));
+                }
                 x if x == b'x' as u32 => self.read_char_hex_escape()?,
-                x if x == b'u' as u32 => self.read_char_unicode_escape(4, 'u')?,
-                x if x == b'U' as u32 => self.read_char_unicode_escape(8, 'U')?,
+                x if x == b'u' as u32 => self.read_char_unicode_escape(UnicodeEscapeKind::Short)?,
+                x if x == b'U' as u32 => self.read_char_unicode_escape(UnicodeEscapeKind::Long)?,
                 x if x == b'N' as u32 => self.read_unicode_name_escape()?,
                 x if (b'0' as u32..=b'7' as u32).contains(&x) => {
                     let mut val = esc - b'0' as u32;
@@ -1651,62 +1491,24 @@ impl<'a> Reader<'a> {
                                 self.bump();
                                 val = val * 8 + (c - b'0' as u32);
                             }
-                            _ => break,
+                            _ => {
+                                break;
+                            }
                         }
                     }
-                    val
-                }
-                x if x == b'C' as u32 => {
-                    if self.current_code() != Some(b'-' as u32) {
-                        return Err(self
-                            .ordinary_error("Invalid escape char syntax: \\C not followed by -"));
+                    if (0x80..0x100).contains(&val) {
+                        emacs_char::byte8_to_char(val as u8)
+                    } else {
+                        val
                     }
-                    self.bump(); // consume '-'
-                    let base = self.parse_char_value(modifiers)?;
-                    return Ok(apply_control_modifier(base));
-                }
-                x if x == b'M' as u32 => {
-                    if self.current_code() != Some(b'-' as u32) {
-                        return Err(self
-                            .ordinary_error("Invalid escape char syntax: \\M not followed by -"));
-                    }
-                    self.bump();
-                    return self.parse_char_value(modifiers | CHAR_META_MODIFIER);
-                }
-                x if x == b'S' as u32 => {
-                    if self.current_code() != Some(b'-' as u32) {
-                        return Err(self
-                            .ordinary_error("Invalid escape char syntax: \\S not followed by -"));
-                    }
-                    self.bump();
-                    return self.parse_char_value(modifiers | CHAR_SHIFT_MODIFIER);
-                }
-                x if x == b'A' as u32 => {
-                    if self.current_code() != Some(b'-' as u32) {
-                        return Err(self
-                            .ordinary_error("Invalid escape char syntax: \\A not followed by -"));
-                    }
-                    self.bump();
-                    return self.parse_char_value(modifiers | (1 << 22)); // alt bit
-                }
-                x if x == b'H' as u32 => {
-                    if self.current_code() != Some(b'-' as u32) {
-                        return Err(self
-                            .ordinary_error("Invalid escape char syntax: \\H not followed by -"));
-                    }
-                    self.bump();
-                    return self.parse_char_value(modifiers | (1 << 24)); // hyper bit
-                }
-                x if x == b'^' as u32 => {
-                    let base = self.parse_char_value(modifiers)?;
-                    return Ok(apply_control_modifier(base));
                 }
                 other => other,
             };
-            Ok(val | modifiers)
-        } else {
-            Ok(ch | modifiers)
+        });
+        for _ in 0..controls {
+            value = apply_control_modifier(value);
         }
+        Ok(DecodedCharacter(u32::from(value) | modifiers.bits()))
     }
 
     // -- Hash syntax #' #( etc -----------------------------------------------
@@ -2898,10 +2700,6 @@ fn is_ascii_digit_code(code: u32) -> bool {
     code <= 0x7F && (code as u8).is_ascii_digit()
 }
 
-fn is_ascii_hexdigit_code(code: u32) -> bool {
-    code <= 0x7F && (code as u8).is_ascii_hexdigit()
-}
-
 fn ascii_hex_digit_value(code: u32) -> Option<u32> {
     if code > 0x7F {
         return None;
@@ -2925,6 +2723,96 @@ fn is_ascii_digit_for_radix_code(code: u32, radix: u32) -> bool {
 /// instead of silently terminating it.
 fn is_ascii_alphanumeric_code(code: u32) -> bool {
     code <= 0x7F && (code as u8 as char).is_ascii_alphanumeric()
+}
+
+/// Unicode escape spelling and width travel together, so callers cannot
+/// request eight digits while identifying the escape as `\u`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+enum UnicodeEscapeKind {
+    #[strum(serialize = "u")]
+    Short,
+    #[strum(serialize = "U")]
+    Long,
+}
+
+impl UnicodeEscapeKind {
+    const fn digit_count(self) -> usize {
+        match self {
+            Self::Short => 4,
+            Self::Long => 8,
+        }
+    }
+}
+
+/// GNU read_char_escape failures. Variant selection determines the Lisp
+/// condition; Display contains only the exact GNU error-data message.
+/// Error payloads own scalar/text data and contain no mutator-owned Lisp state.
+#[derive(Debug, Clone, thiserror::Error)]
+enum CharacterEscapeError {
+    #[error("Invalid modifier in string")]
+    InvalidStringModifier,
+    #[error("Hex character out of range: \\x{value:x}...")]
+    HexOutOfRange { value: u32 },
+    #[error("Invalid escape char syntax: \\x not followed by hex digit")]
+    MissingHexDigit,
+    #[error("Malformed Unicode escape: \\{kind}{value:x}")]
+    MalformedUnicode { kind: UnicodeEscapeKind, value: u32 },
+    #[error("Non-hex character used for Unicode escape: {character} ({code})")]
+    NonHexUnicode { character: String, code: u32 },
+    #[error("Non-Unicode character: 0x{value:x}")]
+    NonUnicode { value: u32 },
+    #[error("Expected opening brace after \\N")]
+    MissingNameOpeningBrace,
+    #[error("Invalid character U+{code:04X} in character name")]
+    InvalidNameCharacter { code: u32 },
+    #[error("Character name too long")]
+    NameTooLong,
+    #[error("Empty character name")]
+    EmptyName,
+    #[error("\\N{{{name}}}")]
+    UnknownName { name: String },
+    #[error("Invalid escape char syntax: \\{prefix} not followed by -")]
+    ModifierWithoutHyphen { prefix: char },
+    #[error("Invalid escape char syntax: \\<newline>")]
+    EscapedNewline,
+}
+
+bitflags::bitflags! {
+    /// GNU character modifier flags. This scalar has no mutator-owned state.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct CharacterModifiers: u32 {
+        const ALT = 1 << 22;
+        const SUPER = 1 << 23;
+        const HYPER = 1 << 24;
+        const SHIFT = 1 << 25;
+        const CONTROL = 1 << 26;
+        const META = 1 << 27;
+    }
+}
+
+/// A character after escape decoding, retaining GNU modifier bits and the
+/// BYTE8 domain. String projection cannot accidentally accept an undecoded
+/// escape prefix. It contains no Lisp state and may cross mutator threads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a decoded character must be projected into a literal's value domain"]
+struct DecodedCharacter(u32);
+
+static_assertions::assert_impl_all!(DecodedCharacter: Send, Sync);
+static_assertions::assert_impl_all!(CharacterModifiers: Send, Sync);
+
+impl DecodedCharacter {
+    fn parts(self) -> (u32, CharacterModifiers) {
+        (
+            self.0 & CHAR_CODE_MASK,
+            CharacterModifiers::from_bits_retain(self.0 & !CHAR_CODE_MASK),
+        )
+    }
+}
+
+impl From<DecodedCharacter> for u32 {
+    fn from(value: DecodedCharacter) -> Self {
+        value.0
+    }
 }
 
 fn character_name_to_code(name: &str) -> Option<u32> {
