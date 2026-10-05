@@ -11,7 +11,7 @@
 //! #^^[...]), read labels (#N= / #N#), radix integers (#x, #o, #b),
 //! propertized strings, reader skip (#@N).
 
-use super::eval::{push_scratch_gc_root, restore_scratch_gc_roots, save_scratch_gc_roots};
+use super::eval::push_scratch_gc_root;
 use super::intern::intern;
 use malachite::base::num::conversion::traits::FromStringBase;
 use malachite::integer::Integer;
@@ -61,6 +61,9 @@ fn plist_get(plist: &[Value], key: HashTableLiteralKey) -> Option<Value> {
     }
     None
 }
+
+#[path = "callable.rs"]
+mod callable;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -828,38 +831,38 @@ impl<'a> Reader<'a> {
             x if x == b'[' as u32 => self.read_vector(),
             x if x == b'\'' as u32 => {
                 self.bump();
-                let saved = save_scratch_gc_roots();
+                let _roots = callable::RootScope::new();
                 let quoted = self.read_form()?;
                 push_scratch_gc_root(quoted);
                 let result = Value::list(vec![Value::symbol("quote"), quoted]);
-                restore_scratch_gc_roots(saved);
+
                 Ok(result)
             }
             x if x == b'`' as u32 => {
                 self.bump();
-                let saved = save_scratch_gc_roots();
+                let _roots = callable::RootScope::new();
                 let quoted = self.read_form()?;
                 push_scratch_gc_root(quoted);
                 let result = Value::list(vec![Value::symbol(intern("`")), quoted]);
-                restore_scratch_gc_roots(saved);
+
                 Ok(result)
             }
             x if x == b',' as u32 => {
                 self.bump();
                 if self.current_code() == Some(b'@' as u32) {
                     self.bump();
-                    let saved = save_scratch_gc_roots();
+                    let _roots = callable::RootScope::new();
                     let expr = self.read_form()?;
                     push_scratch_gc_root(expr);
                     let result = Value::list(vec![Value::symbol(intern(",@")), expr]);
-                    restore_scratch_gc_roots(saved);
+
                     Ok(result)
                 } else {
-                    let saved = save_scratch_gc_roots();
+                    let _roots = callable::RootScope::new();
                     let expr = self.read_form()?;
                     push_scratch_gc_root(expr);
                     let result = Value::list(vec![Value::symbol(intern(",")), expr]);
-                    restore_scratch_gc_roots(saved);
+
                     Ok(result)
                 }
             }
@@ -937,7 +940,7 @@ impl<'a> Reader<'a> {
 
     fn read_list_or_dotted(&mut self) -> Result<Value, ReadError> {
         self.expect('(')?;
-        let saved = save_scratch_gc_roots();
+        let _roots = callable::RootScope::new();
         let mut items = Vec::new();
         loop {
             self.skip_ws_and_comments();
@@ -945,13 +948,13 @@ impl<'a> Reader<'a> {
                 Some(code) if code == b')' as u32 => {
                     self.bump();
                     let result = Value::list(items);
-                    restore_scratch_gc_roots(saved);
+
                     return Ok(result);
                 }
                 Some(code) if code == b'.' as u32 && self.is_dot_separator() => {
                     if items.is_empty() {
                         self.bump();
-                        restore_scratch_gc_roots(saved);
+
                         return Err(self.error("."));
                     }
                     // Dotted pair
@@ -969,11 +972,10 @@ impl<'a> Reader<'a> {
                                 acc = Value::cons(item, acc);
                                 push_scratch_gc_root(acc);
                             }
-                            restore_scratch_gc_roots(saved);
+
                             return Ok(acc);
                         }
                         _ => {
-                            restore_scratch_gc_roots(saved);
                             return Err(self.error("expected ')' after dotted pair"));
                         }
                     }
@@ -984,7 +986,6 @@ impl<'a> Reader<'a> {
                     items.push(item);
                 }
                 None => {
-                    restore_scratch_gc_roots(saved);
                     return Err(self.end_of_file_error());
                 }
             }
@@ -1019,14 +1020,14 @@ impl<'a> Reader<'a> {
     /// Read `[...]` and return items as a Vec<Value>.
     fn read_vector_items(&mut self) -> Result<Vec<Value>, ReadError> {
         self.expect('[')?;
-        let saved = save_scratch_gc_roots();
+        let _roots = callable::RootScope::new();
         let mut items = Vec::new();
         loop {
             self.skip_ws_and_comments();
             match self.current_code() {
                 Some(code) if code == b']' as u32 => {
                     self.bump();
-                    restore_scratch_gc_roots(saved);
+
                     return Ok(items);
                 }
                 Some(_) => {
@@ -1035,7 +1036,6 @@ impl<'a> Reader<'a> {
                     items.push(item);
                 }
                 None => {
-                    restore_scratch_gc_roots(saved);
                     return Err(self.end_of_file_error());
                 }
             }
@@ -1043,13 +1043,13 @@ impl<'a> Reader<'a> {
     }
 
     fn read_vector(&mut self) -> Result<Value, ReadError> {
-        let saved = save_scratch_gc_roots();
+        let _roots = callable::RootScope::new();
         let items = self.read_vector_items()?;
         for item in &items {
             push_scratch_gc_root(*item);
         }
         let result = Value::make_vector(items);
-        restore_scratch_gc_roots(saved);
+
         Ok(result)
     }
 
@@ -1675,11 +1675,11 @@ impl<'a> Reader<'a> {
             x if x == b'\'' as u32 => {
                 // #'function
                 self.bump();
-                let saved = save_scratch_gc_roots();
+                let _roots = callable::RootScope::new();
                 let expr = self.read_form()?;
                 push_scratch_gc_root(expr);
                 let result = Value::list(vec![Value::symbol("function"), expr]);
-                restore_scratch_gc_roots(saved);
+
                 Ok(result)
             }
             x if x == b'_' as u32 => {
@@ -1704,23 +1704,19 @@ impl<'a> Reader<'a> {
                 // with `Fset_text_properties'.  Keep the same representation as
                 // ordinary string intervals so redisplay sees properties like
                 // `(display (space :align-to ...))' on package string literals.
-                let saved = save_scratch_gc_roots();
+                let _roots = callable::RootScope::new();
                 let list = self.read_list_or_dotted()?;
                 push_scratch_gc_root(list);
                 let Some(items) = list_to_vec(&list) else {
-                    restore_scratch_gc_roots(saved);
                     return Err(self.error("#"));
                 };
                 let Some((&string, rest)) = items.split_first() else {
-                    restore_scratch_gc_roots(saved);
                     return Err(self.error("#"));
                 };
                 if !string.is_string() {
-                    restore_scratch_gc_roots(saved);
                     return Err(self.error("#"));
                 }
                 if rest.len() % 3 != 0 {
-                    restore_scratch_gc_roots(saved);
                     return Err(self.error("#(: invalid string property list"));
                 }
                 let string_len = string
@@ -1730,15 +1726,12 @@ impl<'a> Reader<'a> {
                 let mut runs = Vec::with_capacity(rest.len() / 3);
                 for chunk in rest.chunks(3) {
                     let Some(start) = chunk[0].as_fixnum() else {
-                        restore_scratch_gc_roots(saved);
                         return Err(self.error("#(: invalid string property start"));
                     };
                     let Some(end) = chunk[1].as_fixnum() else {
-                        restore_scratch_gc_roots(saved);
                         return Err(self.error("#(: invalid string property end"));
                     };
                     if !(0 <= start && start <= end && end <= string_len) {
-                        restore_scratch_gc_roots(saved);
                         // GNU read1 signals `args-out-of-range' with the START
                         // and END of the offending interval (not an
                         // invalid-read-syntax).
@@ -1749,11 +1742,9 @@ impl<'a> Reader<'a> {
                         ));
                     }
                     let Some(plist_items) = list_to_vec(&chunk[2]) else {
-                        restore_scratch_gc_roots(saved);
                         return Err(self.error("Invalid string property list"));
                     };
                     if plist_items.len() % 2 != 0 {
-                        restore_scratch_gc_roots(saved);
                         return Err(self.error("Invalid string property list"));
                     }
                     runs.push(StringTextPropertyRun {
@@ -1765,14 +1756,14 @@ impl<'a> Reader<'a> {
                 if !runs.is_empty() {
                     set_string_text_properties_for_value(string, runs);
                 }
-                restore_scratch_gc_roots(saved);
+
                 Ok(string)
             }
             x if x == b'[' as u32 => {
                 // #[...] — compiled-function literal in .elc.
                 // Produce a closure object directly, matching GNU Emacs's
                 // lread.c `bytecode_from_rev_list`.
-                let saved = save_scratch_gc_roots();
+                let _roots = callable::RootScope::new();
                 let items = self.read_vector_items()?;
                 for item in &items {
                     push_scratch_gc_root(*item);
@@ -1793,7 +1784,7 @@ impl<'a> Reader<'a> {
                         };
                         self.error(&msg)
                     });
-                restore_scratch_gc_roots(saved);
+
                 result
             }
             x if x == b'^' as u32 => {
@@ -1816,7 +1807,7 @@ impl<'a> Reader<'a> {
                     return Err(self.error("#^"));
                 }
 
-                let saved = save_scratch_gc_roots();
+                let _roots = callable::RootScope::new();
                 let items = self.read_vector_items()?;
                 for item in &items {
                     push_scratch_gc_root(*item);
@@ -1830,7 +1821,7 @@ impl<'a> Reader<'a> {
                     )
                 }
                 .map_err(|msg| self.error(&msg));
-                restore_scratch_gc_roots(saved);
+
                 result
             }
             x if x == b'@' as u32 => {
@@ -1952,19 +1943,17 @@ impl<'a> Reader<'a> {
                         self.bump();
                         let placeholder = Value::cons(Value::NIL, Value::NIL);
                         self.read_labels.insert(n, placeholder);
-                        let saved = save_scratch_gc_roots();
+                        let _roots = callable::RootScope::new();
                         push_scratch_gc_root(placeholder);
                         let expr = match self.read_form() {
                             Ok(expr) => expr,
                             Err(err) => {
-                                restore_scratch_gc_roots(saved);
                                 return Err(err);
                             }
                         };
 
                         let result = if expr.is_cons() {
                             if eq_value(&expr, &placeholder) {
-                                restore_scratch_gc_roots(saved);
                                 return Err(self.error("nonsensical self-reference"));
                             }
                             placeholder.set_car(expr.cons_car());
@@ -1975,7 +1964,7 @@ impl<'a> Reader<'a> {
                             self.read_labels.insert(n, expr);
                             expr
                         };
-                        restore_scratch_gc_roots(saved);
+
                         Ok(result)
                     }
                     Some(code) if code == b'#' as u32 && self.read_circle_enabled() => {
@@ -2139,7 +2128,7 @@ impl<'a> Reader<'a> {
     fn read_hash_table_or_record_literal(&mut self) -> Result<Value, ReadError> {
         // #s(hash-table size N test T data (k1 v1 k2 v2 ...))
         // or #s(record-type field1 field2 ...)
-        let saved = save_scratch_gc_roots();
+        let _roots = callable::RootScope::new();
         let list = self.read_list_or_dotted()?;
         push_scratch_gc_root(list);
 
@@ -2150,12 +2139,10 @@ impl<'a> Reader<'a> {
             cursor = cursor.cons_cdr();
         }
         if !cursor.is_nil() {
-            restore_scratch_gc_roots(saved);
             return Err(self.error("."));
         }
 
         if items.is_empty() {
-            restore_scratch_gc_roots(saved);
             return Err(self.error("#s"));
         }
 
@@ -2166,13 +2153,13 @@ impl<'a> Reader<'a> {
 
         if is_hash_table {
             let result = self.read_hash_table_literal_from_plist(&items[1..]);
-            restore_scratch_gc_roots(saved);
+
             return result;
         }
 
         // Not a hash-table — it's a record #s(type field1 field2 ...)
         let record_value = Value::make_record(items);
-        restore_scratch_gc_roots(saved);
+
         Ok(record_value)
     }
 
