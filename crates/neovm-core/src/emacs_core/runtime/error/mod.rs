@@ -1790,7 +1790,7 @@ fn format_cons_in_state(
                         m = m.saturating_mul(2);
                         n = m;
                         tortoise = cursor;
-                    } else if cursor == tortoise {
+                    } else if super::value::eq_value(&cursor, &tortoise) {
                         out.push_str(&format!(". #{tortoise_idx}"));
                         truncate_format_object_stack(stack_len);
                         return;
@@ -2148,7 +2148,7 @@ fn append_cons_bytes_in_state(
                         m = m.saturating_mul(2);
                         n = m;
                         tortoise = cursor;
-                    } else if cursor == tortoise {
+                    } else if super::value::eq_value(&cursor, &tortoise) {
                         out.extend_from_slice(format!(". #{tortoise_idx}").as_bytes());
                         truncate_format_object_stack(stack_len);
                         return;

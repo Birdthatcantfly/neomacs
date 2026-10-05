@@ -1788,7 +1788,7 @@ fn write_cons_stateful(value: &Value, out: &mut StatefulPrintOutput, state: &mut
                             m = m.saturating_mul(2);
                             n = m;
                             tortoise = cursor;
-                        } else if cursor == tortoise {
+                        } else if super::value::eq_value(&cursor, &tortoise) {
                             write!(out, ". #{tortoise_idx}").unwrap();
                             state.object_stack.truncate(stack_len);
                             return;
@@ -1961,19 +1961,6 @@ fn pop_bytes_cycle_object(pushed: bool) {
             stack.borrow_mut().pop();
         });
     }
-}
-
-fn bytes_object_stack_len() -> usize {
-    PRINT_BYTES_OBJECT_STACK.with(|stack| stack.borrow().len())
-}
-
-fn truncate_bytes_object_stack(len: usize) {
-    PRINT_BYTES_OBJECT_STACK.with(|stack| stack.borrow_mut().truncate(len));
-}
-
-fn bytes_cycle_stack_index(value: &Value) -> Option<usize> {
-    let key = default_cycle_candidate_key(value)?;
-    PRINT_BYTES_OBJECT_STACK.with(|stack| stack.borrow().iter().position(|entry| *entry == key))
 }
 
 fn format_marker_handle(
@@ -2795,38 +2782,52 @@ fn quote_payload(value: &Value) -> Option<Value> {
 fn print_cons_bytes(value: &Value, out: &mut Vec<u8>, options: PrintOptions) {
     let mut cursor = *value;
     let mut first = true;
-    let stack_len = bytes_object_stack_len();
+    let mut maxlen = options
+        .print_length
+        .filter(|length| *length >= 0)
+        .unwrap_or(i64::MAX);
+    let mut tortoise = *value;
+    let mut remaining = 2_i64;
+    let mut period = 2_i64;
+    let mut tortoise_index = 0_i64;
     loop {
         match cursor.kind() {
             ValueKind::Cons => {
-                if !first {
-                    if let Some(index) = bytes_cycle_stack_index(&cursor) {
-                        out.extend_from_slice(b" . ");
-                        out.extend_from_slice(format!("#{index}").as_bytes());
-                        truncate_bytes_object_stack(stack_len);
+                if first {
+                    if maxlen == 0 {
+                        out.extend_from_slice(b"...");
                         return;
                     }
-                    push_bytes_cycle_object(&cursor);
-                }
-                if !first {
+                } else {
                     out.push(b' ');
+                    maxlen = maxlen.saturating_sub(1);
+                    if maxlen <= 0 {
+                        out.extend_from_slice(b"...");
+                        return;
+                    }
+                    // GNU print.c:2740-2763: Brent compares cons identities,
+                    // and advances the tortoise on exponentially spaced steps.
+                    remaining -= 1;
+                    if remaining == 0 {
+                        tortoise_index = tortoise_index.saturating_add(period);
+                        period = period.saturating_mul(2);
+                        remaining = period;
+                        tortoise = cursor;
+                    } else if super::value::eq_value(&cursor, &tortoise) {
+                        out.extend_from_slice(format!(". #{tortoise_index}").as_bytes());
+                        return;
+                    }
                 }
-                let pair_car = cursor.cons_car();
-                let pair_cdr = cursor.cons_cdr();
-                append_print_value_bytes(&pair_car, out, options);
-                cursor = pair_cdr;
+                append_print_value_bytes(&cursor.cons_car(), out, options);
+                cursor = cursor.cons_cdr();
                 first = false;
             }
-            ValueKind::Nil => {
-                truncate_bytes_object_stack(stack_len);
-                return;
-            }
+            ValueKind::Nil => return,
             _ => {
                 if !first {
                     out.extend_from_slice(b" . ");
                 }
                 append_print_value_bytes(&cursor, out, options);
-                truncate_bytes_object_stack(stack_len);
                 return;
             }
         }

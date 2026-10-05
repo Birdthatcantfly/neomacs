@@ -961,3 +961,7 @@ mod graph_closure_units;
 #[cfg(test)]
 #[path = "graph_level_units.rs"]
 mod graph_level_units;
+
+#[cfg(test)]
+#[path = "graph_tail_units.rs"]
+mod graph_tail_units;
