@@ -37,6 +37,10 @@ pub(super) struct ObservedEnvelope {
     // Protocol bounds for a proven empty interval, never an owner hint or a
     // Lisp-state cache. Only this mutator's observed identities constrain it.
     excluded: Option<BarrierWindow>,
+    // The last cons refusal within that proven gap. This mutator-local raw
+    // address is neither rooted nor dereferenced. A disjoint replacement can
+    // retain it as the exact exemption without changing native protocol data.
+    excluded_cons: usize,
     // An exact protocol exemption survives replacement of the generic gap.
     // It is never rooted or dereferenced. Observation of this address closes
     // it before publishing a mark or taking the read's revision snapshot.
@@ -59,6 +63,7 @@ impl ObservedEnvelope {
             slot_below: EMPTY_BOUNDS,
             slot_above: EMPTY_BOUNDS,
             excluded: None,
+            excluded_cons: 0,
             single_cons: 0,
             #[cfg(test)]
             geometry_rebuilds: 0,
@@ -142,6 +147,7 @@ impl ObservedEnvelope {
         }
         if self.excluded.is_some_and(|gap| gap.covers(address)) {
             self.excluded = None;
+            self.excluded_cons = 0;
         }
         if newly_native {
             self.include(address);
@@ -242,10 +248,29 @@ impl ObservedEnvelope {
         // The caller accepts only refusals inside the original hull. Its
         // separate hull predicate continues to reject every exterior store,
         // so an unrelated earlier hole must not monopolize this refinement.
-        if bits & TAG_MASK == TAG_CONS && gap.len() <= 2 * size_of::<ConsCell>() {
+        if self.single_cons != 0 && !gap.covers(self.single_cons) {
+            // The independent exact refusal still covers another region.
+        } else if self.excluded_cons != 0
+            && self
+                .excluded
+                .is_some_and(|previous| previous.covers(self.excluded_cons))
+            && !gap.covers(self.excluded_cons)
+        {
+            // Even a broad first gap needs an exact refusal when a second
+            // disjoint region replaces it. Until then its range remains the
+            // primary admission, avoiding an extra exact-path cost.
+            self.single_cons = self.excluded_cons;
+        } else if bits & TAG_MASK == TAG_CONS && gap.len() <= 2 * size_of::<ConsCell>() {
             self.single_cons = address;
+        } else {
+            self.single_cons = 0;
         }
         self.excluded = Some(gap);
+        self.excluded_cons = if bits & TAG_MASK == TAG_CONS {
+            address
+        } else {
+            0
+        };
         true
     }
 
@@ -261,6 +286,7 @@ impl ObservedEnvelope {
         // the exclusion; collection alone keeps the proved gap available.
         if self.dump != dump {
             self.excluded = None;
+            self.excluded_cons = 0;
             self.single_cons = 0;
         }
         self.dump = dump;
@@ -331,3 +357,7 @@ mod native_geometry_tests;
 #[cfg(test)]
 #[path = "tests/observed_refinement.rs"]
 mod refinement_tests;
+
+#[cfg(test)]
+#[path = "tests/observed_disjoint_refinement.rs"]
+mod disjoint_refinement_tests;

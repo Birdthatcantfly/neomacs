@@ -516,18 +516,31 @@ pub(crate) extern "C" fn neovm_jit_unobserved_collection_owner(owner_bits: i64) 
         if heap.generational.enabled || ordinary.covers(address) {
             return false;
         }
-        // A refused store already outside the original hull gains nothing
-        // from refinement. Do not let that exterior gap occupy the single
-        // useful interior slot. This is a cold native refusal; publication
-        // contains no callback or safepoint before the subsequent store.
-        let mut observed = super::super::collection_reads::compiled_observation_gate(
-            heap.collection_dump_window(),
-        );
-        observed.excluded = None;
-        heap.compiled_barrier_window(ordinary, observed)
-            .covers(address)
+        original_hull_covers_refused_owner(heap, ordinary, address)
     });
     i8::from(eligible && super::super::collection_reads::exclude_unobserved_compiled_cons(bits))
+}
+
+/// Keep geometry reconstruction out of the ordinary ALL refusal's frame.
+/// The installed mutator retains this heap, and no callback or safepoint
+/// separates the original eligibility check, this query and the store.
+#[cfg(feature = "jit")]
+#[cold]
+#[inline(never)]
+fn original_hull_covers_refused_owner(
+    heap: &TaggedHeap,
+    ordinary: BarrierWindow,
+    address: usize,
+) -> bool {
+    // A refused store already outside the original hull gains nothing
+    // from refinement. Do not let that exterior gap occupy the single
+    // useful interior slot. This is a cold native refusal; publication
+    // contains no callback or safepoint before the subsequent store.
+    let mut observed =
+        super::super::collection_reads::compiled_observation_gate(heap.collection_dump_window());
+    observed.excluded = None;
+    heap.compiled_barrier_window(ordinary, observed)
+        .covers(address)
 }
 
 /// Classify this mutator's observations against the currently installed
