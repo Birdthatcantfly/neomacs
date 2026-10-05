@@ -1867,6 +1867,13 @@ pub(crate) fn format_value_bytes_in_state_with_options(
     options: PrintOptions,
 ) -> Vec<u8> {
     let _print_guard = super::print::enter_print_call(&options);
+    if options.print_noescape
+        && let Some(id) = value.as_buffer_id()
+        && let Some(buffer) = buffers.get(id)
+        && let Some(name) = buffer.name_value().as_lisp_string()
+    {
+        return super::print::princ_string_bytes(name, options.princ_string_output()).into_owned();
+    }
     if let Some(handle) = format_opaque_handle_in_state(buffers, frames, threads, value) {
         return handle.into_bytes();
     }
@@ -1935,7 +1942,7 @@ fn format_string_bytes_in_state(
 ) -> Vec<u8> {
     let ls = value.as_lisp_string().expect("checked string");
     if options.print_noescape {
-        return ls.as_bytes().to_vec();
+        return super::print::princ_string_bytes(ls, options.princ_string_output()).into_owned();
     }
     let str_bytes = format_lisp_string_bytes_emacs(ls, &options);
     let Some(runs) = get_string_text_properties_for_value(*value) else {

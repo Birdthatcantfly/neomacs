@@ -941,3 +941,7 @@ mod raw_hash_test_names;
 #[cfg(test)]
 #[path = "compiled_settings_gnu.rs"]
 mod compiled_settings_gnu;
+
+#[cfg(test)]
+#[path = "princ_text.rs"]
+mod princ_text;

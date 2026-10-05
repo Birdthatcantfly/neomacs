@@ -2131,16 +2131,19 @@ fn prin1_to_lisp_string_value_in_state_with_overrides(
     if !options.print_escape_nonascii {
         options.print_escape_nonascii = true;
     }
-    Ok(crate::heap_types::LispString::from_emacs_bytes(
-        super::error::format_value_bytes_in_state_with_options(
-            &ctx.obarray,
-            &ctx.buffers,
-            &ctx.frames,
-            &ctx.threads,
-            value,
-            options,
-        ),
-    ))
+    let bytes = super::error::format_value_bytes_in_state_with_options(
+        &ctx.obarray,
+        &ctx.buffers,
+        &ctx.frames,
+        &ctx.threads,
+        value,
+        options,
+    );
+    Ok(if bytes.is_ascii() {
+        crate::heap_types::LispString::from_unibyte(bytes)
+    } else {
+        crate::heap_types::LispString::from_emacs_bytes(bytes)
+    })
 }
 
 pub(crate) fn builtin_princ(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {

@@ -1,5 +1,8 @@
 //! Value printing (Lisp representation).
 
+mod princ_text;
+pub(crate) use princ_text::{PrincStringDestination, PrincStringOutput, princ_string_bytes};
+
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -83,6 +86,7 @@ pub struct PrintOptions {
     pub print_number_table: Option<Value>,
     pub float_output_format: Option<Value>,
     pub print_noescape: bool,
+    pub(crate) print_string_destination: PrincStringDestination,
     backquote_output_level: usize,
 }
 
@@ -189,6 +193,22 @@ fn try_format_integer_as_character(
 }
 
 impl PrintOptions {
+    /// Source encoding and the stream jointly decide the no-escape character
+    /// protocol. Callable streams ignore print-escape-nonascii (print.c:525).
+    #[inline]
+    pub(crate) fn princ_string_output(&self) -> PrincStringOutput {
+        match self.print_string_destination {
+            PrincStringDestination::Callable => PrincStringOutput::CallbackCharacters,
+            PrincStringDestination::Text => {
+                if self.print_escape_nonascii {
+                    PrincStringOutput::OctalByte8
+                } else {
+                    PrincStringOutput::PreserveByte8
+                }
+            }
+        }
+    }
+
     /// `princ`'s options: strings inside an aggregate print their own bytes
     /// instead of a quoted form.
     ///
@@ -222,6 +242,7 @@ impl PrintOptions {
             print_number_table: None,
             float_output_format: None,
             print_noescape: false,
+            print_string_destination: PrincStringDestination::Text,
             backquote_output_level: 0,
         }
     }
@@ -249,6 +270,7 @@ impl PrintOptions {
             print_number_table: None,
             float_output_format: None,
             print_noescape: false,
+            print_string_destination: PrincStringDestination::Text,
             backquote_output_level: 0,
         }
     }
@@ -926,7 +948,10 @@ fn write_value_stateful_inner(
             with_default_cycle_guard(value, out, state, |out, state| {
                 let ls = value.as_lisp_string().unwrap();
                 if state.options.print_noescape {
-                    out.extend_from_slice(ls.as_bytes());
+                    out.extend_from_slice(&princ_string_bytes(
+                        ls,
+                        state.options.princ_string_output(),
+                    ));
                 } else {
                     match get_string_text_properties_for_value(*value) {
                         Some(runs) => write_lisp_propertized_string_stateful(ls, &runs, out, state),
@@ -1079,7 +1104,16 @@ fn write_value_stateful_inner(
             let bid = value.as_buffer_id().unwrap();
             if let Some(buffers) = state.buffers {
                 if let Some(buf) = buffers.get(bid) {
-                    write!(out, "#<buffer {}>", buf.name_runtime_string_owned()).unwrap();
+                    if state.options.print_noescape {
+                        if let Some(name) = buf.name_value().as_lisp_string() {
+                            out.extend_from_slice(&princ_string_bytes(
+                                name,
+                                state.options.princ_string_output(),
+                            ));
+                        }
+                    } else {
+                        write!(out, "#<buffer {}>", buf.name_runtime_string_owned()).unwrap();
+                    }
                 } else if buffers.dead_buffer_last_name_value(bid).is_some() {
                     out.push_str("#<killed buffer>");
                 } else {
@@ -1865,7 +1899,7 @@ fn append_print_value_bytes(value: &Value, out: &mut Vec<u8>, options: PrintOpti
             let pushed = push_bytes_cycle_object(value);
             let ls = value.as_lisp_string().unwrap();
             if options.print_noescape {
-                out.extend_from_slice(ls.as_bytes());
+                out.extend_from_slice(&princ_string_bytes(ls, options.princ_string_output()));
             } else {
                 let str_bytes = format_lisp_string_bytes_emacs(ls, &options);
                 if let Some(runs) = get_string_text_properties_for_value(*value) {
