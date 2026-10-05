@@ -73,3 +73,22 @@ fn rea32_dot_tokens_require_list_context() {
     assert!(read1("(a .?x)").is_cons());
     assert!(read1("(a .#x1)").is_cons());
 }
+
+#[test]
+fn rea33_sub_chartable_validation_order_and_condition() {
+    for (input, message) in [
+        ("#^^[1 0]", "Invalid size in sub-char-table"),
+        ("#^^[0 0]", "Invalid depth in sub-char-table"),
+        ("#^^[1]", "Invalid size of sub-char-table"),
+        ("#^^[3 -1]", "Invalid size in sub-char-table"),
+    ] {
+        let error = read_result(input).unwrap_err();
+        assert_eq!(error.kind, ReadErrorKind::Error);
+        assert_eq!(error.message, message);
+    }
+    let input = format!("#^^[3 -1 {}]", "nil ".repeat(128));
+    assert_eq!(
+        read_result(&input).unwrap_err().message,
+        "Invalid minimum character in sub-char-table"
+    );
+}

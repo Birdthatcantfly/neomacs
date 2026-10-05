@@ -47,3 +47,15 @@ fn reader_syntax_rea32() {
         expect,
     );
 }
+
+#[test]
+fn reader_syntax_rea33() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    let expect = expect_test::expect![[
+        r#""OK ((error \"Invalid size in sub-char-table\") (error \"Invalid depth in sub-char-table\") (error \"Invalid size of sub-char-table\") (error \"Invalid size in sub-char-table\"))""#
+    ]];
+    assert_oracle_parity_expect(
+        r###"(mapcar (lambda (s) (condition-case e (read-from-string s) (error e))) '("#^^[1 0]" "#^^[0 0]" "#^^[1]" "#^^[3 -1]"))"###,
+        expect,
+    );
+}

@@ -508,6 +508,13 @@ impl ReadLabel {
     }
 }
 
+/// The literal kind determines GNU's validation error condition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CharTableSyntax {
+    Table,
+    SubTable,
+}
+
 struct Reader<'a> {
     source: ReaderSource<'a>,
     source_semantics: ReaderSourceSemantics,
@@ -1796,11 +1803,11 @@ impl<'a> Reader<'a> {
                 // slot conversion to chartable.rs after reading the vector
                 // payload.
                 self.bump();
-                let is_sub_char_table = if self.current_code() == Some(b'^' as u32) {
+                let syntax = if self.current_code() == Some(b'^' as u32) {
                     self.bump();
-                    true
+                    CharTableSyntax::SubTable
                 } else {
-                    false
+                    CharTableSyntax::Table
                 };
                 if self.current_code() != Some(b'[' as u32) {
                     return Err(self.error("#^"));
@@ -1811,16 +1818,21 @@ impl<'a> Reader<'a> {
                 for item in &items {
                     push_scratch_gc_root(*item);
                 }
-                let result = if is_sub_char_table {
-                    crate::emacs_core::chartable::make_sub_char_table_from_external_slots(&items)
-                } else {
-                    crate::emacs_core::chartable::make_char_table_from_external_slots_with_symbols(
-                        &items,
-                        self.symbol_mode,
-                    )
-                }
-                .map_err(|msg| self.error(&msg));
-
+                let result = match syntax {
+                    CharTableSyntax::Table => {
+                        crate::emacs_core::chartable::make_char_table_from_external_slots_with_symbols(
+                            &items,
+                            self.symbol_mode,
+                        )
+                            .map_err(|msg| self.error(&msg))
+                    }
+                    CharTableSyntax::SubTable => {
+                        crate::emacs_core::chartable::make_sub_char_table_from_external_slots(
+                            &items,
+                        )
+                        .map_err(|error| self.ordinary_error(&error.to_string()))
+                    }
+                };
                 result
             }
             x if x == b'@' as u32 => {

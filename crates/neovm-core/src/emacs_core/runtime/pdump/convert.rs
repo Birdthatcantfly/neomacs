@@ -2203,7 +2203,7 @@ impl<'a> LoadDecoder<'a> {
                 slots.push(Value::fixnum(min_char));
                 slots.extend(contents.iter().map(|slot| self.load_value(slot)));
                 let restored = make_sub_char_table_from_external_slots(&slots)
-                    .map_err(DumpError::ImageFormatError)?;
+                    .map_err(|error| DumpError::ImageFormatError(error.to_string()))?;
                 value.with_sub_char_table_mut(|table| {
                     let restored_obj = restored
                         .as_sub_char_table_obj()

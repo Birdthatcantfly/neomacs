@@ -401,32 +401,64 @@ fn prepare_uniprop_ascii_cache(table: &Value, mode: SymbolMode) {
     }
 }
 
+/// GNU's sub-char-table literal diagnostics (src/lread.c:3322-3333).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum SubCharTableReadError {
+    #[error("Invalid size of sub-char-table")]
+    MissingHeader,
+    #[error("Invalid depth in sub-char-table")]
+    Depth,
+    #[error("Invalid size in sub-char-table")]
+    SlotCount,
+    #[error("Invalid minimum character in sub-char-table")]
+    MinimumCharacter,
+}
+
+/// Validated external GNU depth code; no mutator state is stored here.
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,
+)]
+#[repr(u8)]
+enum SubCharTableReadDepth {
+    First = 1,
+    Second = 2,
+    Third = 3,
+}
+
+impl SubCharTableReadDepth {
+    /// External GNU slot counts, src/chartab.c:30-35; not enum ordinals.
+    const fn slots(self) -> usize {
+        match self {
+            Self::First => 16,
+            Self::Second => 32,
+            Self::Third => 128,
+        }
+    }
+}
+
 /// Build a sub-char-table from GNU's readable `#^^[DEPTH MIN-CHAR ...]`
 /// literal, as `lread.c` does.
-pub(crate) fn make_sub_char_table_from_external_slots(items: &[Value]) -> Result<Value, String> {
+pub(crate) fn make_sub_char_table_from_external_slots(
+    items: &[Value],
+) -> Result<Value, SubCharTableReadError> {
     if items.len() < 2 {
-        return Err("Invalid size of sub-char-table".to_string());
+        return Err(SubCharTableReadError::MissingHeader);
     }
     let depth = items[0]
         .as_fixnum()
-        .ok_or_else(|| "Invalid depth in sub-char-table".to_string())?;
-    if !(1..=3).contains(&depth) {
-        return Err("Invalid depth in sub-char-table".to_string());
+        .and_then(|code| u8::try_from(code).ok())
+        .and_then(|code| SubCharTableReadDepth::try_from(code).ok())
+        .ok_or(SubCharTableReadError::Depth)?;
+    if items.len() != 2 + depth.slots() {
+        return Err(SubCharTableReadError::SlotCount);
     }
     let min_char = items[1]
         .as_fixnum()
-        .ok_or_else(|| "Invalid minimum character in sub-char-table".to_string())?;
-    if !(0..=MAX_CHAR).contains(&min_char) {
-        return Err("Invalid minimum character in sub-char-table".to_string());
-    }
-
-    let expected = 2 + GNU_CHARTAB_SIZE[depth as usize];
-    if items.len() != expected {
-        return Err("Invalid size in sub-char-table".to_string());
-    }
-
+        .filter(|code| (0..=MAX_CHAR).contains(code))
+        .ok_or(SubCharTableReadError::MinimumCharacter)?;
+    let depth_code: u8 = depth.into();
     Ok(Value::make_sub_char_table(
-        depth as i32,
+        i32::from(depth_code),
         min_char as i32,
         items[2..].to_vec(),
     ))
