@@ -421,6 +421,7 @@ impl Context {
             obarray.set_symbol_value(name, Value::NIL);
             obarray.make_special(name);
         }
+        obarray.set_symbol_value("print-charset-text-property", Value::symbol("default"));
         obarray.set_symbol_value("text-quoting-style", Value::NIL);
         obarray.make_special("text-quoting-style");
         // GNU DEFVAR_LISP variables needed by loadup.el and early .el files.

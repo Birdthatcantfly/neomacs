@@ -949,3 +949,7 @@ mod princ_text;
 #[cfg(test)]
 #[path = "packed_char_header_units.rs"]
 mod packed_char_header_units;
+
+#[cfg(test)]
+#[path = "charset_units.rs"]
+mod charset_units;

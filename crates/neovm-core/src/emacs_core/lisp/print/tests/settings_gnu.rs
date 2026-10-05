@@ -279,3 +279,25 @@ fn printer_settings_gnu_format_source_ownership() {
         include_str!("settings_gnu/format_source_ownership.expect"),
     );
 }
+
+#[test]
+fn printer_settings_gnu_charset_merge_identity() {
+    oracle(
+        "charset_merge_identity",
+        r###"(let* ((print-charset-text-property nil)
+                 (left (copy-sequence "x"))
+                 (right (copy-sequence "x"))
+                 (distinct (copy-sequence "ab"))
+                 (reordered (copy-sequence "ab"))
+                 (same_order (copy-sequence "ab")))
+            (set-text-properties 0 1 (list 'charset 'ascii 'foo left) distinct)
+            (set-text-properties 1 2 (list 'charset 'unicode 'foo right) distinct)
+            (set-text-properties 0 1 '(foo bar baz quux charset ascii) reordered)
+            (set-text-properties 1 2 '(baz quux charset unicode foo bar) reordered)
+            (set-text-properties 0 1 '(charset ascii foo bar) same_order)
+            (set-text-properties 1 2 '(charset unicode foo bar) same_order)
+            (list (eq left right) (prin1-to-string distinct)
+                  (prin1-to-string reordered) (prin1-to-string same_order)))"###,
+        include_str!("settings_gnu/charset_merge_identity.expect"),
+    );
+}

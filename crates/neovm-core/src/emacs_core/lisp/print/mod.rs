@@ -89,6 +89,7 @@ pub struct PrintOptions {
     pub print_number_table: Option<Value>,
     pub float_output_format: Option<Value>,
     pub print_noescape: bool,
+    pub charset_text_property: CharsetTextProperty,
     pub(crate) print_string_destination: PrincStringDestination,
     backquote_output_level: usize,
 }
@@ -97,6 +98,113 @@ impl Default for PrintOptions {
     fn default() -> Self {
         Self::new(false, false, None, None)
     }
+}
+
+/// Policy for charset annotations (GNU print.c:1586-1610).
+/// This is a per-call value; it holds no mutator-local global state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CharsetTextProperty {
+    Never,
+    Guessable,
+    Always,
+}
+
+impl From<Value> for CharsetTextProperty {
+    fn from(value: Value) -> Self {
+        if value.is_nil() {
+            Self::Never
+        } else if value == Value::T {
+            Self::Always
+        } else {
+            Self::Guessable
+        }
+    }
+}
+
+/// GNU preserves every charset property if ANY interval has an unsafe one.
+/// Return pruned, nonempty intervals without changing the original string.
+pub(crate) fn printed_string_property_runs(
+    value: Value,
+    policy: CharsetTextProperty,
+) -> Option<Vec<StringTextPropertyRun>> {
+    let runs = get_string_text_properties_for_value(value)?;
+    match policy {
+        CharsetTextProperty::Always => return Some(runs),
+        CharsetTextProperty::Never | CharsetTextProperty::Guessable => {}
+    }
+    let has_charset = runs.iter().any(|run| {
+        let mut plist = run.plist;
+        while plist.is_cons() {
+            if plist.cons_car() == Value::symbol("charset") {
+                return true;
+            }
+            let tail = plist.cons_cdr();
+            if !tail.is_cons() {
+                break;
+            }
+            plist = tail.cons_cdr();
+        }
+        false
+    });
+    if !has_charset {
+        return Some(runs);
+    }
+    if policy == CharsetTextProperty::Guessable {
+        let ls = value.as_lisp_string()?;
+        let chars = crate::emacs_core::builtins::lisp_string_char_codes(ls);
+        let unsafe_charset = runs.iter().any(|run| {
+            let mut plist = run.plist;
+            while plist.is_cons() {
+                let key = plist.cons_car();
+                plist = plist.cons_cdr();
+                if !plist.is_cons() {
+                    break;
+                }
+                let charset = plist.cons_car();
+                plist = plist.cons_cdr();
+                if key == Value::symbol("charset") {
+                    return chars.iter().take(run.end).skip(run.start).any(|&ch| {
+                        ch >= 128
+                            && charset
+                                != Value::symbol(crate::emacs_core::charset::char_charset_name(
+                                    ch as i64,
+                                ))
+                    });
+                }
+            }
+            false
+        });
+        if unsafe_charset {
+            return Some(runs);
+        }
+    }
+    let pruned: Vec<_> = runs
+        .into_iter()
+        .filter_map(|run| {
+            let mut plist = run.plist;
+            let mut props = Vec::new();
+            while plist.is_cons() {
+                let key = plist.cons_car();
+                plist = plist.cons_cdr();
+                if !plist.is_cons() {
+                    break;
+                }
+                let value = plist.cons_car();
+                plist = plist.cons_cdr();
+                if key != Value::symbol("charset") {
+                    props.extend([key, value]);
+                }
+            }
+            (!props.is_empty()).then(|| StringTextPropertyRun {
+                plist: Value::list(props),
+                ..run
+            })
+        })
+        .collect();
+    // GNU print.c:1595-1610 removes charset via Fremove_text_properties.
+    // Its walk (textprop.c:1636-1680) preserves physical interval boundaries
+    // and plist order; semantic property-change equality does not merge them.
+    (!pruned.is_empty()).then_some(pruned)
 }
 
 /// GNU prints the test symbol through `print_object`, preserving name bytes,
@@ -239,6 +347,7 @@ impl PrintOptions {
             print_number_table: None,
             float_output_format: None,
             print_noescape: false,
+            charset_text_property: CharsetTextProperty::Guessable,
             print_string_destination: PrincStringDestination::Text,
             backquote_output_level: 0,
         }
@@ -267,6 +376,7 @@ impl PrintOptions {
             print_number_table: None,
             float_output_format: None,
             print_noescape: false,
+            charset_text_property: CharsetTextProperty::Guessable,
             print_string_destination: PrincStringDestination::Text,
             backquote_output_level: 0,
         }
@@ -972,7 +1082,8 @@ fn write_value_stateful_inner(
                         state.options.princ_string_output(),
                     ));
                 } else {
-                    match get_string_text_properties_for_value(*value) {
+                    match printed_string_property_runs(*value, state.options.charset_text_property)
+                    {
                         Some(runs) => write_lisp_propertized_string_stateful(ls, &runs, out, state),
                         None => out
                             .extend_from_slice(&format_lisp_string_bytes_emacs(ls, &state.options)),
@@ -2000,7 +2111,9 @@ fn append_print_value_bytes(value: &Value, out: &mut Vec<u8>, options: PrintOpti
                 out.extend_from_slice(&princ_string_bytes(ls, options.princ_string_output()));
             } else {
                 let str_bytes = format_lisp_string_bytes_emacs(ls, &options);
-                if let Some(runs) = get_string_text_properties_for_value(*value) {
+                if let Some(runs) =
+                    printed_string_property_runs(*value, options.charset_text_property)
+                {
                     out.extend_from_slice(b"#(");
                     out.extend_from_slice(&str_bytes);
                     for run in runs {

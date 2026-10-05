@@ -11,7 +11,7 @@ use std::fmt::{self, Display, Formatter};
 use super::intern::{SymId, format_symbol_name_for_diagnostic, intern, resolve_sym};
 use super::print::PrintOptions;
 use super::string_escape::{format_lisp_string_bytes_emacs, format_lisp_string_emacs};
-use super::value::{Value, ValueKind, VecLikeType, get_string_text_properties_for_value};
+use super::value::{Value, ValueKind, VecLikeType};
 use crate::buffer::EmacsBytePos;
 use crate::emacs_core::eval::ResumeTarget;
 use crate::tagged::SymbolMode;
@@ -1452,6 +1452,9 @@ pub(crate) fn print_options_from_state(
         None
     };
     let mut opts = PrintOptions::new(print_gensym, print_circle, print_level, print_length);
+    opts.charset_text_property = obarray
+        .value_in_buffer(buf, "print-charset-text-property")
+        .map_or(super::print::CharsetTextProperty::Guessable, Into::into);
     opts.print_quoted = print_quoted;
     opts.print_symbols_bare = print_symbols_bare;
     opts.print_escape_newlines = print_escape_newlines;
@@ -1571,7 +1574,9 @@ fn format_value_in_state_slow(
             let ls = value.as_lisp_string().expect("checked string");
             if options.print_noescape {
                 crate::emacs_core::emacs_char::to_utf8_lossy(ls.as_bytes())
-            } else if let Some(runs) = get_string_text_properties_for_value(*value) {
+            } else if let Some(runs) =
+                super::print::printed_string_property_runs(*value, options.charset_text_property)
+            {
                 let mut out = String::from("#(");
                 out.push_str(&format_lisp_string_emacs(ls, &options));
                 for run in runs {
@@ -1945,7 +1950,9 @@ fn format_string_bytes_in_state(
         return super::print::princ_string_bytes(ls, options.princ_string_output()).into_owned();
     }
     let str_bytes = format_lisp_string_bytes_emacs(ls, &options);
-    let Some(runs) = get_string_text_properties_for_value(*value) else {
+    let Some(runs) =
+        super::print::printed_string_property_runs(*value, options.charset_text_property)
+    else {
         return str_bytes;
     };
     let mut out = Vec::new();

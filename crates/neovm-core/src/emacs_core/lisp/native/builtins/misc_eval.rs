@@ -1785,6 +1785,7 @@ fn print_options_from_overrides(
 
 fn reset_print_options(options: &mut super::print::PrintOptions) {
     *options = super::print::PrintOptions::default();
+    options.charset_text_property = super::print::CharsetTextProperty::Never;
 }
 
 fn apply_print_overrides(
@@ -1880,10 +1881,10 @@ fn apply_print_override_setting(
         }
         // GNU accepts these override keys by dynamically binding print
         // variables that Neomacs does not yet model in PrintOptions.
-        "charset-text-property"
-        | "unreadable-function"
-        | "unreadeable-function"
-        | "integers-as-characters" => {}
+        "charset-text-property" => {
+            options.charset_text_property = value.into();
+        }
+        "unreadable-function" | "unreadeable-function" | "integers-as-characters" => {}
         _ => {
             return Err(signal(
                 LispCondition::WrongTypeArgument,
