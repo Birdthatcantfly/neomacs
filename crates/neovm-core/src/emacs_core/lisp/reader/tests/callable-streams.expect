@@ -1,0 +1,1 @@
+OK (((foo (32)) ((a b) (32 114 101 115 116)) ((x . y) nil) ([1 2] (114 101 115 116)) ("hello" (114 101 115 116)) (97 (32)) (18 (95)) ('foo (32)) ((a) (120)) ((a) nil) (#("abc" 0 1 (a b)) (114 101 115 116))) (λfoo (32)) ((a b) (32)) (end-of-file) (invalid-function 1) ((error "callback error") 1))

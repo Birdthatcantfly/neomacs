@@ -85,15 +85,18 @@ fn signal_reader_error_for_eval_source(
             super::reader::end_of_file_error_for_source(eof_source)
         }
         super::value_reader::ReadErrorKind::Error => {
-            signal("error", vec![Value::string(e.message)])
+            signal(LispCondition::Error, vec![Value::string(e.message)])
         }
         super::value_reader::ReadErrorKind::InvalidReadSyntax => signal(
             LispCondition::InvalidReadSyntax,
             vec![Value::string(format!("Read error: {}", e.message))],
         ),
-        super::value_reader::ReadErrorKind::Signal => {
-            signal(e.signal_symbol.as_deref().unwrap_or("error"), e.signal_data)
-        }
+        super::value_reader::ReadErrorKind::Signal => signal(
+            crate::emacs_core::error::UserCondition::from(
+                e.signal_symbol.unwrap_or_else(|| intern("error")),
+            ),
+            e.signal_data,
+        ),
     }
 }
 

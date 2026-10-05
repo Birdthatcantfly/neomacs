@@ -27,8 +27,8 @@ use std::cell::Cell;
 
 use super::builtins::collections::lookup_hash_table_test_alias;
 use super::value::{
-    HashTableLiteralKey, HashTableTest, HashTableWeakness, StringTextPropertyRun, Value,
-    build_hash_table_literal_value, eq_value, get_string_text_properties_for_value, list_to_vec,
+    HashTableLiteralKey, HashTableTest, HashTableWeakness, Value, build_hash_table_literal_value,
+    eq_value, get_string_text_properties_for_value, list_to_vec,
     set_string_text_properties_for_value,
 };
 
@@ -59,9 +59,6 @@ fn plist_get(plist: &[Value], key: HashTableLiteralKey) -> Option<Value> {
     }
     None
 }
-
-#[path = "callable.rs"]
-mod callable;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -153,7 +150,7 @@ pub(crate) fn read_one_from_encoded_file_bytes(
     shorthands: Option<&ReadSymbolShorthands>,
 ) -> Result<Option<(Value, usize)>, ReadError> {
     let mut reader = Reader::new_file_bytes(input, obarray);
-    reader.shorthands = shorthands;
+    reader.shorthands = shorthands.into();
     reader.pos = start;
     if !reader.skip_ws_and_comments() {
         return Ok(None);
@@ -197,7 +194,7 @@ pub fn read_one_with_locate_syms_with_symbols(
     );
     reader.pos = start;
     reader.readchar_offset_origin = ReadcharOffsetOrigin::RelativeToSourceByte(start);
-    reader.locate_syms = locate_syms;
+    reader.symbol_position_mode = SymbolPositionMode::from(locate_syms);
     reader.symbol_mode = mode;
     if !reader.skip_ws_and_comments() {
         return Ok(None);
@@ -205,6 +202,11 @@ pub fn read_one_with_locate_syms_with_symbols(
     let value = reader.read_form()?;
     Ok(Some((value, reader.pos)))
 }
+
+#[path = "callable.rs"]
+mod callable;
+
+pub(crate) use callable::read_from_callable;
 
 /// Read a single form directly from a buffer byte range.
 ///
@@ -216,15 +218,15 @@ pub(crate) fn read_one_from_buffer_with_locate_syms_with_symbols(
     buffer: &Buffer,
     range: EmacsByteRange,
     readchar_offset_origin: BufferReadcharOffsetOrigin,
-    locate_syms: bool,
+    symbol_position_mode: SymbolPositionMode,
     obarray: &super::symbol::Obarray,
     shorthands: Option<&ReadSymbolShorthands>,
     mode: SymbolMode,
 ) -> Result<(Option<Value>, EmacsBytePos), ReadError> {
     let mut reader = Reader::new_buffer(buffer, range, readchar_offset_origin, obarray);
-    reader.locate_syms = locate_syms;
+    reader.symbol_position_mode = symbol_position_mode;
     reader.symbol_mode = mode;
-    reader.shorthands = shorthands;
+    reader.shorthands = shorthands.into();
     if !reader.skip_ws_and_comments() {
         return Ok((None, EmacsBytePos::new(reader.pos)));
     }
@@ -294,7 +296,7 @@ impl<'a> LispReadSource<'a> {
         shorthands: Option<&ReadSymbolShorthands>,
     ) -> Result<Option<(Value, usize)>, ReadError> {
         let mut reader = Reader::new_lisp_string(self.input, start, self.logical_len(), obarray);
-        reader.shorthands = shorthands;
+        reader.shorthands = shorthands.into();
         if !reader.skip_ws_and_comments() {
             return Ok(None);
         }
@@ -335,7 +337,7 @@ impl<'a> LispReadSource<'a> {
         self.read_one_range_with_locate_syms_with_symbols(
             start,
             self.logical_len(),
-            locate_syms,
+            SymbolPositionMode::from(locate_syms),
             obarray,
             None,
             mode,
@@ -346,15 +348,15 @@ impl<'a> LispReadSource<'a> {
         &self,
         start: usize,
         end: usize,
-        locate_syms: bool,
+        symbol_position_mode: SymbolPositionMode,
         obarray: &super::symbol::Obarray,
         shorthands: Option<&ReadSymbolShorthands>,
         mode: SymbolMode,
     ) -> Result<Option<(Value, usize)>, ReadError> {
         let mut reader = Reader::new_lisp_string(self.input, start, end, obarray);
-        reader.locate_syms = locate_syms;
+        reader.symbol_position_mode = symbol_position_mode;
         reader.symbol_mode = mode;
-        reader.shorthands = shorthands;
+        reader.shorthands = shorthands.into();
         if !reader.skip_ws_and_comments() {
             return Ok(None);
         }
@@ -362,6 +364,27 @@ impl<'a> LispReadSource<'a> {
         Ok(Some((value, reader.pos)))
     }
 }
+
+/// Symbol materialization mode for one reader. This value contains no Lisp
+/// state and can be copied between mutators; a reader's source remains local.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SymbolPositionMode {
+    Bare,
+    Positioned,
+}
+
+/// Keep the inherited public boolean API compatible at its boundary.
+impl From<bool> for SymbolPositionMode {
+    #[inline]
+    fn from(position_symbols: bool) -> Self {
+        match position_symbols {
+            false => Self::Bare,
+            true => Self::Positioned,
+        }
+    }
+}
+
+static_assertions::assert_impl_all!(SymbolPositionMode: Send, Sync, Copy);
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ReadSymbolShorthands {
@@ -383,7 +406,7 @@ impl ReadSymbolShorthands {
         Some(Self { pairs })
     }
 
-    fn rewrite(
+    pub(crate) fn rewrite(
         &self,
         name: &crate::heap_types::LispString,
     ) -> Option<crate::heap_types::LispString> {
@@ -413,7 +436,7 @@ pub struct ReadError {
     pub message: String,
     pub position: usize,
     pub kind: ReadErrorKind,
-    pub signal_symbol: Option<String>,
+    pub signal_symbol: Option<super::intern::SymId>,
     pub signal_data: Vec<Value>,
 }
 
@@ -446,6 +469,7 @@ enum ReaderSource<'a> {
     FileBytes(&'a [u8]),
     LispString(&'a crate::heap_types::LispString),
     Buffer(&'a Buffer),
+    Callable(&'a callable::CallableSource<'a>),
 }
 
 /// How a reader source exposes non-ASCII input to the Lisp parser.
@@ -485,11 +509,138 @@ impl ReaderSourceSemantics {
     }
 }
 
-/// The container grammar controls whether a dotted tail is permitted.
+/// Reader environments belong to the current mutator. Callable source-buffer
+/// borrows never span callbacks; its Context is borrowed for each funcall.
+#[derive(Clone, Copy, Debug)]
+enum ReaderEnvironment<'a> {
+    Obarray(&'a super::symbol::Obarray),
+    Callable(&'a callable::CallableSource<'a>),
+}
+
+impl ReaderEnvironment<'_> {
+    fn value(self, name: &str) -> Option<Value> {
+        match self {
+            Self::Obarray(obarray) => obarray.symbol_value_copied(name),
+            Self::Callable(source) => source.variable(name),
+        }
+    }
+}
+
+/// Shorthand binding lifetime: byte-backed input snapshots its binding; a
+/// callable may change it at every get/unget boundary in the current mutator.
+#[derive(Clone, Copy, Debug)]
+enum ReaderShorthands<'a> {
+    Unbound,
+    Snapshot(&'a ReadSymbolShorthands),
+    LiveCallable(&'a callable::CallableSource<'a>),
+}
+
+impl<'a> From<Option<&'a ReadSymbolShorthands>> for ReaderShorthands<'a> {
+    fn from(value: Option<&'a ReadSymbolShorthands>) -> Self {
+        match value {
+            None => Self::Unbound,
+            Some(shorthands) => Self::Snapshot(shorthands),
+        }
+    }
+}
+
+impl ReaderShorthands<'_> {
+    fn rewrite(
+        self,
+        name: &crate::heap_types::LispString,
+    ) -> Option<crate::heap_types::LispString> {
+        match self {
+            Self::Unbound => None,
+            Self::Snapshot(shorthands) => shorthands.rewrite(name),
+            Self::LiveCallable(source) => source
+                .variable("read-symbol-shorthands")
+                .and_then(ReadSymbolShorthands::from_lisp_value)
+                .and_then(|shorthands| shorthands.rewrite(name)),
+        }
+    }
+}
+
+/// GNU keeps read_objects_map rooted (lread.c:5898-5901). Byte-backed
+/// parsers make no Lisp calls; callable input can collect at every character,
+/// so every label entry retains its value beyond temporary parser scopes.
+#[derive(Debug)]
+enum ReadLabels {
+    ByteBacked(std::collections::HashMap<ReadLabel, Value>),
+    Callable(std::collections::HashMap<ReadLabel, crate::emacs_core::error::RetainedLispValue>),
+}
+
+impl ReadLabels {
+    fn for_source(source: ReaderSource<'_>) -> Self {
+        match source {
+            ReaderSource::Callable(_) => Self::Callable(std::collections::HashMap::new()),
+            ReaderSource::Runtime(_)
+            | ReaderSource::FileBytes(_)
+            | ReaderSource::LispString(_)
+            | ReaderSource::Buffer(_) => Self::ByteBacked(std::collections::HashMap::new()),
+        }
+    }
+
+    fn insert(&mut self, label: ReadLabel, value: Value) {
+        match self {
+            Self::ByteBacked(labels) => {
+                labels.insert(label, value);
+            }
+            Self::Callable(labels) => {
+                labels.insert(label, value.into());
+            }
+        }
+    }
+
+    fn get(&self, label: &ReadLabel) -> Option<&Value> {
+        match self {
+            Self::ByteBacked(labels) => labels.get(label),
+            Self::Callable(labels) => labels.get(label).map(AsRef::as_ref),
+        }
+    }
+}
+
+struct Reader<'a> {
+    source: ReaderSource<'a>,
+    source_semantics: ReaderSourceSemantics,
+    pos: usize,
+    limit: usize,
+    /// `#N=EXPR` / `#N#` read labels for shared structure in `.elc` files.
+    read_labels: ReadLabels,
+    /// Materialization mode for reader symbols and their source positions.
+    symbol_position_mode: SymbolPositionMode,
+    /// Dynamic SYMBOLP/EQ policy, supplied by the user-facing reader boundary.
+    symbol_mode: SymbolMode,
+    /// Coordinate origin for `symbol-with-pos-pos`.  GNU initializes its
+    /// character counter to the absolute point for buffer streams and zero
+    /// for strings, markers, functions, and files.
+    readchar_offset_origin: ReadcharOffsetOrigin,
+    /// The active obarray, for resolving `#$` to the current value of
+    /// `load-file-name` (matching GNU's `Vload_file_name`).
+    environment: ReaderEnvironment<'a>,
+    /// Active `read-symbol-shorthands`, if any.  GNU's reader rewrites symbol
+    /// names before interning when this dynamic variable is non-nil.
+    shorthands: ReaderShorthands<'a>,
+    /// One-entry decode cache: `(pos, code, next_pos)` for the most recently
+    /// decoded position.  neomacs's reader peeks the current char
+    /// (`source_code_at`) then advances (`next_pos`) as separate steps, which
+    /// otherwise decodes the same multibyte char twice (each decode reads
+    /// bytes one at a time via `emacs_byte_at_pos`).  This cache makes the
+    /// peek+advance pair decode each position once.  GNU avoids the double
+    /// decode differently -- `readchar` reads-and-advances in one step -- but
+    /// GNU's `unreadchar` still re-decodes pushed-back chars (it only backs the
+    /// position up); this pos cache does not.  Safe because the source bytes at
+    /// a given position are immutable for the reader's lifetime.
+    step_cache: Cell<Option<(usize, u32, usize)>>,
+    /// The GNU dot lookahead belongs to one source character. A list and its
+    /// form dispatcher must not invoke READCHARFUN twice to classify that dot.
+    /// Reader-local state is never shared across mutators.
+    dot_syntax: Cell<Option<(EmacsBytePos, DotSyntax)>>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ListSyntax {
-    Cons,
-    StringProperties,
+enum ReadcharOffsetOrigin {
+    RelativeToSourceByte(usize),
+    AbsoluteBufferPosition,
 }
 
 /// A circular-reader label that GNU can represent as a nonnegative fixnum.
@@ -506,54 +657,27 @@ impl ReadLabel {
     }
 }
 
-/// The literal kind determines GNU's validation error condition.
+/// Only ordinary cons lists admit a dotted tail; string-property payloads do not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ListSyntax {
+    Cons,
+    StringProperties,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DotSyntax {
+    TailMarker,
+    SymbolConstituent,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CharTableSyntax {
     Table,
     SubTable,
 }
 
-struct Reader<'a> {
-    source: ReaderSource<'a>,
-    source_semantics: ReaderSourceSemantics,
-    pos: usize,
-    limit: usize,
-    /// `#N=EXPR` / `#N#` read labels for shared structure in `.elc` files.
-    read_labels: std::collections::HashMap<ReadLabel, Value>,
-    /// When true, wrap interned symbols in symbol-with-pos objects.
-    locate_syms: bool,
-    /// Dynamic SYMBOLP/EQ policy, supplied by the user-facing reader boundary.
-    symbol_mode: SymbolMode,
-    /// Coordinate origin for `symbol-with-pos-pos`.  GNU initializes its
-    /// character counter to the absolute point for buffer streams and zero
-    /// for strings, markers, functions, and files.
-    readchar_offset_origin: ReadcharOffsetOrigin,
-    /// The active obarray, for resolving `#$` to the current value of
-    /// `load-file-name` (matching GNU's `Vload_file_name`).
-    obarray: &'a super::symbol::Obarray,
-    /// Active `read-symbol-shorthands`, if any.  GNU's reader rewrites symbol
-    /// names before interning when this dynamic variable is non-nil.
-    shorthands: Option<&'a ReadSymbolShorthands>,
-    /// One-entry decode cache: `(pos, code, next_pos)` for the most recently
-    /// decoded position.  neomacs's reader peeks the current char
-    /// (`source_code_at`) then advances (`next_pos`) as separate steps, which
-    /// otherwise decodes the same multibyte char twice (each decode reads
-    /// bytes one at a time via `emacs_byte_at_pos`).  This cache makes the
-    /// peek+advance pair decode each position once.  GNU avoids the double
-    /// decode differently -- `readchar` reads-and-advances in one step -- but
-    /// GNU's `unreadchar` still re-decodes pushed-back chars (it only backs the
-    /// position up); this pos cache does not.  Safe because the source bytes at
-    /// a given position are immutable for the reader's lifetime.
-    step_cache: Cell<Option<(usize, u32, usize)>>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ReadcharOffsetOrigin {
-    RelativeToSourceByte(usize),
-    AbsoluteBufferPosition,
-}
-
-/// Quoting suppresses numeric interpretation; owned by its reader only.
+/// Whether quoting suppresses numeric interpretation of a symbol token.
+/// Owned by one reader; it carries no shared Lisp state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SymbolQuoting {
     Plain,
@@ -568,7 +692,8 @@ struct ReaderToken {
     /// non-ASCII / escaped tokens, shorthand rewrite); ASCII symbols intern
     /// straight from the `&str` view via the interner's no-alloc fast path.
     bytes: ReaderTokenBytes,
-    /// Source domain preserves the symbol-name string's exact encoding.
+    /// Source character domain decides the symbol name's storage encoding.
+    /// The token is local to its reader and never shared between mutators.
     source_semantics: ReaderSourceSemantics,
     quoting: SymbolQuoting,
 }
@@ -663,6 +788,16 @@ fn substitute_read_placeholder_recurse(
 }
 
 impl<'a> Reader<'a> {
+    /// Byte-backed readers retain the boundary's policy snapshot. Callable
+    /// input can change it while fetching a character, so consult its context
+    /// only at a policy-sensitive semantic boundary.
+    fn symbol_mode(&self) -> SymbolMode {
+        match self.environment {
+            ReaderEnvironment::Obarray(_) => self.symbol_mode,
+            ReaderEnvironment::Callable(source) => source.symbol_mode(),
+        }
+    }
+
     fn new(
         input: &'a str,
         source_semantics: ReaderSourceSemantics,
@@ -673,13 +808,14 @@ impl<'a> Reader<'a> {
             source_semantics,
             pos: 0,
             limit: input.len(),
-            read_labels: std::collections::HashMap::new(),
-            locate_syms: false,
+            read_labels: ReadLabels::for_source(ReaderSource::Runtime(input)),
+            symbol_position_mode: SymbolPositionMode::Bare,
             symbol_mode: SymbolMode::Bare,
             readchar_offset_origin: ReadcharOffsetOrigin::RelativeToSourceByte(0),
-            obarray,
-            shorthands: None,
+            environment: ReaderEnvironment::Obarray(obarray),
+            shorthands: ReaderShorthands::Unbound,
             step_cache: Cell::new(None),
+            dot_syntax: Cell::new(None),
         }
     }
 
@@ -693,13 +829,14 @@ impl<'a> Reader<'a> {
             source_semantics: ReaderSourceSemantics::EncodedFileBytes,
             pos: 0,
             limit: input.len(),
-            read_labels: std::collections::HashMap::new(),
-            locate_syms: false,
+            read_labels: ReadLabels::for_source(ReaderSource::FileBytes(input)),
+            symbol_position_mode: SymbolPositionMode::Bare,
             symbol_mode: SymbolMode::Bare,
             readchar_offset_origin: ReadcharOffsetOrigin::RelativeToSourceByte(0),
-            obarray,
-            shorthands: None,
+            environment: ReaderEnvironment::Obarray(obarray),
+            shorthands: ReaderShorthands::Unbound,
             step_cache: Cell::new(None),
+            dot_syntax: Cell::new(None),
         }
     }
 
@@ -720,13 +857,14 @@ impl<'a> Reader<'a> {
             source_semantics: ReaderSourceSemantics::for_lisp_object(input.is_multibyte()),
             pos: start,
             limit: end,
-            read_labels: std::collections::HashMap::new(),
-            locate_syms: false,
+            read_labels: ReadLabels::for_source(ReaderSource::LispString(input)),
+            symbol_position_mode: SymbolPositionMode::Bare,
             symbol_mode: SymbolMode::Bare,
             readchar_offset_origin: ReadcharOffsetOrigin::RelativeToSourceByte(start),
-            obarray,
-            shorthands: None,
+            environment: ReaderEnvironment::Obarray(obarray),
+            shorthands: ReaderShorthands::Unbound,
             step_cache: Cell::new(None),
+            dot_syntax: Cell::new(None),
         }
     }
 
@@ -749,8 +887,8 @@ impl<'a> Reader<'a> {
             source_semantics: ReaderSourceSemantics::for_lisp_object(input.get_multibyte()),
             pos: start,
             limit: end,
-            read_labels: std::collections::HashMap::new(),
-            locate_syms: false,
+            read_labels: ReadLabels::for_source(ReaderSource::Buffer(input)),
+            symbol_position_mode: SymbolPositionMode::Bare,
             symbol_mode: SymbolMode::Bare,
             readchar_offset_origin: match readchar_offset_origin {
                 BufferReadcharOffsetOrigin::BufferPoint => {
@@ -760,9 +898,10 @@ impl<'a> Reader<'a> {
                     ReadcharOffsetOrigin::RelativeToSourceByte(start)
                 }
             },
-            obarray,
-            shorthands: None,
+            environment: ReaderEnvironment::Obarray(obarray),
+            shorthands: ReaderShorthands::Unbound,
             step_cache: Cell::new(None),
+            dot_syntax: Cell::new(None),
         }
     }
 
@@ -841,7 +980,7 @@ impl<'a> Reader<'a> {
 
     fn read_form(&mut self) -> Result<Value, ReadError> {
         self.skip_ws_and_comments();
-        // Record the byte position before reading — used by locate_syms
+        // Record the byte position before reading — used by symbol positioning
         // to tag symbols with their source offset (mirrors GNU read0).
         let form_start = self.pos;
         let Some(ch) = self.current_code() else {
@@ -854,13 +993,13 @@ impl<'a> Reader<'a> {
                 self.bump();
                 Err(self.error(")"))
             }
-            x if x == b'.' as u32 && self.is_dot_separator() => {
-                self.bump();
-                Err(self.error("."))
-            }
             x if x == b']' as u32 => {
                 self.bump();
                 Err(self.error("]"))
+            }
+            x if x == b'.' as u32 && self.is_dot_separator() => {
+                self.bump();
+                Err(self.error("."))
             }
             x if x == b'[' as u32 => self.read_vector(),
             x if x == b'\'' as u32 => {
@@ -869,7 +1008,6 @@ impl<'a> Reader<'a> {
                 let quoted = self.read_form()?;
                 push_scratch_gc_root(quoted);
                 let result = Value::list(vec![Value::symbol("quote"), quoted]);
-
                 Ok(result)
             }
             x if x == b'`' as u32 => {
@@ -878,7 +1016,6 @@ impl<'a> Reader<'a> {
                 let quoted = self.read_form()?;
                 push_scratch_gc_root(quoted);
                 let result = Value::list(vec![Value::symbol(intern("`")), quoted]);
-
                 Ok(result)
             }
             x if x == b',' as u32 => {
@@ -889,14 +1026,13 @@ impl<'a> Reader<'a> {
                     let expr = self.read_form()?;
                     push_scratch_gc_root(expr);
                     let result = Value::list(vec![Value::symbol(intern(",@")), expr]);
-
                     Ok(result)
                 } else {
+                    self.unread_source_lookahead()?;
                     let _roots = callable::RootScope::new();
                     let expr = self.read_form()?;
                     push_scratch_gc_root(expr);
                     let result = Value::list(vec![Value::symbol(intern(",")), expr]);
-
                     Ok(result)
                 }
             }
@@ -906,15 +1042,19 @@ impl<'a> Reader<'a> {
             _ => self.read_atom(),
         }?;
 
-        // Wrap symbols with their source position when locate_syms is active.
-        // Matches GNU read0: SYMBOLP(val) && !NILP(val).
-        if self.locate_syms && value.is_bare_symbol() && !value.is_nil() {
-            let pos_val = Value::fixnum(self.symbol_position(form_start) as i64);
-            Ok(crate::tagged::gc::with_tagged_heap(|heap| {
-                heap.alloc_symbol_with_pos(value, pos_val)
-            }))
-        } else {
-            Ok(value)
+        // GNU read0 wraps SYMBOLP(val) && !NILP(val) in positioning mode.
+        match self.symbol_position_mode {
+            SymbolPositionMode::Bare => Ok(value),
+            SymbolPositionMode::Positioned => {
+                if value.is_bare_symbol() && !value.is_nil() {
+                    let pos_val = Value::fixnum(self.symbol_position(form_start) as i64);
+                    Ok(crate::tagged::gc::with_tagged_heap(|heap| {
+                        heap.alloc_symbol_with_pos(value, pos_val)
+                    }))
+                } else {
+                    Ok(value)
+                }
+            }
         }
     }
 
@@ -937,6 +1077,9 @@ impl<'a> Reader<'a> {
     fn source_character_distance(&self, start: usize, end: usize) -> usize {
         debug_assert!(start <= end);
         match self.source {
+            ReaderSource::Callable(source) => {
+                source.character_count(EmacsBytePos::new(start), EmacsBytePos::new(end))
+            }
             // One byte, one character.
             ReaderSource::FileBytes(_) => end - start,
             ReaderSource::Runtime(_) => {
@@ -1006,7 +1149,7 @@ impl<'a> Reader<'a> {
                     let cdr = self.read_form()?;
                     push_scratch_gc_root(cdr);
                     self.skip_ws_and_comments();
-
+                    self.unread_source_lookahead()?;
                     match self.current_code() {
                         Some(code) if code == b')' as u32 => {
                             self.bump();
@@ -1041,11 +1184,26 @@ impl<'a> Reader<'a> {
     /// GNU lread.c treats dot as a dotted-tail marker when the following
     /// character starts a new reader token, including reader-prefix characters
     /// such as comma and backquote.
-    fn is_dot_separator(&self) -> bool {
-        match self.peek_code_at(1) {
-            None => true,
+    fn is_dot_separator(&mut self) -> bool {
+        let position = EmacsBytePos::new(self.pos);
+        if let Some((cached_position, syntax)) = self.dot_syntax.get()
+            && cached_position == position
+        {
+            return matches!(syntax, DotSyntax::TailMarker);
+        }
+        let following = self.peek_code_at(1);
+        if let ReaderSource::Callable(source) = self.source {
+            let next = source
+                .code_and_next(EmacsBytePos::new(self.pos))
+                .map(|(_, next)| next)
+                .unwrap_or(EmacsBytePos::new(self.pos));
+            let _ = source.unread(next);
+            self.step_cache.set(None);
+        }
+        let syntax = match following {
+            None => DotSyntax::TailMarker,
             Some(c) => {
-                is_reader_whitespace_code(c)
+                if is_reader_whitespace_code(c)
                     || c == b'"' as u32
                     || c == b'\'' as u32
                     || c == b'(' as u32
@@ -1055,8 +1213,15 @@ impl<'a> Reader<'a> {
                     || c == b'?' as u32
                     || c == b'`' as u32
                     || c == b',' as u32
+                {
+                    DotSyntax::TailMarker
+                } else {
+                    DotSyntax::SymbolConstituent
+                }
             }
-        }
+        };
+        self.dot_syntax.set(Some((position, syntax)));
+        matches!(syntax, DotSyntax::TailMarker)
     }
 
     // -- Vectors [1 2 3] ----------------------------------------------------
@@ -1071,7 +1236,6 @@ impl<'a> Reader<'a> {
             match self.current_code() {
                 Some(code) if code == b']' as u32 => {
                     self.bump();
-
                     return Ok(items);
                 }
                 Some(_) => {
@@ -1093,7 +1257,6 @@ impl<'a> Reader<'a> {
             push_scratch_gc_root(*item);
         }
         let result = Value::make_vector(items);
-
         Ok(result)
     }
 
@@ -1260,6 +1423,7 @@ impl<'a> Reader<'a> {
             digits += 1;
         }
 
+        self.unread_source_lookahead()?;
         if digits == 0 {
             return Err(self.escape_error(CharacterEscapeError::MissingHexDigit));
         }
@@ -1384,7 +1548,7 @@ impl<'a> Reader<'a> {
 
         let value = self.parse_char_value()?;
         let following = self.current_code();
-
+        self.unread_source_lookahead()?;
         if matches!(following, Some(ch) if !is_char_literal_delimiter_code(ch)) {
             return Err(self.error("?"));
         }
@@ -1477,7 +1641,10 @@ impl<'a> Reader<'a> {
                 x if x == b'v' as u32 => 0x0B,
                 x if x == b'e' as u32 => 0x1B,
                 x if x == b'd' as u32 => 0x7F,
-                x if x == b's' as u32 => b' ' as u32,
+                x if x == b's' as u32 => {
+                    self.unread_source_lookahead()?;
+                    b' ' as u32
+                }
                 x if x == b'\n' as u32 => {
                     return Err(self.escape_error(CharacterEscapeError::EscapedNewline));
                 }
@@ -1494,6 +1661,7 @@ impl<'a> Reader<'a> {
                                 val = val * 8 + (c - b'0' as u32);
                             }
                             _ => {
+                                self.unread_source_lookahead()?;
                                 break;
                             }
                         }
@@ -1530,7 +1698,6 @@ impl<'a> Reader<'a> {
                 let expr = self.read_form()?;
                 push_scratch_gc_root(expr);
                 let result = Value::list(vec![Value::symbol("function"), expr]);
-
                 Ok(result)
             }
             x if x == b'_' as u32 => {
@@ -1598,7 +1765,6 @@ impl<'a> Reader<'a> {
                         };
                         self.error(&msg)
                     });
-
                 result
             }
             x if x == b'^' as u32 => {
@@ -1626,7 +1792,7 @@ impl<'a> Reader<'a> {
                     }
                     let message = self.source_slice_string(syntax_start, self.pos);
                     self.pos = offending_position;
-
+                    self.unread_source_lookahead()?;
                     return Err(self.error(&message));
                 }
 
@@ -1639,7 +1805,7 @@ impl<'a> Reader<'a> {
                     CharTableSyntax::Table => {
                         crate::emacs_core::chartable::make_char_table_from_external_slots_with_symbols(
                             &items,
-                            self.symbol_mode,
+                            self.symbol_mode(),
                         )
                             .map_err(|msg| self.error(&msg))
                     }
@@ -1690,10 +1856,9 @@ impl<'a> Reader<'a> {
                 // Matches GNU lread.c: returns Vload_file_name (the actual
                 // file path string), not the symbol `load-file-name`.
                 self.bump();
-                let sym_id = super::intern::intern("load-file-name");
                 Ok(self
-                    .obarray
-                    .symbol_value_id_copied(sym_id)
+                    .environment
+                    .value("load-file-name")
                     .unwrap_or(Value::NIL))
             }
             x if x == b'#' as u32 => {
@@ -1722,11 +1887,12 @@ impl<'a> Reader<'a> {
                 if self.current_code() == Some(b'(' as u32) {
                     self.read_hash_table_or_record_literal()
                 } else {
-                    // GNU `read1` case 's' consumes the next character with
-                    // `read_and_buffer` before checking it, so the
-                    // `invalid-read-syntax` text includes the offending char
+                    // GNU `read1` case 's' buffers then unreads the next
+                    // character (lread.c:3859), so the signal's data includes
+                    // that character while the stream leaves it unconsumed
                     // (e.g. "#s[").  Mirror that: append the consumed character
                     // to the "#s" prefix, or report just "#s" at end of input.
+                    let offending_position = self.pos;
                     let mut message = String::from("#s");
                     if let Some(code) = self.current_code() {
                         self.bump();
@@ -1734,6 +1900,8 @@ impl<'a> Reader<'a> {
                             message.push(ch);
                         }
                     }
+                    self.pos = offending_position;
+                    self.unread_source_lookahead()?;
                     Err(self.error(&message))
                 }
             }
@@ -1819,6 +1987,28 @@ impl<'a> Reader<'a> {
         }
     }
 
+    fn property_signal_error(&self, flow: crate::emacs_core::error::Flow) -> ReadError {
+        use crate::emacs_core::error::FlowRef;
+        match flow.kind() {
+            FlowRef::Signal(signal) => {
+                let symbol = signal.symbol;
+                let message = signal
+                    .data
+                    .first()
+                    .and_then(|value| value.as_str_owned())
+                    .unwrap_or_else(|| "Invalid text property argument".to_string());
+                self.signal_error(
+                    crate::emacs_core::error::UserCondition::from(symbol),
+                    signal.data.clone(),
+                    &message,
+                )
+            }
+            FlowRef::Throw(_) | FlowRef::ThreadBlocked(_) | FlowRef::Shutdown(_) => {
+                self.ordinary_error("Invalid text property control flow")
+            }
+        }
+    }
+
     fn read_hash_skip_bytes(&mut self) -> Result<Value, ReadError> {
         self.expect('@')?;
         let mut len = 0usize;
@@ -1851,33 +2041,11 @@ impl<'a> Reader<'a> {
             ReaderSource::Runtime(_) | ReaderSource::FileBytes(_) => {
                 self.skip_exact_source_bytes(len)?
             }
-            ReaderSource::LispString(_) | ReaderSource::Buffer(_) => {
+            ReaderSource::LispString(_) | ReaderSource::Buffer(_) | ReaderSource::Callable(_) => {
                 self.skip_dynamic_doc_string_in_non_file_source();
             }
         }
         self.read_form()
-    }
-
-    fn property_signal_error(&self, flow: crate::emacs_core::error::Flow) -> ReadError {
-        use crate::emacs_core::error::FlowRef;
-        match flow.kind() {
-            FlowRef::Signal(signal) => {
-                let symbol = signal.symbol;
-                let message = signal
-                    .data
-                    .first()
-                    .and_then(|value| value.as_str_owned())
-                    .unwrap_or_else(|| "Invalid text property argument".to_string());
-                self.signal_error(
-                    super::intern::resolve_sym(symbol),
-                    signal.data.clone(),
-                    &message,
-                )
-            }
-            FlowRef::Throw(_) | FlowRef::ThreadBlocked(_) | FlowRef::Shutdown(_) => {
-                self.ordinary_error("Invalid text property control flow")
-            }
-        }
     }
 
     fn read_bool_vector_literal(&mut self) -> Result<Value, ReadError> {
@@ -1948,6 +2116,7 @@ impl<'a> Reader<'a> {
             }
         }
 
+        self.unread_source_lookahead()?;
         let digits_source = self.source_slice_string(start, self.pos);
         let digits: String = digits_source
             .chars()
@@ -2004,13 +2173,11 @@ impl<'a> Reader<'a> {
 
         if is_hash_table {
             let result = self.read_hash_table_literal_from_plist(&items[1..]);
-
             return result;
         }
 
         // Not a hash-table — it's a record #s(type field1 field2 ...)
         let record_value = Value::make_record(items);
-
         Ok(record_value)
     }
 
@@ -2025,7 +2192,7 @@ impl<'a> Reader<'a> {
         {
             let Some(name) = test_value.as_bare_symbol_name() else {
                 return Err(self.signal_error(
-                    "wrong-type-argument",
+                    crate::emacs_core::error::LispCondition::WrongTypeArgument,
                     vec![Value::symbol("symbolp"), test_value],
                     "symbolp",
                 ));
@@ -2040,7 +2207,7 @@ impl<'a> Reader<'a> {
                         alias.standard_test.unwrap_or(HashTableTest::Equal)
                     } else {
                         return Err(self.signal_error(
-                            "error",
+                            crate::emacs_core::error::LispCondition::Error,
                             vec![Value::string("Invalid hash table test"), test_value],
                             "Invalid hash table test",
                         ));
@@ -2056,7 +2223,7 @@ impl<'a> Reader<'a> {
             Some(value) => {
                 let Some(name) = value.as_bare_symbol_name() else {
                     return Err(self.signal_error(
-                        "error",
+                        crate::emacs_core::error::LispCondition::Error,
                         vec![Value::string("Invalid hash table weakness"), value],
                         "Invalid hash table weakness",
                     ));
@@ -2065,7 +2232,7 @@ impl<'a> Reader<'a> {
                     Some(weakness) => Some(weakness),
                     None => {
                         return Err(self.signal_error(
-                            "error",
+                            crate::emacs_core::error::LispCondition::Error,
                             vec![Value::string("Invalid hash table weakness"), value],
                             "Invalid hash table weakness",
                         ));
@@ -2082,7 +2249,7 @@ impl<'a> Reader<'a> {
         } else {
             list_to_vec(&data_value).ok_or_else(|| {
                 self.signal_error(
-                    "wrong-type-argument",
+                    crate::emacs_core::error::LispCondition::WrongTypeArgument,
                     vec![Value::symbol("listp"), {
                         let mut tail = data_value;
                         while tail.is_cons() {
@@ -2161,19 +2328,6 @@ impl<'a> Reader<'a> {
                 }
             }
 
-            // A bare `.` is the symbol `.` only when it directly precedes a
-            // closing delimiter (e.g. `(a .)` => `(a \.)`, matching GNU
-            // lread.c which does not treat `)`/`]` as dot terminators).
-            // Otherwise — at top level (`(read ".")`) or as a dotted
-            // separator with no following element — GNU signals
-            // invalid-read-syntax instead of reading the symbol `\.`.
-            if token_text == "." {
-                match self.current_code() {
-                    Some(c) if c == b')' as u32 || c == b']' as u32 => {}
-                    _ => return Err(self.error(".")),
-                }
-            }
-
             // Emacs reader shorthand: bare ## reads as the symbol with empty name.
             if token_text == "##" && token.quoting == SymbolQuoting::Plain {
                 return Ok(self.intern_empty_symbol());
@@ -2186,7 +2340,7 @@ impl<'a> Reader<'a> {
         // same atom the LispString path would (name_atom_from_str for ASCII ==
         // LispString::from_unibyte). This skips the per-token heap LispString
         // for the overwhelming majority of symbols read while loading.
-        if self.shorthands.is_none()
+        if matches!(self.shorthands, ReaderShorthands::Unbound)
             && token.quoting == SymbolQuoting::Plain
             && let Some(text) = token.as_utf8()
             && text.is_ascii()
@@ -2213,10 +2367,7 @@ impl<'a> Reader<'a> {
     #[cold]
     fn intern_empty_symbol(&self) -> Value {
         let empty = crate::heap_types::LispString::from_emacs_bytes(Vec::new());
-        match self
-            .shorthands
-            .and_then(|shorthands| shorthands.rewrite(&empty))
-        {
+        match self.shorthands.rewrite(&empty) {
             Some(name) => {
                 Value::from_sym_id(super::intern::intern_lisp_value(Value::heap_string(name)))
             }
@@ -2228,6 +2379,8 @@ impl<'a> Reader<'a> {
     /// shorthand rewrite (`read-symbol-shorthands`).
     fn to_lisp_string_for_token(&self, token: &ReaderToken) -> crate::heap_types::LispString {
         let name = token.to_lisp_string();
+        // GNU exempts only names made entirely of core operator constituents
+        // (lread.c:3545-3552, 4222-4229), including escaped spellings.
         if token.bytes.iter().all(|byte| {
             matches!(
                 byte,
@@ -2236,9 +2389,7 @@ impl<'a> Reader<'a> {
         }) {
             return name;
         }
-        self.shorthands
-            .and_then(|shorthands| shorthands.rewrite(&name))
-            .unwrap_or(name)
+        self.shorthands.rewrite(&name).unwrap_or(name)
     }
 
     fn read_symbol_token(&mut self) -> Result<ReaderToken, ReadError> {
@@ -2284,6 +2435,7 @@ impl<'a> Reader<'a> {
             self.push_symbol_token_code(&mut bytes, ch);
             self.bump();
         }
+        self.unread_source_lookahead()?;
         // Keep `bytes` inline (no into_vec / LispString here). read_atom interns
         // ASCII symbols directly from the &str view (interner no-alloc fast
         // path); only the cold paths materialize a LispString via to_lisp_string.
@@ -2296,6 +2448,8 @@ impl<'a> Reader<'a> {
 
     fn push_symbol_token_code(&self, bytes: &mut ReaderTokenBytes, code: u32) {
         if !self.source_semantics.is_multibyte() {
+            // Unibyte object sources expose high bytes as BYTE8 characters,
+            // then add_char_to_buffer stores their original bytes (lread.c).
             bytes.push(if emacs_char::char_byte8_p(code) {
                 emacs_char::char_to_byte8(code)
             } else {
@@ -2320,6 +2474,20 @@ impl<'a> Reader<'a> {
             }
             _ => Err(self.error(&format!("expected '{}'", expected))),
         }
+    }
+
+    /// Match GNU unreadchar for peeks made by the grammar. Byte-backed
+    /// sources retain their ordinary cursor; a callable's cached lookahead
+    /// is evicted and its Lisp unget function is called at this boundary.
+    fn unread_source_lookahead(&mut self) -> Result<(), ReadError> {
+        if let ReaderSource::Callable(source) = self.source {
+            let outcome = source.unread(EmacsBytePos::new(self.pos));
+            self.step_cache.set(None);
+            // The source retains the original Flow. Stop immediately before
+            // any Lisp object is constructed; finish returns that Flow.
+            outcome.map_err(|_| self.end_of_file_error())?;
+        }
+        Ok(())
     }
 
     fn current_code(&self) -> Option<u32> {
@@ -2358,12 +2526,17 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn signal_error(&self, symbol: &str, data: Vec<Value>, message: &str) -> ReadError {
+    fn signal_error(
+        &self,
+        symbol: impl crate::emacs_core::error::IntoConditionSym,
+        data: Vec<Value>,
+        message: &str,
+    ) -> ReadError {
         ReadError {
             position: self.pos,
             message: message.to_string(),
             kind: ReadErrorKind::Signal,
-            signal_symbol: Some(symbol.to_string()),
+            signal_symbol: Some(symbol.condition_sym()),
             signal_data: data,
         }
     }
@@ -2386,13 +2559,23 @@ impl<'a> Reader<'a> {
     }
 
     fn read_circle_enabled(&self) -> bool {
-        self.obarray
-            .symbol_value_copied("read-circle")
+        self.environment
+            .value("read-circle")
             .is_none_or(|value| !value.is_nil())
     }
 
     fn skip_to_limit(&mut self) {
-        self.pos = self.limit;
+        match self.source {
+            ReaderSource::Callable(source) => {
+                while let Some((_, next)) = source.code_and_next(EmacsBytePos::new(self.pos)) {
+                    self.pos = next.get();
+                }
+            }
+            ReaderSource::Runtime(_)
+            | ReaderSource::FileBytes(_)
+            | ReaderSource::LispString(_)
+            | ReaderSource::Buffer(_) => self.pos = self.limit,
+        }
     }
 
     fn skip_dynamic_doc_string_in_non_file_source(&mut self) {
@@ -2408,6 +2591,15 @@ impl<'a> Reader<'a> {
     /// The legacy runtime-string source retains its Latin-1 envelope offsets.
     fn skip_exact_source_bytes(&mut self, len: usize) -> Result<(), ReadError> {
         match self.source {
+            ReaderSource::Callable(source) => {
+                for _ in 0..len {
+                    let Some((_, next)) = source.code_and_next(EmacsBytePos::new(self.pos)) else {
+                        return Err(self.end_of_file_error());
+                    };
+                    self.pos = next.get();
+                }
+                Ok(())
+            }
             // GNU `skip_dyn_bytes` skips BYTES; with the file's own bytes as
             // the source that is what a byte count means again.
             ReaderSource::FileBytes(_) => {
@@ -2498,7 +2690,7 @@ impl<'a> Reader<'a> {
             ReaderSource::Runtime(s) => s.as_bytes(),
             ReaderSource::FileBytes(b) => b,
             ReaderSource::LispString(input) => input.as_bytes(),
-            ReaderSource::Buffer(_) => return None,
+            ReaderSource::Buffer(_) | ReaderSource::Callable(_) => return None,
         };
         Some(&bytes[..self.limit.min(bytes.len())])
     }
@@ -2522,6 +2714,9 @@ impl<'a> Reader<'a> {
             return None;
         }
         match self.source {
+            ReaderSource::Callable(source) => source
+                .code_and_next(EmacsBytePos::new(pos))
+                .map(|(code, next)| (code, next.get())),
             ReaderSource::FileBytes(input) => {
                 // GNU source_file_get (lread.c): decode before tokenization,
                 // including symbols and character literals. Keep positions in
@@ -2619,6 +2814,9 @@ impl<'a> Reader<'a> {
             self.limit
         );
         match self.source {
+            ReaderSource::Callable(source) => {
+                source.slice(EmacsBytePos::new(start), EmacsBytePos::new(end))
+            }
             ReaderSource::Runtime(input) => input[start..end].to_string(),
             // Only ASCII numeric sub-parsers read this slice.
             ReaderSource::FileBytes(input) => {

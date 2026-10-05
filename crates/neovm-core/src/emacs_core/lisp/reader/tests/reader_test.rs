@@ -6288,3 +6288,6 @@ fn failed_read_from_buffer_leaves_point_where_reading_stopped() {
 
 #[cfg(test)]
 mod symbol_reader_gnu;
+
+#[cfg(test)]
+mod callable_gnu;

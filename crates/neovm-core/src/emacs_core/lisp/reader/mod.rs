@@ -12,6 +12,7 @@ use crate::tagged::SymbolMode;
 // storage imports removed — now using emacs_char directly
 use super::symbol::Obarray;
 use super::value::*;
+use super::value_reader::SymbolPositionMode;
 use crate::buffer::{EmacsBytePos, EmacsByteRange, LispCharPos1};
 use std::io::Write;
 use std::time::Duration;
@@ -1211,7 +1212,7 @@ impl ReadSourceObject {
 /// that calls `(read)` mid-load consumes its next top-level form.
 fn read_from_active_load_cursor(
     ctx: &mut crate::emacs_core::eval::Context,
-    locate_syms: bool,
+    symbol_position_mode: SymbolPositionMode,
 ) -> EvalResult {
     let Some(cursor) = ctx.load_read_cursors.last() else {
         // `standard-input` names the load stream but no load is active: treat
@@ -1238,7 +1239,7 @@ fn read_from_active_load_cursor(
         .read_one_range_with_locate_syms_with_symbols(
             pos,
             end,
-            locate_syms,
+            symbol_position_mode,
             &ctx.obarray,
             shorthands.as_ref(),
             ctx.symbol_mode(),
@@ -1255,21 +1256,24 @@ fn read_from_active_load_cursor(
     Ok(value)
 }
 
-fn signal_reader_error_from_string(e: super::value_reader::ReadError) -> Flow {
+pub(crate) fn signal_reader_error_from_string(e: super::value_reader::ReadError) -> Flow {
     match e.kind {
         super::value_reader::ReadErrorKind::EndOfFile => {
             ReadSourceObject::Anonymous.end_of_file_error()
         }
         super::value_reader::ReadErrorKind::Error => {
-            signal("error", vec![Value::string(e.message)])
+            signal(LispCondition::Error, vec![Value::string(e.message)])
         }
         super::value_reader::ReadErrorKind::InvalidReadSyntax => signal(
             LispCondition::InvalidReadSyntax,
             vec![Value::string(e.message)],
         ),
-        super::value_reader::ReadErrorKind::Signal => {
-            signal(e.signal_symbol.as_deref().unwrap_or("error"), e.signal_data)
-        }
+        super::value_reader::ReadErrorKind::Signal => signal(
+            crate::emacs_core::error::UserCondition::from(
+                e.signal_symbol.unwrap_or_else(|| intern("error")),
+            ),
+            e.signal_data,
+        ),
     }
 }
 
@@ -1282,14 +1286,17 @@ fn signal_reader_error_from_buffer(
             ReadSourceObject::Buffer(Value::make_buffer(buffer.id)).end_of_file_error()
         }
         super::value_reader::ReadErrorKind::Error => {
-            signal("error", vec![Value::string(e.message)])
+            signal(LispCondition::Error, vec![Value::string(e.message)])
         }
         super::value_reader::ReadErrorKind::InvalidReadSyntax => {
             signal_invalid_read_syntax_in_buffer_object(buffer, e.position, e.message)
         }
-        super::value_reader::ReadErrorKind::Signal => {
-            signal(e.signal_symbol.as_deref().unwrap_or("error"), e.signal_data)
-        }
+        super::value_reader::ReadErrorKind::Signal => signal(
+            crate::emacs_core::error::UserCondition::from(
+                e.signal_symbol.unwrap_or_else(|| intern("error")),
+            ),
+            e.signal_data,
+        ),
     }
 }
 
@@ -1340,7 +1347,7 @@ pub(crate) fn builtin_read_from_string(
     let result = read_from_string_impl_inner(
         &ctx.obarray,
         args,
-        false,
+        SymbolPositionMode::Bare,
         shorthands.as_ref(),
         ctx.symbol_mode(),
     )?;
@@ -1355,13 +1362,19 @@ pub(crate) fn read_from_string_impl(
     obarray: &crate::emacs_core::symbol::Obarray,
     args: Vec<Value>,
 ) -> EvalResult {
-    read_from_string_impl_inner(obarray, args, false, None, SymbolMode::Bare)
+    read_from_string_impl_inner(
+        obarray,
+        args,
+        SymbolPositionMode::Bare,
+        None,
+        SymbolMode::Bare,
+    )
 }
 
 fn read_from_string_impl_inner(
     obarray: &crate::emacs_core::symbol::Obarray,
     args: Vec<Value>,
-    locate_syms: bool,
+    symbol_position_mode: SymbolPositionMode,
     shorthands: Option<&super::value_reader::ReadSymbolShorthands>,
     mode: SymbolMode,
 ) -> EvalResult {
@@ -1443,7 +1456,7 @@ fn read_from_string_impl_inner(
     let read_result = read_source.read_one_range_with_locate_syms_with_symbols(
         start_byte,
         end_byte,
-        locate_syms,
+        symbol_position_mode,
         obarray,
         shorthands,
         mode,
@@ -1473,6 +1486,9 @@ fn read_from_string_impl_inner(
 /// - If STREAM is nil, read from `standard-input`.
 /// - If STREAM is a buffer, read from buffer at point.
 /// - If STREAM is a marker, read from its buffer and advance only the marker.
+/// - Any other object is a READCHARFUN: call it with no arguments for each
+///   character, and with one character to push that character back
+///   (GNU `src/lread.c:323-327`, `486-496`).
 pub fn builtin_read(ctx: &mut crate::emacs_core::eval::Context, args: Vec<Value>) -> EvalResult {
     builtin_read_impl(ctx, args, false)
 }
@@ -1489,8 +1505,11 @@ enum ResolvedReadStream {
     Buffer(crate::buffer::BufferId),
     ActiveLoadCursor,
     Minibuffer,
-    FunctionSymbol(Value),
-    Unsupported(Value),
+    /// GNU `init_source` (`src/lread.c:323-327`): anything that is not a
+    /// buffer, marker, string, or the load-file sentinel is called as a
+    /// READCHARFUN. A non-function signals from that call (`void-function`,
+    /// `invalid-function`), not from stream classification.
+    Callable(Value),
 }
 
 impl ResolvedReadStream {
@@ -1500,30 +1519,36 @@ impl ResolvedReadStream {
             ValueKind::T => Self::Minibuffer,
             ValueKind::String => Self::String(stream),
             ValueKind::Symbol(symbol) if load_token.identifies(symbol) => Self::ActiveLoadCursor,
-            ValueKind::Symbol(_) => Self::FunctionSymbol(stream),
+            // GNU `Fread` (`src/lread.c:2474-2481`) rewrites `t` to the
+            // symbol `read-char`, then that symbol (and only that symbol)
+            // selects the minibuffer. An uninterned or other symbol is a
+            // normal READCHARFUN.
+            ValueKind::Symbol(symbol) if symbol == intern("read-char") => Self::Minibuffer,
             ValueKind::Veclike(VecLikeType::Marker) => Self::Marker(stream),
             ValueKind::Veclike(VecLikeType::Buffer) => {
                 Self::Buffer(stream.as_buffer_id().expect("buffer value kind"))
             }
-            ValueKind::Fixnum(_)
+            ValueKind::Symbol(_)
+            | ValueKind::Fixnum(_)
             | ValueKind::Cons
             | ValueKind::Float
             | ValueKind::Subr(_)
             | ValueKind::Veclike(_)
             | ValueKind::Unbound
-            | ValueKind::Unknown => Self::Unsupported(stream),
+            | ValueKind::Unknown => Self::Callable(stream),
         }
     }
 }
 
 /// Shared implementation for `read` and `read-positioning-symbols`.
-/// When `locate_syms` is true, every interned symbol (except nil) is
-/// wrapped in a `symbol-with-pos` object carrying its source byte offset.
+/// In positioned mode, every interned symbol (except nil) is
+/// wrapped in a `symbol-with-pos` object carrying GNU's read-character offset.
 pub fn builtin_read_impl(
     ctx: &mut crate::emacs_core::eval::Context,
     args: Vec<Value>,
     locate_syms: bool,
 ) -> EvalResult {
+    let symbol_position_mode = SymbolPositionMode::from(locate_syms);
     expect_max_args("read", &args, 1)?;
 
     let stream = if args.is_empty() || args[0].is_nil() {
@@ -1548,7 +1573,7 @@ pub fn builtin_read_impl(
             let result = read_from_string_impl_inner(
                 &ctx.obarray,
                 vec![stream],
-                locate_syms,
+                symbol_position_mode,
                 shorthands.as_ref(),
                 ctx.symbol_mode(),
             )?;
@@ -1584,7 +1609,7 @@ pub fn builtin_read_impl(
                     buf,
                     EmacsByteRange::new(start, end),
                     super::value_reader::BufferReadcharOffsetOrigin::Zero,
-                    locate_syms,
+                    symbol_position_mode,
                     &ctx.obarray,
                     shorthands.as_ref(),
                     ctx.symbol_mode(),
@@ -1651,7 +1676,7 @@ pub fn builtin_read_impl(
                         buf,
                         EmacsByteRange::new(start, end),
                         super::value_reader::BufferReadcharOffsetOrigin::BufferPoint,
-                        locate_syms,
+                        symbol_position_mode,
                         &ctx.obarray,
                         shorthands.as_ref(),
                         ctx.symbol_mode(),
@@ -1684,9 +1709,11 @@ pub fn builtin_read_impl(
             ctx.obarray_mut().materialize_read_symbols(value);
             Ok(value)
         }
-        ResolvedReadStream::ActiveLoadCursor => read_from_active_load_cursor(ctx, locate_syms),
-        ResolvedReadStream::FunctionSymbol(stream) => {
-            Err(signal(LispCondition::VoidFunction, vec![stream]))
+        ResolvedReadStream::ActiveLoadCursor => {
+            read_from_active_load_cursor(ctx, symbol_position_mode)
+        }
+        ResolvedReadStream::Callable(stream) => {
+            read_from_callable(ctx, stream, symbol_position_mode)
         }
         ResolvedReadStream::Minibuffer => {
             // GNU `Fread` (lread.c): a `t` stream -- including the batch default
@@ -1701,7 +1728,7 @@ pub fn builtin_read_impl(
             let result = read_from_string_impl_inner(
                 &ctx.obarray,
                 vec![input],
-                locate_syms,
+                symbol_position_mode,
                 shorthands.as_ref(),
                 ctx.symbol_mode(),
             )?;
@@ -1714,11 +1741,20 @@ pub fn builtin_read_impl(
                 _ => Ok(result),
             }
         }
-        ResolvedReadStream::Unsupported(stream) => {
-            // Unsupported stream source type for read-char function protocol.
-            Err(signal(LispCondition::InvalidFunction, vec![stream]))
-        }
     }
+}
+
+/// GNU `source_function_get/unget` (`src/lread.c:486-496`) drives the same
+/// parser as strings and buffers. Callback get/unget follow GNU token boundaries;
+/// the source owns callback errors and returns them before parser errors.
+fn read_from_callable(
+    ctx: &mut crate::emacs_core::eval::Context,
+    func: Value,
+    symbol_position_mode: SymbolPositionMode,
+) -> EvalResult {
+    let value = super::value_reader::read_from_callable(ctx, func, symbol_position_mode)?;
+    ctx.obarray_mut().materialize_read_symbols(value);
+    Ok(value)
 }
 
 // ---------------------------------------------------------------------------

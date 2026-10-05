@@ -474,7 +474,7 @@ fn read_error_for_load(
             None,
         ),
         super::value_reader::ReadErrorKind::Signal => EvalError::signal(
-            intern(e.signal_symbol.as_deref().unwrap_or("error")),
+            e.signal_symbol.unwrap_or_else(|| intern("error")),
             e.signal_data,
             None,
         ),

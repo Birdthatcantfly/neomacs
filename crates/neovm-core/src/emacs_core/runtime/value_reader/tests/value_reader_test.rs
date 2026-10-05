@@ -1379,10 +1379,10 @@ fn string_literal_representation_matches_gnu_at_the_closing_quote() {
 }
 
 #[cfg(test)]
-mod symbol_contract;
+mod escapes_gnu;
 
 #[cfg(test)]
 mod syntax_compat;
 
 #[cfg(test)]
-mod escapes_gnu;
+mod symbol_contract;

@@ -855,6 +855,32 @@ pub struct InFlightRoots {
     _not_send: std::marker::PhantomData<*const ()>,
 }
 
+/// A mutator-local Lisp value retained independently of temporary evaluator
+/// root scopes. The existing Context registry follows Context activation;
+/// the handle releases its root when dropped. The pin stays private so the
+/// in-flight payload construction contract remains sealed to this module.
+#[derive(Debug)]
+#[must_use = "dropping this handle ends retention of its Lisp value"]
+pub(crate) struct RetainedLispValue {
+    value: Value,
+    _pin: InFlightRoots,
+}
+
+impl From<Value> for RetainedLispValue {
+    fn from(value: Value) -> Self {
+        Self {
+            value,
+            _pin: InFlightRoots::pin([value]),
+        }
+    }
+}
+
+impl AsRef<Value> for RetainedLispValue {
+    fn as_ref(&self) -> &Value {
+        &self.value
+    }
+}
+
 impl InFlightRoots {
     /// Pin every traceable value in `payload` for the handle's lifetime.
     ///
@@ -1093,6 +1119,22 @@ impl IntoConditionSym for LispCondition {
     #[inline(always)]
     fn condition_sym(self) -> SymId {
         intern(self.name())
+    }
+}
+
+/// A Lisp condition selected dynamically; retains the actual symbol identity.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct UserCondition(SymId);
+
+impl From<SymId> for UserCondition {
+    fn from(symbol: SymId) -> Self {
+        Self(symbol)
+    }
+}
+
+impl IntoConditionSym for UserCondition {
+    fn condition_sym(self) -> SymId {
+        self.0
     }
 }
 
