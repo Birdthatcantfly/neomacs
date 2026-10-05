@@ -96,39 +96,33 @@ impl Default for PrintOptions {
     }
 }
 
-/// Return the test-name symbol GNU would print for this table, or `None` when
-/// the test is the default `eql` (in which case GNU omits the ` test ` field).
-///
-/// Mirrors GNU's `!BASE_EQ (h->test->name, Qeql)` check (print.c): the
-/// comparison is against the test *name* symbol, so a table created with
-/// `:test 'eql` (which sets `test_name` to `eql`) is treated as the default.
-fn hash_table_printed_test_name(table: &LispHashTable) -> Option<&'static str> {
-    match table.test_name {
-        Some(test_name) => {
-            let name = resolve_sym(test_name);
-            if name == "eql" { None } else { Some(name) }
-        }
-        None => {
-            if matches!(table.test, HashTableTest::Eql) {
-                None
-            } else {
-                Some(table.test.name())
-            }
-        }
-    }
+/// GNU prints the test symbol through `print_object`, preserving name bytes,
+/// the caller's escape mode, and EQ identity when omitting the default eql test
+/// (src/print.c:2636-2640). No UTF-8 conversion is valid for a Lisp symbol name.
+/// The borrowed table is confined to its mutator; this helper stores no state.
+fn hash_table_printed_test_name(table: &LispHashTable) -> Option<Value> {
+    let name = match table.test_name {
+        Some(id) => Value::symbol(id),
+        None => Value::symbol(table.test.name()),
+    };
+    (name != Value::symbol("eql")).then_some(name)
 }
 
-fn append_hash_table_test_string(table: &LispHashTable, out: &mut StatefulPrintOutput) {
+fn append_hash_table_test_string(
+    table: &LispHashTable,
+    out: &mut StatefulPrintOutput,
+    state: &mut PrintState<'_>,
+) {
     if let Some(name) = hash_table_printed_test_name(table) {
         out.push_str(" test ");
-        out.push_str(name);
+        write_value_stateful(&name, out, state);
     }
 }
 
-fn append_hash_table_test_bytes(table: &LispHashTable, out: &mut Vec<u8>) {
+fn append_hash_table_test_bytes(table: &LispHashTable, out: &mut Vec<u8>, options: PrintOptions) {
     if let Some(name) = hash_table_printed_test_name(table) {
         out.extend_from_slice(b" test ");
-        out.extend_from_slice(name.as_bytes());
+        append_print_value_bytes(&name, out, options);
     }
 }
 
@@ -1271,17 +1265,6 @@ fn with_bytecode_literal_slots<R>(value: &Value, f: impl FnOnce(&[Value]) -> R) 
     Some(result)
 }
 
-/// Public wrapper over [`with_bytecode_literal_slots`] so other modules (the
-/// princ byte printer in `misc_eval`) can iterate a byte-code object's literal
-/// slots — `[arglist, code, constants, depth, doc?, interactive?, …]` — in the
-/// same order the `#[…]` printer uses. Returns `None` for non-byte-code values.
-pub(crate) fn with_bytecode_literal_slots_public<R>(
-    value: &Value,
-    f: impl FnOnce(&[Value]) -> R,
-) -> Option<R> {
-    with_bytecode_literal_slots(value, f)
-}
-
 fn write_bytecode_literal_stateful(
     value: &Value,
     out: &mut StatefulPrintOutput,
@@ -1579,7 +1562,7 @@ fn write_hash_table_stateful(value: &Value, out: &mut StatefulPrintOutput, state
     let table = value.as_hash_table().unwrap().clone();
     out.push_str("#s(hash-table");
 
-    append_hash_table_test_string(&table, out);
+    append_hash_table_test_string(&table, out, state);
 
     if let Some(ref weakness) = table.weakness {
         out.push_str(" weakness ");
@@ -2755,7 +2738,7 @@ fn append_hash_table_bytes(value: &Value, out: &mut Vec<u8>, options: PrintOptio
     let table = value.as_hash_table().unwrap().clone();
     out.extend_from_slice(b"#s(hash-table");
 
-    append_hash_table_test_bytes(&table, out);
+    append_hash_table_test_bytes(&table, out, options);
 
     if let Some(ref weakness) = table.weakness {
         out.extend_from_slice(b" weakness ");

@@ -1568,15 +1568,14 @@ impl FormatOutput {
     }
 
     #[inline]
-    fn promote_printed(&mut self, printed: &[u8]) -> Result<(), Flow> {
-        match self.encoding {
-            FormatStringEncoding::Multibyte => Ok(()),
-            FormatStringEncoding::Unibyte => {
-                if !printed.is_ascii() && result_bytes_imply_multibyte(printed) {
-                    self.promote_multibyte()?;
-                }
-                Ok(())
+    fn promote_printed(&mut self, printed: &PrintedFormatFragment) -> Result<(), Flow> {
+        match (self.encoding, printed.encoding) {
+            (FormatStringEncoding::Unibyte, PrintedFormatEncoding::AsciiUnibyte) => Ok(()),
+            (FormatStringEncoding::Unibyte, PrintedFormatEncoding::Multibyte) => {
+                self.promote_multibyte()
             }
+            (FormatStringEncoding::Multibyte, PrintedFormatEncoding::AsciiUnibyte) => Ok(()),
+            (FormatStringEncoding::Multibyte, PrintedFormatEncoding::Multibyte) => Ok(()),
         }
     }
 
@@ -2781,6 +2780,39 @@ fn emacs_bytes_to_unibyte(mut data: Vec<u8>) -> Vec<u8> {
     data
 }
 
+/// Encoding of a fresh printer scratch result (GNU print.c:829-831).
+/// The printer produces canonical Emacs bytes; an all-ASCII result becomes
+/// unibyte, while every other result retains the scratch buffer's multibyteness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrintedFormatEncoding {
+    AsciiUnibyte,
+    Multibyte,
+}
+
+/// Owns canonical printer output together with its derived encoding. Moving
+/// the Vec into this fragment adds no allocation or byte copy. Source strings
+/// retain their own encoding separately instead of using this scratch policy.
+#[derive(Debug)]
+struct PrintedFormatFragment {
+    bytes: Vec<u8>,
+    encoding: PrintedFormatEncoding,
+}
+
+static_assertions::assert_impl_all!(PrintedFormatEncoding: Send, Sync);
+static_assertions::assert_impl_all!(PrintedFormatFragment: Send, Sync);
+
+impl PrintedFormatFragment {
+    #[must_use]
+    fn from_printer_bytes(bytes: Vec<u8>) -> Self {
+        let encoding = if bytes.is_ascii() {
+            PrintedFormatEncoding::AsciiUnibyte
+        } else {
+            PrintedFormatEncoding::Multibyte
+        };
+        Self { bytes, encoding }
+    }
+}
+
 // The tuple is the private, single-return handoff for bytes, property spans,
 // source spans, and multibyte state; naming its four parts occurs at the caller.
 #[allow(clippy::type_complexity)]
@@ -3005,14 +3037,13 @@ fn do_format(
                             },
                         )
                     } else {
+                        let printed = PrintedFormatFragment::from_printer_bytes(princ_fn(&arg));
+                        result.promote_printed(&printed)?;
                         (
-                            std::borrow::Cow::Owned(princ_fn(&arg)),
+                            std::borrow::Cow::Owned(printed.bytes),
                             FormatStringEncoding::Multibyte,
                         )
                     };
-                if !arg_is_string {
-                    result.promote_printed(&s)?;
-                }
                 let budget = FormatRemainingOutput::new(&result);
                 let (formatted, content_byte_start_in_formatted, content_byte_end_in_formatted) =
                     format_string_spec_tracked(&s, src_multibyte, &spec, ctx, budget)?;
@@ -3046,10 +3077,17 @@ fn do_format(
                 formatted
             }
             'S' => {
-                let s = prin1_fn(&args[this_arg_idx]);
-                result.promote_printed(&s)?;
+                let printed =
+                    PrintedFormatFragment::from_printer_bytes(prin1_fn(&args[this_arg_idx]));
+                result.promote_printed(&printed)?;
                 let budget = FormatRemainingOutput::new(&result);
-                format_string_spec(&s, FormatStringEncoding::Multibyte, &spec, ctx, budget)?
+                format_string_spec(
+                    &printed.bytes,
+                    FormatStringEncoding::Multibyte,
+                    &spec,
+                    ctx,
+                    budget,
+                )?
             }
             'd' | 'i' | 'b' | 'B' | 'o' | 'x' | 'X' => {
                 // Plain `%d` on a fixnum with no property tracking: render the

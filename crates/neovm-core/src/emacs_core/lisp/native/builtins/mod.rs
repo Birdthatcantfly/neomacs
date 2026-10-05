@@ -418,7 +418,6 @@ pub(super) use super::navigation;
 pub(super) use super::print;
 pub(super) use super::regex;
 pub(super) use super::subr_info;
-pub(super) use super::terminal;
 pub(super) use super::textprop;
 pub(super) use super::value;
 pub(super) use super::window_cmds;

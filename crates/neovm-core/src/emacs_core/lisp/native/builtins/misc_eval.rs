@@ -1740,253 +1740,35 @@ fn write_terpri_output(eval: &mut super::eval::Context, target: Value) -> Result
     }
 }
 
-/// Issue #131: render the `princ` form of `value` as canonical Emacs
-/// internal-encoding bytes — a string emits its bytes verbatim (a real
-/// Private-Use glyph survives instead of being decoded as a raw byte), symbol /
-/// buffer names emit their name bytes, and cons / vector / record recurse with
-/// `princ` semantics. Opaque handles fall back to the byte `prin1` sink. This is
-/// the sole `princ` producer (the former storage-string `print_value_princ*`
-/// functions have been retired).
+/// Issue #131: render the `princ` form as canonical Emacs bytes.
+/// `%s` inserts a string argument directly; aggregate objects share the main
+/// byte-safe object printer (GNU editfns.c:3675-3683, print.c:2503-2525).
+/// This immutable path cannot evaluate Lisp; bytes are owned before output.
 pub(crate) fn print_value_princ_bytes(
     ctx: &crate::emacs_core::eval::Context,
     value: &Value,
 ) -> Vec<u8> {
-    // Top-level `%s`/`princ`: a string ARGUMENT is inserted by `Fformat` /
-    // `princ` directly, without `print_object`, so its raw bytes pass through
-    // verbatim. Non-string arguments are printed via `print_object`, which
-    // octal-escapes any eight-bit bytes in nested strings.
-    print_value_princ_bytes_inner(ctx, value, false)
+    if let Some(string) = value.as_lisp_string() {
+        return super::print::princ_string_bytes(
+            string,
+            super::print::PrincStringOutput::PreserveByte8,
+        )
+        .into_owned();
+    }
+    print_value_princ_bytes_to_multibyte_buffer(ctx, value)
 }
 
-/// Render `value` as GNU `Fprinc` does when its print target is a multibyte
-/// buffer, notably `Vprin1_to_string_buffer` in `error-message-string`.
-///
-/// A top-level unibyte string is the one destination-sensitive case: `%s`
-/// returns its raw bytes, while `Fprinc` into a multibyte buffer octal-escapes
-/// eight-bit bytes.  Every non-string object follows the ordinary recursive
-/// `princ` printer, which already gives live buffers their names and applies
-/// nested no-escape semantics.
+/// No-escape printing into a multibyte text stream, including error data.
+/// Source encoding and aggregate traversal share the public object's printer.
+/// This immutable helper cannot evaluate Lisp or expose a borrowed source.
 pub(crate) fn print_value_princ_bytes_to_multibyte_buffer(
     ctx: &crate::emacs_core::eval::Context,
     value: &Value,
 ) -> Vec<u8> {
-    if let Some(string) = value.as_lisp_string() {
-        return if string.is_multibyte() {
-            string.as_bytes().to_vec()
-        } else {
-            crate::emacs_core::string_escape::octal_escape_unibyte_eight_bit(string.as_bytes())
-        };
-    }
-    print_value_princ_bytes_inner(ctx, value, false)
-}
-
-/// `nested` is true for elements reached through an aggregate (list, vector,
-/// record, byte-code object, …), i.e. printed by GNU's
-/// `print_object (…, escapeflag=false)`. In that path, GNU's `print_string`
-/// octal-escapes eight-bit bytes (`\NNN`) even though it omits the surrounding
-/// quotes; only a TOP-LEVEL string argument to `%s`/`princ` is emitted raw.
-fn print_value_princ_bytes_inner(
-    ctx: &crate::emacs_core::eval::Context,
-    value: &Value,
-    nested: bool,
-) -> Vec<u8> {
-    let print_quoted = ctx
-        .obarray
-        .symbol_value_copied("print-quoted")
-        .is_none_or(|v| v.is_truthy());
-    let prin1_bytes = |v: &Value| {
-        super::error::print_value_bytes_in_state(
-            &ctx.obarray,
-            &ctx.buffers,
-            &ctx.frames,
-            &ctx.threads,
-            v,
-        )
-    };
-    let recurse = |v: &Value| print_value_princ_bytes_inner(ctx, v, true);
-    if super::terminal::pure::print_terminal_handle(value).is_some()
-        || ctx.threads.thread_id_from_handle(value).is_some()
-        || ctx.threads.mutex_id_from_handle(value).is_some()
-        || ctx
-            .threads
-            .condition_variable_id_from_handle(value)
-            .is_some()
-    {
-        return prin1_bytes(value);
-    }
-    match value.kind() {
-        ValueKind::String => value
-            .as_lisp_string()
-            .map(|ls| {
-                if ls.is_multibyte() {
-                    // Already canonical Emacs internal encoding — a real
-                    // Private-Use glyph survives verbatim (issue #131).
-                    ls.as_bytes().to_vec()
-                } else if nested {
-                    // Nested under `print_object` (escapeflag=false): GNU's
-                    // `print_string` octal-escapes the raw eight-bit bytes
-                    // (`\NNN`) while still omitting the surrounding quotes. This
-                    // is what makes `(format "%s" (byte-compile …))` render the
-                    // code string as `\211\300…` rather than the raw bytes.
-                    crate::emacs_core::string_escape::octal_escape_unibyte_eight_bit(ls.as_bytes())
-                } else {
-                    // A unibyte string's raw bytes are not a valid multibyte
-                    // sequence; promote high bytes to eight-bit characters so
-                    // the canonical-bytes consumer gets well-formed Emacs bytes.
-                    crate::emacs_core::emacs_char::str_to_multibyte(ls.as_bytes())
-                }
-            })
-            .unwrap_or_default(),
-        ValueKind::Symbol(id) => resolve_sym(id).as_bytes().to_vec(),
-        ValueKind::Veclike(VecLikeType::Buffer) => {
-            let id = value.as_buffer_id().unwrap();
-            if let Some(buf) = ctx.buffers.get(id) {
-                return buf.name_runtime_string_owned().into_bytes();
-            }
-            if ctx.buffers.dead_buffer_last_name_value(id).is_some() {
-                return b"#<killed buffer>".to_vec();
-            }
-            prin1_bytes(value)
-        }
-        ValueKind::Cons => {
-            if let Some(shorthand) =
-                print_value_princ_bytes_list_shorthand(value, print_quoted, &recurse)
-            {
-                return shorthand;
-            }
-            let mut out = vec![b'('];
-            let mut cursor = *value;
-            let mut first = true;
-            loop {
-                match cursor.kind() {
-                    ValueKind::Cons => {
-                        if !first {
-                            out.push(b' ');
-                        }
-                        let pair_car = cursor.cons_car();
-                        let pair_cdr = cursor.cons_cdr();
-                        out.extend_from_slice(&recurse(&pair_car));
-                        cursor = pair_cdr;
-                        first = false;
-                    }
-                    ValueKind::Nil => break,
-                    _other => {
-                        if !first {
-                            out.extend_from_slice(b" . ");
-                        }
-                        out.extend_from_slice(&recurse(&cursor));
-                        break;
-                    }
-                }
-            }
-            out.push(b')');
-            out
-        }
-        ValueKind::Veclike(VecLikeType::Vector) => {
-            let items = value.as_vector_data().unwrap().clone();
-            let mut out = vec![b'['];
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(b' ');
-                }
-                out.extend_from_slice(&recurse(item));
-            }
-            out.push(b']');
-            out
-        }
-        ValueKind::Veclike(VecLikeType::Record) => {
-            let items = value.as_record_data().unwrap().clone();
-            let mut out = b"#s(".to_vec();
-            for (i, item) in items.iter().enumerate() {
-                if i > 0 {
-                    out.push(b' ');
-                }
-                out.extend_from_slice(&recurse(item));
-            }
-            out.push(b')');
-            out
-        }
-        // Interpreted-function closures are PVEC_CLOSURE in GNU and use the
-        // same readable `#[...]` traversal as vectors, with `escapeflag=false`
-        // propagated to every slot (src/print.c:2599-2614).
-        ValueKind::Veclike(VecLikeType::Lambda) => {
-            let mut out = b"#[".to_vec();
-            if let Some(slots) = value.closure_slots() {
-                for (i, item) in slots.iter().enumerate() {
-                    if i > 0 {
-                        out.push(b' ');
-                    }
-                    out.extend_from_slice(&recurse(item));
-                }
-            }
-            out.push(b']');
-            out
-        }
-        // Byte-code objects are printed by GNU's `princ` through
-        // `print_object (obj, printcharfun, escapeflag=false)`
-        // (`src/print.c`), recursing into the slots WITHOUT the escape flag, so
-        // nested strings drop their surrounding quotes — but eight-bit bytes are
-        // still octal-escaped by `print_string` (handled by the `nested` String
-        // arm above). Previously these fell through to `prin1_bytes`, which kept
-        // the quotes: `(format "%s" (byte-compile …))` printed `#[257 "\211…"]`
-        // where GNU prints `#[257 \211…]`. Recurse over the byte-code literal
-        // slots in princ mode to match GNU byte-for-byte.
-        ValueKind::Veclike(VecLikeType::ByteCode) => {
-            let mut out = b"#[".to_vec();
-            if let Some(slot_bytes) =
-                super::print::with_bytecode_literal_slots_public(value, |slots| {
-                    let mut inner = Vec::new();
-                    for (i, item) in slots.iter().enumerate() {
-                        if i > 0 {
-                            inner.push(b' ');
-                        }
-                        inner.extend_from_slice(&recurse(item));
-                    }
-                    inner
-                })
-            {
-                out.extend_from_slice(&slot_bytes);
-                out.push(b']');
-                out
-            } else {
-                prin1_bytes(value)
-            }
-        }
-        _other => prin1_bytes(value),
-    }
-}
-
-/// Recognise the `'x` / `#'x` / `` `x `` / `,x` / `,@x` two-element-list
-/// shorthands for [`print_value_princ_bytes`] and render them as Emacs bytes.
-fn print_value_princ_bytes_list_shorthand(
-    value: &Value,
-    print_quoted: bool,
-    render: &dyn Fn(&Value) -> Vec<u8>,
-) -> Option<Vec<u8>> {
-    if !print_quoted {
-        return None;
-    }
-
-    let items = super::value::list_to_vec(value)?;
-    if items.len() != 2 {
-        return None;
-    }
-
-    let head = match items[0].kind() {
-        ValueKind::Symbol(id) => resolve_sym(id),
-        _ => return None,
-    };
-    let prefix: &[u8] = match head {
-        "quote" => b"'",
-        "function" => b"#'",
-        "`" => b"`",
-        "," => b",",
-        ",@" => b",@",
-        _ => return None,
-    };
-    let mut out = prefix.to_vec();
-    out.extend_from_slice(&render(&items[1]));
-    Some(out)
+    let mut options = super::error::print_options_from_state(&ctx.obarray, None);
+    options.print_noescape = true;
+    options.print_escape_nonascii = true;
+    super::error::print_value_bytes_in_state_with_options(ctx, value, options)
 }
 
 fn print_options_from_overrides(
@@ -2153,7 +1935,13 @@ pub(crate) fn builtin_princ(eval: &mut super::eval::Context, args: Vec<Value>) -
         return builtin_princ_impl(eval, args);
     }
 
-    let bytes = print_value_princ_bytes(eval, &args[0]);
+    let mut options = super::error::print_options_from_state(
+        &eval.obarray,
+        print_target_current_buffer(eval, target),
+    );
+    options.print_noescape = true;
+    options.print_string_destination = super::print::PrincStringDestination::Callable;
+    let bytes = super::error::print_value_bytes_in_state_with_options(eval, &args[0], options);
     let roots = eval.save_specpdl_roots();
     eval.push_specpdl_root(target);
     let princ_result =
@@ -2172,7 +1960,14 @@ pub(crate) fn builtin_princ_impl(
     // is inserted as itself, while genuine eight-bit / non-Unicode content is
     // carried as its disjoint extended encoding — neither is ever mistaken for
     // the other, retiring the storage-string sink princ used to fall back to.
-    let bytes = print_value_princ_bytes(ctx, &args[0]);
+    let target = resolve_print_target_in_state(ctx, args.get(1));
+    let mut options = super::error::print_options_from_state(
+        &ctx.obarray,
+        print_target_current_buffer(ctx, target),
+    );
+    options.print_noescape = true;
+    apply_print_target_escape_bindings(ctx, target, &mut options);
+    let bytes = super::error::print_value_bytes_in_state_with_options(ctx, &args[0], options);
     write_print_bytes_from_ctx(ctx, args.get(1), &bytes)?;
     Ok(args[0])
 }
