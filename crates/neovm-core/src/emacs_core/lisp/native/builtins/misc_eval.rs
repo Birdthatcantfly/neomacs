@@ -8,13 +8,6 @@ use crate::emacs_core::symbol::Obarray;
 use crate::emacs_core::textprop::{StickinessProperty, TextPropertyControlVariable};
 use crate::tagged::value::SymbolMode;
 
-fn runtime_string_value(value: Value) -> String {
-    value
-        .as_lisp_string()
-        .map(|ls| crate::emacs_core::emacs_char::to_utf8_lossy(ls.as_bytes()))
-        .expect("ValueKind::String must carry LispString payload")
-}
-
 pub(crate) fn builtin_get_pos_property(
     eval: &mut super::eval::Context,
     args: Vec<Value>,
@@ -1324,15 +1317,11 @@ pub(crate) fn resolve_print_target_in_state(
 /// The buffer a (resolved) print target writes into, or `None` when the target
 /// is the echo area / `t` / a printer function.
 fn print_target_buffer_id(
-    ctx: &crate::emacs_core::eval::Context,
+    _ctx: &crate::emacs_core::eval::Context,
     target: Value,
 ) -> Option<crate::buffer::BufferId> {
     match target.kind() {
         ValueKind::Veclike(VecLikeType::Buffer) => target.as_buffer_id(),
-        ValueKind::String => {
-            let name = runtime_string_value(target);
-            ctx.buffers.find_buffer_by_name(&name)
-        }
         _ if super::marker::is_marker(&target) => {
             let (buffer_id, _, _) = super::marker::marker_logical_fields(&target)?;
             buffer_id
@@ -1573,16 +1562,6 @@ fn write_print_output_to_target(
             let id = target.as_buffer_id().unwrap();
             insert_print_lisp_string_to_buffer_target(ctx, id, &text)
         }
-        ValueKind::String => {
-            let name = runtime_string_value(target);
-            let Some(id) = ctx.buffers.find_buffer_by_name(&name) else {
-                return Err(signal(
-                    "error",
-                    vec![Value::string(format!("No buffer named {name}"))],
-                ));
-            };
-            insert_print_lisp_string_to_buffer_target(ctx, id, &text)
-        }
         _other if super::marker::is_marker(&target) => {
             insert_print_lisp_string_to_marker_target(ctx, target, &text)
         }
@@ -1619,16 +1598,6 @@ fn write_print_bytes_to_target(
             let id = target.as_buffer_id().unwrap();
             insert_print_lisp_string_to_buffer_target(ctx, id, &ls)
         }
-        ValueKind::String => {
-            let name = runtime_string_value(target);
-            let Some(id) = ctx.buffers.find_buffer_by_name(&name) else {
-                return Err(signal(
-                    "error",
-                    vec![Value::string(format!("No buffer named {name}"))],
-                ));
-            };
-            insert_print_lisp_string_to_buffer_target(ctx, id, &ls)
-        }
         _other if super::marker::is_marker(&target) => {
             insert_print_lisp_string_to_marker_target(ctx, target, &ls)
         }
@@ -1636,9 +1605,9 @@ fn write_print_bytes_to_target(
     }
 }
 
+// GNU src/print.c:132-162, 304-309: strings enter callable dispatch.
 pub(crate) fn print_target_is_direct(target: Value) -> bool {
-    (target.is_t() || target.is_nil() || target.is_buffer() || target.is_string())
-        || super::marker::is_marker(&target)
+    (target.is_t() || target.is_nil() || target.is_buffer()) || super::marker::is_marker(&target)
 }
 
 /// Walk canonical Emacs internal-encoding bytes one character at a time and
@@ -1702,23 +1671,6 @@ fn write_terpri_output(eval: &mut super::eval::Context, target: Value) -> Result
         }
         ValueKind::Veclike(VecLikeType::Buffer) => {
             let id = target.as_buffer_id().unwrap();
-            if eval.buffers.get(id).is_none() {
-                return Err(signal(
-                    "error",
-                    vec![Value::string("Output buffer no longer exists")],
-                ));
-            }
-            let _ = eval.buffers.insert_into_buffer(id, "\n");
-            Ok(())
-        }
-        ValueKind::String => {
-            let name = runtime_string_value(target);
-            let Some(id) = eval.buffers.find_buffer_by_name(&name) else {
-                return Err(signal(
-                    "error",
-                    vec![Value::string(format!("No buffer named {name}"))],
-                ));
-            };
             if eval.buffers.get(id).is_none() {
                 return Err(signal(
                     "error",
@@ -2288,25 +2240,6 @@ pub(crate) fn finish_write_char_in_eval(
                 let _ = eval.buffers.insert_lisp_string_into_buffer(id, &ls);
             }
         }
-        ValueKind::String => {
-            if let Some(bytes) = write_char_emacs_bytes(char_code) {
-                let name = runtime_string_value(target);
-                let Some(id) = eval.buffers.find_buffer_by_name(&name) else {
-                    return Err(signal(
-                        "error",
-                        vec![Value::string(format!("No buffer named {name}"))],
-                    ));
-                };
-                if eval.buffers.get(id).is_none() {
-                    return Err(signal(
-                        "error",
-                        vec![Value::string("Output buffer no longer exists")],
-                    ));
-                }
-                let ls = crate::heap_types::LispString::from_emacs_bytes(bytes);
-                let _ = eval.buffers.insert_lisp_string_into_buffer(id, &ls);
-            }
-        }
         _other => {
             let roots = eval.save_specpdl_roots();
             eval.push_specpdl_root(target);
@@ -2483,3 +2416,7 @@ pub(crate) fn builtin_current_idle_time(
 #[cfg(test)]
 #[path = "tests/terpri_units.rs"]
 mod terpri_units;
+
+#[cfg(test)]
+#[path = "tests/printer_target_units.rs"]
+mod printer_target_units;
