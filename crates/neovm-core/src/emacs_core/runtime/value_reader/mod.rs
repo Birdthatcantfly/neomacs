@@ -2446,8 +2446,12 @@ impl<'a> Reader<'a> {
     }
 
     fn push_symbol_token_code(&self, bytes: &mut ReaderTokenBytes, code: u32) {
-        if !self.source_semantics.is_multibyte() && code <= 0xFF {
-            bytes.push(code as u8);
+        if !self.source_semantics.is_multibyte() {
+            bytes.push(if emacs_char::char_byte8_p(code) {
+                emacs_char::char_to_byte8(code)
+            } else {
+                code as u8
+            });
             return;
         }
 
@@ -2709,7 +2713,7 @@ impl<'a> Reader<'a> {
 
         if !self.source_semantics.is_multibyte() {
             let byte = *bytes.get(pos)?;
-            return Some((byte as u32, 1));
+            return Some((emacs_char::unibyte_to_char(byte), 1));
         }
 
         let (code, width) = emacs_char::string_char(&bytes[pos..]);
@@ -2726,7 +2730,7 @@ impl<'a> Reader<'a> {
 
         if !self.source_semantics.is_multibyte() {
             let byte = input.emacs_byte_at_pos(EmacsBytePos::new(pos))?;
-            return Some((byte as u32, 1));
+            return Some((emacs_char::unibyte_to_char(byte), 1));
         }
 
         let available = (self.limit - pos).min(emacs_char::MAX_MULTIBYTE_LENGTH);

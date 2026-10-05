@@ -113,3 +113,12 @@ fn symbols_gnu_escape_eof() {
         include_str!("symbol_reader_gnu/escape_eof.expect"),
     );
 }
+
+#[test]
+fn symbols_gnu_raw_nbsp() {
+    assert_gnu(
+        "raw_nbsp",
+        r###"(list (let ((pair (read-from-string "a\240b"))) (list (append (symbol-name (car pair)) nil) (cdr pair))) (let ((pair (read-from-string "\240"))) (append (symbol-name (car pair)) nil)) (with-temp-buffer (set-buffer-multibyte nil) (insert "(a\240b)") (goto-char 1) (mapcar (lambda (s) (append (symbol-name s) nil)) (read (current-buffer)))) (read-from-string (string-to-multibyte "a b")))"###,
+        include_str!("symbol_reader_gnu/raw_nbsp.expect"),
+    );
+}

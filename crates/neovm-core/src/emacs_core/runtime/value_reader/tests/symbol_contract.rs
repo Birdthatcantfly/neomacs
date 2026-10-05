@@ -38,3 +38,19 @@ fn symbols_contract_delimiters_and_escape_eof() {
         assert!(name.text().is_multibyte());
     }
 }
+
+#[test]
+fn symbols_contract_source_encoding_is_distinct_from_byte_identity() {
+    crate::test_utils::init_test_tracing();
+    let ob = crate::emacs_core::symbol::Obarray::new();
+    let source = LispString::from_unibyte(b"a\xa0b".to_vec());
+    let (symbol, position) = LispReadSource::new(&source)
+        .read_one(0, &ob)
+        .unwrap()
+        .unwrap();
+    assert_eq!(position, 3);
+    let name =
+        crate::emacs_core::intern::resolve_lisp_visible_symbol_name(symbol.as_symbol_id().unwrap());
+    assert_eq!(name.text().as_bytes(), b"a\xa0b");
+    assert!(!name.text().is_multibyte());
+}
