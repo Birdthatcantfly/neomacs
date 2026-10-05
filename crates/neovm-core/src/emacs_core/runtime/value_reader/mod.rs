@@ -494,13 +494,27 @@ enum ListSyntax {
     StringProperties,
 }
 
+/// A circular-reader label that GNU can represent as a nonnegative fixnum.
+/// Labels belong to one reader, with no shared state between mutators.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[repr(transparent)]
+struct ReadLabel(i64);
+
+impl ReadLabel {
+    fn new(value: i64) -> Option<Self> {
+        (0..=Value::MOST_POSITIVE_FIXNUM)
+            .contains(&value)
+            .then_some(Self(value))
+    }
+}
+
 struct Reader<'a> {
     source: ReaderSource<'a>,
     source_semantics: ReaderSourceSemantics,
     pos: usize,
     limit: usize,
     /// `#N=EXPR` / `#N#` read labels for shared structure in `.elc` files.
-    read_labels: std::collections::HashMap<usize, Value>,
+    read_labels: std::collections::HashMap<ReadLabel, Value>,
     /// When true, wrap interned symbols in symbol-with-pos objects.
     locate_syms: bool,
     /// Dynamic SYMBOLP/EQ policy, supplied by the user-facing reader boundary.
@@ -1683,6 +1697,7 @@ impl<'a> Reader<'a> {
     // -- Hash syntax #' #( etc -----------------------------------------------
 
     fn read_hash_syntax(&mut self) -> Result<Value, ReadError> {
+        let syntax_start = self.pos;
         self.expect('#')?;
         let Some(ch) = self.current_code() else {
             return Err(self.error("#"));
@@ -1896,33 +1911,43 @@ impl<'a> Reader<'a> {
             }
             x if is_ascii_digit_code(x) => {
                 // #N=EXPR defines read label N, #N# references it.
-                let mut n: usize = (ch as u8 - b'0') as usize;
+                let mut n = i64::from(ch as u8 - b'0');
                 self.bump();
                 while let Some(d) = self.current_code() {
                     if is_ascii_digit_code(d) {
-                        n = n * 10 + (d as u8 - b'0') as usize;
                         self.bump();
+                        n = n
+                            .checked_mul(10)
+                            .and_then(|value| value.checked_add(i64::from(d as u8 - b'0')))
+                            .ok_or_else(|| {
+                                self.error(&self.source_slice_string(syntax_start, self.pos))
+                            })?;
                     } else {
                         break;
                     }
                 }
-                match self.current_code() {
-                    Some(code) if code == b'r' as u32 || code == b'R' as u32 => {
+                let label = ReadLabel::new(n);
+                let suffix = self.current_code();
+                if suffix.is_some() {
+                    self.bump();
+                }
+                match (suffix, label) {
+                    (Some(code), _) if code == b'r' as u32 || code == b'R' as u32 => {
                         // #NrDIGITS -- radix-N integer.  GNU lread.c checks
                         // this before #N=/#N# read-label syntax.
-                        self.bump();
                         if !(2..=36).contains(&n) {
                             return Err(self.error(&format!("integer, radix {}", n)));
                         }
                         self.read_radix_number(n as u32)
                     }
-                    Some(code) if code == b'=' as u32 && self.read_circle_enabled() => {
+                    (Some(code), Some(label))
+                        if code == b'=' as u32 && self.read_circle_enabled() =>
+                    {
                         // #N=EXPR -- GNU lread.c installs a placeholder
                         // before reading EXPR so #N# can refer to recursive
                         // structures being read.
-                        self.bump();
                         let placeholder = Value::cons(Value::NIL, Value::NIL);
-                        self.read_labels.insert(n, placeholder);
+                        self.read_labels.insert(label, placeholder);
                         let _roots = callable::RootScope::new();
                         push_scratch_gc_root(placeholder);
                         let expr = match self.read_form() {
@@ -1941,29 +1966,20 @@ impl<'a> Reader<'a> {
                             placeholder
                         } else {
                             substitute_read_placeholder(expr, placeholder);
-                            self.read_labels.insert(n, expr);
+                            self.read_labels.insert(label, expr);
                             expr
                         };
-
                         Ok(result)
                     }
-                    Some(code) if code == b'#' as u32 && self.read_circle_enabled() => {
+                    (Some(code), Some(label))
+                        if code == b'#' as u32 && self.read_circle_enabled() =>
+                    {
                         // #N# — reference previously defined label N
-                        self.bump();
-                        self.read_labels
-                            .get(&n)
-                            .copied()
-                            .ok_or_else(|| self.error(&format!("#{n}#")))
+                        self.read_labels.get(&label).copied().ok_or_else(|| {
+                            self.error(&self.source_slice_string(syntax_start, self.pos))
+                        })
                     }
-                    Some(code) if code == b'=' as u32 => {
-                        self.bump();
-                        Err(self.error(&format!("#{n}=")))
-                    }
-                    Some(code) if code == b'#' as u32 => {
-                        self.bump();
-                        Err(self.error(&format!("#{n}#")))
-                    }
-                    _ => Err(self.error(&format!("#{n}"))),
+                    _ => Err(self.error(&self.source_slice_string(syntax_start, self.pos))),
                 }
             }
             _ => Err(self.error_after_current(&format!("#{}", source_code_for_error(ch)))),

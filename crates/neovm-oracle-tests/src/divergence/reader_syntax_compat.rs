@@ -11,3 +11,15 @@ fn reader_syntax_rea09() {
         expect,
     );
 }
+
+#[test]
+fn reader_syntax_rea12() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    let expect = expect_test::expect![[
+        r##""OK ((invalid-read-syntax \"#2305843009213693952=\") (invalid-read-syntax \"#2305843009213693952#\") (invalid-read-syntax \"#9999999999999999999\") ((a) . 24) (invalid-read-syntax \"#0001 \"))""##
+    ]];
+    assert_oracle_parity_expect(
+        r###"(mapcar (lambda (s) (condition-case e (read-from-string s) (error e))) '("#2305843009213693952=(a)" "#2305843009213693952#" "#999999999999999999999=a" "#2305843009213693951=(a)" "#0001 =(a)"))"###,
+        expect,
+    );
+}

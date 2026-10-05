@@ -26,3 +26,20 @@ fn rea09_property_triples_replace_and_validate_like_set_text_properties() {
     assert!(error.signal_data[0].is_symbol_named("integer-or-marker-p"));
     assert_eq!(read_result(r#"#("a" . nil)"#).unwrap_err().message, ".");
 }
+
+#[test]
+fn rea12_read_labels_reject_fixnum_and_machine_integer_overflow() {
+    for input in [
+        "#2305843009213693952=(a)",
+        "#2305843009213693952#",
+        "#999999999999999999999=a",
+    ] {
+        let error = read_result(input).unwrap_err();
+        assert_eq!(error.kind, ReadErrorKind::InvalidReadSyntax);
+    }
+    assert!(read_result("#2305843009213693951=(a)").is_ok());
+    assert_eq!(
+        read_result("#999999999999999999999=a").unwrap_err().message,
+        "#9999999999999999999"
+    );
+}
