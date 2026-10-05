@@ -2522,25 +2522,38 @@ fn append_symbol_name_bytes_with_escape(
     }
 
     let mut confusing = symbol_name_confusing(bytes);
-    for byte in bytes.iter().copied() {
+    let mut position = 0;
+    let characters = std::iter::from_fn(|| {
+        if position >= bytes.len() {
+            return None;
+        }
+        let byte = bytes[position];
+        let (ch, width) = if byte < 128 {
+            (u32::from(byte), 1)
+        } else if name.is_multibyte() {
+            crate::emacs_core::emacs_char::string_char_unchecked(&bytes[position..])
+        } else {
+            (crate::emacs_core::emacs_char::unibyte_to_char(byte), 1)
+        };
+        position += width;
+        Some(ch)
+    });
+    for ch in characters {
         let needs_escape = matches!(
-            byte,
-            b'(' | b')' | b'[' | b']' | b'"' | b'\\' | b';' | b'#' | b'\'' | b'`' | b','
-        ) || byte <= b' '
+            ch,
+            40 | 41 | 91 | 93 | 34 | 92 | 59 | 35 | 39 | 96 | 44 | 160
+        ) || ch <= 32
             || confusing;
         if escape && needs_escape {
             out.push(b'\\');
             confusing = false;
         }
-        if !name.is_multibyte() && byte >= 0x80 {
-            let mut buf = [0u8; crate::emacs_core::emacs_char::MAX_MULTIBYTE_LENGTH];
-            let len = crate::emacs_core::emacs_char::char_string(
-                crate::emacs_core::emacs_char::unibyte_to_char(byte),
-                &mut buf,
-            );
-            out.extend_from_slice(&buf[..len]);
+        if ch < 128 {
+            out.push(ch as u8);
         } else {
-            out.push(byte);
+            let mut buf = [0u8; crate::emacs_core::emacs_char::MAX_MULTIBYTE_LENGTH];
+            let len = crate::emacs_core::emacs_char::char_string(ch, &mut buf);
+            out.extend_from_slice(&buf[..len]);
         }
     }
 }

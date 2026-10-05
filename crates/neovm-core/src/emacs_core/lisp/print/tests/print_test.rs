@@ -965,3 +965,7 @@ mod graph_level_units;
 #[cfg(test)]
 #[path = "graph_tail_units.rs"]
 mod graph_tail_units;
+
+#[cfg(test)]
+#[path = "symbol_escape_units.rs"]
+mod symbol_escape_units;
