@@ -565,6 +565,16 @@ fn print_preprocess(value: &Value, state: &mut PrintCircleState, options: PrintO
                     stack.push(*item);
                 }
             }
+            ValueKind::Veclike(VecLikeType::CharTable) => {
+                if let Some(slots) = char_table_external_slots(&obj) {
+                    stack.extend(slots.into_iter().rev());
+                }
+            }
+            ValueKind::Veclike(VecLikeType::SubCharTable) => {
+                if let Some((_, _, slots)) = super::chartable::sub_char_table_external_slots(&obj) {
+                    stack.extend(slots.into_iter().rev());
+                }
+            }
             ValueKind::Veclike(VecLikeType::HashTable) => {
                 let table = obj.as_hash_table().unwrap().clone();
                 for (_, entry) in table.data.keyed_entries_in_slot_order().into_iter().rev() {
@@ -659,6 +669,16 @@ fn print_preprocess_external_with_t_removal(
                 let items = obj.as_record_data().unwrap().clone();
                 for item in items.iter().rev() {
                     stack.push(*item);
+                }
+            }
+            ValueKind::Veclike(VecLikeType::CharTable) => {
+                if let Some(slots) = char_table_external_slots(&obj) {
+                    stack.extend(slots.into_iter().rev());
+                }
+            }
+            ValueKind::Veclike(VecLikeType::SubCharTable) => {
+                if let Some((_, _, slots)) = super::chartable::sub_char_table_external_slots(&obj) {
+                    stack.extend(slots.into_iter().rev());
                 }
             }
             ValueKind::Veclike(VecLikeType::HashTable) => {
@@ -810,7 +830,9 @@ pub(crate) fn default_cycle_candidate_key(value: &Value) -> Option<u64> {
             .is_some_and(|items| !items.is_empty())
             .then(|| object_identity_key(value))
             .flatten(),
-        ValueKind::Veclike(VecLikeType::Record)
+        ValueKind::Veclike(VecLikeType::CharTable)
+        | ValueKind::Veclike(VecLikeType::SubCharTable)
+        | ValueKind::Veclike(VecLikeType::Record)
         | ValueKind::Veclike(VecLikeType::HashTable)
         | ValueKind::Veclike(VecLikeType::Lambda)
         | ValueKind::Veclike(VecLikeType::Macro)
@@ -979,16 +1001,9 @@ fn write_value_stateful_inner(
         ValueKind::Veclike(VecLikeType::CharTable) => {
             if let Some(slots) = char_table_external_slots(value) {
                 with_default_cycle_guard(value, out, state, |out, state| {
-                    state.depth += 1;
                     out.push_str("#^[");
-                    for (idx, item) in slots.iter().enumerate() {
-                        if idx > 0 {
-                            out.push(' ');
-                        }
-                        write_value_stateful(item, out, state);
-                    }
+                    write_vector_slots_stateful(&slots, LiteralSlotStart::First, out, state);
                     out.push(']');
-                    state.depth -= 1;
                 });
             }
         }
@@ -997,17 +1012,17 @@ fn write_value_stateful_inner(
                 super::chartable::sub_char_table_external_slots(value)
             {
                 with_default_cycle_guard(value, out, state, |out, state| {
-                    state.depth += 1;
                     out.push_str("#^^[");
                     out.push_str(&depth.to_string());
                     out.push(' ');
                     out.push_str(&min_char.to_string());
-                    for item in &slots {
-                        out.push(' ');
-                        write_value_stateful(item, out, state);
-                    }
+                    write_vector_slots_stateful(
+                        &slots,
+                        LiteralSlotStart::AfterSubCharTableHeader,
+                        out,
+                        state,
+                    );
                     out.push(']');
-                    state.depth -= 1;
                 });
             }
         }
@@ -1313,6 +1328,103 @@ fn write_closure_body_forms_stateful(
             }
             write_value_stateful(form, out, state);
         }
+    }
+}
+
+/// Exclusive access to one invocation's printer state while a child object is
+/// printed. Restores depth on early return, Lisp callback failure, or unwind.
+/// Threading: the borrow remains on the owning mutator; no state is shared.
+#[must_use = "printer state is restored when this scope ends"]
+struct PrintDepthGuard<'scope, 'context> {
+    state: &'scope mut PrintState<'context>,
+    saved_depth: i64,
+    _mutator: std::marker::PhantomData<*const ()>,
+}
+
+static_assertions::assert_not_impl_any!(PrintDepthGuard<'static, 'static>: Send, Sync);
+
+impl<'scope, 'context> PrintDepthGuard<'scope, 'context> {
+    fn enter(state: &'scope mut PrintState<'context>) -> Self {
+        let saved_depth = state.depth;
+        state.depth += 1;
+        Self {
+            state,
+            saved_depth,
+            _mutator: std::marker::PhantomData,
+        }
+    }
+
+    fn state(&mut self) -> &mut PrintState<'context> {
+        self.state
+    }
+}
+
+impl std::fmt::Debug for PrintDepthGuard<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrintDepthGuard")
+            .field("saved_depth", &self.saved_depth)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for PrintDepthGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.state.depth = self.saved_depth;
+    }
+}
+
+/// GNU lisp.h:2098-2120, 2248-2259: depth and min_char are C ints,
+/// whose combined storage consumes one Lisp_Object slot on 64-bit targets
+/// and two on 32-bit targets. Printed scalar count is not the slot offset.
+const SUB_CHAR_TABLE_HEADER_SLOTS: usize =
+    (2 * std::mem::size_of::<libc::c_int>()).div_ceil(std::mem::size_of::<usize>());
+const _: () = {
+    assert!((2 * std::mem::size_of::<libc::c_int>()) % std::mem::size_of::<usize>() == 0);
+    assert!(std::mem::size_of::<Value>() == std::mem::size_of::<usize>());
+    assert!(SUB_CHAR_TABLE_HEADER_SLOTS == 1 || SUB_CHAR_TABLE_HEADER_SLOTS == 2);
+};
+
+/// Literal slot domains: GNU's packed depth and minimum-character integers
+/// occupy one Lisp_Object slot on 64-bit targets (lisp.h:2098-2120, 2248-2259).
+/// The storage offset consumes print-length before the printed Lisp values.
+/// This is per-call scalar metadata; it contains no mutator-owned Lisp state.
+#[derive(Clone, Copy, Debug)]
+enum LiteralSlotStart {
+    First,
+    AfterSubCharTableHeader,
+}
+
+/// GNU print.c:2250-2265 and 2611-2628: every readable pseudovector follows
+/// the same slot traversal, including print-length and child object depth.
+fn write_vector_slots_stateful(
+    slots: &[Value],
+    start: LiteralSlotStart,
+    out: &mut StatefulPrintOutput,
+    state: &mut PrintState,
+) {
+    let mut depth_guard = PrintDepthGuard::enter(state);
+    let state = depth_guard.state();
+    let offset = match start {
+        LiteralSlotStart::First => 0,
+        LiteralSlotStart::AfterSubCharTableHeader => SUB_CHAR_TABLE_HEADER_SLOTS,
+    };
+    let limit = state
+        .options
+        .print_length
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(usize::MAX);
+    let count = slots.len().min(limit.saturating_sub(offset));
+    for (index, slot) in slots[..count].iter().enumerate() {
+        if index + offset > 0 {
+            out.push(' ');
+        }
+        write_value_stateful(slot, out, state);
+    }
+    if count < slots.len() {
+        if count + offset > 0 {
+            out.push(' ');
+        }
+        out.push_str("...");
     }
 }
 

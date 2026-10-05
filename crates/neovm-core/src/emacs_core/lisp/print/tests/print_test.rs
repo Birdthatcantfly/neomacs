@@ -945,3 +945,7 @@ mod compiled_settings_gnu;
 #[cfg(test)]
 #[path = "princ_text.rs"]
 mod princ_text;
+
+#[cfg(test)]
+#[path = "packed_char_header_units.rs"]
+mod packed_char_header_units;
