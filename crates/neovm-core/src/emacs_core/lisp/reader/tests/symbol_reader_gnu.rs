@@ -86,3 +86,30 @@ fn symbols_gnu_compiled_intern_soft_identity() {
         include_str!("symbol_reader_gnu/compiled_intern_soft_identity.expect"),
     );
 }
+
+#[test]
+fn symbols_gnu_hash_delimiter() {
+    assert_gnu(
+        "hash_delimiter",
+        r###"(list (read-from-string "foo#bar") (read-from-string "(a#'b)") (read-from-string "1#") (read-from-string "#:#") (read-from-string "a#b"))"###,
+        include_str!("symbol_reader_gnu/hash_delimiter.expect"),
+    );
+}
+
+#[test]
+fn symbols_gnu_empty_bypass() {
+    assert_gnu(
+        "empty_bypass",
+        r###"(list (mapcar (lambda (s) (let ((pair (read-from-string s))) (list (symbol-name (car pair)) (cdr pair) (eq (car pair) (intern ""))))) '("#_" "#_ " "#_'a" "#_[a]" "#_#_a")) (let ((read-symbol-shorthands '(("" . "gdj-empty-prefix-")))) (mapcar (lambda (source) (let ((value (car (read-from-string source)))) (list (symbol-name value) (multibyte-string-p (symbol-name value))))) '("#_" "#_ " "##" "#:" "#_gdj-bypass-fresh-name"))))"###,
+        include_str!("symbol_reader_gnu/empty_bypass.expect"),
+    );
+}
+
+#[test]
+fn symbols_gnu_escape_eof() {
+    assert_gnu(
+        "escape_eof",
+        r###"(mapcar (lambda (s) (condition-case e (read-from-string s) (error e))) '("a\\" "\\" "#:a\\" "#_a\\"))"###,
+        include_str!("symbol_reader_gnu/escape_eof.expect"),
+    );
+}

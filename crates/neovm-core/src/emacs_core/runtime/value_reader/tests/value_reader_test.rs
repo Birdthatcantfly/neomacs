@@ -1374,3 +1374,6 @@ fn string_literal_representation_matches_gnu_at_the_closing_quote() {
     assert_eq!(mixed.as_bytes(), &[0xC1, 0xBF, 0xC3, 0xA9]);
     assert_eq!(mixed.schars(), 2);
 }
+
+#[cfg(test)]
+mod symbol_contract;

@@ -526,6 +526,14 @@ enum ReadcharOffsetOrigin {
     AbsoluteBufferPosition,
 }
 
+/// Quoting suppresses numeric interpretation; owned by its reader only.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SymbolQuoting {
+    Plain,
+    Escaped,
+}
+
+#[derive(Debug)]
 struct ReaderToken {
     /// Raw token bytes, kept inline (SmallVec) so the common short-symbol case
     /// never touches the heap. The `LispString` name is materialized lazily by
@@ -536,7 +544,7 @@ struct ReaderToken {
     /// Whether the source string was multibyte when the token was read; decides
     /// how `to_lisp_string` reconstructs the exact Lisp-string encoding.
     multibyte: bool,
-    had_escape: bool,
+    quoting: SymbolQuoting,
 }
 
 impl ReaderToken {
@@ -1682,9 +1690,9 @@ impl<'a> Reader<'a> {
                 // `read-symbol-shorthands` and number/t/nil interpretation
                 // (GNU lread.c). So `#_foo` -> foo, `#_2` -> the symbol named "2".
                 self.bump();
-                let token = self.read_symbol_token();
+                let token = self.read_symbol_token()?;
                 if token.bytes.is_empty() {
-                    return Err(self.error("#_"));
+                    return Ok(self.intern_empty_symbol());
                 }
                 let name = token.to_lisp_string();
                 Ok(Value::from_sym_id(intern_lisp_string(&name)))
@@ -1848,7 +1856,7 @@ impl<'a> Reader<'a> {
             x if x == b':' as u32 => {
                 // #:X — uninterned symbol.
                 self.bump();
-                let token = self.read_symbol_token();
+                let token = self.read_symbol_token()?;
                 Ok(Value::from_sym_id(intern_uninterned_lisp_string(
                     &token.to_lisp_string(),
                 )))
@@ -1867,7 +1875,7 @@ impl<'a> Reader<'a> {
             x if x == b'#' as u32 => {
                 // ## — symbol with empty name.
                 self.bump();
-                Ok(Value::from_sym_id(intern("")))
+                Ok(self.intern_empty_symbol())
             }
             x if x == b'b' as u32 || x == b'B' as u32 => {
                 // #b... binary integer
@@ -2264,7 +2272,7 @@ impl<'a> Reader<'a> {
     // -- Atoms (numbers, symbols) --------------------------------------------
 
     fn read_atom(&mut self) -> Result<Value, ReadError> {
-        let token = self.read_symbol_token();
+        let token = self.read_symbol_token()?;
 
         if token.bytes.is_empty() {
             return Err(self.error("expected atom"));
@@ -2277,7 +2285,7 @@ impl<'a> Reader<'a> {
             )));
         }
 
-        if !token.had_escape
+        if token.quoting == SymbolQuoting::Plain
             && let Some(token_text) = token.as_utf8()
         {
             // Try integer. Funnel through Value::make_integer so a value
@@ -2333,8 +2341,8 @@ impl<'a> Reader<'a> {
             }
 
             // Emacs reader shorthand: bare ## reads as the symbol with empty name.
-            if token_text == "##" && !token.had_escape {
-                return Ok(Value::from_sym_id(intern("")));
+            if token_text == "##" && token.quoting == SymbolQuoting::Plain {
+                return Ok(self.intern_empty_symbol());
             }
         }
 
@@ -2345,7 +2353,7 @@ impl<'a> Reader<'a> {
         // LispString::from_unibyte). This skips the per-token heap LispString
         // for the overwhelming majority of symbols read while loading.
         if self.shorthands.is_none()
-            && !token.had_escape
+            && token.quoting == SymbolQuoting::Plain
             && let Some(text) = token.as_utf8()
             && text.is_ascii()
         {
@@ -2358,6 +2366,23 @@ impl<'a> Reader<'a> {
         Ok(Value::from_sym_id(intern_lisp_string(&name)))
     }
 
+    /// Empty #_ and ## use Fintern, including empty-prefix shorthands
+    /// (GNU lread.c:3851, 3999). Rewritten builtin names are multibyte
+    /// (lread.c:4793-4796), independently of the reader source encoding.
+    #[cold]
+    fn intern_empty_symbol(&self) -> Value {
+        let empty = crate::heap_types::LispString::from_emacs_bytes(Vec::new());
+        match self
+            .shorthands
+            .and_then(|shorthands| shorthands.rewrite(&empty))
+        {
+            Some(name) => {
+                Value::from_sym_id(super::intern::intern_lisp_value(Value::heap_string(name)))
+            }
+            None => Value::from_sym_id(intern("")),
+        }
+    }
+
     /// Build the token's exact `LispString` name, applying any active reader
     /// shorthand rewrite (`read-symbol-shorthands`).
     fn to_lisp_string_for_token(&self, token: &ReaderToken) -> crate::heap_types::LispString {
@@ -2367,9 +2392,9 @@ impl<'a> Reader<'a> {
             .unwrap_or(name)
     }
 
-    fn read_symbol_token(&mut self) -> ReaderToken {
+    fn read_symbol_token(&mut self) -> Result<ReaderToken, ReadError> {
         let mut bytes = ReaderTokenBytes::new();
-        let mut had_escape = false;
+        let mut quoting = SymbolQuoting::Plain;
         let byte_source = self.byte_backed_source();
         loop {
             // The ASCII run of the token in one copy; an escape, a non-ASCII
@@ -2396,14 +2421,14 @@ impl<'a> Reader<'a> {
                 break;
             }
             if ch == b'\\' as u32 {
-                had_escape = true;
+                quoting = SymbolQuoting::Escaped;
                 self.bump();
                 match self.current_code() {
                     Some(escaped) => {
                         self.push_symbol_token_code(&mut bytes, escaped);
                         self.bump();
                     }
-                    None => bytes.push(b'\\'),
+                    None => return Err(self.end_of_file_error()),
                 }
                 continue;
             }
@@ -2413,11 +2438,11 @@ impl<'a> Reader<'a> {
         // Keep `bytes` inline (no into_vec / LispString here). read_atom interns
         // ASCII symbols directly from the &str view (interner no-alloc fast
         // path); only the cold paths materialize a LispString via to_lisp_string.
-        ReaderToken {
+        Ok(ReaderToken {
             bytes,
             multibyte: self.source_semantics.is_multibyte(),
-            had_escape,
-        }
+            quoting,
+        })
     }
 
     fn push_symbol_token_code(&self, bytes: &mut ReaderTokenBytes, code: u32) {
@@ -2803,7 +2828,8 @@ fn is_char_literal_delimiter_code(code: u32) -> bool {
 }
 
 fn is_symbol_delimiter_code(code: u32) -> bool {
-    is_reader_whitespace_code(code) || matches!(code, 40 | 41 | 91 | 93 | 39 | 96 | 44 | 34 | 59)
+    is_reader_whitespace_code(code)
+        || matches!(code, 40 | 41 | 91 | 93 | 39 | 96 | 44 | 34 | 59 | 35)
 }
 
 /// GNU `read0`'s lexical whitespace predicate (`src/lread.c`) is deliberately
