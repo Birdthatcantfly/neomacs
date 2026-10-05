@@ -1869,53 +1869,63 @@ pub(crate) fn builtin_intern_soft_2(
     intern_soft_impl(eval, &args)
 }
 
+/// A string requests spelling lookup; a symbol
+/// requests that exact identity and never expands. Views stay local to the
+/// evaluator's mutator and introduce no shared mutable Lisp state.
+#[derive(Debug)]
+enum InternSoftQuery<'a> {
+    Spelling(std::borrow::Cow<'a, crate::heap_types::LispString>),
+    Exact {
+        id: SymId,
+        original: Value,
+        name: crate::emacs_core::intern::LispVisibleSymbolName,
+        _mutator: std::marker::PhantomData<*const ()>,
+    },
+}
+
+impl InternSoftQuery<'_> {
+    fn name(&self) -> &crate::heap_types::LispString {
+        match self {
+            Self::Spelling(name) => name.as_ref(),
+            Self::Exact { name, .. } => name.text(),
+        }
+    }
+
+    fn resolve(&self, found: Value) -> Value {
+        match self {
+            Self::Spelling(_) => found,
+            Self::Exact { id, original, .. } => {
+                if symbol_id(&found, SymbolMode::Bare) == Some(*id) {
+                    *original
+                } else {
+                    Value::NIL
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn intern_soft_impl(eval: &super::eval::Context, args: &[Value]) -> EvalResult {
     expect_min_args("intern-soft", args, 1)?;
     expect_max_args("intern-soft", args, 2)?;
-
-    let mode = eval.symbol_mode();
-    let symbol = args[0].as_symbol_id(mode);
-    let input = mode.unwrap(args[0]);
     let effective_obarray = effective_obarray_arg(eval, args);
-
-    // Custom obarray path
+    // GNU validates the obarray before coercing NAME (lread.c:4824).
     if !is_global_obarray_proxy(eval, &effective_obarray) {
+        check_obarray_value(effective_obarray)?;
+    }
+    let query = if let Some(id) = symbol_id(&args[0], eval.symbol_mode()) {
+        InternSoftQuery::Exact {
+            id,
+            original: args[0],
+            name: crate::emacs_core::intern::resolve_lisp_visible_symbol_name(id),
+            _mutator: std::marker::PhantomData,
+        }
+    } else {
+        let name = eval.expect_lisp_string(args[0])?;
+        InternSoftQuery::Spelling(std::borrow::Cow::Borrowed(name))
+    };
+    let found = if !is_global_obarray_proxy(eval, &effective_obarray) {
         let obarray_val = check_obarray_value(effective_obarray)?;
-        // GNU searches for `SYMBOL_NAME (name)` -- the name OBJECT, the same
-        // string the bucket chain is compared on. The view has to outlive the
-        // `Cow` that borrows out of it, so it is bound before the match rather
-        // than produced inside one of its arms.
-        let symbol_name_view = match input.kind() {
-            ValueKind::Symbol(id) => Some(
-                crate::emacs_core::intern::resolve_lisp_visible_symbol_name(id),
-            ),
-            ValueKind::Nil => Some(crate::emacs_core::intern::resolve_lisp_visible_symbol_name(
-                NIL_SYM_ID,
-            )),
-            ValueKind::T => Some(crate::emacs_core::intern::resolve_lisp_visible_symbol_name(
-                T_SYM_ID,
-            )),
-            _ => None,
-        };
-        let name = match (&symbol_name_view, input.kind()) {
-            (Some(view), _) => std::borrow::Cow::Borrowed(view.text()),
-            (None, ValueKind::String) => {
-                std::borrow::Cow::Borrowed(args[0].as_lisp_string().unwrap())
-            }
-            (None, _other) => {
-                // Transparently unwrap symbol-with-pos → bare symbol name.
-                if let Some(id) = symbol_id(&args[0], eval.symbol_mode()) {
-                    std::borrow::Cow::Borrowed(crate::emacs_core::intern::resolve_sym_lisp_string(
-                        id,
-                    ))
-                } else {
-                    return Err(signal(
-                        LispCondition::WrongTypeArgument,
-                        vec![Value::symbol("stringp"), args[0]],
-                    ));
-                }
-            }
-        };
         let vec_len = obarray_len(obarray_val).unwrap_or(0);
         if vec_len == 0 {
             return Err(signal(
@@ -1923,49 +1933,16 @@ pub(crate) fn intern_soft_impl(eval: &super::eval::Context, args: &[Value]) -> E
                 vec![Value::symbol("obarrayp"), effective_obarray],
             ));
         }
-        let bucket_idx = obarray_hash_lisp_string(name.as_ref(), vec_len);
+        let bucket_idx = obarray_hash_lisp_string(query.name(), vec_len);
         let bucket = obarray_bucket(obarray_val, bucket_idx).unwrap_or(Value::NIL);
-        let found = obarray_bucket_find(bucket, name.as_ref()).unwrap_or(Value::NIL);
-        return Ok(match symbol {
-            Some(id) if found.as_bare_symbol_id() == Some(id) => args[0],
-            Some(_) => Value::NIL,
-            None => found,
-        });
-    }
-
-    // Global obarray path
-    let name = match input.kind() {
-        ValueKind::String => std::borrow::Cow::Borrowed(args[0].as_lisp_string().unwrap()),
-        ValueKind::Nil => std::borrow::Cow::Borrowed(
-            crate::emacs_core::intern::resolve_sym_lisp_string(NIL_SYM_ID),
-        ),
-        ValueKind::T => {
-            std::borrow::Cow::Borrowed(crate::emacs_core::intern::resolve_sym_lisp_string(T_SYM_ID))
-        }
-        ValueKind::Symbol(id) => {
-            std::borrow::Cow::Borrowed(crate::emacs_core::intern::resolve_sym_lisp_string(id))
-        }
-        _other => {
-            // Transparently unwrap symbol-with-pos → bare symbol name.
-            if let Some(id) = symbol_id(&args[0], eval.symbol_mode()) {
-                std::borrow::Cow::Borrowed(crate::emacs_core::intern::resolve_sym_lisp_string(id))
-            } else {
-                return Err(signal(
-                    LispCondition::WrongTypeArgument,
-                    vec![Value::symbol("stringp"), args[0]],
-                ));
-            }
-        }
-    };
-    if let Some(id) = eval.obarray().intern_soft_lisp_string(name.as_ref()) {
-        Ok(match symbol {
-            Some(expected) if expected == id => args[0],
-            Some(_) => Value::NIL,
-            None => Value::from_sym_id(id),
-        })
+        obarray_bucket_find(bucket, query.name()).unwrap_or(Value::NIL)
     } else {
-        Ok(Value::NIL)
-    }
+        eval.obarray()
+            .intern_soft_lisp_string(query.name())
+            .map(Value::from_sym_id)
+            .unwrap_or(Value::NIL)
+    };
+    Ok(query.resolve(found))
 }
 
 pub(crate) fn builtin_obarray_make(args: Vec<Value>) -> EvalResult {
