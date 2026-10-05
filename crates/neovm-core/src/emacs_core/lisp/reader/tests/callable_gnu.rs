@@ -22,6 +22,14 @@ const CALLABLE: &str = r###"(progn (defvar gdj-input nil) (let ((gdj-input nil))
       (condition-case e (read (lambda () (setq n (1+ n)) (error "callback error")))
         (error (list e n)))))))"###;
 
+const COLUMNS: &str = r###"(mapcar (lambda (spec)
+  (with-temp-buffer
+    (setq tab-width (car spec))
+    (insert (cadr spec)) (goto-char 1)
+    (condition-case e (while t (read (current-buffer)))
+      (error (list e (point))))))
+  '((8 "x\n\ty )") (3 "x\n\ty )") (8 "x\n中 )") (8 "x\nλ )") (8 "x\n  y )")))"###;
+
 const TRACE: &str = r###"(list
  (mapcar (lambda (source)
    (let ((input (string-to-list source)) (trace nil))
@@ -129,6 +137,11 @@ fn assert_gnu(name: &str, form: &str, fixture: &str) {
 #[test]
 fn callable_reader_gnu_get_unget() {
     assert_gnu("streams", CALLABLE, include_str!("callable-streams.expect"));
+}
+
+#[test]
+fn reader_error_columns_gnu_display_width() {
+    assert_gnu("columns", COLUMNS, include_str!("callable-columns.expect"));
 }
 
 const LONG_GC: &str = r#"(let ((input (string-to-list (concat "(" (make-string 10000 ?\s) "a \"xyz\" [1 2]) rest"))) (calls 0))

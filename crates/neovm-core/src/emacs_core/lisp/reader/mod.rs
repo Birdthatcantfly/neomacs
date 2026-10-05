@@ -1118,35 +1118,38 @@ fn signal_invalid_read_syntax_in_lisp_string(
     )
 }
 
+/// GNU `invalid_syntax_lisp` (`src/lread.c:636-652`) measures the line
+/// from BEGV and the column with current_column, including display widths.
+/// Point is already published at the reader's stop position before this call.
 fn signal_invalid_read_syntax_in_buffer_object(
-    buffer: &crate::buffer::Buffer,
-    absolute_error_pos: usize,
+    ctx: &mut super::eval::Context,
+    buffer_id: crate::buffer::BufferId,
+    absolute_error_pos: EmacsBytePos,
     message: String,
 ) -> Flow {
+    let Some(buffer) = ctx.buffers.get(buffer_id) else {
+        return signal(
+            LispCondition::Error,
+            vec![Value::string("Buffer does not exist")],
+        );
+    };
     let accessible = buffer.accessible_emacs_byte_region();
-    let end = accessible.clamp(EmacsBytePos::new(absolute_error_pos));
+    let end = accessible.clamp(absolute_error_pos);
     let range = EmacsByteRange::new(accessible.start(), end);
     let mut prefix = Vec::with_capacity(range.len().get());
     buffer.copy_emacs_byte_range_to(range, &mut prefix);
     let line = prefix.iter().filter(|&&byte| byte == b'\n').count() as i64 + 1;
-    let line_start = prefix
-        .iter()
-        .rposition(|&byte| byte == b'\n')
-        .map(|pos| pos + 1)
-        .unwrap_or(0);
-    let column = if buffer.get_multibyte() {
-        crate::emacs_core::emacs_char::chars_in_multibyte(&prefix[line_start..]) as i64
-    } else {
-        (prefix.len() - line_start) as i64
-    };
-    signal(
-        LispCondition::InvalidReadSyntax,
-        vec![
-            Value::string(message),
-            Value::fixnum(line),
-            Value::fixnum(column),
-        ],
-    )
+    match super::indent::display_column_at_emacs_byte_pos(ctx, buffer_id, end) {
+        Ok(column) => signal(
+            LispCondition::InvalidReadSyntax,
+            vec![
+                Value::string(message),
+                Value::fixnum(line),
+                Value::fixnum(column as i64),
+            ],
+        ),
+        Err(flow) => flow,
+    }
 }
 
 pub(crate) fn end_of_file_error_for_source(source: Option<Value>) -> Flow {
@@ -1278,18 +1281,24 @@ pub(crate) fn signal_reader_error_from_string(e: super::value_reader::ReadError)
 }
 
 fn signal_reader_error_from_buffer(
-    buffer: &crate::buffer::Buffer,
+    ctx: &mut super::eval::Context,
+    buffer_id: crate::buffer::BufferId,
     e: super::value_reader::ReadError,
 ) -> Flow {
     match e.kind {
         super::value_reader::ReadErrorKind::EndOfFile => {
-            ReadSourceObject::Buffer(Value::make_buffer(buffer.id)).end_of_file_error()
+            ReadSourceObject::Buffer(Value::make_buffer(buffer_id)).end_of_file_error()
         }
         super::value_reader::ReadErrorKind::Error => {
             signal(LispCondition::Error, vec![Value::string(e.message)])
         }
         super::value_reader::ReadErrorKind::InvalidReadSyntax => {
-            signal_invalid_read_syntax_in_buffer_object(buffer, e.position, e.message)
+            signal_invalid_read_syntax_in_buffer_object(
+                ctx,
+                buffer_id,
+                EmacsBytePos::new(e.position),
+                e.message,
+            )
         }
         super::value_reader::ReadErrorKind::Signal => signal(
             crate::emacs_core::error::UserCondition::from(
@@ -1689,16 +1698,16 @@ pub fn builtin_read_impl(
                             // to the accessible end like the marker arm above, so a
                             // stop offset at the boundary cannot land past it.
                             let stopped_at = EmacsBytePos::new(e.position).min(end);
-                            Err((signal_reader_error_from_buffer(buf, e), stopped_at))
+                            Err((e, stopped_at))
                         }
                     }
                 };
 
             let (maybe_value, new_pt) = match outcome {
                 Ok(result) => result,
-                Err((flow, stopped_at)) => {
+                Err((error, stopped_at)) => {
                     let _ = &mut ctx.buffers.goto_buffer_emacs_byte_pos(buf_id, stopped_at);
-                    return Err(flow);
+                    return Err(signal_reader_error_from_buffer(ctx, buf_id, error));
                 }
             };
 
