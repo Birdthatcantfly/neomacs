@@ -23,3 +23,15 @@ fn reader_syntax_rea12() {
         expect,
     );
 }
+
+#[test]
+fn reader_syntax_rea13() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    let expect = expect_test::expect![[
+        r#""OK ((1 . 3) (1 . 3) (1 . 3) (1 . 5) (invalid-read-syntax \"integer, radix 16\") (invalid-read-syntax \"integer, radix 16\") (-1 . 4) (2 . 7))""#
+    ]];
+    assert_oracle_parity_expect(
+        r###"(mapcar (lambda (s) (condition-case e (read-from-string s) (error e))) '("#x1_0" "#b1_0" "#o1_7" "#24r1_0" "#x_1" "#x1g" "#x-1_0" "#b00010_1"))"###,
+        expect,
+    );
+}

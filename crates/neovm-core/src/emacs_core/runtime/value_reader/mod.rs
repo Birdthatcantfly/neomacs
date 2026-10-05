@@ -2103,7 +2103,7 @@ impl<'a> Reader<'a> {
         // leaving the stray letter to be misread as the next form.
         let mut saw_invalid_digit = false;
         while let Some(c) = self.current_code() {
-            if is_ascii_digit_for_radix_code(c, radix) || c == b'_' as u32 {
+            if is_ascii_digit_for_radix_code(c, radix) {
                 self.bump();
             } else if is_ascii_alphanumeric_code(c) {
                 // Alphanumeric but not a digit for this radix: consume and
@@ -2118,7 +2118,7 @@ impl<'a> Reader<'a> {
         let digits_source = self.source_slice_string(start, self.pos);
         let digits: String = digits_source
             .chars()
-            .filter(|c| *c != '_' && *c != '-' && *c != '+')
+            .filter(|c| *c != '-' && *c != '+')
             .collect();
         if digits.is_empty() || saw_invalid_digit {
             return Err(self.error(&format!("integer, radix {}", radix)));

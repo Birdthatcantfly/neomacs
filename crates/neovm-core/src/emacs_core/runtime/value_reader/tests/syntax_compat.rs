@@ -43,3 +43,16 @@ fn rea12_read_labels_reject_fixnum_and_machine_integer_overflow() {
         "#9999999999999999999"
     );
 }
+
+#[test]
+fn rea13_radix_underscore_terminates_integer() {
+    for (source, offset) in [("#x1_0", 3), ("#b1_0", 3), ("#o1_7", 3), ("#24r1_0", 5)] {
+        let (value, end) = read_result(source).unwrap().unwrap();
+        assert_eq!(value.as_fixnum(), Some(1));
+        assert_eq!(end, offset);
+    }
+    assert_eq!(
+        read_result("#x_1").unwrap_err().message,
+        "integer, radix 16"
+    );
+}
