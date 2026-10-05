@@ -62,3 +62,31 @@ fn symbols_contract_source_encoding_is_distinct_from_byte_identity() {
         crate::emacs_core::intern::resolve_lisp_visible_symbol_name(symbol.as_symbol_id().unwrap());
     assert!(name.text().is_multibyte());
 }
+
+#[test]
+fn symbols_contract_shorthands_keep_source_order_and_skip_core_operators() {
+    crate::test_utils::init_test_tracing();
+    let ob = crate::emacs_core::symbol::Obarray::new();
+    let pairs = Value::list(vec![
+        Value::cons(Value::string("s-"), Value::string("string-")),
+        Value::cons(Value::string("s-t"), Value::string("zz")),
+    ]);
+    let shorthands = ReadSymbolShorthands::from_lisp_value(pairs).unwrap();
+    let source = LispString::from_unibyte(b"s-trim".to_vec());
+    let (symbol, _) = LispReadSource::new(&source)
+        .read_one_with_shorthands(0, &ob, Some(&shorthands))
+        .unwrap()
+        .unwrap();
+    assert!(symbol.is_symbol_named("string-trim"));
+    let pairs = Value::list(vec![Value::cons(
+        Value::string("<"),
+        Value::string("wrong-"),
+    )]);
+    let shorthands = ReadSymbolShorthands::from_lisp_value(pairs).unwrap();
+    let source = LispString::from_unibyte(b"<=".to_vec());
+    let (symbol, _) = LispReadSource::new(&source)
+        .read_one_with_shorthands(0, &ob, Some(&shorthands))
+        .unwrap()
+        .unwrap();
+    assert!(symbol.is_symbol_named("<="));
+}

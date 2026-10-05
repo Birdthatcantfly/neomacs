@@ -100,7 +100,7 @@ fn symbols_gnu_hash_delimiter() {
 fn symbols_gnu_empty_bypass() {
     assert_gnu(
         "empty_bypass",
-        r###"(list (mapcar (lambda (s) (let ((pair (read-from-string s))) (list (symbol-name (car pair)) (cdr pair) (eq (car pair) (intern ""))))) '("#_" "#_ " "#_'a" "#_[a]" "#_#_a")) (let ((read-symbol-shorthands '(("" . "gdj-empty-prefix-")))) (mapcar (lambda (source) (let ((value (car (read-from-string source)))) (list (symbol-name value) (multibyte-string-p (symbol-name value))))) '("#_" "#_ " "##" "#:" "#_gdj-bypass-fresh-name"))))"###,
+        r###"(list (mapcar (lambda (s) (let ((pair (read-from-string s))) (list (symbol-name (car pair)) (cdr pair) (eq (car pair) (intern ""))))) '("#_" "#_ " "#_'a" "#_[a]" "#_#_a")) (let ((read-symbol-shorthands '(("" . "gdj-empty-prefix-")))) (mapcar (lambda (source) (let ((value (car (read-from-string source)))) (list (symbol-name value) (multibyte-string-p (symbol-name value))))) '("#_" "#_ " "##" "#:" "#_gdj-bypass-fresh-name" "-"))))"###,
         include_str!("symbol_reader_gnu/empty_bypass.expect"),
     );
 }
@@ -129,5 +129,14 @@ fn symbols_gnu_multibyte_name() {
         "multibyte_name",
         r###"(list (multibyte-string-p (symbol-name (car (read-from-string (string-to-multibyte "gdj-symbols-multibyte-name-new"))))) (multibyte-string-p (symbol-name (car (read-from-string "gdj-symbols-unibyte-name-new")))) (multibyte-string-p (symbol-name (car (read-from-string (string-to-multibyte "#:gdj-symbols-uninterned-mb"))))) (multibyte-string-p (symbol-name (car (read-from-string (string-to-multibyte "#:"))))) (multibyte-string-p (symbol-name (car (read-from-string (string-to-multibyte "#_"))))))"###,
         include_str!("symbol_reader_gnu/multibyte_name.expect"),
+    );
+}
+
+#[test]
+fn symbols_gnu_shorthand_reader() {
+    assert_gnu(
+        "shorthand_reader",
+        r###"(list (let ((read-symbol-shorthands '(("s-" . "string-") ("s-t" . "zz")))) (car (read-from-string "s-trim"))) (let ((read-symbol-shorthands '(("-" . "x-")))) (car (read-from-string "-"))) (let ((read-symbol-shorthands '(("<" . "x-")))) (car (read-from-string "<="))) (let ((read-symbol-shorthands '((":a" . "b")))) (car (read-from-string ":abc"))) (let ((read-symbol-shorthands '(("t" . "thing")))) (car (read-from-string "t"))))"###,
+        include_str!("symbol_reader_gnu/shorthand_reader.expect"),
     );
 }

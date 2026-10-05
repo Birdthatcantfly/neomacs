@@ -369,8 +369,7 @@ pub(crate) struct ReadSymbolShorthands {
 
 impl ReadSymbolShorthands {
     pub(crate) fn from_lisp_value(value: Value) -> Option<Self> {
-        let mut pairs = crate::emacs_core::value::list_to_vec(&value)?
-            .into_iter()
+        let pairs = crate::emacs_core::value::list_iter(value)
             .filter_map(|entry| {
                 if !entry.is_cons() {
                     return None;
@@ -380,7 +379,6 @@ impl ReadSymbolShorthands {
                 Some((shorthand, longhand))
             })
             .collect::<Vec<_>>();
-        pairs.sort_by_key(|pair| std::cmp::Reverse(pair.0.sbytes()));
         Some(Self { pairs })
     }
 
@@ -394,7 +392,7 @@ impl ReadSymbolShorthands {
             if input.starts_with(short_bytes) {
                 let mut rewritten = long.as_bytes().to_vec();
                 rewritten.extend_from_slice(&input[short_bytes.len()..]);
-                return Some(if name.is_multibyte() || long.is_multibyte() {
+                return Some(if name.is_multibyte() {
                     crate::heap_types::LispString::from_emacs_bytes(rewritten)
                 } else {
                     crate::heap_types::LispString::from_unibyte(rewritten)
@@ -2285,13 +2283,6 @@ impl<'a> Reader<'a> {
             return Err(self.error("expected atom"));
         }
 
-        // Keywords (:foo) — including bare `:` which is a keyword in Emacs
-        if token.bytes.first() == Some(&b':') {
-            return Ok(Value::keyword_id(super::intern::intern_lisp_value(
-                Value::heap_string(token.to_lisp_string()),
-            )));
-        }
-
         if token.quoting == SymbolQuoting::Plain
             && let Some(token_text) = token.as_utf8()
         {
@@ -2324,14 +2315,6 @@ impl<'a> Reader<'a> {
                 if let Some(f) = parse_emacs_special_float(token_text) {
                     return Ok(Value::make_float(f));
                 }
-            }
-
-            // t and nil
-            if token_text == "t" {
-                return Ok(Value::T);
-            }
-            if token_text == "nil" {
-                return Ok(Value::NIL);
             }
 
             // A bare `.` is the symbol `.` only when it directly precedes a
@@ -2401,6 +2384,14 @@ impl<'a> Reader<'a> {
     /// shorthand rewrite (`read-symbol-shorthands`).
     fn to_lisp_string_for_token(&self, token: &ReaderToken) -> crate::heap_types::LispString {
         let name = token.to_lisp_string();
+        if token.bytes.iter().all(|byte| {
+            matches!(
+                byte,
+                b'^' | b'*' | b'+' | b'-' | b'/' | b'<' | b'=' | b'>' | b'_' | b'|'
+            )
+        }) {
+            return name;
+        }
         self.shorthands
             .and_then(|shorthands| shorthands.rewrite(&name))
             .unwrap_or(name)
