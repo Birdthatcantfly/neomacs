@@ -53,4 +53,12 @@ fn symbols_contract_source_encoding_is_distinct_from_byte_identity() {
         crate::emacs_core::intern::resolve_lisp_visible_symbol_name(symbol.as_symbol_id().unwrap());
     assert_eq!(name.text().as_bytes(), b"a\xa0b");
     assert!(!name.text().is_multibyte());
+    let source = LispString::from_emacs_bytes(b"gdj-unit-multibyte-new-name".to_vec());
+    let (symbol, _) = LispReadSource::new(&source)
+        .read_one(0, &ob)
+        .unwrap()
+        .unwrap();
+    let name =
+        crate::emacs_core::intern::resolve_lisp_visible_symbol_name(symbol.as_symbol_id().unwrap());
+    assert!(name.text().is_multibyte());
 }

@@ -122,3 +122,12 @@ fn symbols_gnu_raw_nbsp() {
         include_str!("symbol_reader_gnu/raw_nbsp.expect"),
     );
 }
+
+#[test]
+fn symbols_gnu_multibyte_name() {
+    assert_gnu(
+        "multibyte_name",
+        r###"(list (multibyte-string-p (symbol-name (car (read-from-string (string-to-multibyte "gdj-symbols-multibyte-name-new"))))) (multibyte-string-p (symbol-name (car (read-from-string "gdj-symbols-unibyte-name-new")))) (multibyte-string-p (symbol-name (car (read-from-string (string-to-multibyte "#:gdj-symbols-uninterned-mb"))))) (multibyte-string-p (symbol-name (car (read-from-string (string-to-multibyte "#:"))))) (multibyte-string-p (symbol-name (car (read-from-string (string-to-multibyte "#_"))))))"###,
+        include_str!("symbol_reader_gnu/multibyte_name.expect"),
+    );
+}

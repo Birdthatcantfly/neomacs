@@ -12,7 +12,7 @@
 //! propertized strings, reader skip (#@N).
 
 use super::eval::{push_scratch_gc_root, restore_scratch_gc_roots, save_scratch_gc_roots};
-use super::intern::{intern, intern_lisp_string, intern_uninterned_lisp_string};
+use super::intern::intern;
 use malachite::base::num::conversion::traits::FromStringBase;
 use malachite::integer::Integer;
 // bytes_to_unibyte_storage_string and encode_nonunicode_char_for_storage
@@ -541,9 +541,8 @@ struct ReaderToken {
     /// non-ASCII / escaped tokens, shorthand rewrite); ASCII symbols intern
     /// straight from the `&str` view via the interner's no-alloc fast path.
     bytes: ReaderTokenBytes,
-    /// Whether the source string was multibyte when the token was read; decides
-    /// how `to_lisp_string` reconstructs the exact Lisp-string encoding.
-    multibyte: bool,
+    /// Source domain preserves the symbol-name string's exact encoding.
+    source_semantics: ReaderSourceSemantics,
     quoting: SymbolQuoting,
 }
 
@@ -558,7 +557,7 @@ impl ReaderToken {
     /// Materialize the exact Lisp-string name (heap). Reconstructs the same
     /// encoding `read_symbol_token` used to before this was made lazy.
     fn to_lisp_string(&self) -> crate::heap_types::LispString {
-        if self.multibyte {
+        if self.source_semantics.is_multibyte() {
             crate::heap_types::LispString::from_emacs_bytes(self.bytes.to_vec())
         } else {
             crate::heap_types::LispString::from_unibyte(self.bytes.to_vec())
@@ -1695,7 +1694,9 @@ impl<'a> Reader<'a> {
                     return Ok(self.intern_empty_symbol());
                 }
                 let name = token.to_lisp_string();
-                Ok(Value::from_sym_id(intern_lisp_string(&name)))
+                Ok(Value::from_sym_id(super::intern::intern_lisp_value(
+                    Value::heap_string(name),
+                )))
             }
             x if x == b'(' as u32 => {
                 // #("string" START END (PROPS...) ...) — propertized string.
@@ -1857,9 +1858,15 @@ impl<'a> Reader<'a> {
                 // #:X — uninterned symbol.
                 self.bump();
                 let token = self.read_symbol_token()?;
-                Ok(Value::from_sym_id(intern_uninterned_lisp_string(
-                    &token.to_lisp_string(),
-                )))
+                Ok(Value::from_sym_id(
+                    super::intern::make_uninterned_symbol_with_name_value(
+                        if token.bytes.is_empty() {
+                            Value::string("")
+                        } else {
+                            Value::heap_string(token.to_lisp_string())
+                        },
+                    ),
+                ))
             }
             x if x == b'$' as u32 => {
                 // #$ — expands to the current load file name during read.
@@ -2280,8 +2287,8 @@ impl<'a> Reader<'a> {
 
         // Keywords (:foo) — including bare `:` which is a keyword in Emacs
         if token.bytes.first() == Some(&b':') {
-            return Ok(Value::keyword_id(intern_lisp_string(
-                &token.to_lisp_string(),
+            return Ok(Value::keyword_id(super::intern::intern_lisp_value(
+                Value::heap_string(token.to_lisp_string()),
             )));
         }
 
@@ -2357,13 +2364,20 @@ impl<'a> Reader<'a> {
             && let Some(text) = token.as_utf8()
             && text.is_ascii()
         {
-            return Ok(Value::from_sym_id(intern(text)));
+            if !token.source_semantics.is_multibyte() {
+                return Ok(Value::from_sym_id(intern(text)));
+            }
+            if let Some(id) = super::intern::lookup_interned(text) {
+                return Ok(Value::from_sym_id(id));
+            }
         }
 
         // Cold path: non-ASCII / escaped / shorthand-rewritten symbols keep the
         // exact LispString encoding.
         let name = self.to_lisp_string_for_token(&token);
-        Ok(Value::from_sym_id(intern_lisp_string(&name)))
+        let id = super::intern::lookup_interned_lisp_string(&name)
+            .unwrap_or_else(|| super::intern::intern_lisp_value(Value::heap_string(name)));
+        Ok(Value::from_sym_id(id))
     }
 
     /// Empty #_ and ## use Fintern, including empty-prefix shorthands
@@ -2440,7 +2454,7 @@ impl<'a> Reader<'a> {
         // path); only the cold paths materialize a LispString via to_lisp_string.
         Ok(ReaderToken {
             bytes,
-            multibyte: self.source_semantics.is_multibyte(),
+            source_semantics: self.source_semantics,
             quoting,
         })
     }
