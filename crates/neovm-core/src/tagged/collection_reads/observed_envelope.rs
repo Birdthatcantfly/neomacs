@@ -123,26 +123,39 @@ impl ObservedEnvelope {
         slot_geometry: bool,
     ) -> bool {
         debug_assert!(!slot_geometry || native_geometry);
-        if !self.owners.insert(bits) {
-            return false;
-        }
+        let newly_owned = self.owners.insert(bits);
         if !native_geometry {
-            return true;
+            return newly_owned;
         }
         let address = bits & !TAG_MASK;
+        // A dead owner can be marked again at this address by another mutator
+        // before epoch filtering removes our old identity. A real projection
+        // must still promote Other -> Slots; positive membership alone may
+        // remain conservative across reuse and never reads a stale header.
+        let newly_native = self.addresses.insert(address);
+        let newly_slot = slot_geometry && self.slot_addresses.insert(address);
+        if !newly_native && !newly_slot {
+            return newly_owned;
+        }
         if self.single_cons == address {
             self.single_cons = 0;
         }
         if self.excluded.is_some_and(|gap| gap.covers(address)) {
             self.excluded = None;
         }
-        self.addresses.insert(address);
-        self.include(address);
-        if slot_geometry {
-            self.slot_addresses.insert(address);
+        if newly_native {
+            self.include(address);
+        }
+        if newly_slot {
             self.include_slot(address);
         }
         true
+    }
+
+    /// Positive eligibility is cached from a live projection, independently
+    /// of complete identity membership. It may conservatively survive reuse.
+    pub(super) fn has_slot_geometry(&self, bits: usize) -> bool {
+        self.slot_addresses.contains(&(bits & !TAG_MASK))
     }
 
     /// A completed local publication remains valid throughout a stable

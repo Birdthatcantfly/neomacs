@@ -726,16 +726,26 @@ fn publish_observed_owner_in_state(state: &mut State, bits: usize) -> bool {
     if compiled_journal_mode() != CompiledJournalMode::Observed {
         return false;
     }
-    // RECENT collisions and later scopes still record their own dependency,
-    // but a same-epoch local owner has already completed its sticky publication.
-    // Context/dump changes republish through the existing heap installation and
-    // barrier publisher; they do not require another shared owner mark.
-    if state.observed.already_published(bits) {
-        return false;
-    }
+    // Same-epoch membership proves sticky publication, but reclamation on
+    // another mutator can reuse a veclike address and mark its new lifetime
+    // before this ledger refreshes. Promote cached native eligibility only
+    // from a real live projection; stale certificate replay never reads a
+    // header. Positive slot eligibility may conservatively survive reuse.
+    let tag = bits & super::value::TAG_MASK;
+    let promoted_geometry = if state.observed.already_published(bits) {
+        if tag != super::value::TAG_VECLIKE || state.observed.has_slot_geometry(bits) {
+            return false;
+        }
+        let live_geometry = native_window_collection_owner(bits);
+        if live_geometry != NativeWindowCollectionOwner::Slots {
+            return false;
+        }
+        Some(live_geometry)
+    } else {
+        None
+    };
     let dump = super::gc::current_collection_dump_window();
     let refreshed = state.observed.refresh(dump);
-    let tag = bits & super::value::TAG_MASK;
     if matches!(
         tag,
         super::value::TAG_CONS | super::value::TAG_STRING | super::value::TAG_VECLIKE
@@ -746,7 +756,8 @@ fn publish_observed_owner_in_state(state: &mut State, bits: usize) -> bool {
         // Header subtype is immutable throughout this live owner's lifetime.
         // Capture only the eligibility fact here: reclamation and transitive
         // replay must never dereference the ledger's unrooted owner addresses.
-        let native_geometry = native_window_collection_owner(bits);
+        let native_geometry =
+            promoted_geometry.unwrap_or_else(|| native_window_collection_owner(bits));
         let changed = state.observed.insert(
             bits,
             native_geometry != NativeWindowCollectionOwner::Other,
@@ -865,3 +876,7 @@ mod observed_gap_tests;
 #[cfg(all(test, feature = "jit"))]
 #[path = "collection_reads/tests/observed_collisions_test.rs"]
 mod observed_collisions_tests;
+
+#[cfg(all(test, feature = "jit"))]
+#[path = "collection_reads/tests/observed_reused_subtype_test.rs"]
+mod observed_reused_subtype_tests;
