@@ -1638,6 +1638,62 @@ fn symbol_shorthand(id: SymId) -> Option<SymbolShorthand> {
     }
 }
 
+/// Scoped shorthand syntax and nesting on an invocation's exclusive printer
+/// state. GNU print.c:2533-2568 retains depth for quote/function and increases
+/// it for backquote/comma; restoration is guaranteed on every exit.
+/// Threading: all references remain on the calling mutator.
+#[must_use = "printer state is restored when this scope ends"]
+struct PrintShorthandGuard<'scope, 'context> {
+    state: &'scope mut PrintState<'context>,
+    saved_options: PrintOptions,
+    saved_depth: i64,
+    _mutator: std::marker::PhantomData<*const ()>,
+}
+
+static_assertions::assert_not_impl_any!(PrintShorthandGuard<'static, 'static>: Send, Sync);
+
+impl<'scope, 'context> PrintShorthandGuard<'scope, 'context> {
+    fn enter(
+        state: &'scope mut PrintState<'context>,
+        options: PrintOptions,
+        shorthand: SymbolShorthand,
+    ) -> Self {
+        let saved_options = state.options;
+        let saved_depth = state.depth;
+        state.options = options;
+        state.depth += match shorthand {
+            SymbolShorthand::Quote | SymbolShorthand::Function => 0,
+            SymbolShorthand::Backquote | SymbolShorthand::Comma | SymbolShorthand::CommaAt => 1,
+        };
+        Self {
+            state,
+            saved_options,
+            saved_depth,
+            _mutator: std::marker::PhantomData,
+        }
+    }
+
+    fn state(&mut self) -> &mut PrintState<'context> {
+        self.state
+    }
+}
+
+impl std::fmt::Debug for PrintShorthandGuard<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrintShorthandGuard")
+            .field("saved_depth", &self.saved_depth)
+            .field("saved_options", &self.saved_options)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for PrintShorthandGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.state.options = self.saved_options;
+        self.state.depth = self.saved_depth;
+    }
+}
+
 /// Try to produce a shorthand form (quote, function, backquote, etc.) using
 /// stateful printing. Returns `Some(string)` on success.
 fn write_list_shorthand_stateful(
@@ -1663,7 +1719,8 @@ fn write_list_shorthand_stateful(
         return None;
     }
 
-    let (prefix, nested_options) = match symbol_shorthand(head)? {
+    let shorthand = symbol_shorthand(head)?;
+    let (prefix, nested_options) = match shorthand {
         SymbolShorthand::Quote => ("'", state.options),
         SymbolShorthand::Function => ("#'", state.options),
         SymbolShorthand::Backquote => ("`", state.options.enter_backquote()),
@@ -1681,11 +1738,9 @@ fn write_list_shorthand_stateful(
         }
     };
 
-    let saved_options = state.options;
-    state.options = nested_options;
+    let mut scope = PrintShorthandGuard::enter(state, nested_options, shorthand);
     let mut out = StatefulPrintOutput::from_str(prefix);
-    write_value_stateful(&items[1], &mut out, state);
-    state.options = saved_options;
+    write_value_stateful(&items[1], &mut out, scope.state());
     Some(out)
 }
 
@@ -2012,6 +2067,8 @@ fn write_lisp_propertized_string_stateful(
     out: &mut StatefulPrintOutput,
     state: &mut PrintState<'_>,
 ) {
+    let mut depth_guard = PrintDepthGuard::enter(state);
+    let state = depth_guard.state();
     out.push_str("#(");
     out.extend_from_slice(&format_lisp_string_bytes_emacs(ls, &state.options));
     for run in runs {

@@ -1423,8 +1423,7 @@ pub(crate) fn print_options_from_state(
         .is_some_and(|v| v.is_truthy());
     let print_level = obarray
         .value_in_buffer(buf, "print-level")
-        .and_then(|v| v.as_fixnum())
-        .filter(|&n| n >= 0);
+        .and_then(|v| v.as_fixnum());
     let print_length = obarray
         .value_in_buffer(buf, "print-length")
         .and_then(|v| v.as_fixnum())
