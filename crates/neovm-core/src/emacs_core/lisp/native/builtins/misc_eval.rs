@@ -1348,6 +1348,70 @@ fn print_target_current_buffer(
     }
 }
 
+fn print_settings_source(
+    ctx: &super::eval::Context,
+    target: Value,
+) -> super::print::PrintSettingsSource {
+    let buffer = print_target_buffer_id(ctx, target).or_else(|| ctx.buffers.current_buffer_id());
+    buffer.map_or(
+        super::print::PrintSettingsSource::Globals,
+        super::print::PrintSettingsSource::Buffer,
+    )
+}
+
+/// Temporarily select the target to bind its localized escape cell. Explicit
+/// completion restores runtime state; panic Drop restores native ownership.
+/// The outer printer scope owns specbindings.
+/// No state leaves the owning mutator or is published to another thread.
+#[must_use = "dropping the guard restores the caller buffer"]
+struct PrintBindingBufferGuard<'context> {
+    context: &'context mut super::eval::Context,
+    origin: Option<crate::buffer::BufferId>,
+    _mutator: std::marker::PhantomData<*const ()>,
+}
+static_assertions::assert_not_impl_any!(PrintBindingBufferGuard<'static>: Send, Sync);
+impl std::fmt::Debug for PrintBindingBufferGuard<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrintBindingBufferGuard")
+            .field("origin", &self.origin)
+            .finish()
+    }
+}
+impl<'context> PrintBindingBufferGuard<'context> {
+    fn new(context: &'context mut super::eval::Context) -> Self {
+        let origin = context.buffers.current_buffer_id();
+        Self {
+            context,
+            origin,
+            _mutator: std::marker::PhantomData,
+        }
+    }
+    fn select(&mut self, target: crate::buffer::BufferId) -> Result<(), Flow> {
+        if self.context.buffers.current_buffer_id() == Some(target) {
+            Ok(())
+        } else {
+            self.context.set_current_buffer_unrecorded(target)
+        }
+    }
+    fn context(&mut self) -> &mut super::eval::Context {
+        self.context
+    }
+    fn finish(mut self, result: Result<(), Flow>) -> Result<(), Flow> {
+        if let Some(origin) = self.origin {
+            self.context.restore_current_buffer_if_live(origin);
+        }
+        self.origin = None;
+        result
+    }
+}
+impl Drop for PrintBindingBufferGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(origin) = self.origin.take() {
+            self.context.restore_current_buffer_storage_if_live(origin);
+        }
+    }
+}
+
 /// The multibyteness of the buffer that a (resolved) print target writes into,
 /// or `None` when the target is the echo area / `t` / a printer function (where
 /// GNU's `print_prepare` leaves the `print-escape-*` variables untouched).
@@ -1367,21 +1431,48 @@ fn print_target_buffer_multibyte(
 /// In particular, a unibyte string printed into a unibyte buffer keeps
 /// `print-escape-nonascii` nil, so its high bytes are emitted raw (not octal),
 /// while printing into a multibyte buffer escapes them.
+#[derive(Clone, Copy, Debug, strum::AsRefStr)]
+enum ImplicitPrintEscape {
+    #[strum(serialize = "print-escape-nonascii")]
+    Nonascii,
+    #[strum(serialize = "print-escape-multibyte")]
+    Multibyte,
+}
+
 fn apply_print_target_escape_bindings(
-    ctx: &crate::emacs_core::eval::Context,
+    ctx: &mut crate::emacs_core::eval::Context,
     target: Value,
-    options: &mut super::print::PrintOptions,
-) {
-    let Some(target_multibyte) = print_target_buffer_multibyte(ctx, target) else {
-        return;
+) -> Result<(), Flow> {
+    let Some(target_id) = print_target_buffer_id(ctx, target) else {
+        return Ok(());
     };
-    if target_multibyte {
-        if !options.print_escape_nonascii {
-            options.print_escape_nonascii = true;
-        }
-    } else if !options.print_escape_multibyte {
-        options.print_escape_multibyte = true;
+    let Some(multibyte) = print_target_buffer_multibyte(ctx, target) else {
+        return Ok(());
+    };
+    let binding = if multibyte {
+        ImplicitPrintEscape::Nonascii
+    } else {
+        ImplicitPrintEscape::Multibyte
+    };
+    if ctx
+        .obarray
+        .value_in_buffer(ctx.buffers.get(target_id), binding.as_ref())
+        .is_some_and(|value| value.is_truthy())
+    {
+        return Ok(());
     }
+    let mut buffer_scope = PrintBindingBufferGuard::new(ctx);
+    let result = (|| {
+        buffer_scope.select(target_id)?;
+        let ctx = buffer_scope.context();
+        let binding = intern(binding.as_ref());
+        if ctx.specbind_cached(binding, Value::T) {
+            Ok(())
+        } else {
+            ctx.try_specbind(binding, Value::T)
+        }
+    })();
+    buffer_scope.finish(result)
 }
 
 /// `text` is read AFTER `signal_before_text_change`, i.e. after arbitrary
@@ -1605,7 +1696,6 @@ fn write_print_bytes_to_target(
     }
 }
 
-// GNU src/print.c:132-162, 304-309: strings enter callable dispatch.
 pub(crate) fn print_target_is_direct(target: Value) -> bool {
     (target.is_t() || target.is_nil() || target.is_buffer()) || super::marker::is_marker(&target)
 }
@@ -1682,37 +1772,26 @@ fn write_terpri_output(eval: &mut super::eval::Context, target: Value) -> Result
         }
         _other => {
             // Root the callable target across eval.apply().
-            let roots = eval.save_specpdl_roots();
-            eval.push_specpdl_root(target);
-            let call_result = eval.apply(target, vec![Value::fixnum('\n' as i64)]);
-            eval.restore_specpdl_roots(roots);
-            call_result?;
+            let mut scope = super::print::PrintEvaluationGuard::new(eval);
+            if let Some(buffer_id) = scope.context().buffers.current_buffer_id() {
+                scope
+                    .context()
+                    .specpdl
+                    .push(crate::emacs_core::eval::SpecBinding::SaveCurrentBuffer { buffer_id });
+            }
+            scope.context().push_specpdl_root(target);
+            let result = scope
+                .context()
+                .apply(target, vec![Value::fixnum('\n' as i64)]);
+            scope.finish_value(result)?;
             Ok(())
         }
     }
 }
 
-/// Issue #131: render the `princ` form as canonical Emacs bytes.
-/// `%s` inserts a string argument directly; aggregate objects share the main
-/// byte-safe object printer (GNU editfns.c:3675-3683, print.c:2503-2525).
-/// This immutable path cannot evaluate Lisp; bytes are owned before output.
-pub(crate) fn print_value_princ_bytes(
-    ctx: &crate::emacs_core::eval::Context,
-    value: &Value,
-) -> Vec<u8> {
-    if let Some(string) = value.as_lisp_string() {
-        return super::print::princ_string_bytes(
-            string,
-            super::print::PrincStringOutput::PreserveByte8,
-        )
-        .into_owned();
-    }
-    print_value_princ_bytes_to_multibyte_buffer(ctx, value)
-}
-
-/// No-escape printing into a multibyte text stream, including error data.
-/// Source encoding and aggregate traversal share the public object's printer.
-/// This immutable helper cannot evaluate Lisp or expose a borrowed source.
+/// No-escape printing into a multibyte text stream, including error-data
+/// printing. This shares object traversal with the public printer, so raw-byte
+/// symbol names never pass through Rust's UTF-8-only symbol-name API.
 pub(crate) fn print_value_princ_bytes_to_multibyte_buffer(
     ctx: &crate::emacs_core::eval::Context,
     value: &Value,
@@ -1723,43 +1802,75 @@ pub(crate) fn print_value_princ_bytes_to_multibyte_buffer(
     super::error::print_value_bytes_in_state_with_options(ctx, value, options)
 }
 
-fn print_options_from_overrides(
-    ctx: &super::eval::Context,
-    buf: Option<&crate::buffer::Buffer>,
-    overrides: Option<&Value>,
-) -> Result<super::print::PrintOptions, Flow> {
-    let mut options = super::error::print_options_from_state(&ctx.obarray, buf);
-    if let Some(overrides) = overrides.filter(|v| !v.is_nil()) {
-        apply_print_overrides(&mut options, *overrides)?;
+/// One override-list cursor stays rooted while specbind invokes watchers.
+/// The exclusive Context borrow is confined to the calling mutator. Only roots
+/// are removed on Drop: print-variable bindings survive for the outer printer
+/// unwind scope. The root-slot token is private and cannot outlive this scope.
+#[must_use = "dropping the guard releases the override cursor root"]
+struct PrintOverrideCursorGuard<'context> {
+    context: &'context mut super::eval::Context,
+    roots: Option<super::eval::SpecpdlRootScopeState>,
+    cursor: super::eval::SpecpdlRootSlot,
+    _mutator: std::marker::PhantomData<*const ()>,
+}
+static_assertions::assert_not_impl_any!(PrintOverrideCursorGuard<'static>: Send, Sync);
+impl std::fmt::Debug for PrintOverrideCursorGuard<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrintOverrideCursorGuard")
+            .field("roots", &self.roots)
+            .field("cursor", &self.cursor)
+            .finish()
     }
-    Ok(options)
+}
+impl<'context> PrintOverrideCursorGuard<'context> {
+    fn new(context: &'context mut super::eval::Context, value: Value) -> Self {
+        let roots = Some(context.save_specpdl_roots());
+        let cursor = context.push_specpdl_root_slot(value);
+        Self {
+            context,
+            roots,
+            cursor,
+            _mutator: std::marker::PhantomData,
+        }
+    }
+    fn set_cursor(&mut self, value: Value) {
+        self.context.set_specpdl_root_slot(&self.cursor, value);
+    }
+    fn context(&mut self) -> &mut super::eval::Context {
+        self.context
+    }
+}
+impl Drop for PrintOverrideCursorGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(roots) = self.roots.take() {
+            self.context.restore_specpdl_roots(roots);
+        }
+    }
 }
 
-fn reset_print_options(options: &mut super::print::PrintOptions) {
-    *options = super::print::PrintOptions::default();
-    options.charset_text_property = super::print::CharsetTextProperty::Never;
-}
-
-fn apply_print_overrides(
-    options: &mut super::print::PrintOptions,
-    mut overrides: Value,
-) -> Result<(), Flow> {
-    if overrides == Value::T {
-        reset_print_options(options);
+/// Bind GNU printer override variables in list order, including resets.
+/// The exclusive Context borrow belongs to the caller's PrintEvaluationGuard;
+/// no Lisp state is cached outside that mutator or survives guard teardown.
+fn bind_print_overrides(ctx: &mut super::eval::Context, mut overrides: Value) -> Result<(), Flow> {
+    if overrides.is_nil() {
         return Ok(());
     }
-
+    if overrides == Value::T {
+        return bind_print_defaults(ctx);
+    }
+    let mut roots = PrintOverrideCursorGuard::new(ctx, overrides);
     while !overrides.is_nil() {
+        roots.set_cursor(overrides);
+        let ctx = roots.context();
         if !overrides.is_cons() {
             return Err(signal(
                 LispCondition::WrongTypeArgument,
                 vec![Value::symbol("consp"), overrides],
             ));
         }
-
         let setting = overrides.cons_car();
         if setting == Value::T {
-            reset_print_options(options);
+            bind_print_defaults(ctx)?;
         } else {
             if !setting.is_cons() {
                 return Err(signal(
@@ -1767,118 +1878,313 @@ fn apply_print_overrides(
                     vec![Value::symbol("consp"), setting],
                 ));
             }
-            apply_print_override_setting(options, setting.cons_car(), setting.cons_cdr())?;
+            let key = PrintOverrideKey::try_from(setting.cons_car())?;
+            ctx.try_specbind(key.variable(), setting.cons_cdr())?;
         }
-
-        overrides = overrides.cons_cdr();
-    }
-
-    Ok(())
-}
-
-fn apply_print_override_setting(
-    options: &mut super::print::PrintOptions,
-    key: Value,
-    value: Value,
-) -> Result<(), Flow> {
-    let ValueKind::Symbol(id) = key.kind() else {
-        return Err(signal(
-            LispCondition::WrongTypeArgument,
-            vec![Value::symbol("symbolp"), key],
-        ));
-    };
-
-    match resolve_sym(id) {
-        "length" => {
-            options.print_length = value.as_fixnum().filter(|n| *n >= 0);
-        }
-        "level" => {
-            options.print_level = value.as_fixnum().filter(|n| *n >= 0);
-        }
-        "circle" => {
-            options.print_circle = value.is_truthy();
-        }
-        "escape-newlines" => {
-            options.print_escape_newlines = value.is_truthy();
-        }
-        "escape-control-characters" => {
-            options.print_escape_control_characters = value.is_truthy();
-        }
-        "escape-nonascii" => {
-            options.print_escape_nonascii = value.is_truthy();
-        }
-        "escape-multibyte" => {
-            options.print_escape_multibyte = value.is_truthy();
-        }
-        "gensym" => {
-            options.print_gensym = value.is_truthy();
-        }
-        "quoted" => {
-            options.print_quoted = value.is_truthy();
-        }
-        "continuous-numbering" => {
-            options.print_continuous_numbering = value.is_truthy();
-            if !options.print_continuous_numbering {
-                options.print_number_table = None;
-            }
-        }
-        "symbols-bare" => {
-            options.print_symbols_bare = value.is_truthy();
-        }
-        "number-table" => {
-            options.print_number_table = value.is_hash_table().then_some(value);
-        }
-        "float-format" => {
-            options.float_output_format = value.is_string().then_some(value);
-        }
-        // GNU accepts these override keys by dynamically binding print
-        // variables that Neomacs does not yet model in PrintOptions.
-        "charset-text-property" => {
-            options.charset_text_property = value.into();
-        }
-        "unreadable-function" | "unreadeable-function" | "integers-as-characters" => {}
-        _ => {
+        let tail = overrides.cons_cdr();
+        if !tail.is_nil() && !tail.is_cons() {
             return Err(signal(
                 LispCondition::WrongTypeArgument,
-                vec![Value::symbol("symbolp"), key],
+                vec![Value::symbol("consp"), overrides],
             ));
+        }
+        overrides = tail;
+    }
+    Ok(())
+}
+fn bind_print_defaults(ctx: &mut super::eval::Context) -> Result<(), Flow> {
+    for &key in <PrintOverrideKey as strum::VariantArray>::VARIANTS {
+        ctx.try_specbind(key.variable(), key.default_value())?;
+    }
+    Ok(())
+}
+#[derive(Clone, Copy, Debug, strum::EnumString, strum::AsRefStr, strum::VariantArray)]
+enum PrintOverrideKey {
+    #[strum(serialize = "length")]
+    Length,
+    #[strum(serialize = "level")]
+    Level,
+    #[strum(serialize = "circle")]
+    Circle,
+    #[strum(serialize = "quoted")]
+    Quoted,
+    #[strum(serialize = "escape-newlines")]
+    EscapeNewlines,
+    #[strum(serialize = "escape-control-characters")]
+    EscapeControlCharacters,
+    #[strum(serialize = "escape-nonascii")]
+    EscapeNonascii,
+    #[strum(serialize = "escape-multibyte")]
+    EscapeMultibyte,
+    #[strum(serialize = "charset-text-property")]
+    CharsetTextProperty,
+    #[strum(serialize = "unreadable-function")]
+    UnreadableFunction,
+    #[strum(serialize = "unreadeable-function")]
+    LegacyUnreadableFunction,
+    #[strum(serialize = "gensym")]
+    Gensym,
+    #[strum(serialize = "continuous-numbering")]
+    ContinuousNumbering,
+    #[strum(serialize = "symbols-bare")]
+    SymbolsBare,
+    #[strum(serialize = "number-table")]
+    NumberTable,
+    #[strum(serialize = "float-format")]
+    FloatFormat,
+    #[strum(serialize = "integers-as-characters")]
+    IntegersAsCharacters,
+}
+impl TryFrom<Value> for PrintOverrideKey {
+    type Error = Flow;
+    fn try_from(key: Value) -> Result<Self, Self::Error> {
+        let parsed = key
+            .as_bare_symbol_name()
+            .and_then(|name| name.parse::<Self>().ok())
+            .filter(|setting| key == Value::symbol(setting.as_ref()));
+        parsed.ok_or_else(|| {
+            signal(
+                LispCondition::WrongTypeArgument,
+                vec![Value::symbol("symbolp"), Value::NIL],
+            )
+        })
+    }
+}
+
+impl PrintOverrideKey {
+    fn variable(self) -> SymId {
+        match self {
+            Self::FloatFormat => intern("float-output-format"),
+            Self::LegacyUnreadableFunction | Self::UnreadableFunction => {
+                intern("print-unreadable-function")
+            }
+            Self::Length
+            | Self::Level
+            | Self::Circle
+            | Self::Quoted
+            | Self::EscapeNewlines
+            | Self::EscapeControlCharacters
+            | Self::EscapeNonascii
+            | Self::EscapeMultibyte
+            | Self::CharsetTextProperty
+            | Self::Gensym
+            | Self::ContinuousNumbering
+            | Self::SymbolsBare
+            | Self::NumberTable
+            | Self::IntegersAsCharacters => intern(&format!("print-{}", self.as_ref())),
+        }
+    }
+    fn default_value(self) -> Value {
+        match self {
+            Self::Quoted => Value::T,
+            Self::Length
+            | Self::Level
+            | Self::Circle
+            | Self::EscapeNewlines
+            | Self::EscapeControlCharacters
+            | Self::EscapeNonascii
+            | Self::EscapeMultibyte
+            | Self::CharsetTextProperty
+            | Self::Gensym
+            | Self::ContinuousNumbering
+            | Self::SymbolsBare
+            | Self::NumberTable
+            | Self::IntegersAsCharacters
+            | Self::FloatFormat
+            | Self::LegacyUnreadableFunction
+            | Self::UnreadableFunction => Value::NIL,
+        }
+    }
+}
+
+/// Escaping mode selected once at the Lisp optional-argument boundary.
+/// This enum is per-call scalar metadata with no mutator-owned state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ObjectEscaping {
+    Escaped,
+    Unescaped,
+}
+impl From<Value> for ObjectEscaping {
+    fn from(value: Value) -> Self {
+        if value.is_truthy() {
+            Self::Unescaped
+        } else {
+            Self::Escaped
+        }
+    }
+}
+impl ObjectEscaping {
+    fn is_unescaped(self) -> bool {
+        match self {
+            Self::Escaped => false,
+            Self::Unescaped => true,
+        }
+    }
+}
+
+/// Admission is confined to nil overrides and objects whose non-circle printer
+/// cannot invoke Lisp or select a buffer. Keep this proof mutator-local like the
+/// enclosing PrintEvaluationGuard; properties can require evaluator traversal.
+struct CallbackFreePrintLeaf {
+    _mutator: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl CallbackFreePrintLeaf {
+    fn validate(value: Value, overrides: Value) -> Option<Self> {
+        if !overrides.is_nil() {
+            return None;
+        }
+        let admitted = match value.kind() {
+            ValueKind::Nil
+            | ValueKind::T
+            | ValueKind::Fixnum(_)
+            | ValueKind::Float
+            | ValueKind::Symbol(_) => true,
+            ValueKind::String => {
+                !crate::emacs_core::value::string_has_text_properties_for_value(value)
+            }
+            ValueKind::Subr(_)
+            | ValueKind::Cons
+            | ValueKind::Veclike(_)
+            | ValueKind::Unbound
+            | ValueKind::Unknown => false,
+        };
+        admitted.then_some(Self {
+            _mutator: std::marker::PhantomData,
+        })
+    }
+}
+
+enum Prin1StringPreparation {
+    CallbackFreeLeaf {
+        _proof: CallbackFreePrintLeaf,
+        options: super::print::PrintOptions,
+    },
+    SavedBuffer(super::print::PrintOptions),
+}
+static_assertions::assert_not_impl_any!(Prin1StringPreparation: Send, Sync);
+
+impl Prin1StringPreparation {
+    fn into_options(self) -> super::print::PrintOptions {
+        match self {
+            Self::CallbackFreeLeaf { options, .. } | Self::SavedBuffer(options) => options,
+        }
+    }
+}
+
+fn prin1_string_options(
+    ctx: &crate::emacs_core::eval::Context,
+    escaping: ObjectEscaping,
+) -> super::print::PrintOptions {
+    let mut options = super::error::print_options_from_state(&ctx.obarray, None);
+    options.print_noescape = escaping.is_unescaped();
+    // GNU's multibyte Vprin1_to_string_buffer implicitly binds this flag to t.
+    // Retain the old rendering fallback if a watcher changes the real binding.
+    options.print_escape_nonascii = true;
+    options
+}
+
+fn prepare_prin1_string(
+    ctx: &mut crate::emacs_core::eval::Context,
+    value: Value,
+    escaping: ObjectEscaping,
+    overrides: Value,
+) -> Result<Prin1StringPreparation, Flow> {
+    // Overrides precede PRINTPREPARE's saved buffer (GNU print.c:814-825).
+    bind_print_overrides(ctx, overrides)?;
+    let escape_nonascii = intern("print-escape-nonascii");
+    let needs_binding = !ctx
+        .obarray
+        .symbol_value_id_copied(escape_nonascii)
+        .is_some_and(|value| value.is_truthy());
+
+    if let Some(proof) = CallbackFreePrintLeaf::validate(value, overrides) {
+        let binding_depth = ctx.specpdl.len();
+        // A successful cached bind is a real Let, including forwarded BOOL
+        // storage. Refusal changes neither storage nor specpdl and runs no Lisp.
+        if !needs_binding || ctx.specbind_cached(escape_nonascii, Value::T) {
+            // Binding can change aliased options, so capture only afterward.
+            let options = prin1_string_options(ctx, escaping);
+            if !options.print_circle {
+                return Ok(Prin1StringPreparation::CallbackFreeLeaf {
+                    _proof: proof,
+                    options,
+                });
+            }
+            if let Some(buffer_id) = ctx.buffers.current_buffer_id() {
+                ctx.specpdl
+                    .push(crate::emacs_core::eval::SpecBinding::SaveCurrentBuffer { buffer_id });
+                if needs_binding {
+                    // No Lisp/safepoint has occurred since the single cached
+                    // Let. Restore [Save, Let] before circle traversal can call
+                    // Lisp, preserving the buffer seen by normal unlet cleanup.
+                    debug_assert_eq!(ctx.specpdl.len(), binding_depth + 2);
+                    ctx.specpdl.swap(binding_depth, binding_depth + 1);
+                }
+            }
+            return Ok(Prin1StringPreparation::SavedBuffer(options));
         }
     }
 
-    Ok(())
+    // Preserve Save-before-try_specbind on every refusal/general path: watched
+    // binding may select a buffer, and unlet must precede buffer restoration.
+    if let Some(buffer_id) = ctx.buffers.current_buffer_id() {
+        ctx.specpdl
+            .push(crate::emacs_core::eval::SpecBinding::SaveCurrentBuffer { buffer_id });
+    }
+    if needs_binding {
+        ctx.try_specbind(escape_nonascii, Value::T)?;
+    }
+    Ok(Prin1StringPreparation::SavedBuffer(prin1_string_options(
+        ctx, escaping,
+    )))
+}
+
+/// Prepare format's object bytes inside its already-armed print guard.
+/// GNU format %s/%S uses prin1-to-string without overrides (editfns.c:3670-3685).
+/// Share its scratch escaping option while retaining the native real implicit
+/// binding, after-bind option capture, and circle/refusal cleanup ordering.
+pub(super) fn prepare_format_object_options(
+    ctx: &mut crate::emacs_core::eval::Context,
+    value: Value,
+    escaping: ObjectEscaping,
+) -> Result<super::print::PrintOptions, Flow> {
+    prepare_prin1_string(ctx, value, escaping, Value::NIL).map(Prin1StringPreparation::into_options)
 }
 
 fn prin1_to_lisp_string_value_in_state_with_overrides(
-    ctx: &crate::emacs_core::eval::Context,
+    ctx: &mut crate::emacs_core::eval::Context,
     value: &Value,
-    noescape: bool,
+    escaping: ObjectEscaping,
     overrides: Option<&Value>,
 ) -> Result<crate::heap_types::LispString, Flow> {
-    // GNU's `Fprin1_to_string` prints into `Vprin1_to_string_buffer`, so
-    // `PRINTPREPARE` makes THAT buffer current and the caller's buffer-local
-    // `print-level` / `print-length` never apply (ledger 196).
-    let mut options = print_options_from_overrides(ctx, None, overrides)?;
-    options.print_noescape = noescape;
-    // GNU `prin1-to-string' prints into `Vprin1_to_string_buffer', which is a
-    // multibyte buffer, so `print_prepare' binds `print-escape-nonascii' to t
-    // (print.c).  A unibyte string's high bytes are therefore octal-escaped in
-    // the resulting (multibyte) string, matching `(prin1 ... multibyte-buffer)'.
-    if !options.print_escape_nonascii {
-        options.print_escape_nonascii = true;
-    }
-    let bytes = super::error::format_value_bytes_in_state_with_options(
-        &ctx.obarray,
-        &ctx.buffers,
-        &ctx.frames,
-        &ctx.threads,
-        value,
-        options,
-    );
-    Ok(if bytes.is_ascii() {
-        crate::heap_types::LispString::from_unibyte(bytes)
-    } else {
-        crate::heap_types::LispString::from_emacs_bytes(bytes)
-    })
+    let mut scope = super::print::PrintEvaluationGuard::new(ctx);
+    let result = (|| {
+        let ctx = scope.context();
+
+        // GNU's `Fprin1_to_string` prints into `Vprin1_to_string_buffer`, so
+        // `PRINTPREPARE` makes THAT buffer current and the caller's buffer-local
+        // `print-level` / `print-length` never apply (ledger 196).
+        let options = prepare_prin1_string(
+            ctx,
+            *value,
+            escaping,
+            overrides.copied().unwrap_or(Value::NIL),
+        )?
+        .into_options();
+        let bytes = super::print::print_value_bytes_in_context(
+            ctx,
+            value,
+            options,
+            super::print::PrintSettingsSource::Globals,
+        )?;
+        Ok(if bytes.is_ascii() {
+            crate::heap_types::LispString::from_unibyte(bytes)
+        } else {
+            crate::heap_types::LispString::from_emacs_bytes(bytes)
+        })
+    })();
+    scope.finish(result)
 }
 
 pub(crate) fn builtin_princ(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {
@@ -1887,206 +2193,246 @@ pub(crate) fn builtin_princ(eval: &mut super::eval::Context, args: Vec<Value>) -
     if print_target_is_direct(target) {
         return builtin_princ_impl(eval, args);
     }
+    let settings_source = print_settings_source(eval, target);
+    let mut scope = super::print::PrintEvaluationGuard::new(eval);
+    let result = (|| {
+        let eval = scope.context();
+        eval.push_specpdl_root(target);
+        if let Some(buffer_id) = eval.buffers.current_buffer_id() {
+            eval.specpdl
+                .push(crate::emacs_core::eval::SpecBinding::SaveCurrentBuffer { buffer_id });
+        }
 
-    let mut options = super::error::print_options_from_state(
-        &eval.obarray,
-        print_target_current_buffer(eval, target),
-    );
-    options.print_noescape = true;
-    options.print_string_destination = super::print::PrincStringDestination::Callable;
-    let bytes = super::error::print_value_bytes_in_state_with_options(eval, &args[0], options);
-    let roots = eval.save_specpdl_roots();
-    eval.push_specpdl_root(target);
-    let princ_result =
-        dispatch_print_callback_emacs_chars(&bytes, |ch| eval.apply(target, vec![ch]).map(|_| ()));
-    eval.restore_specpdl_roots(roots);
-    princ_result?;
-    Ok(args[0])
+        let mut options = super::error::print_options_from_state(
+            &eval.obarray,
+            print_target_current_buffer(eval, target),
+        );
+        options.print_noescape = true;
+        options.print_string_destination = super::print::PrincStringDestination::Callable;
+        let bytes =
+            super::print::print_value_bytes_in_context(eval, &args[0], options, settings_source)?;
+        let princ_result = dispatch_print_callback_emacs_chars(&bytes, |ch| {
+            eval.apply(target, vec![ch]).map(|_| ())
+        });
+        princ_result?;
+        Ok(args[0])
+    })();
+    scope.finish_value(result)
 }
 
 pub(crate) fn builtin_princ_impl(
     ctx: &mut crate::emacs_core::eval::Context,
     args: Vec<Value>,
 ) -> EvalResult {
-    expect_min_args("princ", &args, 1)?;
-    // Issue #131: emit canonical Emacs bytes directly. A real Private-Use glyph
-    // is inserted as itself, while genuine eight-bit / non-Unicode content is
-    // carried as its disjoint extended encoding — neither is ever mistaken for
-    // the other, retiring the storage-string sink princ used to fall back to.
-    let target = resolve_print_target_in_state(ctx, args.get(1));
-    let mut options = super::error::print_options_from_state(
-        &ctx.obarray,
-        print_target_current_buffer(ctx, target),
-    );
-    options.print_noescape = true;
-    apply_print_target_escape_bindings(ctx, target, &mut options);
-    let bytes = super::error::print_value_bytes_in_state_with_options(ctx, &args[0], options);
-    write_print_bytes_from_ctx(ctx, args.get(1), &bytes)?;
-    Ok(args[0])
-}
+    let mut scope = super::print::PrintEvaluationGuard::new(ctx);
+    let result = (|| {
+        let ctx = scope.context();
 
-/// GNU `print_object`/`print_preprocess` build `Vprint_number_table` (a real
-/// `eq` hash table) inside the printer when `print-circle' is set, and -- when
-/// `print-continuous-numbering' is also set -- keep it (and `print_number_index`)
-/// alive across successive print calls so shared structure retains its `#N='
-/// labels (src/print.c:1296-1322, 1444-1445).  The neomacs printer only takes
-/// the persistent (Lisp-variable) path when `print-number-table' is already a
-/// hash table; otherwise it uses a throwaway internal table.  To match GNU,
-/// materialize and bind the table here -- before printing -- whenever both
-/// variables are active and the variable does not yet hold a hash table.  The
-/// table's *contents* then persist automatically (it is a shared heap object),
-/// so the next call in the same `print-continuous-numbering' scope reuses the
-/// existing `#N#' references instead of re-emitting `#N=' prefixes.
-pub(crate) fn ensure_continuous_print_number_table(ctx: &mut crate::emacs_core::eval::Context) {
-    let continuous = ctx
-        .obarray
-        .symbol_value_copied("print-continuous-numbering")
-        .is_some_and(|v| v.is_truthy());
-    let circle = ctx
-        .obarray
-        .symbol_value_copied("print-circle")
-        .is_some_and(|v| v.is_truthy());
-    if !(continuous && circle) {
-        return;
-    }
-    let already_table = ctx
-        .obarray
-        .symbol_value_copied("print-number-table")
-        .is_some_and(|v| v.is_hash_table());
-    if already_table {
-        return;
-    }
-    ctx.set_variable(
-        "print-number-table",
-        Value::hash_table(crate::emacs_core::value::HashTableTest::Eq),
-    );
-    // GNU `print_object' resets `print_number_index' to 0 whenever it (re)builds
-    // a nil `Vprint_number_table' (src/print.c:1300-1305).  Mirror that so the
-    // first shared object in this continuous-numbering scope is labelled `#1='.
-    crate::emacs_core::print::reset_print_number_index();
+        expect_min_args("princ", &args, 1)?;
+        // Issue #131: emit canonical Emacs bytes directly. A real Private-Use glyph
+        // is inserted as itself, while genuine eight-bit / non-Unicode content is
+        // carried as its disjoint extended encoding — neither is ever mistaken for
+        // the other, retiring the storage-string sink princ used to fall back to.
+        let target = resolve_print_target_in_state(ctx, args.get(1));
+        ctx.push_specpdl_root(target);
+        let output_target = if target.is_nil() { Value::T } else { target };
+        let settings_source = print_settings_source(ctx, target);
+        if let Some(buffer_id) = ctx.buffers.current_buffer_id() {
+            ctx.specpdl
+                .push(crate::emacs_core::eval::SpecBinding::SaveCurrentBuffer { buffer_id });
+        }
+        apply_print_target_escape_bindings(ctx, target)?;
+        let mut options = super::error::print_options_from_state(
+            &ctx.obarray,
+            print_target_current_buffer(ctx, target),
+        );
+        options.print_noescape = true;
+        let bytes =
+            super::print::print_value_bytes_in_context(ctx, &args[0], options, settings_source)?;
+        write_print_bytes_from_ctx(ctx, Some(&output_target), &bytes)?;
+        Ok(args[0])
+    })();
+    scope.finish_value(result)
 }
 
 pub(crate) fn builtin_prin1(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {
     expect_min_args("prin1", &args, 1)?;
-    ensure_continuous_print_number_table(eval);
     let target = resolve_print_target(eval, args.get(1));
-    let options =
-        print_options_from_overrides(eval, print_target_current_buffer(eval, target), args.get(2))?;
     if print_target_is_direct(target) {
         return builtin_prin1_impl(eval, args);
     }
 
-    // GNU's callable print target receives Emacs character codes one at a time.
-    // Keep the printer's canonical Emacs bytes intact until that boundary: a
-    // Rust String cannot represent byte8 or non-Unicode Emacs characters and
-    // would silently replace them before `external-debugging-output` (or any
-    // other character sink) sees them.
-    let bytes = super::error::print_value_bytes_in_state_with_options(eval, &args[0], options);
-    let roots = eval.save_specpdl_roots();
-    eval.push_specpdl_root(target);
-    let prin1_result =
-        dispatch_print_callback_emacs_chars(&bytes, |ch| eval.apply(target, vec![ch]).map(|_| ()));
-    eval.restore_specpdl_roots(roots);
-    prin1_result?;
-    Ok(args[0])
+    let mut scope = super::print::PrintEvaluationGuard::new(eval);
+    let result = (|| {
+        let eval = scope.context();
+
+        expect_min_args("prin1", &args, 1)?;
+        let target = resolve_print_target(eval, args.get(1));
+        eval.push_specpdl_root(target);
+        bind_print_overrides(eval, args.get(2).copied().unwrap_or(Value::NIL))?;
+        if let Some(buffer_id) = eval.buffers.current_buffer_id() {
+            eval.specpdl
+                .push(crate::emacs_core::eval::SpecBinding::SaveCurrentBuffer { buffer_id });
+        }
+        let settings_source = print_settings_source(eval, target);
+
+        let options = super::error::print_options_from_state(
+            &eval.obarray,
+            print_target_current_buffer(eval, target),
+        );
+
+        // GNU's callable print target receives Emacs character codes one at a time.
+        // Keep the printer's canonical Emacs bytes intact until that boundary: a
+        // Rust String cannot represent byte8 or non-Unicode Emacs characters and
+        // would silently replace them before `external-debugging-output` (or any
+        // other character sink) sees them.
+        let bytes =
+            super::print::print_value_bytes_in_context(eval, &args[0], options, settings_source)?;
+        let prin1_result = dispatch_print_callback_emacs_chars(&bytes, |ch| {
+            eval.apply(target, vec![ch]).map(|_| ())
+        });
+        prin1_result?;
+        Ok(args[0])
+    })();
+    scope.finish_value(result)
 }
 
 pub(crate) fn builtin_prin1_impl(
     ctx: &mut crate::emacs_core::eval::Context,
     args: Vec<Value>,
 ) -> EvalResult {
-    expect_min_args("prin1", &args, 1)?;
-    ensure_continuous_print_number_table(ctx);
-    let target = resolve_print_target_in_state(ctx, args.get(1));
-    let mut options =
-        print_options_from_overrides(ctx, print_target_current_buffer(ctx, target), args.get(2))?;
-    // GNU `print_prepare' implicitly binds `print-escape-nonascii' /
-    // `print-escape-multibyte' based on the destination buffer's multibyteness,
-    // so e.g. a unibyte string's high bytes print raw into a unibyte buffer but
-    // octal-escaped into a multibyte buffer.
-    apply_print_target_escape_bindings(ctx, target, &mut options);
-    // Issue #131: emit canonical Emacs bytes so a real Private-Use glyph in the
-    // printed output is inserted as itself, not decoded as a raw byte.
-    let bytes = super::error::print_value_bytes_in_state_with_options(ctx, &args[0], options);
-    write_print_bytes_from_ctx(ctx, args.get(1), &bytes)?;
-    Ok(args[0])
+    let mut scope = super::print::PrintEvaluationGuard::new(ctx);
+    let result = (|| {
+        let ctx = scope.context();
+
+        expect_min_args("prin1", &args, 1)?;
+        let target = resolve_print_target_in_state(ctx, args.get(1));
+        ctx.push_specpdl_root(target);
+        let output_target = if target.is_nil() { Value::T } else { target };
+        bind_print_overrides(ctx, args.get(2).copied().unwrap_or(Value::NIL))?;
+        let settings_source = print_settings_source(ctx, target);
+        if let Some(buffer_id) = ctx.buffers.current_buffer_id() {
+            ctx.specpdl
+                .push(crate::emacs_core::eval::SpecBinding::SaveCurrentBuffer { buffer_id });
+        }
+        apply_print_target_escape_bindings(ctx, target)?;
+        let options = super::error::print_options_from_state(
+            &ctx.obarray,
+            print_target_current_buffer(ctx, target),
+        );
+        // GNU `print_prepare' implicitly binds `print-escape-nonascii' /
+        // `print-escape-multibyte' based on the destination buffer's multibyteness,
+        // so e.g. a unibyte string's high bytes print raw into a unibyte buffer but
+        // octal-escaped into a multibyte buffer.
+        // Issue #131: emit canonical Emacs bytes so a real Private-Use glyph in the
+        // printed output is inserted as itself, not decoded as a raw byte.
+        let bytes =
+            super::print::print_value_bytes_in_context(ctx, &args[0], options, settings_source)?;
+        write_print_bytes_from_ctx(ctx, Some(&output_target), &bytes)?;
+        Ok(args[0])
+    })();
+    scope.finish_value(result)
 }
 
 pub(crate) fn builtin_prin1_to_string(
     eval: &mut super::eval::Context,
     args: Vec<Value>,
 ) -> EvalResult {
-    ensure_continuous_print_number_table(eval);
     builtin_prin1_to_string_impl(eval, args)
 }
 
 pub(crate) fn builtin_prin1_to_string_impl(
-    ctx: &crate::emacs_core::eval::Context,
+    ctx: &mut crate::emacs_core::eval::Context,
     args: Vec<Value>,
 ) -> EvalResult {
     expect_min_args("prin1-to-string", &args, 1)?;
-    let noescape = args.get(1).is_some_and(|v| v.is_truthy());
+    let escaping = ObjectEscaping::from(args.get(1).copied().unwrap_or(Value::NIL));
     Ok(Value::heap_string(
-        prin1_to_lisp_string_value_in_state_with_overrides(ctx, &args[0], noescape, args.get(2))?,
+        prin1_to_lisp_string_value_in_state_with_overrides(ctx, &args[0], escaping, args.get(2))?,
     ))
 }
 
 pub(crate) fn builtin_print(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {
     expect_min_args("print", &args, 1)?;
-    ensure_continuous_print_number_table(eval);
     let target = resolve_print_target(eval, args.get(1));
     if print_target_is_direct(target) {
         return builtin_print_impl(eval, args);
     }
+    let settings_source = print_settings_source(eval, target);
+    let mut scope = super::print::PrintEvaluationGuard::new(eval);
+    let result = (|| {
+        let eval = scope.context();
+        eval.push_specpdl_root(target);
+        if let Some(buffer_id) = eval.buffers.current_buffer_id() {
+            eval.specpdl
+                .push(crate::emacs_core::eval::SpecBinding::SaveCurrentBuffer { buffer_id });
+        }
 
-    // A function stream performs no `set_buffer_internal`, so GNU reads its
-    // `print-*` globals with the CALLER's buffer current -- the same rule
-    // `builtin_prin1`'s function path follows. Ledger 196.
-    let options = super::error::print_options_from_state(
-        &eval.obarray,
-        print_target_current_buffer(eval, target),
-    );
-    let mut bytes = Vec::new();
-    bytes.push(b'\n');
-    bytes.extend_from_slice(&super::error::print_value_bytes_in_state_with_options(
-        eval, &args[0], options,
-    ));
-    bytes.push(b'\n');
-    let roots = eval.save_specpdl_roots();
-    eval.push_specpdl_root(target);
-    let print_result =
-        dispatch_print_callback_emacs_chars(&bytes, |ch| eval.apply(target, vec![ch]).map(|_| ()));
-    eval.restore_specpdl_roots(roots);
-    print_result?;
-    Ok(args[0])
+        // A function stream performs no `set_buffer_internal`, so GNU reads its
+        // `print-*` globals with the CALLER's buffer current -- the same rule
+        // `builtin_prin1`'s function path follows. Ledger 196.
+        let options = super::error::print_options_from_state(
+            &eval.obarray,
+            print_target_current_buffer(eval, target),
+        );
+        let mut bytes = Vec::new();
+        bytes.push(b'\n');
+        bytes.extend_from_slice(&super::print::print_value_bytes_in_context(
+            eval,
+            &args[0],
+            options,
+            settings_source,
+        )?);
+        bytes.push(b'\n');
+        let print_result = dispatch_print_callback_emacs_chars(&bytes, |ch| {
+            eval.apply(target, vec![ch]).map(|_| ())
+        });
+        print_result?;
+        Ok(args[0])
+    })();
+    scope.finish_value(result)
 }
 
 pub(crate) fn builtin_print_impl(
     ctx: &mut crate::emacs_core::eval::Context,
     args: Vec<Value>,
 ) -> EvalResult {
-    expect_min_args("print", &args, 1)?;
-    ensure_continuous_print_number_table(ctx);
-    // GNU `print_prepare' binds the `print-escape-*' flags from the destination
-    // buffer's multibyteness (see `builtin_prin1_impl`).
-    let target = resolve_print_target_in_state(ctx, args.get(1));
-    let mut options = super::error::print_options_from_state(
-        &ctx.obarray,
-        print_target_current_buffer(ctx, target),
-    );
-    apply_print_target_escape_bindings(ctx, target, &mut options);
-    // Issue #131: emit canonical Emacs bytes (see `builtin_prin1_impl`).
-    let mut bytes = Vec::new();
-    bytes.push(b'\n');
-    bytes.extend_from_slice(&super::error::print_value_bytes_in_state_with_options(
-        ctx, &args[0], options,
-    ));
-    bytes.push(b'\n');
-    write_print_bytes_from_ctx(ctx, args.get(1), &bytes)?;
-    Ok(args[0])
+    let mut scope = super::print::PrintEvaluationGuard::new(ctx);
+    let result = (|| {
+        let ctx = scope.context();
+
+        expect_min_args("print", &args, 1)?;
+        // GNU `print_prepare' binds the `print-escape-*' flags from the destination
+        // buffer's multibyteness (see `builtin_prin1_impl`).
+        let target = resolve_print_target_in_state(ctx, args.get(1));
+        ctx.push_specpdl_root(target);
+        let output_target = if target.is_nil() { Value::T } else { target };
+        let settings_source = print_settings_source(ctx, target);
+        if let Some(buffer_id) = ctx.buffers.current_buffer_id() {
+            ctx.specpdl
+                .push(crate::emacs_core::eval::SpecBinding::SaveCurrentBuffer { buffer_id });
+        }
+        apply_print_target_escape_bindings(ctx, target)?;
+        let options = super::error::print_options_from_state(
+            &ctx.obarray,
+            print_target_current_buffer(ctx, target),
+        );
+        // Issue #131: emit canonical Emacs bytes (see `builtin_prin1_impl`).
+        let mut bytes = Vec::new();
+        bytes.push(b'\n');
+        bytes.extend_from_slice(&super::print::print_value_bytes_in_context(
+            ctx,
+            &args[0],
+            options,
+            settings_source,
+        )?);
+        bytes.push(b'\n');
+        write_print_bytes_from_ctx(ctx, Some(&output_target), &bytes)?;
+        Ok(args[0])
+    })();
+    scope.finish_value(result)
 }
 
-// GNU src/print.c:627-653 (ENSURE); 149-162 (validated marker point).
 /// Scalar line state derived from the resolved stream's validated point.
 /// It holds no heap references and is safe to copy between threads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2241,11 +2587,18 @@ pub(crate) fn finish_write_char_in_eval(
             }
         }
         _other => {
-            let roots = eval.save_specpdl_roots();
-            eval.push_specpdl_root(target);
-            let call_result = eval.apply(target, vec![Value::fixnum(char_code)]);
-            eval.restore_specpdl_roots(roots);
-            call_result?;
+            let mut scope = super::print::PrintEvaluationGuard::new(eval);
+            if let Some(buffer_id) = scope.context().buffers.current_buffer_id() {
+                scope
+                    .context()
+                    .specpdl
+                    .push(crate::emacs_core::eval::SpecBinding::SaveCurrentBuffer { buffer_id });
+            }
+            scope.context().push_specpdl_root(target);
+            let result = scope
+                .context()
+                .apply(target, vec![Value::fixnum(char_code)]);
+            scope.finish_value(result)?;
         }
     }
 
@@ -2414,9 +2767,21 @@ pub(crate) fn builtin_current_idle_time(
 }
 
 #[cfg(test)]
+#[path = "tests/print_override_roots.rs"]
+mod print_override_roots;
+
+#[cfg(test)]
 #[path = "tests/terpri_units.rs"]
 mod terpri_units;
 
 #[cfg(test)]
 #[path = "tests/printer_target_units.rs"]
 mod printer_target_units;
+
+#[cfg(test)]
+#[path = "tests/print_binding_scope_test.rs"]
+mod print_binding_scope_test;
+
+#[cfg(test)]
+#[path = "tests/prin1_string_leaf_test.rs"]
+mod prin1_string_leaf_test;

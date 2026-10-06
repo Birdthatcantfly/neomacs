@@ -1291,7 +1291,7 @@ fn format_signal_payload(raw_data: Option<&Value>, data: &[Value]) -> String {
     }
 }
 
-fn format_opaque_handle_in_state(
+pub(crate) fn format_opaque_handle_in_state(
     buffers: &crate::buffer::BufferManager,
     frames: &crate::window::FrameManager,
     threads: &super::threads::ThreadManager,
@@ -1443,7 +1443,7 @@ pub(crate) fn print_options_from_state(
     let print_continuous_numbering = obarray
         .value_in_buffer(buf, "print-continuous-numbering")
         .is_some_and(|v| v.is_truthy());
-    let print_number_table = if print_continuous_numbering {
+    let print_number_table = if print_circle {
         obarray
             .value_in_buffer(buf, "print-number-table")
             .filter(|v| v.is_hash_table())
@@ -1454,6 +1454,9 @@ pub(crate) fn print_options_from_state(
     opts.charset_text_property = obarray
         .value_in_buffer(buf, "print-charset-text-property")
         .map_or(super::print::CharsetTextProperty::Guessable, Into::into);
+    opts.unreadable_function = obarray
+        .value_in_buffer(buf, "print-unreadable-function")
+        .filter(|v| !v.is_nil());
     opts.print_quoted = print_quoted;
     opts.print_symbols_bare = print_symbols_bare;
     opts.print_escape_newlines = print_escape_newlines;

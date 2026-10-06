@@ -301,3 +301,318 @@ fn printer_settings_gnu_charset_merge_identity() {
         include_str!("settings_gnu/charset_merge_identity.expect"),
     );
 }
+
+#[test]
+fn printer_settings_gnu_cons_tortoise_callback_gc() {
+    oracle(
+        "cons_tortoise_callback_gc",
+        r###"(let* ((object (list (make-marker) (make-marker) (make-marker)
+                              (make-marker) (make-marker) (make-marker)
+                              (make-marker) 'end))
+                 (calls 0)
+                 (print-circle nil)
+                 (print-unreadable-function
+                  (lambda (_object _escaping)
+                    (setq calls (1+ calls))
+                    (when (= calls 5)
+                      ;; The third cons holds the printer's Brent tortoise,
+                      ;; but this surgery leaves only first/fifth reachable.
+                      (let ((current (nthcdr 4 object)))
+                        (setcdr object current)
+                        (garbage-collect)
+                        (dotimes (index 1024) (cons index nil))
+                        (setcdr current
+                                (list (make-marker) (make-marker) 'end))))
+                    "Q")))
+            (list (prin1-to-string object) calls (length object)))"###,
+        include_str!("settings_gnu/cons_tortoise_callback_gc.expect"),
+    );
+}
+
+#[test]
+fn printer_settings_gnu_destination_local_callback() {
+    oracle(
+        "destination_local_callback",
+        r###"(with-temp-buffer
+  (let* ((origin (current-buffer))
+         (destination (generate-new-buffer "printer-local-destination"))
+         (origin-function (lambda (_o _e) "O"))
+         (calls 0) (events nil) (nested nil)
+         (destination-function
+          (lambda (_o _e)
+            (setq calls (1+ calls))
+            (when (> calls 2) (error "recursive callback"))
+            (push (list (eq (current-buffer) origin)
+                        (eq print-unreadable-function origin-function)
+                        (with-current-buffer destination
+                          (null print-unreadable-function))) events)
+            (with-current-buffer destination
+              (prin1 (make-marker) (lambda (character) (push character nested))))
+            (garbage-collect)
+            "D")))
+    (setq-local print-unreadable-function origin-function)
+    (with-current-buffer destination
+      (setq-local print-unreadable-function destination-function))
+    (unwind-protect
+        (let ((result (condition-case e
+                          (progn (prin1 (make-marker) destination) 'ok)
+                        (error e))))
+          (list result calls (nreverse events)
+                (with-current-buffer destination (buffer-string))
+                (apply #'string (nreverse nested))
+                (eq (current-buffer) origin)
+                (eq print-unreadable-function origin-function)
+                (with-current-buffer destination
+                  (eq print-unreadable-function destination-function))))
+      (kill-buffer destination))))"###,
+        include_str!("settings_gnu/destination_local_callback.expect"),
+    );
+}
+
+#[test]
+fn printer_settings_gnu_default_local_callback() {
+    oracle(
+        "default_local_callback",
+        r###"(with-temp-buffer
+  (let* ((origin (current-buffer))
+         (origin-function (lambda (_o _e) "O"))
+         (old-default (default-value 'print-unreadable-function))
+         (calls 0) (events nil) (bindings nil)
+         (watcher (lambda (_symbol _value operation where)
+                    (push (list operation (null where)) bindings)))
+         (default-function
+          (lambda (_o _e)
+            (setq calls (1+ calls))
+            (when (> calls 2) (error "recursive default callback"))
+            (push (list (eq (current-buffer) origin)
+                        (eq print-unreadable-function origin-function)
+                        (null (default-value 'print-unreadable-function))) events)
+            (garbage-collect)
+            "D")))
+    (setq-local print-unreadable-function origin-function)
+    (unwind-protect
+        (progn
+          (set-default 'print-unreadable-function default-function)
+          (add-variable-watcher 'print-unreadable-function watcher)
+          (let ((text (condition-case e (prin1-to-string (make-marker)) (error e))))
+            (list text calls (nreverse events)
+                  (nreverse bindings)
+                  (eq print-unreadable-function origin-function)
+                  (eq (default-value 'print-unreadable-function) default-function))))
+      (remove-variable-watcher 'print-unreadable-function watcher)
+      (set-default 'print-unreadable-function old-default))))"###,
+        include_str!("settings_gnu/default_local_callback.expect"),
+    );
+}
+
+/// GNU editfns.c:3670-3685 calls Fprin1_to_string for escaped %S and object %s.
+/// print.c:143-151 selects its scratch destination before the implicit binding
+/// at :175-177; caller-local NIL therefore must not suppress raw-byte escaping.
+/// Full witnesses cover default/local cells, all output domains, and cleanup.
+const FORMAT_LOCALIZED_SCRATCH_ESCAPE: &str = r###"(progn
+(require 'cl-lib)
+(defvar gdk-format-policy-watch-log nil)
+(defun gdk-format-policy-watcher (symbol newval operation _where)
+  ;; GNU invokes watchers before its final store. Observe buffer and cells;
+  ;; do not mutate the watched value, redirects, or the selected buffer.
+  (push (list :operation operation :new-value newval
+              :buffer (buffer-name)
+              :default (default-value symbol)
+              :visible (symbol-value symbol))
+        gdk-format-policy-watch-log))
+(defun gdk-format-policy-witness (text)
+  ;; Complete character list + explicit encoding/byte length preserve byte8 vs
+  ;; unibyte-high domains, with no string-as-unibyte conversion/normalization.
+  (list :length (length text) :bytes (string-bytes text)
+        :multibyte (multibyte-string-p text) :codes (string-to-list text)))
+(defun gdk-format-policy-row (local operation)
+  (with-temp-buffer
+    (rename-buffer "gdk-format-policy-caller" t)
+    (when local
+      (make-local-variable 'print-escape-nonascii)
+      (setq print-escape-nonascii nil))
+    (setq gdk-format-policy-watch-log nil)
+    (let* ((input (unibyte-string 233))
+           (before-default (default-value 'print-escape-nonascii))
+           (before-visible print-escape-nonascii)
+           (result
+            (pcase operation
+              ('format-S (format "%S" input))
+              ('format-s-aggregate (format "%s" (list input)))
+              ('prin1-string (prin1-to-string input)))))
+      (list :local local :operation operation
+            :input (gdk-format-policy-witness input)
+            :before-default before-default :before-visible before-visible
+            :result (gdk-format-policy-witness result)
+            :after-default (default-value 'print-escape-nonascii)
+            :after-visible print-escape-nonascii
+            :watch-log (nreverse gdk-format-policy-watch-log)
+            :buffer-after (buffer-name)))))
+(let ((original-default (default-value 'print-escape-nonascii))
+      (watched nil)
+      rows)
+  (unwind-protect
+      (progn
+        ;; Exactly the disputed default=nil/local=nil shape. No dynamic let of
+        ;; this printer flag surrounds format, since that would mask the cells.
+        (set-default 'print-escape-nonascii nil)
+        (when watched
+          (add-variable-watcher 'print-escape-nonascii #'gdk-format-policy-watcher))
+        (dolist (local '(nil t))
+          (dolist (operation '(format-S format-s-aggregate prin1-string))
+            (push (gdk-format-policy-row local operation) rows)))
+        ;; Rows contain numeric complete result domains and ASCII buffer names.
+        ;; Capture them before serialization adds any unrelated printer work.
+        (list :watched watched :rows (nreverse rows)))
+    (when watched
+      (remove-variable-watcher 'print-escape-nonascii #'gdk-format-policy-watcher))
+    (set-default 'print-escape-nonascii original-default)))
+)"###;
+
+#[test]
+fn printer_settings_gnu_format_localized_scratch_escape() {
+    oracle(
+        "format_localized_scratch_escape",
+        FORMAT_LOCALIZED_SCRATCH_ESCAPE,
+        include_str!("settings_gnu/format_localized_scratch_escape.expect"),
+    );
+}
+
+/// Native scope control complements the per-row local/default/caller-buffer
+/// cleanup witnesses. No GNU private scratch-buffer selection is claimed.
+#[test]
+fn printer_format_localized_scratch_escape_restores_native_scope() {
+    crate::test_utils::init_test_tracing();
+    let mut context = crate::test_utils::runtime_startup_context();
+    let depth = context.specpdl.len();
+    let origin = context.buffers.current_buffer_id();
+    let escape_before = context.obarray.symbol_value_copied("print-escape-nonascii");
+    context
+        .eval_str(FORMAT_LOCALIZED_SCRATCH_ESCAPE)
+        .expect("localized formatter scratch-escape scope");
+    assert_eq!(context.specpdl.len(), depth);
+    assert_eq!(context.buffers.current_buffer_id(), origin);
+    assert_eq!(
+        context.obarray.symbol_value_copied("print-escape-nonascii"),
+        escape_before,
+    );
+}
+
+#[cfg(test)]
+#[path = "output_domains.rs"]
+mod output_domains;
+
+/// GNU editfns.c:3680-3688,3720-3727 returns a resolved exact %S string.
+/// The expected fixture must be refreshed from sandboxed GNU, not handwritten.
+#[test]
+fn printer_settings_gnu_format_exact_prin1_result_encoding() {
+    oracle(
+        "format_exact_prin1_result_encoding",
+        r###"(let ((print-charset-text-property t))
+(let* ((shape
+        (lambda (text)
+          (list :chars (length text)
+                :bytes (string-bytes text)
+                :multibyte (multibyte-string-p text)
+                :codes (string-to-list text)
+                :properties
+                (mapcar (lambda (position)
+                          (list position (text-properties-at position text)))
+                        (number-sequence 0 (1- (length text)))))))
+       (sources
+        (list
+         (list 'ascii-multibyte (string-to-multibyte (make-string 2 97)))
+         (list 'byte8 (make-string 2 #x3fff80))
+         (list 'ascii-properties
+               (propertize (string-to-multibyte (make-string 2 97))
+                           'gdk-tag '(x y) 'charset 'ascii))
+         (list 'unicode-properties
+               (propertize (make-string 2 233)
+                           'gdk-tag '(x y) 'charset 'unicode))))
+       (controls
+        (list
+         (list 'exact-unibyte (string-to-unibyte (copy-sequence "%S")))
+         (list 'exact-multibyte (string-to-multibyte (copy-sequence "%S")))
+         (list 'padded (copy-sequence "%12S"))
+         (list 'prefixed (copy-sequence "x:%S"))
+         (list 'propertized (propertize (copy-sequence "%S") 'gdk-format 'control)))))
+  (mapcar
+   (lambda (builtin)
+     (list builtin
+           (mapcar
+            (lambda (source-row)
+              (let ((source (cadr source-row)))
+                (list
+                 (car source-row)
+                 (mapcar
+                  (lambda (control-row)
+                    (let* ((control (cadr control-row))
+                           (source-before (funcall shape source))
+                           (control-before (funcall shape control))
+                           ;; Even unused multibyte inputs must not override
+                           ;; GNU's resolved-string shortcut for exact %S.
+                           (result (funcall builtin control source
+                                            (string-to-multibyte "unused"))))
+                      (list (car control-row)
+                            :source-before source-before
+                            :control-before control-before
+                            :result (funcall shape result)
+                            :source-after (funcall shape source)
+                            :control-after (funcall shape control))))
+                  controls))))
+            sources)))
+   '(format format-message))))"###,
+        include_str!("settings_gnu/format_exact_prin1_result_encoding.expect"),
+    );
+}
+
+/// GNU editfns.c:3680-3688,3720-3727 returns a resolved exact %S string.
+/// The expected fixture must be refreshed from sandboxed GNU, not handwritten.
+#[test]
+fn printer_settings_gnu_format_exact_prin1_callback_control() {
+    oracle(
+        "format_exact_prin1_callback_control",
+        r###"(let ((shape
+       (lambda (text)
+         (list :chars (length text)
+               :bytes (string-bytes text)
+               :multibyte (multibyte-string-p text)
+               :codes (string-to-list text)
+               :properties
+               (mapcar (lambda (position)
+                         (list position (text-properties-at position text)))
+                       (number-sequence 0 (1- (length text))))))))
+  (mapcar
+   (lambda (builtin)
+     (list
+      builtin
+      (mapcar
+       (lambda (mode)
+         (let* ((control (string-to-multibyte (copy-sequence "%S")))
+                (calls 0)
+                (print-unreadable-function
+                 (lambda (_object _escaping)
+                   (setq calls (1+ calls))
+                   (when (memq mode '(mutate-byte add-and-mutate remove-and-mutate))
+                     (aset control 1 ?d))
+                   (when (memq mode '(add-properties add-and-mutate))
+                     (put-text-property 0 2 'gdk-format 'after control))
+                   (when (memq mode '(remove-properties remove-and-mutate))
+                     (set-text-properties 0 2 nil control))
+                   (garbage-collect)
+                   "Q")))
+           (when (memq mode '(remove-properties remove-and-mutate))
+             (put-text-property 0 2 'gdk-format 'before control))
+           (let* ((control-before (funcall shape control))
+                  (result (funcall builtin control (make-marker)
+                                   (string-to-multibyte "unused"))))
+             (list mode :calls calls
+                   :control-before control-before
+                   :result (funcall shape result)
+                   :control-after (funcall shape control)))))
+       '(unchanged mutate-byte add-properties remove-properties
+                   add-and-mutate remove-and-mutate))))
+   '(format format-message)))"###,
+        include_str!("settings_gnu/format_exact_prin1_callback_control.expect"),
+    );
+}

@@ -51,6 +51,8 @@ fn oracle(name: &str, form: &str, fixture: &str) {
         fixture.to_owned()
     };
     let mut context = crate::test_utils::runtime_startup_context();
+    // Match the lexical-binding:nil file used to refresh the GNU fixture.
+    context.set_lexical_binding(false);
     let actual = crate::emacs_core::format_eval_result(&context.eval_str(form));
     assert_eq!(actual, format!("OK {}", expected.trim_end()), "{name}");
 }

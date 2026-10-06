@@ -969,3 +969,19 @@ mod graph_tail_units;
 #[cfg(test)]
 #[path = "symbol_escape_units.rs"]
 mod symbol_escape_units;
+
+#[cfg(test)]
+#[path = "settings_units.rs"]
+mod settings_units;
+
+#[cfg(test)]
+#[path = "scope_guards.rs"]
+mod scope_guards;
+
+#[cfg(test)]
+#[path = "error_charset_units.rs"]
+mod error_charset_units;
+
+#[cfg(test)]
+#[path = "quoted_policy_units.rs"]
+mod quoted_policy_units;

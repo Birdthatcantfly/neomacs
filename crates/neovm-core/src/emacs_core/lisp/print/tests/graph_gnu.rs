@@ -215,3 +215,27 @@ fn hash_callbacks_read_live_physical_slots() {
         include_str!("graph_hash_mutation.expect"),
     );
 }
+
+// GNU print.c:1324, 1700-1733, 2611-2613: nested closure print has its
+// own traversal while the unreadable callback is dynamically disabled.
+// Append this fragment to tests/graph_gnu.rs; fixture comes only from GNU.
+#[test]
+fn closure_reentry_does_not_share_traversal_stack() {
+    compare(
+        "closure_reentry",
+        r##"(mapcar
+  (lambda (circle)
+    (let* ((marker (make-marker))
+           (closure (eval '(lambda () x) (list (cons 'x marker))))
+           (nested nil)
+           (print-circle circle)
+           (print-unreadable-function
+            (lambda (_object _escaped)
+              ;; GNU binds this callback to nil during the recursive print.
+              (setq nested (prin1-to-string closure))
+              "Q")))
+      (progn (prin1-to-string closure) nested)))
+  '(nil t))"##,
+        include_str!("graph_closure_reentry.expect"),
+    );
+}
