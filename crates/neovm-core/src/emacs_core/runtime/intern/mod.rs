@@ -1325,11 +1325,12 @@ fn global_symbol_registry() -> &'static RwLock<SymbolRegistry> {
     GLOBAL_SYMBOL_REGISTRY.get_or_init(|| RwLock::new(SymbolRegistry::new()))
 }
 
-/// The epoch every thread-local symbol cache validates against: bumped
-/// whenever the canonical name -> symbol mapping can have changed (a new
-/// canonical symbol, an unintern, a symbol-table load). Exposed so caches
-/// outside this module — `TaggedValue::subr_from_sym_id`'s memo — can hang off
-/// the same invalidation.
+/// The epoch positive canonical-name caches validate against. Removing a
+/// canonical mapping publishes invalidation under the registry write guard;
+/// readers load it with Acquire. Fresh intern/dump insertions preserve existing
+/// mappings, and these caches never retain misses, so insertions need no bump.
+/// Caches outside this module, including `TaggedValue::subr_from_sym_id`'s memo,
+/// can use the same invalidation.
 pub(crate) fn symbol_registry_epoch_value() -> u64 {
     symbol_registry_epoch().load(Ordering::Acquire)
 }
@@ -1425,10 +1426,24 @@ pub fn make_uninterned_symbol_with_name_value(name_value: TaggedValue) -> SymId 
 }
 
 /// Look up the canonical interned symbol id for a string without interning it.
+///
+/// Successful UTF-8 queries share `intern`'s positive cache: the registry
+/// lookup proves both bytes and computed character count match the immutable
+/// name atom. Supplied-count Lisp-string queries use their separate APIs.
+/// Threading: cached ids and process-lifetime spellings contain no Lisp heap
+/// state. Each thread validates the existing shared registry epoch before use.
 #[inline]
 pub fn lookup_interned(s: &str) -> Option<SymId> {
+    ensure_thread_local_cache_epoch_current();
+    if let Some(sym_id) = thread_local_interned_str(s) {
+        return Some(sym_id);
+    }
     let registry = global_symbol_registry().read();
-    registry.lookup(s)
+    let sym_id = registry.lookup(s)?;
+    let canonical_name = registry.resolve(sym_id);
+    drop(registry);
+    thread_local_record_interned_str(canonical_name, sym_id);
+    Some(sym_id)
 }
 
 #[inline]
@@ -1585,10 +1600,15 @@ pub fn resolve_sym_lisp_string(id: SymId) -> &'static LispString {
 pub(crate) fn unintern_canonical_id(id: SymId) -> bool {
     let changed = {
         let mut registry = global_symbol_registry().write();
-        registry.unintern_canonical_symbol(id)
+        let changed = registry.unintern_canonical_symbol(id);
+        if changed {
+            // Publish invalidation before an uncached reader can observe the
+            // removed mapping; cache hits validate this epoch with Acquire.
+            symbol_registry_epoch().fetch_add(1, Ordering::AcqRel);
+        }
+        changed
     };
     if changed {
-        symbol_registry_epoch().fetch_add(1, Ordering::AcqRel);
         ensure_thread_local_cache_epoch_current();
     }
     changed
@@ -2073,3 +2093,7 @@ mod gc_tls_ownership_tests;
 #[cfg(test)]
 #[path = "tests/declared_name_identity.rs"]
 mod declared_name_identity_tests;
+
+#[cfg(test)]
+#[path = "tests/native_lookup_cache.rs"]
+mod native_lookup_cache_tests;
