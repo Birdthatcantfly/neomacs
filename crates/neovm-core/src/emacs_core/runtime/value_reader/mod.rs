@@ -934,6 +934,27 @@ impl SourceCharacterCursor {
         }
     }
 
+    /// `permits_offset(0)` and then `advance(1)` in one dispatch: the range
+    /// check and the step of one consumed character. Leaves the cursor
+    /// unchanged when the range is exhausted.
+    #[inline(always)]
+    fn take_one(&mut self) -> bool {
+        match self {
+            Self::Bytes => true,
+            Self::PhysicalEnd { position, .. } => {
+                *position = position.add_len(CharLen::new(1));
+                true
+            }
+            Self::CharacterEnd { position, end } => {
+                let admitted = position.get() < end.get();
+                if admitted {
+                    *position = CharPos0::new(position.get() + 1);
+                }
+                admitted
+            }
+        }
+    }
+
     /// Rare physical-EOF check: admit only initialized byte SBYTES, and
     /// only while the requested logical interval still contains this step.
     fn permits_initialized_terminator(self, offset: CharLen) -> bool {
@@ -1347,9 +1368,9 @@ impl<'a> Reader<'a> {
         loop {
             if let Some(src) = self.byte_backed_source() {
                 let mut p = self.pos;
-                let ascii_end = self.ascii_limit(EmacsBytePos::new(src.len()));
+                let run = &src[..self.ascii_limit(EmacsBytePos::new(src.len()))];
                 loop {
-                    while p < ascii_end && src[p] <= 32 {
+                    while p < run.len() && run[p] <= 32 {
                         p += 1;
                     }
                     if p < src.len()
@@ -1377,8 +1398,12 @@ impl<'a> Reader<'a> {
             }
             if ch == b';' as u32 {
                 // Line comment
-                while let Some(c) = self.current_code() {
-                    if let Some(src) = self.byte_backed_source() {
+                loop {
+                    // Past the payload (after an admitted terminator) only
+                    // the per-character step can answer the end.
+                    if let Some(src) = self.byte_backed_source()
+                        && self.pos < src.len()
+                    {
                         let end = self.ascii_limit(EmacsBytePos::new(src.len()));
                         let span = &src[self.pos..end];
                         let newline = memchr::memchr(b'\n', span);
@@ -1400,9 +1425,9 @@ impl<'a> Reader<'a> {
                             continue;
                         }
                     }
-                    self.bump();
-                    if c == b'\n' as u32 {
-                        break;
+                    match self.take_code() {
+                        Some(c) if c != b'\n' as u32 => {}
+                        _ => break,
                     }
                 }
                 continue;
@@ -1761,9 +1786,11 @@ impl<'a> Reader<'a> {
             if let Some(src) = byte_source {
                 let start = self.pos;
                 let mut p = start;
-                let ascii_end = self.ascii_limit(EmacsBytePos::new(src.len()));
-                while p < ascii_end {
-                    let b = src[p];
+                // Bounding the slice, not the loop, keeps the per-byte
+                // bounds check out of the run.
+                let run = &src[..self.ascii_limit(EmacsBytePos::new(src.len()))];
+                while p < run.len() {
+                    let b = run[p];
                     if b >= 0x80 || b == b'"' || b == b'\\' {
                         break;
                     }
@@ -1774,28 +1801,30 @@ impl<'a> Reader<'a> {
                     self.advance_ascii_to(EmacsBytePos::new(p));
                 }
             }
-            let Some(ch) = self.current_code() else {
+            let Some(ch) = self.take_code() else {
                 return Err(self.end_of_file_error());
             };
-            self.bump();
             match ch {
                 x if x == b'"' as u32 => {
                     return Ok(Value::heap_string(flags.finish(buf)));
                 }
                 x if x == b'\\' as u32 => {
-                    let Some(esc) = self.current_code() else {
+                    let Some(esc) = self.take_code() else {
                         return Err(self.end_of_file_error());
                     };
-                    self.bump();
                     // GNU lread.c:3060-3077 applies only these string
                     // rules before using the common character decoder.
                     match esc {
                         x if x == b's' as u32 => buf.push(b' '),
                         x if x == b'\n' as u32 || x == b' ' as u32 => {}
-                        _ => {
-                            let value = self.read_char_escape(esc)?;
-                            self.push_string_escape_value(&mut buf, &mut flags, value)?;
-                        }
+                        _ => match self_contained_escape_code(esc) {
+                            // No modifier: the code goes in as it is.
+                            Some(code) => Self::push_string_char(&mut buf, &mut flags, code),
+                            None => {
+                                let value = self.read_char_escape(esc)?;
+                                self.push_string_escape_value(&mut buf, &mut flags, value)?;
+                            }
+                        },
                     }
                 }
                 other => {
@@ -2063,14 +2092,15 @@ impl<'a> Reader<'a> {
     }
 
     /// GNU `read_char_escape` (lread.c:2604-2864) for the character ESC after
-    /// a backslash. The plain escapes (the named controls and octal) take no
-    /// modifier and are answered inline: they are most of the escapes in a
-    /// compiled file's byte-code strings. Every other escape takes
+    /// a backslash. The escapes that take no modifier (the named controls,
+    /// a character standing for itself, and octal) are answered inline: they
+    /// are most of the escapes in docstrings and in a compiled file's
+    /// byte-code strings. Every other escape takes
     /// [`Self::read_modified_char_escape`]. Always inlined: as an out-of-line
     /// call its frame alone cost more than the escape.
     #[inline(always)]
     fn read_char_escape(&mut self, esc: u32) -> Result<DecodedCharacter, ReadError> {
-        if let Some(code) = plain_escape_code(esc) {
+        if let Some(code) = self_contained_escape_code(esc) {
             return Ok(DecodedCharacter(code));
         }
         if (u32::from(b'0')..=u32::from(b'7')).contains(&esc) {
@@ -2944,9 +2974,9 @@ impl<'a> Reader<'a> {
             if let Some(src) = byte_source {
                 let start = self.pos;
                 let mut p = start;
-                let ascii_end = self.ascii_limit(EmacsBytePos::new(src.len()));
-                while p < ascii_end {
-                    let b = src[p];
+                let run = &src[..self.ascii_limit(EmacsBytePos::new(src.len()))];
+                while p < run.len() {
+                    let b = run[p];
                     if b >= 0x80 || b == b'\\' || is_symbol_delimiter_code(u32::from(b)) {
                         break;
                     }
@@ -3155,16 +3185,42 @@ impl<'a> Reader<'a> {
         self.source_code_at(pos, CharLen::new(offset))
     }
 
+    /// The character at the cursor, consumed: GNU `READCHAR`. The same as
+    /// [`Self::current_code`] followed by [`Self::bump`] when it is a
+    /// character, but the common step decodes the character and checks the
+    /// range once.
+    #[inline(always)]
+    fn take_code(&mut self) -> Option<u32> {
+        if self.dot_unread.get().is_none()
+            && let Some((code, next)) = self.code_and_next(self.pos)
+            && self.character_cursor.take_one()
+        {
+            self.pos = next;
+            return Some(code);
+        }
+        self.take_code_slow()
+    }
+
+    /// [`Self::take_code`] at a pending dot resume, the end of a bounded
+    /// range or the end of the source.
+    #[cold]
+    #[inline(never)]
+    fn take_code_slow(&mut self) -> Option<u32> {
+        let code = self.current_code()?;
+        self.bump();
+        Some(code)
+    }
+
     /// Step past the character at the cursor. The common step (no pending dot
     /// resume, a character inside the range) is inlined; every other case
     /// takes [`Self::bump_slow`].
     #[inline(always)]
     fn bump(&mut self) {
         if self.dot_unread.get().is_none()
-            && self.character_cursor.permits_offset(CharLen::ZERO)
             && let Some((_, next)) = self.code_and_next(self.pos)
+            && self.character_cursor.take_one()
         {
-            self.advance_decoded_to(EmacsBytePos::new(next));
+            self.pos = next;
             return;
         }
         self.bump_slow();
@@ -3373,7 +3429,6 @@ impl<'a> Reader<'a> {
         }
     }
 
-    #[inline]
     #[inline(always)]
     fn source_code_at(&self, pos: usize, offset: CharLen) -> Option<u32> {
         match self.code_and_next(pos) {
@@ -3685,6 +3740,35 @@ fn plain_escape_code(esc: u32) -> Option<u32> {
         _ => return None,
     };
     Some(u32::from(code))
+}
+
+/// The escapes of GNU read_char_escape that read nothing further: the named
+/// control escapes, and every character without escape syntax, which stands
+/// for itself (`default: chr = c;`, lread.c:2832-2834), such as `\\` and
+/// `\"`. None for the escapes that read more source or signal: the modifier
+/// prefixes, octal, hex, Unicode and named-character escapes, and an escaped
+/// newline.
+#[inline(always)]
+fn self_contained_escape_code(esc: u32) -> Option<u32> {
+    match u8::try_from(esc) {
+        Ok(
+            b'\n'
+            | b'M'
+            | b'S'
+            | b'H'
+            | b'A'
+            | b's'
+            | b'C'
+            | b'^'
+            | b'0'..=b'7'
+            | b'x'
+            | b'u'
+            | b'U'
+            | b'N',
+        ) => None,
+        Ok(_) => Some(plain_escape_code(esc).unwrap_or(esc)),
+        Err(_) => Some(esc),
+    }
 }
 
 fn is_char_literal_delimiter_code(code: u32) -> bool {
