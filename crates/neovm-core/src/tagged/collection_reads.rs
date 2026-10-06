@@ -163,9 +163,8 @@ enum JournalPolicy {
     JournalAndObserve,
 }
 
-// Preserve MAIN390's actual journal prefix, verified in its shipping DWARF:
-// captures@0, writes@24 and journal_policy@32. Cold observation metadata must
-// not reorder fields touched by every interpreted or legacy compiled setter.
+// Keep the journal prefix independent of cold observation metadata growth.
+// This is a private Rust layout; generated code does not bake these offsets.
 // The executing mutator owns this State; only atomic marks/epochs are shared.
 #[repr(C)]
 struct State {
@@ -489,7 +488,7 @@ fn observe_new_owner(bits: usize) {
             return;
         }
         publish_observed_owner_in_state(&mut state, bits);
-        record_observation_with_epoch(
+        record_observation(
             &mut state,
             bits,
             LispCollectionRevision::current(),
@@ -516,7 +515,7 @@ fn observe_uncached(bits: usize) {
             // hit: that read alone can safely publish the live owner.
             RECENT_READS.with(|recent| recent.forget(bits));
         }
-        record_observation_with_epoch(
+        record_observation(
             &mut state,
             bits,
             LispCollectionRevision::current(),
@@ -530,7 +529,7 @@ fn observe_uncached(bits: usize) {
 // permitted here. An existing entry retains its first-read revision.
 #[cold]
 #[inline(never)]
-fn record_observation_with_epoch(
+fn record_observation(
     state: &mut State,
     bits: usize,
     revision: LispCollectionRevision,
@@ -542,38 +541,6 @@ fn record_observation_with_epoch(
         if capture.publication_epoch != publication_epoch {
             capture.publication_epoch = None;
         }
-        if capture.overflow {
-            continue;
-        }
-        if capture.reads.len() == MAX_READS && !capture.reads.contains_key(&bits) {
-            capture.overflow = true;
-        } else {
-            capture.reads.entry(bits).or_insert(revision);
-        }
-    }
-}
-
-// Keep the fused setter's original three-argument cold edge and journal-first
-// ordering. Only an actual projection miss can publish an Observed-mode owner;
-// JournalOnly and RECENT hits never query that policy or observation metadata.
-// The setter owns State and cannot call Lisp or reach a safepoint before its
-// raw store. Publication precedes dependency insertion and the data access,
-// which uses the setter's already-advanced revision just as in the interpreter.
-#[cold]
-#[inline(never)]
-fn record_observation(state: &mut State, bits: usize, revision: LispCollectionRevision) {
-    if RECENT_READS.with(|recent| recent.observed.get()) {
-        publish_observed_owner_in_state(state, bits);
-        record_observation_with_epoch(state, bits, revision, recent_publication_epoch());
-        return;
-    }
-    #[cfg(test)]
-    OBSERVATION_STATE_ACCESSES.with(|count| count.set(count.get() + 1));
-    for capture in &mut state.captures {
-        // Production policy is immutable. A scalar test override can change
-        // it inside a capture; an Off/Eager projection cannot retain the old
-        // Observed-mode publication qualification.
-        capture.publication_epoch = None;
         if capture.overflow {
             continue;
         }
@@ -626,10 +593,22 @@ pub(super) fn record_projected_write(value: TaggedValue, projection: WriteProjec
                 false
             }
         };
+        // Keep capture eligibility ahead of the common journal block. In
+        // JournalOnly, this branches directly to the revision/write pair;
+        // no observation booleans remain live across that block.
+        let recent = observe && projected && recently_observed(value.bits());
+        if observe && projected && !recent {
+            publish_observed_owner_in_state(&mut state, value.bits());
+        }
         let revision = LispCollectionRevision::advance();
         state.writes[revision.sequence() as usize % JOURNAL_SIZE] = value.bits();
-        if observe && projected && !recently_observed(value.bits()) {
-            record_observation(&mut state, value.bits(), revision);
+        if observe && projected && !recent {
+            record_observation(
+                &mut state,
+                value.bits(),
+                revision,
+                recent_publication_epoch(),
+            );
         }
     });
     projected
@@ -758,11 +737,7 @@ fn publish_observed_owner_in_state(state: &mut State, bits: usize) -> bool {
         // replay must never dereference the ledger's unrooted owner addresses.
         let native_geometry =
             promoted_geometry.unwrap_or_else(|| native_window_collection_owner(bits));
-        let changed = state.observed.insert(
-            bits,
-            native_geometry != NativeWindowCollectionOwner::Other,
-            native_geometry == NativeWindowCollectionOwner::Slots,
-        );
+        let changed = state.observed.insert(bits, native_geometry);
         let newly = if changed {
             #[cfg(test)]
             OBSERVED_OWNER_PUBLICATIONS.with(|count| count.set(count.get() + 1));
@@ -812,7 +787,7 @@ fn native_window_collection_owner(bits: usize) -> NativeWindowCollectionOwner {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NativeWindowCollectionOwner {
     Other,
     Cons,

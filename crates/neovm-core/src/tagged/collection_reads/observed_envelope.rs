@@ -11,6 +11,7 @@ use super::super::gc::{
 };
 use super::super::header::ConsCell;
 use super::super::value::{TAG_CONS, TAG_MASK, TAG_VECLIKE};
+use super::NativeWindowCollectionOwner;
 use rustc_hash::FxHashSet;
 use std::collections::BTreeSet;
 
@@ -121,17 +122,13 @@ impl ObservedEnvelope {
     /// only reclamation or a dump-span change scans all local identities.
     /// A newly observed owner closes any gap covering it before the caller
     /// publishes its shared mark or snapshots the dependency's revision.
-    pub(super) fn insert(
-        &mut self,
-        bits: usize,
-        native_geometry: bool,
-        slot_geometry: bool,
-    ) -> bool {
-        debug_assert!(!slot_geometry || native_geometry);
+    pub(super) fn insert(&mut self, bits: usize, geometry: NativeWindowCollectionOwner) -> bool {
         let newly_owned = self.owners.insert(bits);
-        if !native_geometry {
-            return newly_owned;
-        }
+        let slot_geometry = match geometry {
+            NativeWindowCollectionOwner::Other => return newly_owned,
+            NativeWindowCollectionOwner::Cons => false,
+            NativeWindowCollectionOwner::Slots => true,
+        };
         let address = bits & !TAG_MASK;
         // A dead owner can be marked again at this address by another mutator
         // before epoch filtering removes our old identity. A real projection

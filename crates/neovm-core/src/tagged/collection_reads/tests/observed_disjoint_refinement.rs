@@ -5,6 +5,7 @@
 //! heap retains every endpoint and mutation target for the whole test.
 
 use super::ObservedEnvelope;
+use crate::tagged::collection_reads::NativeWindowCollectionOwner;
 use crate::tagged::gc::TaggedHeap;
 use crate::tagged::header::ConsCell;
 use crate::tagged::value::{TAG_MASK, TaggedValue};
@@ -34,7 +35,7 @@ fn observed_broad_cons_gap_retains_prior_owner_when_disjoint_gap_replaces_it() {
     let (_heap, cells) = live_cells::<12>();
     let mut envelope = ObservedEnvelope::new();
     for endpoint in [cells[0], cells[4], cells[11]] {
-        assert!(envelope.insert(endpoint.bits(), true, false));
+        assert!(envelope.insert(endpoint.bits(), NativeWindowCollectionOwner::Cons));
     }
     let old = cells[2];
     let fresh = cells[7];
@@ -66,7 +67,7 @@ fn observed_broad_cons_gap_retains_prior_owner_when_disjoint_gap_replaces_it() {
     assert!(!envelope.exclude_unobserved(fresh.bits()));
     assert_eq!(envelope.gate().excluded, Some(fresh_gap));
 
-    assert!(envelope.insert(old.bits(), true, false));
+    assert!(envelope.insert(old.bits(), NativeWindowCollectionOwner::Cons));
     let observed = envelope.gate();
     assert_eq!(
         observed.single_cons, 0,
@@ -80,7 +81,7 @@ fn observed_disjoint_small_cons_gaps_keep_the_first_exact_exemption() {
     let (_heap, cells) = live_cells::<5>();
     let mut envelope = ObservedEnvelope::new();
     for endpoint in [cells[0], cells[2], cells[4]] {
-        assert!(envelope.insert(endpoint.bits(), true, false));
+        assert!(envelope.insert(endpoint.bits(), NativeWindowCollectionOwner::Cons));
     }
     let old = cells[1];
     let fresh = cells[3];
@@ -107,7 +108,7 @@ fn observed_disjoint_small_cons_gaps_keep_the_first_exact_exemption() {
     assert!(!envelope.exclude_unobserved(fresh.bits()));
     assert_eq!(envelope.gate().excluded, Some(fresh_gap));
 
-    assert!(envelope.insert(old.bits(), true, false));
+    assert!(envelope.insert(old.bits(), NativeWindowCollectionOwner::Cons));
     assert_eq!(envelope.gate().single_cons, 0);
     assert_eq!(envelope.gate().excluded, Some(fresh_gap));
 }
