@@ -12960,36 +12960,6 @@ fn prin1_to_string_honors_print_number_table_override() {
 }
 
 #[test]
-fn prin1_to_string_continuous_numbering_keeps_global_label_index() {
-    crate::test_utils::init_test_tracing();
-    let mut eval = crate::emacs_core::eval::Context::new();
-
-    let result = eval
-        .eval_str(
-            r#"
-            (progn
-              (let ((print-circle t)
-                    (print-continuous-numbering nil))
-                (let ((x (list 0)))
-                  (prin1-to-string (list x x))))
-              (let ((print-circle t)
-                    (print-continuous-numbering t))
-                (concat
-                 (let ((print-number-table (make-hash-table :test 'eq)))
-                   (let ((x (list 1)))
-                     (prin1-to-string (list x x))))
-                 "\n"
-                 (let ((print-number-table (make-hash-table :test 'eq)))
-                   (let ((x (list 2)))
-                     (prin1-to-string (list x x)))))))
-            "#,
-        )
-        .expect("continuous numbering should keep labels across print calls");
-
-    assert_eq!(result, Value::string("(#1=(1) #1#)\n(#2=(2) #2#)"));
-}
-
-#[test]
 fn prin1_to_string_updates_print_number_table_after_first_print() {
     crate::test_utils::init_test_tracing();
     let mut eval = crate::emacs_core::eval::Context::new();
@@ -13030,32 +13000,6 @@ fn prin1_to_string_reuses_print_number_table_positive_label() {
         .expect("positive print-number-table entries should print as references");
 
     assert_eq!(result, Value::string("(#1=(1) #1#)\n#1#"));
-}
-
-#[test]
-fn prin1_to_string_continuous_gensym_gets_print_number_label() {
-    crate::test_utils::init_test_tracing();
-    let mut eval = crate::emacs_core::eval::Context::new();
-
-    let result = eval
-        .eval_str(
-            r#"
-            (progn
-              (let ((print-circle t)
-                    (print-continuous-numbering nil))
-                (let ((x (list 0)))
-                  (prin1-to-string (list x x))))
-              (let* ((s (make-symbol "g"))
-                     (print-gensym t)
-                     (print-circle t)
-                     (print-continuous-numbering t)
-                     (print-number-table (make-hash-table :test 'eq)))
-                (prin1-to-string s)))
-            "#,
-        )
-        .expect("GNU labels continuous print-gensym symbols even when seen once");
-
-    assert_eq!(result, Value::string("#1=#:g"));
 }
 
 #[test]
@@ -19551,3 +19495,7 @@ mod sequence_gnu;
 #[cfg(test)]
 #[path = "printer_streams.rs"]
 mod printer_streams;
+
+#[cfg(test)]
+#[path = "continuous_numbering_gnu.rs"]
+mod continuous_numbering_gnu;
