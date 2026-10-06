@@ -220,11 +220,14 @@ struct Capture {
 /// lifetime ends. Identities are not roots: a reclaimed address can be reused
 /// for an unrelated, initially unobserved object. Certificates and their
 /// mutation journals remain local to the observing mutator.
+#[derive(Debug)]
 pub struct CollectionReads {
     reads: FxHashSet<usize>,
     revision: LispCollectionRevision,
     _not_send: std::marker::PhantomData<*const ()>,
 }
+
+static_assertions::assert_not_impl_any!(CollectionReads: Send, Sync);
 
 impl CollectionReads {
     pub fn unchanged(&self) -> bool {
@@ -268,10 +271,14 @@ fn unchanged_since(reads: &FxHashSet<usize>, revision: LispCollectionRevision) -
 
 /// Nested observations contribute reads to their enclosing observation too.
 /// The guard cannot move across threads; unwinding restores the prior scope.
+#[derive(Debug)]
+#[must_use = "dropping the guard ends this mutator's collection-read capture"]
 struct CollectionReadScope {
     active: bool,
     _not_send: std::marker::PhantomData<*const ()>,
 }
+
+static_assertions::assert_not_impl_any!(CollectionReadScope: Send, Sync);
 
 impl CollectionReadScope {
     fn begin() -> Self {

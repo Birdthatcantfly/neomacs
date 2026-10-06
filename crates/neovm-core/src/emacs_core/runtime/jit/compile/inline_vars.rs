@@ -1602,6 +1602,16 @@ enum Restore {
     Cons { cons: ClifValue, value: ClifValue },
 }
 
+/// One compilation's mutually exclusive cons-restore admission policy.
+/// Observed GEN0 and generational guards cannot be requested together.
+/// The selected policy contains no mutator state or generated-code metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConsRestoreBarrier {
+    Window,
+    Observed,
+    Generational,
+}
+
 /// The checks of one popped entry at ENTRY, bound by SITE, and the restore
 /// it makes -- `pop_simple_specpdl_suffix`'s arm for the entry, with the
 /// symbol's shape read now (a watcher or local made inside the binding
@@ -1626,8 +1636,7 @@ fn unbind_entry(
     cur: Option<ClifValue>,
     window: Window,
     conds: &mut SmallVec<[ClifValue; 16]>,
-    generational: bool,
-    observed: bool,
+    cons_barrier: ConsRestoreBarrier,
 ) -> Restore {
     let cell = baked(fb, site.cell);
     let sym = site.sym;
@@ -1683,8 +1692,10 @@ fn unbind_entry(
                 .ins()
                 .uload8(types::I64, trusted(), blv, BLV_FOUND_OFFSET as i32);
             let found = ne_imm(fb, found, 0);
-            let local_store =
-                (!generational && !observed).then(|| cons_store_ok(fb, rt, window, valcell, None));
+            let local_store = match cons_barrier {
+                ConsRestoreBarrier::Window => Some(cons_store_ok(fb, rt, window, valcell, None)),
+                ConsRestoreBarrier::Observed | ConsRestoreBarrier::Generational => None,
+            };
             let mut local_conds: SmallVec<[ClifValue; 5]> =
                 smallvec::smallvec![is_local, here, hit, found];
             local_conds.extend(local_store);
@@ -1703,8 +1714,12 @@ fn unbind_entry(
             let fwd_word = load_word(fb, blv, BLV_FWD_OFFSET);
             let fwd_same = eq_imm(fb, fwd_word, fwd as i64);
             let (rule_ok, ruled) = blv_rule(fb, rule, old);
-            let default_store = (!generational && !observed)
-                .then(|| cons_store_ok(fb, rt, window, defcell, remembered_defcell));
+            let default_store = match cons_barrier {
+                ConsRestoreBarrier::Window => {
+                    Some(cons_store_ok(fb, rt, window, defcell, remembered_defcell))
+                }
+                ConsRestoreBarrier::Observed | ConsRestoreBarrier::Generational => None,
+            };
             let mut default_conds: SmallVec<[ClifValue; 4]> =
                 smallvec::smallvec![is_default, fwd_same];
             default_conds.extend(default_store);
@@ -1773,6 +1788,13 @@ fn emit_unbind_fast(
     // Only localized restores write heap conses. Plain/forwarded restores
     // must not consult a possibly inactive allocation view during lowering.
     let generational = cur.is_some() && rt.generational_enabled();
+    let cons_barrier = if generational {
+        ConsRestoreBarrier::Generational
+    } else if observed {
+        ConsRestoreBarrier::Observed
+    } else {
+        ConsRestoreBarrier::Window
+    };
     let mut conds: SmallVec<[ClifValue; 16]> = SmallVec::new();
     let gate = if sites
         .iter()
@@ -1796,8 +1818,7 @@ fn emit_unbind_fast(
             cur,
             window,
             &mut conds,
-            generational,
-            observed,
+            cons_barrier,
         ));
     }
     // Every shape and raw owner predicate is checked before any restore or

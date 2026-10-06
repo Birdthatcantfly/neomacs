@@ -85,6 +85,14 @@ enum ConsStoreProbe {
     Range,
 }
 
+/// Compiler-owned store domain. Cons exemptions never admit vector/record
+/// slots, whose native gate uses its own observation hull. No runtime state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeStoreOwner {
+    Cons,
+    Slots,
+}
+
 thread_local! {
     /// Inline heap sites emitted in the function being lowered.
     static INLINE_HEAP_SITES: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -148,35 +156,36 @@ fn emit_barrier_window_check(
     heap: ClifValue,
     owner: ClifValue,
     slow: Block,
-    slots: bool,
+    owner_kind: NativeStoreOwner,
 ) {
     let observed = rt
         .refs
         .group_enabled(super::shim_refs::ShimGroup::CollectionObservationGate)
         && !rt.generational_enabled();
     let outside = fb.create_block();
-    let first_probe = observed && !slots && rt.refs.observation_exclusions_enabled();
+    let first_probe = observed
+        && owner_kind == NativeStoreOwner::Cons
+        && rt.refs.observation_exclusions_enabled();
     if first_probe {
         emit_cons_observation_exemptions(fb, heap, owner, outside);
     }
-    let (lo_offset, len_offset, flags) = if observed && slots {
-        (
+    let (lo_offset, len_offset, flags) = match owner_kind {
+        NativeStoreOwner::Slots if observed => (
             HEAP_JIT_SLOT_BARRIER_LO,
             HEAP_JIT_SLOT_BARRIER_LEN,
             MemFlagsData::new().with_notrap(),
-        )
-    } else {
-        (
+        ),
+        NativeStoreOwner::Cons | NativeStoreOwner::Slots => (
             HEAP_JIT_BARRIER_LO,
             HEAP_JIT_BARRIER_LEN,
             MemFlagsData::trusted(),
-        )
+        ),
     };
     let lo = fb.ins().load(types::I64, flags, heap, lo_offset as i32);
     let len = fb.ins().load(types::I64, flags, heap, len_offset as i32);
     let offset = fb.ins().isub(owner, lo);
     let inside = fb.ins().icmp(IntCC::UnsignedLessThan, offset, len);
-    if observed && !slots && !first_probe {
+    if observed && owner_kind == NativeStoreOwner::Cons && !first_probe {
         // A pre-capture leaf keeps the original hot hull rejection. If a
         // later capture widens it, the same negative proofs still refine
         // its cold interior refusal without paying on ordinary heap stores.
@@ -273,7 +282,7 @@ pub(crate) fn emit_cons_store_barrier(
     // entry check as ordinary inline cons stores. This is compiler metadata.
     note_inline_site();
     let heap = heap_ptr(fb, rt);
-    emit_barrier_window_check(fb, rt, heap, owner, slow, false);
+    emit_barrier_window_check(fb, rt, heap, owner, slow, NativeStoreOwner::Cons);
     if !rt.generational_enabled() {
         if jit_gen0_collection_journal_eager() {
             emit_collection_write(fb, rt, owner, TAG_CONS);
@@ -334,7 +343,7 @@ fn emit_slot_store_barrier(
 ) {
     use super::jit_layout::heap::GC_HEADER_TENURED_OFFSET;
     use crate::tagged::header::GcHeader;
-    emit_barrier_window_check(fb, rt, heap, owner, slow, true);
+    emit_barrier_window_check(fb, rt, heap, owner, slow, NativeStoreOwner::Slots);
     if rt.generational_enabled() && super::lowering::is_known_fixnum(fb, value) {
         emit_collection_write(fb, rt, owner, crate::tagged::value::TAG_VECLIKE);
         return;
