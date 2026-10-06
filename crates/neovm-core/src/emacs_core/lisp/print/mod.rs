@@ -2936,18 +2936,40 @@ fn append_bytes_cycle_ref_if_any(value: &Value, out: &mut Vec<u8>) -> bool {
     })
 }
 
-fn push_bytes_cycle_object(value: &Value) -> bool {
-    let Some(key) = default_cycle_candidate_key(value) else {
-        return false;
-    };
-    PRINT_BYTES_OBJECT_STACK.with(|stack| stack.borrow_mut().push(key));
-    true
+/// Owns one traversal prefix of the existing synchronous byte-printer stack.
+/// Its constructor releases the RefCell borrow before rendering, and Drop only
+/// truncates copyable identities after all child borrows have ended. The guard
+/// is confined to its owning mutator thread and introduces no Lisp-state cache.
+#[derive(Debug)]
+#[must_use = "dropping the guard restores the byte-printer traversal prefix"]
+struct BytePrintObjectStackGuard {
+    saved: usize,
+    _mutator: std::marker::PhantomData<*const ()>,
+}
+static_assertions::assert_not_impl_any!(BytePrintObjectStackGuard: Send, Sync);
+
+impl BytePrintObjectStackGuard {
+    fn enter(value: &Value) -> Option<Self> {
+        let key = default_cycle_candidate_key(value)?;
+        let saved = PRINT_BYTES_OBJECT_STACK.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            let saved = stack.len();
+            stack.push(key);
+            saved
+        });
+        Some(Self {
+            saved,
+            _mutator: std::marker::PhantomData,
+        })
+    }
 }
 
-fn pop_bytes_cycle_object(pushed: bool) {
-    if pushed {
-        PRINT_BYTES_OBJECT_STACK.with(|stack| {
-            stack.borrow_mut().pop();
+impl Drop for BytePrintObjectStackGuard {
+    fn drop(&mut self) {
+        let _ = PRINT_BYTES_OBJECT_STACK.try_with(|stack| {
+            if let Ok(mut stack) = stack.try_borrow_mut() {
+                stack.truncate(self.saved);
+            }
         });
     }
 }
@@ -3146,7 +3168,7 @@ fn append_print_value_bytes(value: &Value, out: &mut Vec<u8>, options: PrintOpti
             if append_bytes_cycle_ref_if_any(value, out) {
                 return;
             }
-            let pushed = push_bytes_cycle_object(value);
+            let _byte_guard = BytePrintObjectStackGuard::enter(value);
             let ls = value.as_lisp_string().unwrap();
             if options.print_noescape {
                 out.extend_from_slice(&princ_string_bytes(ls, options.princ_string_output()));
@@ -3170,28 +3192,25 @@ fn append_print_value_bytes(value: &Value, out: &mut Vec<u8>, options: PrintOpti
                     out.extend_from_slice(&str_bytes);
                 }
             }
-            pop_bytes_cycle_object(pushed);
         }
         ValueKind::Cons => {
             if append_bytes_cycle_ref_if_any(value, out) {
                 return;
             }
-            let pushed = push_bytes_cycle_object(value);
+            let _byte_guard = BytePrintObjectStackGuard::enter(value);
             if let Some(shorthand) = print_list_shorthand_bytes(value, options) {
                 out.extend_from_slice(&shorthand);
-                pop_bytes_cycle_object(pushed);
                 return;
             }
             out.push(b'(');
             print_cons_bytes(value, out, options);
             out.push(b')');
-            pop_bytes_cycle_object(pushed);
         }
         ValueKind::Veclike(VecLikeType::CharTable) => {
             if append_bytes_cycle_ref_if_any(value, out) {
                 return;
             }
-            let pushed = push_bytes_cycle_object(value);
+            let _byte_guard = BytePrintObjectStackGuard::enter(value);
             if let Some(slots) = char_table_external_slots(value) {
                 out.extend_from_slice(b"#^[");
                 for (idx, item) in slots.iter().enumerate() {
@@ -3202,13 +3221,12 @@ fn append_print_value_bytes(value: &Value, out: &mut Vec<u8>, options: PrintOpti
                 }
                 out.push(b']');
             }
-            pop_bytes_cycle_object(pushed);
         }
         ValueKind::Veclike(VecLikeType::SubCharTable) => {
             if append_bytes_cycle_ref_if_any(value, out) {
                 return;
             }
-            let pushed = push_bytes_cycle_object(value);
+            let _byte_guard = BytePrintObjectStackGuard::enter(value);
             if let Some((depth, min_char, slots)) =
                 super::chartable::sub_char_table_external_slots(value)
             {
@@ -3222,7 +3240,6 @@ fn append_print_value_bytes(value: &Value, out: &mut Vec<u8>, options: PrintOpti
                 }
                 out.push(b']');
             }
-            pop_bytes_cycle_object(pushed);
         }
         ValueKind::Veclike(VecLikeType::BoolVector) => {
             let nbits = bool_vector_length(value).unwrap_or(0);
@@ -3232,7 +3249,7 @@ fn append_print_value_bytes(value: &Value, out: &mut Vec<u8>, options: PrintOpti
             if append_bytes_cycle_ref_if_any(value, out) {
                 return;
             }
-            let pushed = push_bytes_cycle_object(value);
+            let _byte_guard = BytePrintObjectStackGuard::enter(value);
             out.push(b'[');
             let items = value.as_vector_data().unwrap().clone();
             for (idx, item) in items.iter().enumerate() {
@@ -3242,13 +3259,12 @@ fn append_print_value_bytes(value: &Value, out: &mut Vec<u8>, options: PrintOpti
                 append_print_value_bytes(item, out, options);
             }
             out.push(b']');
-            pop_bytes_cycle_object(pushed);
         }
         ValueKind::Veclike(VecLikeType::Record) => {
             if append_bytes_cycle_ref_if_any(value, out) {
                 return;
             }
-            let pushed = push_bytes_cycle_object(value);
+            let _byte_guard = BytePrintObjectStackGuard::enter(value);
             out.extend_from_slice(b"#s(");
             let items = value.as_record_data().unwrap().clone();
             for (idx, item) in items.iter().enumerate() {
@@ -3258,15 +3274,13 @@ fn append_print_value_bytes(value: &Value, out: &mut Vec<u8>, options: PrintOpti
                 append_print_value_bytes(item, out, options);
             }
             out.push(b')');
-            pop_bytes_cycle_object(pushed);
         }
         ValueKind::Veclike(VecLikeType::HashTable) => {
             if append_bytes_cycle_ref_if_any(value, out) {
                 return;
             }
-            let pushed = push_bytes_cycle_object(value);
+            let _byte_guard = BytePrintObjectStackGuard::enter(value);
             append_hash_table_bytes(value, out, options);
-            pop_bytes_cycle_object(pushed);
         }
         ValueKind::Veclike(VecLikeType::Obarray) => {
             let count = value.as_obarray_obj().map_or(0, |obj| obj.count);
@@ -3276,20 +3290,19 @@ fn append_print_value_bytes(value: &Value, out: &mut Vec<u8>, options: PrintOpti
             if append_bytes_cycle_ref_if_any(value, out) {
                 return;
             }
-            let pushed = push_bytes_cycle_object(value);
-            let text = with_print_object_guard(
+            let _byte_guard = BytePrintObjectStackGuard::enter(value);
+            let bytes = with_print_object_guard(
                 PrintObjectRef::Lambda(value.0),
-                |index| format!("#{index}"),
-                || format_interpreted_closure(value, options),
+                |index| format!("#{index}").into_bytes(),
+                || format_interpreted_closure_bytes(value, options),
             );
-            out.extend_from_slice(text.as_bytes());
-            pop_bytes_cycle_object(pushed);
+            out.extend_from_slice(&bytes);
         }
         ValueKind::Veclike(VecLikeType::Macro) => {
             if append_bytes_cycle_ref_if_any(value, out) {
                 return;
             }
-            let pushed = push_bytes_cycle_object(value);
+            let _byte_guard = BytePrintObjectStackGuard::enter(value);
             let params = value.closure_params().map_or_else(
                 || "nil".to_string(),
                 |params| format_params(params, options),
@@ -3299,7 +3312,6 @@ fn append_print_value_bytes(value: &Value, out: &mut Vec<u8>, options: PrintOpti
                 .map(|body| format_closure_body_forms(body, options))
                 .unwrap_or_else(|| "nil".to_string());
             out.extend_from_slice(format!("(macro {} {})", params, body).as_bytes());
-            pop_bytes_cycle_object(pushed);
         }
         ValueKind::Subr(id) => {
             out.extend_from_slice(format!("#<subr {}>", resolve_sym(id)).as_bytes())
@@ -3312,9 +3324,8 @@ fn append_print_value_bytes(value: &Value, out: &mut Vec<u8>, options: PrintOpti
             if append_bytes_cycle_ref_if_any(value, out) {
                 return;
             }
-            let pushed = push_bytes_cycle_object(value);
+            let _byte_guard = BytePrintObjectStackGuard::enter(value);
             append_bytecode_literal_bytes(value, out, options);
-            pop_bytes_cycle_object(pushed);
         }
         ValueKind::Veclike(VecLikeType::Marker) => out.extend_from_slice(
             print_special_handle(value, None)
@@ -3721,17 +3732,24 @@ fn format_closure_body_forms(body: Value, options: PrintOptions) -> String {
     }
 }
 
-fn format_interpreted_closure(value: &Value, options: PrintOptions) -> String {
-    value
-        .closure_slots()
-        .map(|slots| {
-            let parts = slots
-                .iter()
-                .map(|slot| print_value_with_options(slot, options))
-                .collect::<Vec<_>>();
-            format!("#[{}]", parts.join(" "))
-        })
-        .unwrap_or_else(|| "#[]".to_string())
+/// GNU print.c:2611-2613 traverses closure slots in the current PE_vector
+/// invocation, retaining the enclosing identities (print.c:2285-2300).
+/// This synchronous byte-only path descends with its existing mutator-owned
+/// traversal prefix; starting a new string invocation for each slot loses that
+/// prefix and also converts raw byte payloads through UTF-8.
+fn format_interpreted_closure_bytes(value: &Value, options: PrintOptions) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"#[");
+    if let Some(slots) = value.closure_slots() {
+        for (index, slot) in slots.iter().enumerate() {
+            if index != 0 {
+                out.push(b' ');
+            }
+            append_print_value_bytes(slot, &mut out, options);
+        }
+    }
+    out.push(b']');
+    out
 }
 
 fn print_list_shorthand_bytes(value: &Value, options: PrintOptions) -> Option<Vec<u8>> {

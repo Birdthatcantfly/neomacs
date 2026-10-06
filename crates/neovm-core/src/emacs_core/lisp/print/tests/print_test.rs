@@ -985,3 +985,11 @@ mod error_charset_units;
 #[cfg(test)]
 #[path = "quoted_policy_units.rs"]
 mod quoted_policy_units;
+
+#[cfg(test)]
+#[path = "graph_recursive_closure_units.rs"]
+mod graph_recursive_closure_units;
+
+#[cfg(test)]
+#[path = "graph_byte_stack_guard_units.rs"]
+mod graph_byte_stack_guard_units;
