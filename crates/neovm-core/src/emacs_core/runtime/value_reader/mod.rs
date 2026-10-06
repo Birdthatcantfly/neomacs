@@ -899,7 +899,7 @@ impl SourceCharacterCursor {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn permits_offset(self, offset: CharLen) -> bool {
         match self {
             Self::Bytes | Self::PhysicalEnd { .. } => true,
@@ -922,7 +922,7 @@ impl SourceCharacterCursor {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn advance(&mut self, chars: CharLen) {
         match self {
             Self::Bytes => {}
@@ -3001,7 +3001,24 @@ impl<'a> Reader<'a> {
     /// Match GNU unreadchar for actual grammar lookahead. Callable input
     /// invokes Lisp unget; original string input remaps through its position
     /// cache. Detached byte-backed sources retain their byte cursor.
+    /// GNU unreadchar after a lookahead. Only a callable stream and a string
+    /// whose characters are not its bytes have state to restore; every other
+    /// source just keeps its byte position.
+    #[inline]
     fn unread_source_lookahead(&mut self) -> Result<(), ReadError> {
+        if matches!(self.source, ReaderSource::Callable(_))
+            || matches!(self.original_string,
+                OriginalStringCacheBinding::Original(original)
+                    if original.payload.schars() != original.payload.sbytes())
+        {
+            return self.unread_stateful_source_lookahead();
+        }
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn unread_stateful_source_lookahead(&mut self) -> Result<(), ReadError> {
         if let ReaderSource::Callable(source) = self.source {
             let outcome = source.unread(EmacsBytePos::new(self.pos));
             self.step_cache.set(None);
@@ -3073,7 +3090,7 @@ impl<'a> Reader<'a> {
         self.pos = next.get();
     }
 
-    #[inline]
+    #[inline(always)]
     fn advance_decoded_to(&mut self, next: EmacsBytePos) {
         self.character_cursor.advance(CharLen::new(1));
         self.pos = next.get();
@@ -3092,12 +3109,15 @@ impl<'a> Reader<'a> {
             .get()
     }
 
-    #[inline]
+    /// The character at the cursor, read once per source character: always
+    /// inlined, with the bounded-range end and the payload terminator out of
+    /// line.
+    #[inline(always)]
     fn current_code(&self) -> Option<u32> {
-        self.character_cursor
-            .permits_offset(CharLen::new(0))
-            .then(|| self.source_code_at(self.pos, CharLen::ZERO))
-            .flatten()
+        if !self.character_cursor.permits_offset(CharLen::ZERO) {
+            return None;
+        }
+        self.source_code_at(self.pos, CharLen::ZERO)
     }
 
     fn peek_code_at(&self, offset: usize) -> Option<u32> {
@@ -3114,8 +3134,26 @@ impl<'a> Reader<'a> {
         self.source_code_at(pos, CharLen::new(offset))
     }
 
-    #[inline]
+    /// Step past the character at the cursor. The common step (no pending dot
+    /// resume, a character inside the range) is inlined; every other case
+    /// takes [`Self::bump_slow`].
+    #[inline(always)]
     fn bump(&mut self) {
+        if self.dot_unread.get().is_none()
+            && self.character_cursor.permits_offset(CharLen::ZERO)
+            && let Some((_, next)) = self.code_and_next(self.pos)
+        {
+            self.advance_decoded_to(EmacsBytePos::new(next));
+            return;
+        }
+        self.bump_slow();
+    }
+
+    /// [`Self::bump`] at a pending dot resume, the end of a bounded range or
+    /// the end of the source.
+    #[cold]
+    #[inline(never)]
+    fn bump_slow(&mut self) {
         if !self.character_cursor.permits_offset(CharLen::new(0)) {
             return;
         }
@@ -3315,11 +3353,19 @@ impl<'a> Reader<'a> {
     }
 
     #[inline]
+    #[inline(always)]
     fn source_code_at(&self, pos: usize, offset: CharLen) -> Option<u32> {
-        self.code_and_next(pos).map(|(code, _)| code).or_else(|| {
-            self.initialized_terminator_next(EmacsBytePos::new(pos), offset)
-                .map(|_| 0)
-        })
+        match self.code_and_next(pos) {
+            Some((code, _)) => Some(code),
+            None => self.initialized_terminator_code(pos, offset),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn initialized_terminator_code(&self, pos: usize, offset: CharLen) -> Option<u32> {
+        self.initialized_terminator_next(EmacsBytePos::new(pos), offset)
+            .map(|_| 0)
     }
 
     /// The only modeled byte outside the payload is its initialized NUL
@@ -3343,6 +3389,7 @@ impl<'a> Reader<'a> {
         }
     }
 
+    #[inline(always)]
     fn next_pos(&self, pos: usize) -> Option<usize> {
         self.code_and_next(pos).map(|(_, next)| next)
     }
