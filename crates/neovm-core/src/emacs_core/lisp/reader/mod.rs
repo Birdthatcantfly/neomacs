@@ -1331,17 +1331,13 @@ fn stdin_end_of_file_error() -> Flow {
 /// `byte-compile-file`), so reading source that declares
 /// `read-symbol-shorthands` in its local variables rewrites `prefix:name`
 /// symbols.  The value must be resolved with buffer-local visibility — the
-/// global binding is normally nil — hence we go through
-/// `visible_runtime_variable_value_by_id` rather than the raw obarray slot.
+/// global binding is normally nil — hence the current buffer's binding cell
+/// (`read_symbol_shorthands_value`) rather than the raw obarray slot.
 /// Returns `None` when unset/nil.
 fn current_read_symbol_shorthands(
     eval: &super::eval::Context,
 ) -> Option<super::value_reader::ReadSymbolShorthands> {
-    let sym = crate::emacs_core::intern::intern("read-symbol-shorthands");
-    let value = eval
-        .visible_runtime_variable_value_by_id(sym)
-        .ok()
-        .flatten()?;
+    let value = super::builtins::symbols::read_symbol_shorthands_value(eval);
     if value.is_nil() {
         return None;
     }

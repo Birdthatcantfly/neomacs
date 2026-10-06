@@ -2000,25 +2000,42 @@ fn intern_shorthand_name(
     eval: &super::eval::Context,
     name: &crate::heap_types::LispString,
 ) -> Result<Option<RewrittenSymbolName>, crate::heap_types::GnuDeclaredCharacterCountError> {
-    static SHORTHANDS: std::sync::OnceLock<SymId> = std::sync::OnceLock::new();
-    let id = *SHORTHANDS.get_or_init(|| intern("read-symbol-shorthands"));
-    // A plain value cell already is the visible dynamic binding. Aliases,
-    // buffer-local cells, and forwarded cells require the Context lookup.
-    use crate::emacs_core::symbol::SymbolRedirect;
-    let visible = match eval.obarray().get_by_id(id) {
-        Some(symbol) => match symbol.redirect() {
-            SymbolRedirect::Plainval => eval.obarray().symbol_value_id_copied(id),
-            SymbolRedirect::Localized | SymbolRedirect::Forwarded | SymbolRedirect::Varalias => {
-                eval.visible_runtime_variable_value_by_id(id).ok().flatten()
-            }
-        },
-        None => eval.visible_runtime_variable_value_by_id(id).ok().flatten(),
-    };
-    let value = visible.unwrap_or(Value::NIL);
+    let value = read_symbol_shorthands_value(eval);
     if value.is_nil() {
         return Ok(None);
     }
     rewrite_intern_shorthand(value, name)
+}
+
+/// The visible value of `read-symbol-shorthands`, which GNU reads as the C
+/// variable `Vread_symbol_shorthands` (lread.c:4970, a `DEFVAR_LISP` at
+/// lread.c:5921). `intern`, `intern-soft` and every `read` consult it, so
+/// read the cells that hold it directly: the forwarded C variable (or a
+/// plain value cell), and the current buffer's binding cell once a file's
+/// local variables made it buffer-local. Aliases and an unbound cell take
+/// the general variable lookup. Mutator-local: reads only the calling
+/// evaluator's obarray and buffers.
+#[inline]
+pub(crate) fn read_symbol_shorthands_value(eval: &super::eval::Context) -> Value {
+    static SHORTHANDS: std::sync::OnceLock<SymId> = std::sync::OnceLock::new();
+    let id = *SHORTHANDS.get_or_init(|| intern("read-symbol-shorthands"));
+    use crate::emacs_core::symbol::SymbolRedirect;
+    let direct = match eval.obarray().get_by_id(id).map(|symbol| symbol.redirect()) {
+        // `symbol_value_id_copied` answers None for a buffer-slot forward,
+        // which only the general lookup can read.
+        Some(SymbolRedirect::Forwarded | SymbolRedirect::Plainval) => {
+            eval.obarray().symbol_value_id_copied(id)
+        }
+        Some(SymbolRedirect::Localized) => eval
+            .buffers
+            .current_buffer()
+            .and_then(|buffer| eval.obarray().read_localized_in_buffer(id, buffer))
+            .filter(|value| !value.is_unbound()),
+        Some(SymbolRedirect::Varalias) | None => None,
+    };
+    direct
+        .or_else(|| eval.visible_runtime_variable_value_by_id(id).ok().flatten())
+        .unwrap_or(Value::NIL)
 }
 
 /// Match GNU's first valid byte prefix. Active pairs belong to this mutator;
