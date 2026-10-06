@@ -144,3 +144,30 @@ fn modifier_chains_are_iterative_and_control_is_not_idempotent() {
         &[225]
     );
 }
+
+#[test]
+fn self_contained_escapes_match_gnu_for_every_ascii_character() {
+    check(
+        "ascii-self-contained",
+        r#"(list
+  (let (out)
+    (dotimes (c 128)
+      (push (list c
+                  (condition-case e
+                      (let ((s (car (read-from-string (string ?\" ?\\ c ?\")))))
+                        (list (append s nil) (multibyte-string-p s)))
+                    (error (car e)))
+                  (condition-case e (car (read-from-string (string ?? ?\\ c)))
+                    (error (car e))))
+            out))
+    (nreverse out))
+  (mapcar (lambda (source)
+            (condition-case e
+                (let ((v (car (read-from-string source))))
+                  (if (stringp v) (list (append v nil) (multibyte-string-p v)) v))
+              (error (car e))))
+          '("?\\M-\\\\" "?\\C-\\(" "?\\M-\\d" "?\\^\\e" "?\\S-\\\"" "?\\M-\\a"
+            "\"\\C-\\\\\"" "\"\\M-\\\"\"")))"#,
+        include_str!("escapes-ascii-self-contained.expect"),
+    );
+}

@@ -2202,7 +2202,7 @@ impl<'a> Reader<'a> {
                 esc = next;
                 continue;
             }
-            if let Some(code) = plain_escape_code(esc) {
+            if let Some(code) = self_contained_escape_code(esc) {
                 break code;
             }
             break match esc {
@@ -3726,51 +3726,60 @@ impl<'a> Reader<'a> {
 // Free functions (copied from parser.rs)
 // ---------------------------------------------------------------------------
 
-/// The named control escapes of GNU read_char_escape (lread.c:2624-2632):
-/// `\n \r \t \a \b \f \v \e \d`, which read nothing further.
-#[inline(always)]
-fn plain_escape_code(esc: u32) -> Option<u32> {
-    let code = match u8::try_from(esc).ok()? {
-        b'n' => b'\n',
-        b'r' => b'\r',
-        b't' => b'\t',
-        b'a' => 0x07,
-        b'b' => 0x08,
-        b'f' => 0x0C,
-        b'v' => 0x0B,
-        b'e' => 0x1B,
-        b'd' => 0x7F,
-        _ => return None,
-    };
-    Some(u32::from(code))
+/// GNU read_char_escape (lread.c:2604-2864) for an ASCII character after a
+/// backslash, when the escape reads nothing further: the named control
+/// escapes `\a \b \d \e \f \n \r \t \v` (lread.c:2624-2632), and every
+/// character without escape syntax, which stands for itself
+/// (`default: chr = c;`, lread.c:2832-2834), such as `\\` and `\"`. None
+/// for the escapes that read more source or signal: the modifier prefixes,
+/// octal, hex, Unicode and named-character escapes, and an escaped newline.
+const fn ascii_self_contained_escape(esc: u8) -> Option<u8> {
+    match esc {
+        b'\n'
+        | b'M'
+        | b'S'
+        | b'H'
+        | b'A'
+        | b's'
+        | b'C'
+        | b'^'
+        | b'0'..=b'7'
+        | b'x'
+        | b'u'
+        | b'U'
+        | b'N' => None,
+        b'a' => Some(0x07),
+        b'b' => Some(0x08),
+        b'd' => Some(0x7F),
+        b'e' => Some(0x1B),
+        b'f' => Some(0x0C),
+        b'n' => Some(b'\n'),
+        b'r' => Some(b'\r'),
+        b't' => Some(b'\t'),
+        b'v' => Some(0x0B),
+        other => Some(other),
+    }
 }
 
-/// The escapes of GNU read_char_escape that read nothing further: the named
-/// control escapes, and every character without escape syntax, which stands
-/// for itself (`default: chr = c;`, lread.c:2832-2834), such as `\\` and
-/// `\"`. None for the escapes that read more source or signal: the modifier
-/// prefixes, octal, hex, Unicode and named-character escapes, and an escaped
-/// newline.
+/// [`ascii_self_contained_escape`] for every ASCII character, so answering
+/// an escape is one indexed load.
+const ASCII_SELF_CONTAINED_ESCAPES: [Option<u8>; 128] = {
+    let mut table = [None; 128];
+    let mut esc = 0;
+    while esc < table.len() {
+        table[esc] = ascii_self_contained_escape(esc as u8);
+        esc += 1;
+    }
+    table
+};
+
+/// [`ascii_self_contained_escape`] for any character code: an escaped
+/// non-ASCII character stands for itself.
 #[inline(always)]
 fn self_contained_escape_code(esc: u32) -> Option<u32> {
-    match u8::try_from(esc) {
-        Ok(
-            b'\n'
-            | b'M'
-            | b'S'
-            | b'H'
-            | b'A'
-            | b's'
-            | b'C'
-            | b'^'
-            | b'0'..=b'7'
-            | b'x'
-            | b'u'
-            | b'U'
-            | b'N',
-        ) => None,
-        Ok(_) => Some(plain_escape_code(esc).unwrap_or(esc)),
-        Err(_) => Some(esc),
+    match ASCII_SELF_CONTAINED_ESCAPES.get(esc as usize) {
+        Some(entry) => entry.map(u32::from),
+        None => Some(esc),
     }
 }
 
