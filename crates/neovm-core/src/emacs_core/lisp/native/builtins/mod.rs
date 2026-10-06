@@ -86,15 +86,25 @@ pub(crate) fn lisp_string_char_at(
 /// steps from the previous character instead of rescanning.
 pub(crate) fn lisp_string_value_char_at(value: Value, idx: usize) -> Option<u32> {
     let string = value.as_lisp_string()?;
-    let bytes = string.as_bytes();
-    if !string.is_multibyte() {
-        return bytes.get(idx).map(|&b| b as u32);
+    // Unibyte or computed all-ASCII text: the byte is the character, and the
+    // decoder's frame stays off this path.
+    if string.has_one_byte_characters() {
+        return string.as_bytes().get(idx).map(|&b| u32::from(b));
     }
+    multibyte_string_value_char_at(value, string, idx)
+}
+
+#[inline(never)]
+fn multibyte_string_value_char_at(
+    value: Value,
+    string: &crate::heap_types::LispString,
+    idx: usize,
+) -> Option<u32> {
     if idx >= string.schars() {
         return None;
     }
     let byte_pos = crate::emacs_core::string_pos_cache::string_char_to_byte(value, string, idx);
-    let tail = bytes.get(byte_pos..).unwrap_or_default();
+    let tail = string.as_bytes().get(byte_pos..).unwrap_or_default();
     let (cp, _) = crate::heap_types::decode_declared_multibyte_char(tail);
     Some(cp)
 }
