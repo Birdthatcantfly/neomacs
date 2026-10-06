@@ -1832,6 +1832,7 @@ impl<'a> Reader<'a> {
         buf.extend_from_slice(&tmp[..len]);
     }
 
+    #[inline]
     fn push_string_escape_value(
         &self,
         buf: &mut Vec<u8>,
@@ -2061,9 +2062,54 @@ impl<'a> Reader<'a> {
         self.read_char_escape(esc)
     }
 
-    /// GNU `read_char_escape`, lread.c:2604-2864. Modifier chains are
-    /// iterative, so their source length cannot become Rust stack depth.
-    fn read_char_escape(&mut self, mut esc: u32) -> Result<DecodedCharacter, ReadError> {
+    /// GNU `read_char_escape` (lread.c:2604-2864) for the character ESC after
+    /// a backslash. The plain escapes (the named controls and octal) take no
+    /// modifier and are answered inline: they are most of the escapes in a
+    /// compiled file's byte-code strings. Every other escape takes
+    /// [`Self::read_modified_char_escape`]. Always inlined: as an out-of-line
+    /// call its frame alone cost more than the escape.
+    #[inline(always)]
+    fn read_char_escape(&mut self, esc: u32) -> Result<DecodedCharacter, ReadError> {
+        if let Some(code) = plain_escape_code(esc) {
+            return Ok(DecodedCharacter(code));
+        }
+        if (u32::from(b'0')..=u32::from(b'7')).contains(&esc) {
+            return self.read_octal_escape(esc).map(DecodedCharacter);
+        }
+        self.read_modified_char_escape(esc)
+    }
+
+    /// The octal escape whose first digit is FIRST (lread.c:2697-2717): up to
+    /// two more digits, with GNU's unread of the lookahead that ends a
+    /// shorter escape. Codes 0x80-0xFF are raw bytes.
+    #[inline(always)]
+    fn read_octal_escape(&mut self, first: u32) -> Result<u32, ReadError> {
+        let mut val = first - u32::from(b'0');
+        for _ in 0..2 {
+            match self.current_code() {
+                Some(c) if (u32::from(b'0')..=u32::from(b'7')).contains(&c) => {
+                    self.bump();
+                    val = val * 8 + (c - u32::from(b'0'));
+                }
+                _ => {
+                    self.unread_source_lookahead()?;
+                    break;
+                }
+            }
+        }
+        Ok(if (0x80..0x100).contains(&val) {
+            emacs_char::byte8_to_char(val as u8)
+        } else {
+            val
+        })
+    }
+
+    /// [`Self::read_char_escape`] for modifier prefixes and the escapes that
+    /// read further syntax (`\x`, `\u`, `\U`, `\N{}`, `\s`). Modifier
+    /// chains are iterative, so their source length cannot become Rust stack
+    /// depth.
+    #[inline(never)]
+    fn read_modified_char_escape(&mut self, mut esc: u32) -> Result<DecodedCharacter, ReadError> {
         let mut modifiers = CharacterModifiers::empty();
         let mut controls = 0usize;
         let mut value = DecodedCharacter(loop {
@@ -2112,16 +2158,10 @@ impl<'a> Reader<'a> {
                 esc = next;
                 continue;
             }
+            if let Some(code) = plain_escape_code(esc) {
+                break code;
+            }
             break match esc {
-                x if x == b'n' as u32 => b'\n' as u32,
-                x if x == b'r' as u32 => b'\r' as u32,
-                x if x == b't' as u32 => b'\t' as u32,
-                x if x == b'a' as u32 => 0x07,
-                x if x == b'b' as u32 => 0x08,
-                x if x == b'f' as u32 => 0x0C,
-                x if x == b'v' as u32 => 0x0B,
-                x if x == b'e' as u32 => 0x1B,
-                x if x == b'd' as u32 => 0x7F,
                 x if x == b's' as u32 => {
                     self.unread_source_lookahead()?;
                     b' ' as u32
@@ -2133,26 +2173,7 @@ impl<'a> Reader<'a> {
                 x if x == b'u' as u32 => self.read_char_unicode_escape(UnicodeEscapeKind::Short)?,
                 x if x == b'U' as u32 => self.read_char_unicode_escape(UnicodeEscapeKind::Long)?,
                 x if x == b'N' as u32 => self.read_unicode_name_escape()?,
-                x if (b'0' as u32..=b'7' as u32).contains(&x) => {
-                    let mut val = esc - b'0' as u32;
-                    for _ in 0..2 {
-                        match self.current_code() {
-                            Some(c) if (b'0' as u32..=b'7' as u32).contains(&c) => {
-                                self.bump();
-                                val = val * 8 + (c - b'0' as u32);
-                            }
-                            _ => {
-                                self.unread_source_lookahead()?;
-                                break;
-                            }
-                        }
-                    }
-                    if (0x80..0x100).contains(&val) {
-                        emacs_char::byte8_to_char(val as u8)
-                    } else {
-                        val
-                    }
-                }
+                x if (b'0' as u32..=b'7' as u32).contains(&x) => self.read_octal_escape(x)?,
                 other => other,
             };
         });
@@ -3646,6 +3667,25 @@ impl<'a> Reader<'a> {
 // ---------------------------------------------------------------------------
 // Free functions (copied from parser.rs)
 // ---------------------------------------------------------------------------
+
+/// The named control escapes of GNU read_char_escape (lread.c:2624-2632):
+/// `\n \r \t \a \b \f \v \e \d`, which read nothing further.
+#[inline(always)]
+fn plain_escape_code(esc: u32) -> Option<u32> {
+    let code = match u8::try_from(esc).ok()? {
+        b'n' => b'\n',
+        b'r' => b'\r',
+        b't' => b'\t',
+        b'a' => 0x07,
+        b'b' => 0x08,
+        b'f' => 0x0C,
+        b'v' => 0x0B,
+        b'e' => 0x1B,
+        b'd' => 0x7F,
+        _ => return None,
+    };
+    Some(u32::from(code))
+}
 
 fn is_char_literal_delimiter_code(code: u32) -> bool {
     is_reader_whitespace_code(code)
