@@ -477,6 +477,21 @@ impl ReadSymbolShorthands {
         Some(Self { pairs })
     }
 
+    /// `read-symbol-shorthands` from a file's Local Variables section.
+    ///
+    /// GNU `hack-local-variables--find-variables` sorts that value by the
+    /// length of each shorthand, longest first, with the stable `sort`
+    /// (lisp/files.el:4462-4467), so the first-match scan in
+    /// `oblookup_considering_shorthand` (lread.c:4966-5010) prefers the
+    /// longest prefix. A value bound any other way keeps its own order.
+    pub(crate) fn from_file_local_value(value: Value) -> Option<Self> {
+        let mut shorthands = Self::from_lisp_value(value)?;
+        shorthands
+            .pairs
+            .sort_by_key(|(short, _)| std::cmp::Reverse(short.schars()));
+        Some(shorthands)
+    }
+
     pub(crate) fn rewrite(
         &self,
         name: &crate::heap_types::LispString,

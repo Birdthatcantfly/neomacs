@@ -1510,7 +1510,7 @@ fn read_symbol_shorthands_value_text(
     else {
         return Ok(None);
     };
-    Ok(ReadSymbolShorthands::from_lisp_value(value))
+    Ok(ReadSymbolShorthands::from_file_local_value(value))
 }
 
 fn is_unsupported_compiled_path(path: &Path) -> bool {

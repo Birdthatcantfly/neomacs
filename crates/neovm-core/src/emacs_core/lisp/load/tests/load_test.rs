@@ -8651,6 +8651,34 @@ fn load_source_applies_read_symbol_shorthands_from_file_local_variables() {
     );
 }
 
+/// GNU sorts file-local shorthands longest first with the stable `sort`
+/// (lisp/files.el:4462-4467): a longer shorthand listed later still wins, and
+/// equal-length shorthands keep their source order. Expected value from GNU
+/// 31.1.
+#[test]
+fn load_source_sorts_file_local_shorthands_stably_by_length() {
+    crate::test_utils::init_test_tracing();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("shorthand-tie.el");
+    std::fs::write(
+        &path,
+        r#"(setq neomacs-shorthand-tie-result (symbol-name 'tie-x))
+
+;; Local Variables:
+;; read-symbol-shorthands: (("ti" . "neomacs-short-")
+;;                          ("tie-" . "neomacs-first-")
+;;                          ("tie-" . "neomacs-second-"))
+;; End:
+"#,
+    )
+    .expect("write shorthand tie fixture");
+
+    assert_eq!(
+        fresh_bootstrap_eval_with_loaded_file(&path, "neomacs-shorthand-tie-result"),
+        r#"OK "neomacs-first-x""#
+    );
+}
+
 /// GNU `hack-local-variables--find-variables` looks for the section only in
 /// the last 3000 characters of the file; a section buried earlier is not a
 /// Local Variables section for `read-symbol-shorthands` either.  The window
