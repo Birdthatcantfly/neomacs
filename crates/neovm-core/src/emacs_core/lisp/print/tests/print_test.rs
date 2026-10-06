@@ -1001,3 +1001,7 @@ mod error_string_leaf_gnu;
 #[cfg(test)]
 #[path = "symbol_noescape_gnu.rs"]
 mod symbol_noescape_gnu;
+
+#[cfg(test)]
+#[path = "princ_octal_spans_gnu.rs"]
+mod princ_octal_spans_gnu;

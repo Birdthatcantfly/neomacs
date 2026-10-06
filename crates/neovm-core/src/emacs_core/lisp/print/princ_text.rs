@@ -88,20 +88,38 @@ pub(crate) fn princ_string_bytes(
             Cow::Borrowed(bytes)
         }
         (PrincStringSource::Multibyte(bytes), PrincStringOutput::OctalByte8) => {
-            // GNU character.c:786 skips ASCII multibyte strings by comparing
-            // cached character/byte lengths. Ordinary Unicode needs no decode.
-            if string.schars() == string.sbytes()
-                || !bytes
-                    .iter()
-                    .any(|byte| emacs_char::char_byte8_head_p(*byte))
-            {
+            // GNU character.c:786 skips ASCII via cached character/byte counts.
+            // In canonical Emacs multibyte text, C0/C1 occur only as the heads
+            // of two-byte raw-byte characters, never as continuation bytes.
+            if string.schars() == string.sbytes() {
                 return Cow::Borrowed(bytes);
             }
-            let mut out = Vec::with_capacity(bytes.len());
-            let mut pos = 0;
-            while pos < bytes.len() {
-                let (code, len) = emacs_char::string_char(&bytes[pos..]);
-                if emacs_char::char_byte8_p(code) {
+            let Some(first_byte8) = memchr::memchr2(0xC0, 0xC1, bytes) else {
+                return Cow::Borrowed(bytes);
+            };
+            // Count both canonical heads with specialized bulk byte scans.
+            // Their sets are disjoint; continuation bytes cannot be either head.
+            let tail = &bytes[first_byte8..];
+            let byte8_count =
+                memchr::memchr_iter(0xC0, tail).count() + memchr::memchr_iter(0xC1, tail).count();
+            // Each two-byte byte8 pair becomes four ASCII octal bytes (GNU
+            // character.c:798-805). Checked reservation arithmetic cannot
+            // introduce a capacity-overflow panic. If the final capacity is
+            // unrepresentable, retain the existing incremental Vec growth.
+            let capacity = byte8_count
+                .checked_mul(2)
+                .and_then(|extra| bytes.len().checked_add(extra))
+                .filter(|size| *size <= isize::MAX as usize)
+                .unwrap_or(bytes.len());
+            let mut out = Vec::with_capacity(capacity);
+            let mut ordinary_start = 0;
+            let mut raw_start = first_byte8;
+            loop {
+                out.extend_from_slice(&bytes[ordinary_start..raw_start]);
+                // Decode adjacent canonical byte8 pairs locally. Search only
+                // when an ordinary span separates runs, not once per head.
+                while raw_start < bytes.len() && matches!(bytes[raw_start], 0xC0 | 0xC1) {
+                    let (code, len) = emacs_char::string_char(&bytes[raw_start..]);
                     let byte = emacs_char::char_to_byte8(code);
                     out.extend_from_slice(&[
                         b'\\',
@@ -109,11 +127,15 @@ pub(crate) fn princ_string_bytes(
                         b'0' + ((byte >> 3) & 7),
                         b'0' + (byte & 7),
                     ]);
-                } else {
-                    out.extend_from_slice(&bytes[pos..pos + len]);
+                    raw_start += len;
                 }
-                pos += len;
+                ordinary_start = raw_start;
+                let Some(offset) = memchr::memchr2(0xC0, 0xC1, &bytes[ordinary_start..]) else {
+                    break;
+                };
+                raw_start = ordinary_start + offset;
             }
+            out.extend_from_slice(&bytes[ordinary_start..]);
             Cow::Owned(out)
         }
     }
