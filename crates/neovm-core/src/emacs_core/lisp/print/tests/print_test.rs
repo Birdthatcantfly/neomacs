@@ -997,3 +997,7 @@ mod graph_byte_stack_guard_units;
 #[cfg(test)]
 #[path = "error_string_leaf_gnu.rs"]
 mod error_string_leaf_gnu;
+
+#[cfg(test)]
+#[path = "symbol_noescape_gnu.rs"]
+mod symbol_noescape_gnu;

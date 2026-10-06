@@ -3502,32 +3502,63 @@ fn symbol_bytes(id: super::intern::SymId, options: PrintOptions) -> Vec<u8> {
     // Identity is decided on the name ATOM, the printed spelling on the name
     // OBJECT: GNU prints the string the symbol was created from, which Lisp can
     // have mutated in place since.
-    let canonical = lookup_interned_lisp_string(resolve_sym_lisp_string(id));
+    // GNU print.c:2492-2494 consults interned status only for a gensym prefix.
+    // Preserve atom identity when needed; visible mutable spelling stays below.
+    let needs_gensym_prefix = options.print_gensym
+        && lookup_interned_lisp_string(resolve_sym_lisp_string(id)) != Some(id);
     let visible_name = super::intern::resolve_lisp_visible_symbol_name(id);
     let name = visible_name.text();
     let mut out = Vec::new();
-    if canonical == Some(id) {
-        append_symbol_name_bytes_with_escape(name, &mut out, !options.print_noescape);
-    } else if options.print_gensym {
+    if needs_gensym_prefix {
         out.extend_from_slice(b"#:");
-        if !name.is_empty() {
-            append_symbol_name_bytes_with_escape(name, &mut out, !options.print_noescape);
+        if name.is_empty() {
+            return out;
         }
-    } else {
-        append_symbol_name_bytes_with_escape(name, &mut out, !options.print_noescape);
     }
+    append_symbol_name_bytes_with_escape(name, &mut out, SymbolNameEscaping::from(options));
     out
+}
+
+/// Per-render symbol-name quoting policy; scalar metadata shared safely by
+/// mutators, with no cached Lisp state. Symbols always promote raw name bytes
+/// to byte8 characters, independently of the destination's string protocol.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SymbolNameEscaping {
+    Readable,
+    Preserve,
+}
+static_assertions::assert_impl_all!(SymbolNameEscaping: Send, Sync);
+
+impl From<PrintOptions> for SymbolNameEscaping {
+    fn from(options: PrintOptions) -> Self {
+        if options.print_noescape {
+            Self::Preserve
+        } else {
+            Self::Readable
+        }
+    }
 }
 
 fn append_symbol_name_bytes_with_escape(
     name: &crate::heap_types::LispString,
     out: &mut Vec<u8>,
-    escape: bool,
+    escaping: SymbolNameEscaping,
 ) {
     let bytes = name.as_bytes();
     if bytes.is_empty() {
         out.extend_from_slice(b"##");
         return;
+    }
+
+    match escaping {
+        SymbolNameEscaping::Preserve => {
+            // GNU symbols fetch characters as multibyte even for callable
+            // streams (print.c:2506-2510; character.h:464-483). Raw name bytes
+            // become byte8, unlike a string sent to CallbackCharacters.
+            out.extend_from_slice(&princ_string_bytes(name, PrincStringOutput::PreserveByte8));
+            return;
+        }
+        SymbolNameEscaping::Readable => {}
     }
 
     let mut confusing = symbol_name_confusing(bytes);
@@ -3553,7 +3584,7 @@ fn append_symbol_name_bytes_with_escape(
             40 | 41 | 91 | 93 | 34 | 92 | 59 | 35 | 39 | 96 | 44 | 160
         ) || ch <= 32
             || confusing;
-        if escape && needs_escape {
+        if needs_escape {
             out.push(b'\\');
             confusing = false;
         }
