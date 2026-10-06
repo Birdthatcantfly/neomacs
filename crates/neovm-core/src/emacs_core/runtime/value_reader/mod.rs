@@ -1028,6 +1028,16 @@ struct Reader<'a> {
     source_semantics: ReaderSourceSemantics,
     pos: usize,
     limit: usize,
+    /// The source's bytes up to `limit` when the source is byte-backed (a
+    /// loaded file's text, or a Lisp string); None for a buffer or callable
+    /// source, which has no contiguous bytes and keeps the per-character
+    /// step. Neither the source nor `limit` changes during a read, so the
+    /// slice is taken once, at construction. Every storage-string sentinel
+    /// is a code point at or above U+E080 and every multibyte lead byte is
+    /// at or above 0x80, so an ASCII byte of either source is that character
+    /// and one position wide: the byte-run fast paths read such runs
+    /// directly, the way GNU `read0` walks `readchar` bytes.
+    source_bytes: Option<&'a [u8]>,
     character_cursor: SourceCharacterCursor,
     original_string: OriginalStringCacheBinding<'a>,
     dot_unread: Cell<Option<DotUnreadCursor>>,
@@ -1235,6 +1245,7 @@ impl<'a> Reader<'a> {
             source_semantics,
             pos: 0,
             limit: input.len(),
+            source_bytes: Some(input.as_bytes()),
             character_cursor: SourceCharacterCursor::Bytes,
             original_string: OriginalStringCacheBinding::Uncached,
             dot_unread: Cell::new(None),
@@ -1259,6 +1270,7 @@ impl<'a> Reader<'a> {
             source_semantics: ReaderSourceSemantics::EncodedFileBytes,
             pos: 0,
             limit: input.len(),
+            source_bytes: Some(input),
             character_cursor: SourceCharacterCursor::Bytes,
             original_string: OriginalStringCacheBinding::Uncached,
             dot_unread: Cell::new(None),
@@ -1308,6 +1320,7 @@ impl<'a> Reader<'a> {
             source_semantics: ReaderSourceSemantics::for_lisp_object(input.is_multibyte()),
             pos: start,
             limit: end,
+            source_bytes: Some(&input.as_bytes()[..end]),
             character_cursor,
             original_string,
             dot_unread: Cell::new(None),
@@ -1341,6 +1354,7 @@ impl<'a> Reader<'a> {
             source_semantics: ReaderSourceSemantics::for_lisp_object(input.get_multibyte()),
             pos: start,
             limit: end,
+            source_bytes: None,
             character_cursor: SourceCharacterCursor::Bytes,
             original_string: OriginalStringCacheBinding::Uncached,
             dot_unread: Cell::new(None),
@@ -3489,22 +3503,11 @@ impl<'a> Reader<'a> {
         self.code_and_next_memo(pos)
     }
 
-    /// The source's bytes up to `limit` when the source is byte-backed (a
-    /// loaded file's text, or a Lisp string).  Every storage-string sentinel
-    /// is a code point at or above U+E080 and every multibyte lead byte is at
-    /// or above 0x80, so an ASCII byte of either source is that character
-    /// and one position wide: the byte-run fast paths below read such runs
-    /// directly, the way GNU `read0` walks `readchar` bytes.  A buffer source
-    /// has no contiguous bytes and keeps the per-character step.
+    /// The source's bytes up to `limit` when the source is byte-backed:
+    /// [`Self::source_bytes`].
     #[inline(always)]
     fn byte_backed_source(&self) -> Option<&'a [u8]> {
-        let bytes: &'a [u8] = match self.source {
-            ReaderSource::Runtime(s) => s.as_bytes(),
-            ReaderSource::FileBytes(b) => b,
-            ReaderSource::LispString(input) => input.as_bytes(),
-            ReaderSource::Buffer(_) | ReaderSource::Callable(_) => return None,
-        };
-        Some(&bytes[..self.limit.min(bytes.len())])
+        self.source_bytes
     }
 
     fn code_and_next_memo(&self, pos: usize) -> Option<(u32, usize)> {

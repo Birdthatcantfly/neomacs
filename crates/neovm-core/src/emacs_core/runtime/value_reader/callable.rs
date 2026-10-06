@@ -241,6 +241,7 @@ pub(crate) fn read_from_callable(
         source_semantics: ReaderSourceSemantics::MultibyteCharacters,
         pos: 0,
         limit: usize::MAX,
+        source_bytes: None,
         character_cursor: super::SourceCharacterCursor::Bytes,
         original_string: super::OriginalStringCacheBinding::Uncached,
         dot_unread: Cell::new(None),
