@@ -2294,6 +2294,21 @@ impl<'a> Reader<'a> {
             return Err(self.error("expected atom"));
         }
 
+        // GNU resolves even nil/t through the obarray after shorthand
+        // expansion (lread.c:4222-4255); core symbols can be uninterned
+        // (lread.c:4887-4922). Only bypass spelling lookup when this binding
+        // cannot rewrite and the original core identity remains canonical.
+        if matches!(self.shorthands, ReaderShorthands::Unbound)
+            && let Some(id) = match token.bytes.as_slice() {
+                b"nil" => Some(super::intern::NIL_SYM_ID),
+                b"t" => Some(super::intern::T_SYM_ID),
+                _ => None,
+            }
+            && super::intern::is_canonical_id(id)
+        {
+            return Ok(Value::from_sym_id(id));
+        }
+
         if token.quoting == SymbolQuoting::Plain
             && let Some(token_text) = token.as_utf8()
         {

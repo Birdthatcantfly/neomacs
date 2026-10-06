@@ -1909,23 +1909,75 @@ impl InternSoftQuery<'_> {
     }
 }
 
+/// A custom obarray whose compatibility conversion has already completed.
+/// This handle remains in the calling mutator; it does not retain a heap borrow.
+#[derive(Debug)]
+struct CheckedInternSoftObarray {
+    value: Value,
+    _mutator: std::marker::PhantomData<*const ()>,
+}
+
+impl TryFrom<Value> for CheckedInternSoftObarray {
+    type Error = Flow;
+
+    #[inline]
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        Ok(Self {
+            value: check_obarray_value(value)?,
+            _mutator: std::marker::PhantomData,
+        })
+    }
+}
+
+static_assertions::assert_not_impl_any!(CheckedInternSoftObarray: Send, Sync);
+
+/// One selected lookup domain. Custom conversion occurs before NAME coercion,
+/// matching GNU Fintern_soft. The selection stays local to the calling mutator.
+#[derive(Debug)]
+enum SelectedInternSoftObarray {
+    Global,
+    Custom(CheckedInternSoftObarray),
+}
+
+static_assertions::assert_not_impl_any!(SelectedInternSoftObarray: Send, Sync);
+
 /// GNU oblookup_considering_shorthand (lread.c:4966-5010) scans valid
 /// pairs in source order. Nil, the overwhelmingly common binding, allocates
 /// nothing. The rewritten builtin name is multibyte (Fintern, 4793-4796).
+#[inline]
 fn intern_shorthand_name(
     eval: &super::eval::Context,
     name: &crate::heap_types::LispString,
 ) -> Option<crate::heap_types::LispString> {
     static SHORTHANDS: std::sync::OnceLock<SymId> = std::sync::OnceLock::new();
     let id = *SHORTHANDS.get_or_init(|| intern("read-symbol-shorthands"));
-    let value = eval
-        .visible_runtime_variable_value_by_id(id)
-        .ok()
-        .flatten()
-        .unwrap_or(Value::NIL);
+    // A plain value cell already is the visible dynamic binding. Aliases,
+    // buffer-local cells, and forwarded cells require the Context lookup.
+    use crate::emacs_core::symbol::SymbolRedirect;
+    let visible = match eval.obarray().get_by_id(id) {
+        Some(symbol) => match symbol.redirect() {
+            SymbolRedirect::Plainval => eval.obarray().symbol_value_id_copied(id),
+            SymbolRedirect::Localized | SymbolRedirect::Forwarded | SymbolRedirect::Varalias => {
+                eval.visible_runtime_variable_value_by_id(id).ok().flatten()
+            }
+        },
+        None => eval.visible_runtime_variable_value_by_id(id).ok().flatten(),
+    };
+    let value = visible.unwrap_or(Value::NIL);
     if value.is_nil() {
         return None;
     }
+    rewrite_intern_shorthand(value, name)
+}
+
+/// Match GNU's first valid byte prefix. Active pairs belong to this mutator;
+/// no Lisp callback or source borrow survives this allocation-only path.
+#[cold]
+#[inline(never)]
+fn rewrite_intern_shorthand(
+    value: Value,
+    name: &crate::heap_types::LispString,
+) -> Option<crate::heap_types::LispString> {
     crate::emacs_core::value::list_iter(value).find_map(|pair| {
         if !pair.is_cons() {
             return None;
@@ -1946,10 +1998,13 @@ pub(crate) fn intern_soft_impl(eval: &super::eval::Context, args: &[Value]) -> E
     expect_min_args("intern-soft", args, 1)?;
     expect_max_args("intern-soft", args, 2)?;
     let effective_obarray = effective_obarray_arg(eval, args);
-    // GNU validates the obarray before coercing NAME (lread.c:4824).
-    if !is_global_obarray_proxy(eval, &effective_obarray) {
-        check_obarray_value(effective_obarray)?;
-    }
+    // GNU validates the obarray before coercing NAME (lread.c:4819-4828).
+    // Retain the returned compatibility object, instead of converting twice.
+    let selected = if is_global_obarray_proxy(eval, &effective_obarray) {
+        SelectedInternSoftObarray::Global
+    } else {
+        SelectedInternSoftObarray::Custom(CheckedInternSoftObarray::try_from(effective_obarray)?)
+    };
     let query = if let Some(id) = symbol_id(&args[0], eval.symbol_mode()) {
         InternSoftQuery::Exact {
             id,
@@ -1964,23 +2019,25 @@ pub(crate) fn intern_soft_impl(eval: &super::eval::Context, args: &[Value]) -> E
             .unwrap_or(std::borrow::Cow::Borrowed(name));
         InternSoftQuery::Spelling(name)
     };
-    let found = if !is_global_obarray_proxy(eval, &effective_obarray) {
-        let obarray_val = check_obarray_value(effective_obarray)?;
-        let vec_len = obarray_len(obarray_val).unwrap_or(0);
-        if vec_len == 0 {
-            return Err(signal(
-                LispCondition::WrongTypeArgument,
-                vec![Value::symbol("obarrayp"), effective_obarray],
-            ));
-        }
-        let bucket_idx = obarray_hash_lisp_string(query.name(), vec_len);
-        let bucket = obarray_bucket(obarray_val, bucket_idx).unwrap_or(Value::NIL);
-        obarray_bucket_find(bucket, query.name()).unwrap_or(Value::NIL)
-    } else {
-        eval.obarray()
+    let found = match selected {
+        SelectedInternSoftObarray::Global => eval
+            .obarray()
             .intern_soft_lisp_string(query.name())
             .map(Value::from_sym_id)
-            .unwrap_or(Value::NIL)
+            .unwrap_or(Value::NIL),
+        SelectedInternSoftObarray::Custom(checked) => {
+            let obarray_val = checked.value;
+            let vec_len = obarray_len(obarray_val).unwrap_or(0);
+            if vec_len == 0 {
+                return Err(signal(
+                    LispCondition::WrongTypeArgument,
+                    vec![Value::symbol("obarrayp"), effective_obarray],
+                ));
+            }
+            let bucket_idx = obarray_hash_lisp_string(query.name(), vec_len);
+            let bucket = obarray_bucket(obarray_val, bucket_idx).unwrap_or(Value::NIL);
+            obarray_bucket_find(bucket, query.name()).unwrap_or(Value::NIL)
+        }
     };
     Ok(query.resolve(found))
 }

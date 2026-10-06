@@ -328,4 +328,7 @@ mod window_redisplay;
 
 #[cfg(target_os = "linux")]
 mod dbus_native_marshalling;
+#[cfg(test)]
+#[path = "tests/reader_core_symbol_compat.rs"]
+mod reader_core_symbol_compat;
 mod reader_syntax_compat;
