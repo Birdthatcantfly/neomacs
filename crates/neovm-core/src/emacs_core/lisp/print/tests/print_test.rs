@@ -993,3 +993,7 @@ mod graph_recursive_closure_units;
 #[cfg(test)]
 #[path = "graph_byte_stack_guard_units.rs"]
 mod graph_byte_stack_guard_units;
+
+#[cfg(test)]
+#[path = "error_string_leaf_gnu.rs"]
+mod error_string_leaf_gnu;

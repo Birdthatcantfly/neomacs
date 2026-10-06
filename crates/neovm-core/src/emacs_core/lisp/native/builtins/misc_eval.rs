@@ -1796,6 +1796,25 @@ pub(crate) fn print_value_princ_bytes_to_multibyte_buffer(
     ctx: &crate::emacs_core::eval::Context,
     value: &Value,
 ) -> Vec<u8> {
+    // GNU print.c:2376-2378 sends a no-escape string straight to
+    // print_string_1 (472-495), ignoring its properties and other object
+    // settings. Circle preprocessing (1329-1330) can still label strings,
+    // so retain the full printer whenever print-circle is enabled.
+    if let Some(string) = value.as_lisp_string()
+        && !ctx
+            .obarray
+            .value_in_buffer(None, "print-circle")
+            .is_some_and(|setting| setting.is_truthy())
+    {
+        // With no active circle table, entry resets numbering independently
+        // of print-continuous-numbering. Keep the shared RAII lifecycle.
+        let _print_guard = super::print::enter_print_call(&super::print::PrintOptions::default());
+        return super::print::princ_string_bytes(
+            string,
+            super::print::PrincStringOutput::OctalByte8,
+        )
+        .into_owned();
+    }
     let mut options = super::error::print_options_from_state(&ctx.obarray, None);
     options.print_noescape = true;
     options.print_escape_nonascii = true;
