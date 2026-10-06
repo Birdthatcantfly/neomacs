@@ -1708,6 +1708,20 @@ impl MappedHeapBuilder {
         size_byte: i64,
         data: &DumpByteData,
     ) {
+        // Preserve numeric dump fields while regenerating the private count
+        // proof in the baked header. Self-contained mapped strings are already
+        // complete at relocation and need no startup scan or sidecar write.
+        let size = match data {
+            DumpByteData::Mapped(span) => {
+                let start = span.offset as usize;
+                let end = start + span.len as usize;
+                LispString::character_count_word_for_image(&self.bytes[start..end], size, size_byte)
+            }
+            DumpByteData::StaticRoData { .. } => size,
+            DumpByteData::Owned(_) => {
+                unreachable!("owned string bytes should be extracted before raw heap population")
+            }
+        };
         let data_word = match data {
             DumpByteData::Mapped(span) => {
                 let data_field_offset = offset
@@ -1976,3 +1990,7 @@ fn align_padding(value: usize, align: usize) -> usize {
 #[cfg(test)]
 #[path = "mapped_heap/tests/mapped_heap_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mapped_heap/tests/string_character_count_kind.rs"]
+mod string_character_count_kind_tests;

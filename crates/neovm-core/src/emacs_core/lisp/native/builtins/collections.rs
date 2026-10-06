@@ -304,7 +304,7 @@ macro_rules! aset_string_write_body {
         let replacement_code = replacement_code as u32;
         if !string.is_multibyte() && replacement_code > 0xff {
             return Err(signal(
-                "error",
+                LispCondition::Error,
                 vec![Value::string(
                     "Attempt to store non-byte value into unibyte string",
                 )],
@@ -313,7 +313,7 @@ macro_rules! aset_string_write_body {
         if string.is_multibyte() {
             if replacement_code > 0x7f {
                 return Err(signal(
-                    "error",
+                    LispCondition::Error,
                     vec![Value::string(
                         "Attempt to store non-ASCII char into multibyte string",
                     )],
@@ -325,10 +325,16 @@ macro_rules! aset_string_write_body {
             // implements both; the bare-slice converter can implement neither,
             // because a `&[u8]` does not know SCHARS -- so reaching for it made
             // this O(index).
-            let byte_pos = string.char_to_byte_pos(idx);
-            if string.as_bytes()[byte_pos] > 0x7f {
+            let byte_pos =
+                crate::emacs_core::string_pos_cache::string_char_to_byte(*$array, string, idx);
+            let old_byte = string
+                .as_bytes()
+                .get(byte_pos)
+                .copied()
+                .ok_or_else(|| signal(LispCondition::ArgsOutOfRange, vec![*$array, *$index]))?;
+            if old_byte > 0x7f {
                 return Err(signal(
-                    "error",
+                    LispCondition::Error,
                     vec![Value::string(
                         "Attempt to replace non-ASCII char in multibyte string",
                     )],

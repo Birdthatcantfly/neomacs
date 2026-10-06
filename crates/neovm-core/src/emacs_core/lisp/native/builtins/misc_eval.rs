@@ -2669,11 +2669,9 @@ pub(crate) fn builtin_propertize(args: Vec<Value>) -> EvalResult {
     // Issue #131: copy the source string's Emacs bytes verbatim rather than
     // round-tripping through the lossy storage-string form, which would decode a
     // real Private-Use glyph as a raw byte.
-    let new_str = Value::heap_string(if string.is_multibyte() {
-        crate::heap_types::LispString::from_emacs_bytes(string.as_bytes().to_vec())
-    } else {
-        crate::heap_types::LispString::from_unibyte(string.as_bytes().to_vec())
-    });
+    // GNU copies SCHARS and SBYTES independently (editfns.c:3314,
+    // fns.c:789-794). Recounting bytes loses supplied shorthand metadata.
+    let new_str = Value::heap_string(string.without_properties());
 
     // Copy existing text properties from source string
     if args[0].is_string()
@@ -2804,3 +2802,7 @@ mod print_binding_scope_test;
 #[cfg(test)]
 #[path = "tests/prin1_string_leaf_test.rs"]
 mod prin1_string_leaf_test;
+
+#[cfg(test)]
+#[path = "misc_eval/tests/declared_propertize.rs"]
+mod declared_propertize_tests;

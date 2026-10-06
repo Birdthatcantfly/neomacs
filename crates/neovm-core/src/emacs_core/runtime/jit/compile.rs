@@ -4195,6 +4195,9 @@ mod collection_journal;
 #[cfg(test)]
 #[path = "tests/compile_pipeline_test.rs"]
 pub(crate) mod compile_pipeline_tests;
+#[cfg(test)]
+#[path = "tests/declared_string_guards.rs"]
+mod declared_string_guard_tests;
 pub(crate) mod heap_inline;
 #[cfg(test)]
 #[path = "tests/inline_heap_ops_test.rs"]

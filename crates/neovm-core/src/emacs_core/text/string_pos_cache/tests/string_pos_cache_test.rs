@@ -60,9 +60,9 @@ fn cached_conversions_agree_with_a_scan_from_the_start() {
                 "seed {seed} char {char_index}"
             );
             let byte_index = r % (bytes.len() + 3);
-            let want = emacs_char::byte_to_char_pos(&bytes, byte_index.min(bytes.len()));
+            let want = emacs_char::byte_to_char_pos(&bytes, byte_index.min(bytes.len())) as i64;
             assert_eq!(
-                string_byte_to_char(value, s, byte_index),
+                string_byte_to_gnu_char(value, s, byte_index).get(),
                 want,
                 "seed {seed} byte {byte_index}"
             );
@@ -105,7 +105,7 @@ fn a_changed_string_never_answers_from_the_cache() {
     let s = value.as_lisp_string().expect("string");
     assert_eq!(string_char_to_byte(value, s, 2), 3);
     assert_eq!(string_char_to_byte(value, s, 1), 2);
-    assert_eq!(string_byte_to_char(value, s, 2), 1);
+    assert_eq!(string_byte_to_gnu_char(value, s, 2).get(), 1);
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn clear_string_invalidates_cached_pair_after_shape_change() {
         "the cached multibyte position must not survive clear-string"
     );
     assert_eq!(string_char_to_byte(value, cleared, 2), 2);
-    assert_eq!(string_byte_to_char(value, cleared, 3), 3);
+    assert_eq!(string_byte_to_gnu_char(value, cleared, 3).get(), 3);
 
     // Byte mutation also invalidates a cached entry on a different owner. Its
     // backing pointer and length stay unchanged, so this exercises the epoch.

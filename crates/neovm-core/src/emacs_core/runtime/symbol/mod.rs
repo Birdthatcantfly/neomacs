@@ -1971,6 +1971,17 @@ impl Obarray {
         Some(id)
     }
 
+    /// Look up raw GNU name metadata before allocating a Lisp name string.
+    #[inline]
+    pub(crate) fn intern_soft_name_query(
+        &self,
+        query: crate::emacs_core::intern::SymbolNameQuery<'_>,
+    ) -> Option<SymId> {
+        let id = crate::emacs_core::intern::lookup_interned_name_query(query)?;
+        self.slot(id).filter(|sym| sym.interned_global)?;
+        Some(id)
+    }
+
     /// Get symbol data (mutable). Interns the symbol if needed.
     pub fn get_or_intern(&mut self, name: &str) -> &mut LispSymbol {
         let id = intern(name);

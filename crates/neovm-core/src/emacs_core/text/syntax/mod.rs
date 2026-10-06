@@ -20,8 +20,9 @@ use crate::buffer::{
     Buffer, BufferManager, CharLen, CharPos0, EmacsByteLen, EmacsBytePos, LispCharPos1,
     TextPropertyTable,
 };
-use crate::heap_types::LispString;
+use crate::heap_types::{GnuStringCharPos, LispString, StringCharacterCountKind};
 
+mod declared_string;
 pub(crate) mod parse_cache;
 mod parse_loop;
 mod pps_propertize;
@@ -3681,6 +3682,119 @@ struct StringPropSource<'a> {
     intervals: &'a TextPropertyTable,
 }
 
+/// String regexp syntax positions must retain the exact heap identity/payload.
+/// A heap binding can only be built by checking its borrowed Value. Owned
+/// strings serve the existing Rust-only matcher domain. Threading: neither
+/// binding may leave its current mutator, including when it is immutable.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StringSyntaxPositionSource<'a> {
+    kind: StringSyntaxPositionSourceKind<'a>,
+    _mutator: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum StringSyntaxPositionSourceKind<'a> {
+    Heap {
+        value: Value,
+        string: &'a LispString,
+    },
+    Owned(&'a LispString),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum StringSyntaxPositionSourceError {
+    #[error("String regexp syntax source is not a Lisp string")]
+    NotString,
+}
+static_assertions::assert_impl_all!(StringSyntaxPositionSourceError: Send, Sync);
+
+impl<'a> TryFrom<&'a Value> for StringSyntaxPositionSource<'a> {
+    type Error = StringSyntaxPositionSourceError;
+
+    fn try_from(value: &'a Value) -> Result<Self, Self::Error> {
+        let string = value
+            .as_lisp_string()
+            .ok_or(StringSyntaxPositionSourceError::NotString)?;
+        Ok(Self {
+            kind: StringSyntaxPositionSourceKind::Heap {
+                value: *value,
+                string,
+            },
+            _mutator: std::marker::PhantomData,
+        })
+    }
+}
+
+impl<'a> StringSyntaxPositionSource<'a> {
+    pub(crate) const fn owned(string: &'a LispString) -> Self {
+        Self {
+            kind: StringSyntaxPositionSourceKind::Owned(string),
+            _mutator: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) const fn string(self) -> &'a LispString {
+        match self.kind {
+            StringSyntaxPositionSourceKind::Heap { string, .. } => string,
+            StringSyntaxPositionSourceKind::Owned(string) => string,
+        }
+    }
+
+    fn byte_to_gnu_char_pos(self, byte_pos: usize) -> GnuStringCharPos {
+        match self.kind {
+            StringSyntaxPositionSourceKind::Heap { value, string } => {
+                crate::emacs_core::string_pos_cache::string_byte_to_gnu_char(
+                    value, string, byte_pos,
+                )
+            }
+            StringSyntaxPositionSourceKind::Owned(string) => string.byte_to_gnu_char_pos(byte_pos),
+        }
+    }
+}
+static_assertions::assert_not_impl_any!(StringSyntaxPositionSource<'static>: Send, Sync);
+
+#[derive(Debug)]
+enum StringSyntaxPositionMode<'a> {
+    Computed,
+    Supplied(Box<declared_string::DeclaredStringSyntaxState<'a>>),
+}
+
+/// Relative logical cursor update, matching GNU syntax.h:175-197.
+/// Threading: plain invocation-local query metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum StringSyntaxPositionUpdate {
+    Both,
+    Forward,
+    Backward,
+}
+static_assertions::assert_impl_all!(StringSyntaxPositionUpdate: Send, Sync, Copy);
+
+/// GNU `interval_of` rejects a character coordinate outside [0, SCHARS]
+/// before it consults intervals (textprop.c:523-550). No unsigned/clamped
+/// lookup may replace this diagnostic. Threading: immutable numeric data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum StringSyntaxPositionError {
+    #[error("String syntax property position is outside declared bounds: {position:?}")]
+    OutOfRange { position: GnuStringCharPos },
+    #[error("Error in syntax_table logic for to-the-end intervals")]
+    ToEndIntervals,
+    #[error("Error in syntax_table logic for intervals <-")]
+    ForwardIntervals,
+    #[error("Error in syntax_table logic for intervals ->")]
+    BackwardIntervals,
+}
+
+impl StringSyntaxPositionError {
+    pub(crate) const fn position(self) -> Option<GnuStringCharPos> {
+        match self {
+            Self::OutOfRange { position } => Some(position),
+            Self::ToEndIntervals | Self::ForwardIntervals | Self::BackwardIntervals => None,
+        }
+    }
+}
+
+static_assertions::assert_impl_all!(StringSyntaxPositionError: Send, Sync, Copy);
+
 /// Per-match `syntax-table` property cache for a regexp over a STRING object.
 ///
 /// GNU arms the same `gl_state` for a string as for a buffer
@@ -3690,26 +3804,75 @@ struct StringPropSource<'a> {
 /// per character, and the same [`SyntaxProperties`] vocabulary at the seam, over
 /// the string's own intervals instead of a buffer's.
 ///
-/// A scan that ignores properties -- and a string carrying none, which is the
-/// overwhelmingly common case and the reason the run is left `covering_everything`
-/// there -- keeps no source at all, so "honours properties but has nothing to
-/// read them from" is not a state this type can hold.
+/// Computed-count strings retain the existing byte-run/no-property fast path.
+/// A supplied nonidentity count requires GNU's signed logical run instead,
+/// including its first lookup and later interval errors when no tree exists.
+/// Ignoring syntax properties skips both lookup modes, as GNU does.
 pub(crate) struct StringSyntaxPropByteRun<'a> {
     run: PropRunCells,
     source: Option<StringPropSource<'a>>,
+    position_mode: StringSyntaxPositionMode<'a>,
+    // The regex syntax callback is currently infallible. Retain its FIRST
+    // diagnostic until the frontend rejects the match before publishing it.
+    position_error: Cell<Option<StringSyntaxPositionError>>,
+    // This per-search interior-mutable cache belongs to one mutator invocation.
+    // No TLS is added; neither migration nor shared concurrent mutation is valid.
+    _mutator: std::marker::PhantomData<*mut ()>,
+}
+
+static_assertions::assert_not_impl_any!(StringSyntaxPropByteRun<'static>: Send, Sync);
+
+impl std::fmt::Debug for StringSyntaxPropByteRun<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StringSyntaxPropByteRun")
+            .field("run_start", &self.run.start.get())
+            .field("run_end", &self.run.end.get())
+            .field("position_mode", &self.position_mode)
+            .field("position_error", &self.position_error.get())
+            .finish()
+    }
 }
 
 impl<'a> StringSyntaxPropByteRun<'a> {
-    /// `intervals` is the string's own interval table, absent when the string
-    /// carries no properties at all. GNU's `update_syntax_table` returns early
-    /// when `interval_of` finds no interval, giving such a position no property
-    /// -- not even the `default-text-properties` fallback -- so dropping the
-    /// resolver here is the same answer, reached without any per-character work.
+    /// Legacy Rust-owned lookup; computed strings keep their byte-run path.
     pub(crate) fn new(
         props: SyntaxProperties<'a>,
         string: &'a LispString,
         intervals: Option<&'a TextPropertyTable>,
     ) -> Self {
+        Self::for_source(props, StringSyntaxPositionSource::owned(string), intervals)
+    }
+
+    /// Heap syntax reads use their object identity/cache before checking GNU's
+    /// logical run. A supplied count is a proof distinction, never a recount.
+    pub(crate) fn for_source(
+        props: SyntaxProperties<'a>,
+        position_source: StringSyntaxPositionSource<'a>,
+        intervals: Option<&'a TextPropertyTable>,
+    ) -> Self {
+        let string = position_source.string();
+        let position_mode = match string.character_count_kind() {
+            StringCharacterCountKind::Computed => StringSyntaxPositionMode::Computed,
+            StringCharacterCountKind::Supplied => match props {
+                SyntaxProperties::Ignore | SyntaxProperties::PositionedIgnore => {
+                    StringSyntaxPositionMode::Computed
+                }
+                SyntaxProperties::Honor(resolver) | SyntaxProperties::PositionedHonor(resolver) => {
+                    if string.is_multibyte() && string.schars() != string.sbytes() {
+                        StringSyntaxPositionMode::Supplied(Box::new(
+                            declared_string::DeclaredStringSyntaxState::new(
+                                position_source,
+                                resolver,
+                                intervals,
+                            ),
+                        ))
+                    } else {
+                        StringSyntaxPositionMode::Computed
+                    }
+                }
+            },
+        };
         let source = match (props, intervals) {
             (
                 SyntaxProperties::Honor(resolver) | SyntaxProperties::PositionedHonor(resolver),
@@ -3726,7 +3889,38 @@ impl<'a> StringSyntaxPropByteRun<'a> {
         } else {
             PropRunCells::covering_everything()
         };
-        Self { run, source }
+        Self {
+            run,
+            source,
+            position_mode,
+            position_error: Cell::new(None),
+            _mutator: std::marker::PhantomData,
+        }
+    }
+
+    /// Computed strings take their existing physical pair lookup directly;
+    /// only a typed supplied state enters the cold logical-coordinate worker.
+    #[inline]
+    pub(crate) fn boundary_syntax(
+        &self,
+        table: &SyntaxTable,
+        request: crate::emacs_core::regex_emacs::BoundarySyntaxRequest,
+        mode: crate::tagged::SymbolMode,
+        physical: impl FnOnce() -> crate::emacs_core::regex_emacs::BoundarySyntaxClasses,
+    ) -> crate::emacs_core::regex_emacs::BoundarySyntaxClasses {
+        match &self.position_mode {
+            StringSyntaxPositionMode::Computed => physical(),
+            StringSyntaxPositionMode::Supplied(state) => {
+                supplied_boundary_syntax(table, request, state, &self.position_error, mode)
+            }
+        }
+    }
+
+    /// The matcher frontend must check this before exposing success/match data,
+    /// including when the matcher returns no match. GNU signals during lookup.
+    #[inline]
+    pub(crate) fn position_error(&self) -> Option<StringSyntaxPositionError> {
+        self.position_error.get()
     }
 
     /// The end (byte offset) of the stretch from `byte_pos` that carries no
@@ -3734,6 +3928,12 @@ impl<'a> StringSyntaxPropByteRun<'a> {
     /// (see [`SyntaxPropByteRun::property_free_until`]).  `usize::MAX` for a
     /// string with no properties to read.
     pub(crate) fn property_free_until(&self, byte_pos: usize) -> usize {
+        match &self.position_mode {
+            StringSyntaxPositionMode::Computed => {}
+            // A bulk/plain shortcut would skip signed coordinate/cache updates.
+            // This capability query itself is not a GNU syntax read.
+            StringSyntaxPositionMode::Supplied(_) => return byte_pos,
+        }
         match self.syntax_table_prop_at_string_byte(byte_pos) {
             Some(_) => byte_pos,
             // The lookup leaves the run containing `byte_pos` cached.
@@ -3745,6 +3945,23 @@ impl<'a> StringSyntaxPropByteRun<'a> {
     /// served from the cached run when possible.
     #[inline]
     fn syntax_table_prop_at_string_byte(&self, byte_pos: usize) -> Option<Value> {
+        match &self.position_mode {
+            StringSyntaxPositionMode::Computed => {}
+            StringSyntaxPositionMode::Supplied(state) => {
+                // GNU already signaled at the first failed lookup. Do not
+                // mutate its shared position cache during deferred unwinding.
+                if self.position_error.get().is_some() {
+                    return None;
+                }
+                return match state.lookup(byte_pos) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.position_error.set(Some(error));
+                        None
+                    }
+                };
+            }
+        }
         if let Some(value) = self.run.get(byte_pos) {
             return value;
         }
@@ -3762,10 +3979,24 @@ impl<'a> StringSyntaxPropByteRun<'a> {
     /// loop.
     #[inline(never)]
     fn refill_run(&self, source: StringPropSource<'a>, byte_pos: usize) -> Option<Value> {
-        let char_pos = source.string.byte_to_char_pos(byte_pos);
+        let position = source.string.byte_to_gnu_char_pos(byte_pos);
+        let char_pos = CharPos0::try_from(position)
+            .ok()
+            .filter(|position| position.get() <= source.string.schars());
+        let Some(char_pos) = char_pos else {
+            if self.position_error.get().is_none() {
+                self.position_error
+                    .set(Some(StringSyntaxPositionError::OutOfRange { position }));
+            }
+            // The frontend rejects this invocation before any match is published.
+            // Avoid repeating invalid interval lookups while the infallible
+            // bounded matcher returns control. This is never a valid result.
+            self.run.set(0, usize::MAX, None);
+            return None;
+        };
         let (plist, start, end) = source
             .intervals
-            .interval_plist_run_at_char_pos(CharPos0::new(char_pos), source.string.schars());
+            .interval_plist_run_at_char_pos(char_pos, source.string.schars());
         let value = plist.and_then(|plist| source.resolver.resolve_interval_plist(plist));
         self.run.set(
             source.string.char_to_byte_pos(start.get()),
@@ -3838,6 +4069,143 @@ fn syntax_entry_from_emacs_syntax_property(
     } else {
         syntax_entry_from_chartable_entry(&prop)
     }
+}
+
+/// GNU regex-emacs.c:4983-5165 converts CURRENT offset once; adjacent
+/// syntax reads adjust logical coordinates without touching the byte cache.
+/// Computed-count callers use their inherited physical lookup method.
+#[cold]
+#[inline(never)]
+fn supplied_boundary_syntax(
+    table: &SyntaxTable,
+    request: crate::emacs_core::regex_emacs::BoundarySyntaxRequest,
+    state: &declared_string::DeclaredStringSyntaxState<'_>,
+    position_error: &Cell<Option<StringSyntaxPositionError>>,
+    mode: crate::tagged::SymbolMode,
+) -> crate::emacs_core::regex_emacs::BoundarySyntaxClasses {
+    use crate::emacs_core::regex_emacs::SyntaxAssertion;
+    let empty = request.with_classes(None, None);
+    if position_error.get().is_some() {
+        return empty;
+    }
+    // GNU beginning opcodes fail at physical end before requesting syntax;
+    // end opcodes fail at physical beginning likewise.
+    match request.kind() {
+        SyntaxAssertion::WordBeginning | SyntaxAssertion::SymbolBeginning
+            if request.current().is_none() =>
+        {
+            return empty;
+        }
+        SyntaxAssertion::WordEnd | SyntaxAssertion::SymbolEnd if request.previous().is_none() => {
+            return empty;
+        }
+        SyntaxAssertion::WordBoundary
+        | SyntaxAssertion::NotWordBoundary
+        | SyntaxAssertion::WordBeginning
+        | SyntaxAssertion::WordEnd
+        | SyntaxAssertion::SymbolBeginning
+        | SyntaxAssertion::SymbolEnd => {}
+    }
+    let current_position = state.character_position(request.current_byte().get());
+    // On initialized GNU source bytes this subtraction fits ptrdiff_t. A
+    // Rust-only position at i64::MIN lies outside GNU-defined arithmetic;
+    // decline that unsupported query without wrapping or scanning memory.
+    let Some(previous_position) = current_position
+        .get()
+        .checked_sub(1)
+        .map(GnuStringCharPos::new)
+    else {
+        return empty;
+    };
+    let classify = |ch: EmacsChar, position, update| {
+        if position_error.get().is_some() {
+            return None;
+        }
+        match state.lookup_character(position, update) {
+            Ok(property) => Some(
+                property
+                    .and_then(|prop| syntax_entry_from_emacs_syntax_property(prop, ch, mode))
+                    .unwrap_or_else(|| {
+                        record_syntax_table_decode();
+                        let entry = match mode {
+                            crate::tagged::SymbolMode::Bare => table.get_entry_code(ch.code()),
+                            crate::tagged::SymbolMode::Positioned => {
+                                syntax_entry_at_char_code_with_symbols(
+                                    &table.chartable(),
+                                    ch.code(),
+                                    mode,
+                                )
+                            }
+                        };
+                        entry.unwrap_or_else(|| {
+                            SyntaxEntry::simple(table.char_syntax_code(ch.code()))
+                        })
+                    })
+                    .class,
+            ),
+            Err(error) => {
+                position_error.set(Some(error));
+                None
+            }
+        }
+    };
+    let previous = |update| {
+        request
+            .previous()
+            .and_then(|ch| classify(ch.character(), previous_position, update))
+    };
+    let current = |update| {
+        request
+            .current()
+            .and_then(|ch| classify(ch.character(), current_position, update))
+    };
+    let word = |class: Option<SyntaxClass>| class == Some(SyntaxClass::Word);
+    let symbol =
+        |class: Option<SyntaxClass>| matches!(class, Some(SyntaxClass::Word | SyntaxClass::Symbol));
+    let (before, after) = match request.kind() {
+        SyntaxAssertion::WordBoundary | SyntaxAssertion::NotWordBoundary => {
+            let before = previous(StringSyntaxPositionUpdate::Both);
+            let after = current(StringSyntaxPositionUpdate::Forward);
+            (before, after)
+        }
+        SyntaxAssertion::WordBeginning => {
+            let after = current(StringSyntaxPositionUpdate::Both);
+            let before = if word(after) {
+                previous(StringSyntaxPositionUpdate::Backward)
+            } else {
+                None
+            };
+            (before, after)
+        }
+        SyntaxAssertion::WordEnd => {
+            let before = previous(StringSyntaxPositionUpdate::Both);
+            let after = if word(before) {
+                current(StringSyntaxPositionUpdate::Forward)
+            } else {
+                None
+            };
+            (before, after)
+        }
+        SyntaxAssertion::SymbolBeginning => {
+            let after = current(StringSyntaxPositionUpdate::Both);
+            let before = if symbol(after) {
+                previous(StringSyntaxPositionUpdate::Backward)
+            } else {
+                None
+            };
+            (before, after)
+        }
+        SyntaxAssertion::SymbolEnd => {
+            let before = previous(StringSyntaxPositionUpdate::Both);
+            let after = if symbol(before) {
+                current(StringSyntaxPositionUpdate::Forward)
+            } else {
+                None
+            };
+            (before, after)
+        }
+    };
+    request.with_classes(before, after)
 }
 
 /// Per-scan cache of the `syntax-table` text-property run, mirroring GNU
@@ -7856,3 +8224,11 @@ mod gc_tls_ownership_tests;
 
 mod symbol_policy;
 pub(crate) use symbol_policy::*;
+
+#[cfg(test)]
+#[path = "tests/signed_string_positions.rs"]
+mod signed_string_positions_tests;
+
+#[cfg(test)]
+#[path = "tests/declared_logical_state.rs"]
+mod declared_logical_state_tests;

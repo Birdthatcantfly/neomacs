@@ -135,7 +135,7 @@ fn gc_collection_epoch_string_pos_thread_change_activation_invalidates_changed_l
         "source-thread cache reused an offset invalidated on another thread"
     );
     assert_eq!(
-        string_byte_to_char(string, string.as_lisp_string().unwrap(), 2),
+        string_byte_to_gnu_char(string, string.as_lisp_string().unwrap(), 2).get(),
         1
     );
 }
@@ -246,7 +246,7 @@ pub(super) fn assert_warm_entry(string: Value, before: Entry) {
     assert_eq!(after.byte_pos, before.byte_pos);
     assert_eq!(
         cached_pair(string, string.as_lisp_string().unwrap()),
-        Some((2, 3))
+        Some((GnuStringCharPos::new(2), 3))
     );
     assert_eq!(
         string_char_to_byte(string, string.as_lisp_string().unwrap(), 2),

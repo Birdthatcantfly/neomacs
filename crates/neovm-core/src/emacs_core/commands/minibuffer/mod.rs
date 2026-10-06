@@ -1980,23 +1980,16 @@ fn lisp_string_chars(
     let bytes = string.as_bytes();
     let multibyte = string.is_multibyte();
     let mut pos = 0usize;
-    std::iter::from_fn(move || {
-        if pos >= bytes.len() {
-            return None;
-        }
+    // GNU minibuf.c:1719-1723 compares a declared character prefix. A
+    // shorthand name can have SCHARS independent of payload decoding.
+    (0..string.schars()).map(move |index| {
         if !multibyte {
-            let code = bytes[pos] as u32;
-            pos += 1;
-            return Some(code);
+            return u32::from(bytes[index]);
         }
-        let byte = bytes[pos];
-        if byte < 0x80 {
-            pos += 1;
-            return Some(byte as u32);
-        }
-        let (cp, len) = crate::emacs_core::emacs_char::string_char_unchecked(&bytes[pos..]);
-        pos += len;
-        Some(cp)
+        let tail = bytes.get(pos..).unwrap_or_default();
+        let (code, width) = crate::heap_types::decode_declared_multibyte_char(tail);
+        pos += width;
+        code
     })
 }
 
@@ -2831,12 +2824,13 @@ fn completion_string_matches_regexps(
         ) {
             Ok(Some(_)) => {} // matched — continue checking remaining regexps
             Ok(None) => return Ok(false),
-            Err(message) => {
+            Err(super::builtins::search::FastStringMatchError::Regexp(message)) => {
                 return Err(signal(
                     LispCondition::InvalidRegexp,
                     vec![Value::string(message)],
                 ));
             }
+            Err(error) => return Err(error.into_signal()),
         }
     }
     Ok(true)
@@ -3144,3 +3138,7 @@ pub(crate) fn builtin_flex_cost_gotoh(
 #[cfg(test)]
 #[path = "tests/minibuffer_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/declared_string_completion.rs"]
+mod declared_string_completion_tests;

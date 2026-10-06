@@ -241,7 +241,10 @@ pub(crate) fn read_from_callable(
         source_semantics: ReaderSourceSemantics::MultibyteCharacters,
         pos: 0,
         limit: usize::MAX,
-        read_labels: ReadLabels::for_source(ReaderSource::Callable(&source)),
+        character_cursor: super::SourceCharacterCursor::Bytes,
+        original_string: super::OriginalStringCacheBinding::Uncached,
+        dot_unread: Cell::new(None),
+        read_labels: ReadLabels::for_source(&ReaderSource::Callable(&source)),
         symbol_position_mode,
         // Callable readers query the live policy at each semantic boundary.
         symbol_mode: crate::tagged::SymbolMode::Bare,

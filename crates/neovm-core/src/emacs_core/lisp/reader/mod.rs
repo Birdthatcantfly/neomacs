@@ -1404,12 +1404,12 @@ fn read_from_string_impl_inner(
     // GNU Emacs `Fread_from_string` (`src/lread.c:2514`) treats START and
     // END as character indices into STRING (validated via
     // `validate_subarray` against `SCHARS (string)`), translates them to
-    // byte offsets through `string_char_to_byte`, and reports
+    // START's byte offset through `string_char_to_byte`, keeps END logical,
+    // and reports
     // FINAL-STRING-INDEX as a *character* index too. Indexing by raw
     // UTF-8 byte length here was a long-standing bug (audit §11.6) that
     // would either panic on multibyte input (slicing mid-codepoint) or
     // return a byte offset where elisp expected a character count.
-    let full_string_bytes = full_string.as_bytes();
     let char_count = full_string.schars();
 
     let start_arg = args.get(1).cloned().unwrap_or(Value::NIL);
@@ -1451,35 +1451,36 @@ fn read_from_string_impl_inner(
         ));
     }
 
-    let start_byte = if full_string.is_multibyte() {
-        crate::emacs_core::emacs_char::char_to_byte_pos(full_string_bytes, start_char)
-    } else {
-        start_char
-    };
-    let end_byte = if full_string.is_multibyte() {
-        crate::emacs_core::emacs_char::char_to_byte_pos(full_string_bytes, end_char)
-    } else {
-        end_char
-    };
-
-    let read_result = read_source.read_one_range_with_locate_syms_with_symbols(
-        start_byte,
-        end_byte,
+    let range = crate::buffer::CharRange::from_start_len(
+        crate::buffer::CharPos0::new(start_char),
+        crate::buffer::CharLen::new(end_char - start_char),
+    );
+    // The parsing snapshot is an owned copy. Cache against the original
+    // source object's payload so repeated START conversions retain identity.
+    let actual_source = args[0].as_lisp_string().ok_or_else(|| {
+        signal(
+            LispCondition::WrongTypeArgument,
+            vec![Value::symbol("stringp"), args[0]],
+        )
+    })?;
+    let start_byte = EmacsBytePos::new(crate::emacs_core::string_pos_cache::string_char_to_byte(
+        args[0],
+        actual_source,
+        start_char,
+    ));
+    let range = super::value_reader::CharacterReadRange::for_original(&args[0], range, start_byte)
+        .map_err(signal_reader_error_from_string)?;
+    let read_result = read_source.read_one_character_range_with_locate_syms_with_symbols(
+        range,
         symbol_position_mode,
         obarray,
-        shorthands,
+        shorthands.into(),
         mode,
     );
-
-    let (value, absolute_end_byte) = read_result
+    let (value, end_position) = read_result
         .map_err(signal_reader_error_from_string)?
         .ok_or_else(|| signal(LispCondition::EndOfFile, vec![]))?;
-
-    let absolute_end_char = if full_string.is_multibyte() {
-        crate::emacs_core::emacs_char::byte_to_char_pos(full_string_bytes, absolute_end_byte)
-    } else {
-        absolute_end_byte
-    };
+    let absolute_end_char = end_position.get();
 
     Ok(Value::cons(value, Value::fixnum(absolute_end_char as i64)))
 }

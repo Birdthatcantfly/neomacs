@@ -6290,4 +6290,7 @@ fn failed_read_from_buffer_leaves_point_where_reading_stopped() {
 mod symbol_reader_gnu;
 
 #[cfg(test)]
+mod shorthand_declared_gnu;
+
+#[cfg(test)]
 mod callable_gnu;

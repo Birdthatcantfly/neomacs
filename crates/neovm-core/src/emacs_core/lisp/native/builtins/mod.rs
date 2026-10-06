@@ -47,14 +47,9 @@ pub(crate) fn lisp_string_char_codes(string: &crate::heap_types::LispString) -> 
     }
     let mut out = Vec::with_capacity(string.schars());
     let mut pos = 0;
-    while pos < bytes.len() {
-        let byte = bytes[pos];
-        if byte < 0x80 {
-            out.push(byte as u32);
-            pos += 1;
-            continue;
-        }
-        let (cp, len) = crate::emacs_core::emacs_char::string_char_unchecked(&bytes[pos..]);
+    for _ in 0..string.schars() {
+        let tail = bytes.get(pos..).unwrap_or_default();
+        let (cp, len) = crate::heap_types::decode_declared_multibyte_char(tail);
         out.push(cp);
         pos += len;
     }
@@ -80,7 +75,8 @@ pub(crate) fn lisp_string_char_at(
     // `LispString::char_to_byte_pos' answers an all-ASCII multibyte string
     // -- what `buffer-substring' returns for ASCII text -- in O(1).
     let byte_pos = string.char_to_byte_pos(idx);
-    let (cp, _) = crate::emacs_core::emacs_char::string_char_unchecked(&bytes[byte_pos..]);
+    let tail = bytes.get(byte_pos..).unwrap_or_default();
+    let (cp, _) = crate::heap_types::decode_declared_multibyte_char(tail);
     Some(cp)
 }
 
@@ -98,7 +94,8 @@ pub(crate) fn lisp_string_value_char_at(value: Value, idx: usize) -> Option<u32>
         return None;
     }
     let byte_pos = crate::emacs_core::string_pos_cache::string_char_to_byte(value, string, idx);
-    let (cp, _) = crate::emacs_core::emacs_char::string_char_unchecked(&bytes[byte_pos..]);
+    let tail = bytes.get(byte_pos..).unwrap_or_default();
+    let (cp, _) = crate::heap_types::decode_declared_multibyte_char(tail);
     Some(cp)
 }
 
@@ -115,8 +112,9 @@ pub(crate) fn for_each_lisp_string_char(
         return;
     }
     let mut pos = 0;
-    while pos < bytes.len() {
-        let (cp, len) = crate::emacs_core::emacs_char::string_char_unchecked(&bytes[pos..]);
+    for _ in 0..string.schars() {
+        let tail = bytes.get(pos..).unwrap_or_default();
+        let (cp, len) = crate::heap_types::decode_declared_multibyte_char(tail);
         f(cp);
         pos += len;
     }

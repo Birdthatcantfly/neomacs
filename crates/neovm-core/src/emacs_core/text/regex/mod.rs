@@ -53,7 +53,7 @@ use crate::emacs_core::regex_emacs::{
     self, BufferSyntaxLookup, CaseTranslation, CompiledPattern, DefaultSyntaxLookup,
     MatchRegisters, SyntaxCacheKey, SyntaxLookup,
 };
-use crate::heap_types::LispString;
+use crate::heap_types::{GnuStringCharPos, LispString};
 
 pub(crate) const REPLACE_MATCH_SUBEXP_MISSING: &str = "replace-match subexpression does not exist";
 const GNU_SEARCH_REGS_BASE_CAPACITY: usize = 7;
@@ -302,9 +302,22 @@ impl<'a> StringSyntaxLookup<'a> {
     /// (src/syntax.c:277): `SETUP_BUFFER_SYNTAX_TABLE` for the base table
     /// whatever the object, and the object's own intervals for the positional
     /// property.
+    #[cfg(test)]
     pub(crate) fn new(
         base: Option<BufferSyntaxLookup>,
         string: &'a LispString,
+        syntax_properties: crate::emacs_core::syntax::SyntaxProperties<'a>,
+    ) -> Self {
+        Self::for_source(
+            base,
+            crate::emacs_core::syntax::StringSyntaxPositionSource::owned(string),
+            syntax_properties,
+        )
+    }
+
+    pub(crate) fn for_source(
+        base: Option<BufferSyntaxLookup>,
+        source: crate::emacs_core::syntax::StringSyntaxPositionSource<'a>,
         syntax_properties: crate::emacs_core::syntax::SyntaxProperties<'a>,
     ) -> Self {
         let Some(base) = base else {
@@ -318,18 +331,34 @@ impl<'a> StringSyntaxLookup<'a> {
         else {
             return Self::Table(base);
         };
+        let string = source.string();
         let intervals = string.intervals();
-        if intervals.is_empty() {
+        let supplied_nonidentity = string.character_count_kind()
+            == crate::heap_types::StringCharacterCountKind::Supplied
+            && string.is_multibyte()
+            && string.schars() != string.sbytes();
+        if intervals.is_empty() && !supplied_nonidentity {
             return Self::Table(base);
         }
         Self::Propertized(StringRegexpSyntaxLookup {
-            property_lookup: crate::emacs_core::syntax::StringSyntaxPropByteRun::new(
+            property_lookup: crate::emacs_core::syntax::StringSyntaxPropByteRun::for_source(
                 syntax_properties,
-                string,
+                source,
                 intervals.as_table(),
             ),
             base,
         })
+    }
+
+    /// First deferred GNU syntax lookup failure. Read before consuming any
+    /// success carrier, even if the matcher ultimately reports no match.
+    pub(crate) fn position_error(
+        &self,
+    ) -> Option<crate::emacs_core::syntax::StringSyntaxPositionError> {
+        match self {
+            Self::Standard(_) | Self::Table(_) => None,
+            Self::Propertized(lookup) => lookup.property_lookup.position_error(),
+        }
     }
 
     pub(crate) fn as_lookup(&self) -> &dyn SyntaxLookup {
@@ -373,6 +402,18 @@ impl SyntaxLookup for StringRegexpSyntaxLookup<'_> {
         c2: crate::emacs_core::emacs_char::EmacsChar,
     ) -> bool {
         self.base.emacs_word_boundary_between(c1, c2)
+    }
+
+    fn boundary_syntax_at(
+        &self,
+        request: crate::emacs_core::regex_emacs::BoundarySyntaxRequest,
+    ) -> crate::emacs_core::regex_emacs::BoundarySyntaxClasses {
+        self.property_lookup.boundary_syntax(
+            &self.base.syntax_table,
+            request,
+            self.base.symbol_mode(),
+            || request.physical_lookup(self),
+        )
     }
 
     fn char_syntax(&self, c: char) -> crate::emacs_core::syntax::SyntaxClass {
@@ -801,7 +842,7 @@ enum MatchDataKind {
     /// string object is available after `string-match`, but not after
     /// `set-match-data` restores an integer list saved by `match-data`.
     StringChars {
-        groups: smallvec::SmallVec<[Option<CharRange>; GNU_SEARCH_REGS_BASE_CAPACITY]>,
+        groups: smallvec::SmallVec<[Option<StringMatchRange>; GNU_SEARCH_REGS_BASE_CAPACITY]>,
         searched: Option<SearchedString>,
     },
     /// Published Lisp positions retained in place across a failed string
@@ -959,66 +1000,60 @@ impl SearchRegisters {
         &self,
         searched: SearchedString,
         target: Option<&mut Option<MatchData>>,
-    ) -> CharPos0 {
+    ) -> GnuStringCharPos {
         let SearchRegistersKind::Engine { regs, offset } = &self.0 else {
             unreachable!("a string search fills engine registers");
         };
         debug_assert_eq!(*offset, 0, "string registers count from the string's start");
         let string = searched.as_lisp_string();
-        // As `EngineMatchData::publish_string`: an all-ASCII or unibyte
-        // string's byte offsets are its character offsets.
         let identity = string
-            .map(|s| !s.is_multibyte() || s.schars() == s.sbytes())
-            .unwrap_or(true);
-        let to_char = |byte: i64| -> usize {
-            let byte = byte as usize;
+            .is_some_and(|string| !string.is_multibyte() || string.schars() == string.sbytes());
+        // Engine byte registers are nonnegative indexes into initialized data,
+        // whose length fits ptrdiff_t. This identity route changes no encoding.
+        let to_char = |byte: i64| {
             if identity {
-                return byte;
-            }
-            let string = string.expect("non-identity conversion has a string");
-            match &searched {
-                SearchedString::Heap(value) => {
-                    crate::emacs_core::string_pos_cache::string_byte_to_char(*value, string, byte)
-                }
-                SearchedString::Owned(_) => string.byte_to_char_pos(byte),
+                GnuStringCharPos::new(byte)
+            } else {
+                searched_byte_to_gnu_char(&searched, byte as usize)
             }
         };
-        let start = CharPos0::new(to_char(regs.start[0]));
         let Some(target) = target else {
-            return start;
+            return to_char(regs.start[0]);
         };
         let fill = |groups: &mut smallvec::SmallVec<
-            [Option<CharRange>; GNU_SEARCH_REGS_BASE_CAPACITY],
+            [Option<StringMatchRange>; GNU_SEARCH_REGS_BASE_CAPACITY],
         >| {
             let capacity = gnu_search_regs_capacity(regs.num_regs());
             groups.reserve(capacity);
-            for (&group_start, &group_end) in regs.start.iter().zip(regs.end.iter()) {
-                groups.push((group_start >= 0 && group_end >= 0).then(|| {
-                    CharRange::new(
-                        CharPos0::new(to_char(group_start)),
-                        CharPos0::new(to_char(group_end)),
-                    )
-                }));
+            for (&start, &end) in regs.start.iter().zip(regs.end.iter()) {
+                groups.push(
+                    (start >= 0 && end >= 0)
+                        .then(|| StringMatchRange::new(to_char(start), to_char(end))),
+                );
             }
             groups.resize(groups.len().max(capacity), None);
         };
-        if let Some(match_data) = target
+        // GNU search.c:430-439 converts registers before converting VAL again.
+        // The shared cache makes this order observable for supplied counts.
+        if let Some(data) = target
             && let MatchDataKind::StringChars {
                 groups,
                 searched: previous,
-            } = &mut match_data.kind
+            } = &mut data.kind
         {
             groups.clear();
             fill(groups);
+            let start = to_char(regs.start[0]);
             *previous = Some(searched);
             #[cfg(debug_assertions)]
             {
-                match_data.read_mask = Default::default();
+                data.read_mask = Default::default();
             }
             return start;
         }
         let mut groups = smallvec::SmallVec::new();
         fill(&mut groups);
+        let start = to_char(regs.start[0]);
         *target = Some(MatchData {
             kind: MatchDataKind::StringChars {
                 groups,
@@ -1142,13 +1177,122 @@ pub(crate) struct BufferSearchSuccess {
     match_data: MatchData,
 }
 
-/// A successful string search ready for optional publication to evaluator
-/// state. Predicate callers can consume only the start position and discard
-/// the already-published match data without constructing a throwaway slot.
+/// A successful byte match awaiting optional string-register publication.
+/// Predicate callers consume only the signed return position; stateful callers
+/// publish registers first. No callback or GC boundary may outlive the source.
+/// Threading: this carrier retains a mutator-owned searched Value and is confined.
 #[derive(Clone, Debug)]
 pub(crate) struct StringSearchSuccess {
-    start: CharPos0,
-    match_data: MatchData,
+    byte_start: EmacsBytePos,
+    bytes: EngineMatchData,
+    searched: SearchedString,
+    _mutator: std::marker::PhantomData<*const ()>,
+}
+static_assertions::assert_not_impl_any!(StringSearchSuccess: Send, Sync);
+
+/// GNU string match registers are signed and need not be ordered after
+/// a declared SCHARS/SBYTES conversion. They are not substring bounds.
+/// Threading: numeric metadata only, with no Lisp state or heap borrow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StringMatchRange {
+    start: GnuStringCharPos,
+    end: GnuStringCharPos,
+}
+
+impl StringMatchRange {
+    fn new(start: GnuStringCharPos, end: GnuStringCharPos) -> Self {
+        Self { start, end }
+    }
+
+    fn from_char_range(range: CharRange) -> Option<Self> {
+        Self::try_from(range).ok()
+    }
+
+    fn checked_char_range(self) -> Option<CharRange> {
+        CharRange::try_from(self).ok()
+    }
+
+    fn lisp_endpoints(self) -> Option<LispMatchEndpoints> {
+        (self.start.get() >= 0).then(|| LispMatchEndpoints {
+            start: self.start.get(),
+            end: self.end.get(),
+        })
+    }
+}
+
+/// A signed register pair that cannot be used as substring bounds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+enum StringMatchRangeError {
+    #[error(transparent)]
+    Position(#[from] crate::heap_types::GnuStringCharPosError),
+    #[error("String match endpoints are reversed")]
+    Reversed,
+}
+
+impl TryFrom<CharRange> for StringMatchRange {
+    type Error = crate::heap_types::GnuStringCharPosError;
+    fn try_from(range: CharRange) -> Result<Self, Self::Error> {
+        Ok(Self::new(
+            GnuStringCharPos::try_from(range.start())?,
+            GnuStringCharPos::try_from(range.end())?,
+        ))
+    }
+}
+
+impl TryFrom<StringMatchRange> for CharRange {
+    type Error = StringMatchRangeError;
+    fn try_from(range: StringMatchRange) -> Result<Self, Self::Error> {
+        let start = CharPos0::try_from(range.start)?;
+        let end = CharPos0::try_from(range.end)?;
+        if start > end {
+            return Err(StringMatchRangeError::Reversed);
+        }
+        Ok(CharRange::new(start, end))
+    }
+}
+static_assertions::assert_impl_all!(StringMatchRangeError: Send, Sync);
+
+/// Lisp-visible match endpoints. Buffer origins remain one-based; string
+/// origins remain zero-based signed GNU registers. Only start<0 means unset.
+/// Threading: immutable numeric metadata, containing no Lisp state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LispMatchEndpoints {
+    start: i64,
+    end: i64,
+}
+
+impl LispMatchEndpoints {
+    pub(crate) fn start(self) -> i64 {
+        self.start
+    }
+    pub(crate) fn end(self) -> i64 {
+        self.end
+    }
+}
+
+/// Saved string registers contain no searched source Value or property table.
+/// GNU unwind restoration keeps signed metadata independently of Lisp parsing.
+/// Threading: owned numeric metadata only; no Lisp state or callback lifetime.
+#[derive(Clone, Debug)]
+pub(crate) struct StringMatchRegisterSnapshot {
+    groups: smallvec::SmallVec<[Option<StringMatchRange>; GNU_SEARCH_REGS_BASE_CAPACITY]>,
+}
+static_assertions::assert_impl_all!(StringMatchRegisterSnapshot: Send, Sync);
+static_assertions::assert_impl_all!(StringMatchRange: Send, Sync);
+static_assertions::assert_impl_all!(LispMatchEndpoints: Send, Sync);
+
+/// Convert only a byte position produced within the searched payload. All
+/// payload lengths fit GNU ptrdiff_t; owned/mapped bytes never exceed isizeMAX.
+fn searched_byte_to_gnu_char(searched: &SearchedString, byte: usize) -> GnuStringCharPos {
+    match searched {
+        SearchedString::Heap(value) => {
+            let string = value
+                .as_lisp_string()
+                .expect("searched heap string remains rooted");
+            crate::emacs_core::string_pos_cache::string_byte_to_gnu_char(*value, string, byte)
+        }
+        SearchedString::Owned(string) => string.byte_to_gnu_char_pos(byte),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1298,6 +1442,26 @@ pub fn char_pos_to_byte_lisp_string(s: &crate::heap_types::LispString, char_pos:
 }
 
 impl MatchData {
+    pub(crate) fn string_register_snapshot(&self) -> Option<StringMatchRegisterSnapshot> {
+        match &self.kind {
+            MatchDataKind::StringChars { groups, .. } => Some(StringMatchRegisterSnapshot {
+                groups: groups.clone(),
+            }),
+            MatchDataKind::LispRegisters { .. } => None,
+        }
+    }
+
+    pub(crate) fn from_string_register_snapshot(snapshot: StringMatchRegisterSnapshot) -> Self {
+        Self {
+            kind: MatchDataKind::StringChars {
+                groups: snapshot.groups,
+                searched: None,
+            },
+            #[cfg(debug_assertions)]
+            read_mask: Default::default(),
+        }
+    }
+
     pub(crate) fn string(
         groups: Vec<Option<MatchGroup>>,
         searched: Option<SearchedString>,
@@ -1306,7 +1470,11 @@ impl MatchData {
             kind: MatchDataKind::StringChars {
                 groups: groups
                     .into_iter()
-                    .map(|group| group.map(MatchGroup::string_char_range))
+                    .map(|group| {
+                        group.and_then(|group| {
+                            StringMatchRange::from_char_range(group.string_char_range())
+                        })
+                    })
                     .collect(),
                 searched,
             },
@@ -1373,12 +1541,40 @@ impl MatchData {
                 .get(index)
                 .copied()
                 .flatten()
+                .and_then(StringMatchRange::checked_char_range)
                 .map(MatchGroup::from_char_range),
             MatchDataKind::LispRegisters { groups, .. } => groups
                 .get(index)
                 .copied()
                 .flatten()
                 .map(LispCharMatchRange::into_match_group),
+        };
+        #[cfg(debug_assertions)]
+        if result.is_some() {
+            match_stats::count_first_some_read(&self.read_mask, index);
+        }
+        result
+    }
+
+    /// GNU match_limit/Fmatch_data filter only the signed start register.
+    /// A negative end or reversed endpoints still belong to a matched group.
+    pub(crate) fn lisp_group(&self, index: usize) -> Option<LispMatchEndpoints> {
+        #[cfg(debug_assertions)]
+        match_stats::count_group_read(index);
+        let result = match &self.kind {
+            MatchDataKind::StringChars { groups, .. } => groups
+                .get(index)
+                .copied()
+                .flatten()
+                .and_then(StringMatchRange::lisp_endpoints),
+            MatchDataKind::LispRegisters { groups, .. } => groups
+                .get(index)
+                .copied()
+                .flatten()
+                .map(|range| LispMatchEndpoints {
+                    start: range.start.get() as i64,
+                    end: range.end.get() as i64,
+                }),
         };
         #[cfg(debug_assertions)]
         if result.is_some() {
@@ -1395,7 +1591,11 @@ impl MatchData {
     /// out of replacement and extraction code.
     pub(crate) fn group_zero_based_char_range(&self, index: usize) -> Option<CharRange> {
         match &self.kind {
-            MatchDataKind::StringChars { groups, .. } => groups.get(index).copied().flatten(),
+            MatchDataKind::StringChars { groups, .. } => groups
+                .get(index)
+                .copied()
+                .flatten()
+                .and_then(StringMatchRange::checked_char_range),
             MatchDataKind::LispRegisters { source, groups } => groups
                 .get(index)
                 .copied()
@@ -1415,12 +1615,24 @@ impl MatchData {
             .collect()
     }
 
-    pub(crate) fn translate_positions(&mut self, delta: i64) {
+    pub(crate) fn translate_positions(
+        &mut self,
+        delta: i64,
+    ) -> Result<(), crate::heap_types::GnuStringCharPosError> {
         let map = |group: MatchGroup| group.translate_saturating(delta);
         match &mut self.kind {
             MatchDataKind::StringChars { groups, .. } => {
                 for range in groups.iter_mut().flatten() {
-                    *range = map(MatchGroup::from_char_range(*range)).string_char_range();
+                    if range.start.get() < 0 {
+                        continue;
+                    }
+                    // GNU search.c:3073 explicitly applies max(0, position+N).
+                    let shifted = |position: GnuStringCharPos| {
+                        i64::try_from((position.get() as i128 + delta as i128).max(0))
+                            .map(GnuStringCharPos::new)
+                            .map_err(|_| crate::heap_types::GnuStringCharPosError::TooLarge)
+                    };
+                    *range = StringMatchRange::new(shifted(range.start)?, shifted(range.end)?);
                 }
             }
             MatchDataKind::LispRegisters { groups, .. } => {
@@ -1429,6 +1641,7 @@ impl MatchData {
                 }
             }
         }
+        Ok(())
     }
 
     /// Rewrite every group through MAP, in the same Lisp-visible coordinates
@@ -1445,7 +1658,12 @@ impl MatchData {
         match &mut self.kind {
             MatchDataKind::StringChars { groups, .. } => {
                 for range in groups.iter_mut().flatten() {
-                    *range = map(MatchGroup::from_char_range(*range)).string_char_range();
+                    if let Some(valid) = range.checked_char_range() {
+                        let mapped = map(MatchGroup::from_char_range(valid)).string_char_range();
+                        if let Some(mapped) = StringMatchRange::from_char_range(mapped) {
+                            *range = mapped;
+                        }
+                    }
                 }
             }
             MatchDataKind::LispRegisters { groups, .. } => {
@@ -1496,44 +1714,37 @@ impl EngineMatchData {
         crate::emacs_core::perf_trace::time_op(
             crate::emacs_core::perf_trace::HotpathOp::RegexMatchDataChars,
             || {
-                // Resolve the searched string ONCE: `SearchedString::
-                // byte_to_char_pos` re-decodes the Value per endpoint, and for
-                // unibyte/all-ASCII strings byte == char so the whole
-                // conversion is the identity.
                 let string = searched_string.as_lisp_string();
-                let identity = string
-                    .map(|s| !s.is_multibyte() || s.schars() == s.sbytes())
-                    .unwrap_or(true);
-                let char_groups = if identity {
-                    self.groups
-                        .into_iter()
-                        .map(|range| range.map(MatchGroup::from_emacs_byte_range))
-                        .collect()
-                } else {
-                    let string = string.expect("non-identity conversion has a string");
-                    // A heap string converts through the position cache: a
-                    // `string-match' loop publishes endpoints left to right.
-                    let to_char = |byte: usize| match &searched_string {
-                        SearchedString::Heap(value) => {
-                            crate::emacs_core::string_pos_cache::string_byte_to_char(
-                                *value, string, byte,
-                            )
-                        }
-                        SearchedString::Owned(_) => string.byte_to_char_pos(byte),
-                    };
-                    self.groups
-                        .into_iter()
-                        .map(|range| {
-                            range.map(|range| {
-                                MatchGroup::new(
-                                    to_char(range.start().get()),
-                                    to_char(range.end().get()),
-                                )
-                            })
-                        })
-                        .collect()
+                let identity = string.is_some_and(|string| {
+                    !string.is_multibyte() || string.schars() == string.sbytes()
+                });
+                let to_char = |byte: usize| {
+                    if identity {
+                        GnuStringCharPos::new(byte as i64)
+                    } else {
+                        searched_byte_to_gnu_char(&searched_string, byte)
+                    }
                 };
-                MatchData::string(char_groups, Some(searched_string))
+                let groups = self
+                    .groups
+                    .into_iter()
+                    .map(|range| {
+                        range.map(|range| {
+                            StringMatchRange::new(
+                                to_char(range.start().get()),
+                                to_char(range.end().get()),
+                            )
+                        })
+                    })
+                    .collect();
+                MatchData {
+                    kind: MatchDataKind::StringChars {
+                        groups,
+                        searched: Some(searched_string),
+                    },
+                    #[cfg(debug_assertions)]
+                    read_mask: Default::default(),
+                }
             },
         )
     }
@@ -1607,16 +1818,43 @@ impl BufferSearchSuccess {
 }
 
 impl StringSearchSuccess {
-    fn new(match_data: MatchData) -> Self {
-        let start = match_data
-            .group_zero_based_char_range(0)
-            .expect("successful string search has group zero")
-            .start();
-        Self { start, match_data }
+    fn from_byte_match(searched: SearchedString, bytes: EngineMatchData) -> Self {
+        let byte_start = EmacsBytePos::new(
+            bytes
+                .group(0)
+                .expect("successful engine search has group zero")
+                .start(),
+        );
+        Self {
+            byte_start,
+            bytes,
+            searched,
+            _mutator: std::marker::PhantomData,
+        }
     }
 
-    pub(crate) fn into_parts(self) -> (CharPos0, MatchData) {
-        (self.start, self.match_data)
+    /// Consume GNU `fast_string_match_internal`'s byte result without
+    /// publishing registers or touching the string-position cache
+    /// (`search.c:485-499`). This domain is distinct from public string-match.
+    pub(crate) fn into_byte_start(self) -> EmacsBytePos {
+        self.byte_start
+    }
+
+    /// An inhibited search converts only its returned position, as GNU does.
+    pub(crate) fn into_start(self) -> GnuStringCharPos {
+        searched_byte_to_gnu_char(&self.searched, self.byte_start.get())
+    }
+
+    /// Publish registers first, then convert VAL again using the same source.
+    pub(crate) fn into_parts(self) -> (GnuStringCharPos, MatchData) {
+        let match_data = self.bytes.publish_string(self.searched);
+        let start = searched_byte_to_gnu_char(
+            match_data
+                .searched_string()
+                .expect("published string search retains its source"),
+            self.byte_start.get(),
+        );
+        (start, match_data)
     }
 }
 
@@ -4461,11 +4699,16 @@ pub(crate) fn string_match_full_with_case_fold_source_lisp_pattern_posix_syntax(
         translation_table,
         syntax,
     )?;
-    Ok(success.map(|success| {
-        let (start, published_match_data) = success.into_parts();
-        *match_data = Some(published_match_data);
-        start.get()
-    }))
+    success
+        .map(|success| {
+            let (start, published_match_data) = success.into_parts();
+            // These inherited Rust APIs promise unsigned positions. Their Lisp
+            // callers use StringSearchSuccess directly and retain signed results.
+            let start = CharPos0::try_from(start).map_err(|error| error.to_string())?;
+            *match_data = Some(published_match_data);
+            Ok(start.get())
+        })
+        .transpose()
 }
 
 #[allow(clippy::too_many_arguments)] // matching options remain explicit at the GNU-regexp boundary
@@ -4502,8 +4745,10 @@ pub(crate) fn string_search_full_with_case_fold_source_lisp_pattern_posix_syntax
         STRING_MATCH_AT_DOT_UNREACHABLE,
     ) {
         let byte_md = engine_match_data_from_registers(&regs, 0);
-        let char_md = string_char_match_data(searched_string, byte_md);
-        Ok(Some(StringSearchSuccess::new(char_md)))
+        Ok(Some(StringSearchSuccess::from_byte_match(
+            searched_string,
+            byte_md,
+        )))
     } else if regex_emacs::take_matcher_overflow() {
         Err(regex_emacs::MATCHER_OVERFLOW_MESSAGE.to_string())
     } else {
@@ -4528,11 +4773,16 @@ pub(crate) fn string_match_full_with_case_fold_source_posix(
         case_fold,
         posix,
     )?;
-    Ok(success.map(|success| {
-        let (start, published_match_data) = success.into_parts();
-        *match_data = Some(published_match_data);
-        start.get()
-    }))
+    success
+        .map(|success| {
+            let (start, published_match_data) = success.into_parts();
+            // These inherited Rust APIs promise unsigned positions. Their Lisp
+            // callers use StringSearchSuccess directly and retain signed results.
+            let start = CharPos0::try_from(start).map_err(|error| error.to_string())?;
+            *match_data = Some(published_match_data);
+            Ok(start.get())
+        })
+        .transpose()
 }
 
 pub(crate) fn string_search_full_with_case_fold_and_posix(
@@ -4593,11 +4843,10 @@ fn string_search_full_with_case_fold_source_compiled_syntax(
                 literal_find_emacs_bytes(&string.as_bytes()[start..], &literal, true, _case_fold)
                     .map(|matched| matched.shift(start));
             if let Some(byte_match) = byte_match {
-                let char_md = string_char_match_data(
+                Ok(Some(StringSearchSuccess::from_byte_match(
                     searched_string,
                     single_group_match_data(byte_match.start(), byte_match.end()),
-                );
-                Ok(Some(StringSearchSuccess::new(char_md)))
+                )))
             } else {
                 Ok(None)
             }
@@ -4614,8 +4863,10 @@ fn string_search_full_with_case_fold_source_compiled_syntax(
                 STRING_MATCH_AT_DOT_UNREACHABLE,
             ) {
                 let byte_md = engine_match_data_from_registers(&regs, 0);
-                let char_md = string_char_match_data(searched_string, byte_md);
-                Ok(Some(StringSearchSuccess::new(char_md)))
+                Ok(Some(StringSearchSuccess::from_byte_match(
+                    searched_string,
+                    byte_md,
+                )))
             } else if regex_emacs::take_matcher_overflow() {
                 Err(regex_emacs::MATCHER_OVERFLOW_MESSAGE.to_string())
             } else {
@@ -5168,3 +5419,7 @@ fn buffer_search_translation_table_with_symbols(
     }
     crate::emacs_core::casetab::buffer_case_canon_table_with_symbols(buf, mode)
 }
+
+#[cfg(test)]
+#[path = "tests/declared_signed_positions.rs"]
+mod declared_signed_position_tests;

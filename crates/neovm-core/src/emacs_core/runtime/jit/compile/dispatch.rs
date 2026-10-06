@@ -339,9 +339,9 @@ fn aref_fast(array: Value, index: Value) -> Option<Value> {
     }
     if array.is_string() {
         let string = array.as_lisp_string()?;
-        // A multibyte string whose character count is its byte count holds
-        // only ASCII: every other character takes two or more bytes.
-        if string.is_multibyte() && string.schars() != string.sbytes() {
+        // A byte is the character only where every character is one byte;
+        // a supplied GNU count never qualifies, and the builtin decodes it.
+        if !string.has_one_byte_characters() {
             return None;
         }
         return string
@@ -773,7 +773,7 @@ fn aset_fast(array: Value, index: Value, value: Value) -> bool {
             return false;
         }
         let fits = if string.is_multibyte() {
-            string.schars() == string.sbytes() && (0..=0x7f).contains(&code)
+            string.has_one_byte_characters() && (0..=0x7f).contains(&code)
         } else {
             (0..=0xff).contains(&code)
         };

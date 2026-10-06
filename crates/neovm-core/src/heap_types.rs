@@ -23,13 +23,14 @@ use std::sync::{Mutex, OnceLock};
 /// `None` for those strings. Like GNU, `SDATA` has a trailing NUL byte after
 /// `SBYTES`; that terminator is not part of the Lisp string contents.
 ///
-/// - **Multibyte:** `size_byte >= 0`.  `size` = char count, `size_byte` = byte count.
+/// - **Multibyte:** `size_byte >= 0`. Masked `size` is the char count.
 /// - **Unibyte:**   `size_byte < 0`. `size` = byte count (each byte is one char).
 ///   GNU distinguishes `-1` normally allocated, `-2` rodata, and `-3`
 ///   immovable bytecode storage.
 #[repr(C)]
 pub struct LispString {
-    /// Character count (cached).
+    /// Character count plus immutable count-proof metadata in the spare top bit.
+    /// Counts fit isize::MAX; SCHARS and compiled consumers mask metadata.
     size: usize,
     /// Byte count for multibyte strings, or GNU's negative unibyte marker.
     size_byte: i64,
@@ -84,6 +85,37 @@ pub(crate) enum LispStringStorageKind {
 // pointer word is admitted separately; it never dereferences that table.
 static_assertions::assert_not_impl_any!(LispString: Send, Sync);
 static_assertions::assert_not_impl_any!(TextPropertyTable: Send, Sync);
+
+/// Whether the declared count has a decoded-payload proof.
+///
+/// Supplied counts are valid GNU metadata without requiring agreement with a
+/// payload scan. Computed permits normal syntax-property fast paths. Immutable
+/// numeric metadata has no Lisp state and may cross mutator threads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StringCharacterCountKind {
+    Computed,
+    Supplied,
+}
+static_assertions::assert_impl_all!(StringCharacterCountKind: Send, Sync);
+
+bitflags::bitflags! {
+    /// Private immutable metadata within the size word; no payload layout change.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct StringCharacterCountFlags: usize {
+        const SUPPLIED = 1usize << (usize::BITS - 1);
+    }
+}
+static_assertions::assert_impl_all!(StringCharacterCountFlags: Send, Sync);
+
+// Compiled code reads the size word without masking (`LispString::
+// JIT_SIZE_OFFSET`): the proof bit sits above every byte count, so `size ==
+// size_byte` fails for a supplied count, and fixnum tagging shifts it out of
+// a compiled `length`.
+const _: () = assert!(StringCharacterCountFlags::SUPPLIED.bits() > isize::MAX as usize);
+const _: () = assert!(
+    StringCharacterCountFlags::all().bits().trailing_zeros()
+        >= usize::BITS - crate::tagged::value::FIXNUM_SHIFT
+);
 
 #[derive(Clone, Copy)]
 struct StaticRoDataEntry {
@@ -144,6 +176,98 @@ fn lookup_static_rodata(key: u64, len: usize) -> Option<*const u8> {
     }
 }
 
+/// GNU's supplied string character count, independently of payload decoding.
+///
+/// Zero is valid even for nonempty bytes. Negative counts never reach an
+/// allocated string. Threading: this is immutable numeric metadata with no
+/// Lisp state, and may cross mutator threads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GnuDeclaredCharacterCount(usize);
+
+/// A supplied GNU count that cannot be represented by an allocated string.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum GnuDeclaredCharacterCountError {
+    #[error("Negative symbol-name character count")]
+    Negative,
+    #[error("Symbol-name character count is too large")]
+    TooLarge,
+}
+
+impl TryFrom<i128> for GnuDeclaredCharacterCount {
+    type Error = GnuDeclaredCharacterCountError;
+
+    fn try_from(value: i128) -> Result<Self, Self::Error> {
+        if value < 0 {
+            return Err(GnuDeclaredCharacterCountError::Negative);
+        }
+        let count = isize::try_from(value).map_err(|_| GnuDeclaredCharacterCountError::TooLarge)?;
+        Ok(Self(count as usize))
+    }
+}
+
+impl From<GnuDeclaredCharacterCount> for usize {
+    fn from(value: GnuDeclaredCharacterCount) -> Self {
+        value.0
+    }
+}
+
+static_assertions::assert_impl_all!(GnuDeclaredCharacterCount: Send, Sync);
+static_assertions::assert_impl_all!(GnuDeclaredCharacterCountError: Send, Sync);
+const _: () =
+    assert!(std::mem::size_of::<GnuDeclaredCharacterCount>() == std::mem::size_of::<usize>());
+
+/// GNU's signed string character coordinate (`ptrdiff_t`), distinct from a
+/// validated nonnegative buffer/string position. Supplied SCHARS can make a
+/// backward byte conversion negative even while all payload bytes are ASCII.
+/// Threading: immutable numeric metadata, safe to move between mutator threads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) struct GnuStringCharPos(i64);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum GnuStringCharPosError {
+    #[error("Negative GNU string character coordinate")]
+    Negative,
+    #[error("String character coordinate is too large")]
+    TooLarge,
+}
+
+impl GnuStringCharPos {
+    pub(crate) const fn new(position: i64) -> Self {
+        Self(position)
+    }
+
+    pub(crate) const fn get(self) -> i64 {
+        self.0
+    }
+}
+
+impl TryFrom<CharPos0> for GnuStringCharPos {
+    type Error = GnuStringCharPosError;
+
+    fn try_from(position: CharPos0) -> Result<Self, Self::Error> {
+        i64::try_from(position.get())
+            .map(Self)
+            .map_err(|_| GnuStringCharPosError::TooLarge)
+    }
+}
+
+impl TryFrom<GnuStringCharPos> for CharPos0 {
+    type Error = GnuStringCharPosError;
+
+    fn try_from(position: GnuStringCharPos) -> Result<Self, Self::Error> {
+        if position.get() < 0 {
+            return Err(GnuStringCharPosError::Negative);
+        }
+        usize::try_from(position.get())
+            .map(Self::new)
+            .map_err(|_| GnuStringCharPosError::TooLarge)
+    }
+}
+
+static_assertions::assert_impl_all!(GnuStringCharPos: Send, Sync, Copy);
+static_assertions::assert_impl_all!(GnuStringCharPosError: Send, Sync);
+const _: () = assert!(std::mem::size_of::<GnuStringCharPos>() == std::mem::size_of::<i64>());
+
 struct OwnedStringDataGuard<'a> {
     string: &'a mut LispString,
     data: ManuallyDrop<Vec<u8>>,
@@ -179,11 +303,17 @@ impl LispString {
     // (`lowering::emit_inline_string_aref`/`_aset`) read the fields through
     // them and must answer exactly as `aref_fast`/`aset_fast` do: a
     // character is one stored byte when the string is unibyte (`size_byte <
-    // 0`) or multibyte with `size_byte == size` (all ASCII), and a byte may
-    // be stored in place only into owned storage (`storage_capacity != 0`) of
-    // a normally allocated unibyte string or an all-ASCII multibyte one.
+    // 0`) or multibyte with `size_byte == size` (all ASCII, see
+    // [`LispString::has_one_byte_characters`]), and a byte may be stored in
+    // place only into owned storage (`storage_capacity != 0`) of a normally
+    // allocated unibyte string or an all-ASCII multibyte one.
 
-    /// Offset of the character count (`schars`).
+    /// Offset of the encoded character count word: `schars` plus the count
+    /// proof bit, which compiled code never has to mask. `length` tags the
+    /// word as a fixnum, whose shift drops the bit (asserted below); inline
+    /// `aref`/`aset` use the word only behind `size_byte < 0 || size ==
+    /// size_byte`, which a supplied count never passes, and a unibyte string
+    /// never carries the bit.
     pub(crate) const JIT_SIZE_OFFSET: usize = std::mem::offset_of!(LispString, size);
     /// Offset of `size_byte`: the byte count, or a negative unibyte marker.
     pub(crate) const JIT_SIZE_BYTE_OFFSET: usize = std::mem::offset_of!(LispString, size_byte);
@@ -197,6 +327,9 @@ impl LispString {
 }
 
 impl LispString {
+    /// The character count bits of the encoded size word.
+    pub(crate) const CHARACTER_COUNT_MASK: usize = !StringCharacterCountFlags::all().bits();
+
     // -- Constructors --------------------------------------------------------
 
     fn normalize_size_byte(size_byte: i64, static_rodata: bool) -> i64 {
@@ -220,9 +353,18 @@ impl LispString {
         );
     }
 
+    /// Only a multibyte string carries a supplied count: compiled `aref`/`aset`
+    /// compare a unibyte string's size word with an index directly.
+    fn assert_unibyte_count_has_no_proof(size: usize, size_byte: i64) {
+        debug_assert!(
+            size_byte >= 0 || size & !Self::CHARACTER_COUNT_MASK == 0,
+            "unibyte string size word carries count proof metadata"
+        );
+    }
+
     fn payload_len_for(size: usize, size_byte: i64) -> usize {
         if size_byte < 0 {
-            size
+            size & Self::CHARACTER_COUNT_MASK
         } else {
             size_byte as usize
         }
@@ -254,6 +396,7 @@ impl LispString {
     fn from_owned_payload(mut payload: Vec<u8>, size: usize, size_byte: i64) -> Self {
         let size_byte = Self::normalize_size_byte(size_byte, false);
         Self::assert_valid_size_byte(size_byte);
+        Self::assert_unibyte_count_has_no_proof(size, size_byte);
         debug_assert_eq!(
             payload.len(),
             Self::payload_len_for(size, size_byte),
@@ -281,6 +424,7 @@ impl LispString {
     ) -> Self {
         let size_byte = Self::normalize_size_byte(size_byte, static_rodata);
         Self::assert_valid_size_byte(size_byte);
+        Self::assert_unibyte_count_has_no_proof(size, size_byte);
         debug_assert_eq!(len, Self::payload_len_for(size, size_byte));
         debug_assert!(!ptr.is_null());
         debug_assert_eq!(unsafe { *ptr.add(len) }, 0);
@@ -412,6 +556,23 @@ impl LispString {
         Self::from_owned_payload(data, size, size_byte)
     }
 
+    /// Preserve GNU `make_multibyte_string`'s supplied character count.
+    ///
+    /// GNU shorthand replacement calculates counts arithmetically, so the
+    /// declared count may differ from a scan of the raw concatenated bytes
+    /// (`lread.c:5004`, `alloc.c:2241-2247`). This constructor does not assert
+    /// a decode-count invariant. Accessors must bound all payload reads.
+    /// As GNU `alloc.c:2332` does, zero bytes select the empty multibyte shape.
+    pub(crate) fn from_emacs_bytes_with_declared_chars(
+        data: Vec<u8>,
+        chars: GnuDeclaredCharacterCount,
+    ) -> Self {
+        let size = if data.is_empty() { 0 } else { chars.0 };
+        let size_byte = data.len() as i64;
+        let size = Self::encode_character_count(size, StringCharacterCountKind::Supplied);
+        Self::from_owned_payload(data, size, size_byte)
+    }
+
     /// [`Self::from_emacs_bytes`] for a caller that already knows the
     /// character count, so the bytes are not walked a second time to
     /// recover it.
@@ -436,6 +597,7 @@ impl LispString {
     /// The caller is responsible for passing consistent `data`, `size`, and
     /// `size_byte` values (as stored in the dump file).
     pub fn from_dump(data: Vec<u8>, size: usize, size_byte: i64) -> Self {
+        let size = Self::character_count_word_for_image(&data, size, size_byte);
         Self::from_owned_payload(data, size, size_byte)
     }
 
@@ -451,7 +613,9 @@ impl LispString {
         size: usize,
         size_byte: i64,
     ) -> Self {
-        unsafe { Self::from_borrowed_bytes(ptr, len, size, size_byte, false) }
+        let mut string = unsafe { Self::from_borrowed_bytes(ptr, len, size, size_byte, false) };
+        string.size = Self::character_count_word_for_image(string.as_bytes(), size, size_byte);
+        string
     }
 
     /// `from_unibyte` from a borrowed slice, copying with the spare NUL slot
@@ -584,7 +748,7 @@ impl LispString {
         } else {
             let data = Self::copy_payload(bytes);
             let size_byte = bytes.len() as i64;
-            Self::from_owned_payload(data, schars, size_byte)
+            Self::from_dump(data, schars, size_byte)
         }
     }
 
@@ -634,16 +798,76 @@ impl LispString {
         std::str::from_utf8(self.as_bytes()).ok()
     }
 
-    /// Character count.
+    #[inline]
+    fn encode_character_count(count: usize, kind: StringCharacterCountKind) -> usize {
+        debug_assert!(count <= Self::CHARACTER_COUNT_MASK);
+        count
+            | match kind {
+                StringCharacterCountKind::Computed => StringCharacterCountFlags::empty().bits(),
+                StringCharacterCountKind::Supplied => StringCharacterCountFlags::SUPPLIED.bits(),
+            }
+    }
+
+    /// Regenerate count proof at a cold image/reconstruction boundary. Numeric
+    /// dump sizes remain SCHARS; mapped images bake the encoded private word.
+    /// The scan happens while building an image, never during regex lookup.
+    pub(crate) fn character_count_word_for_image(
+        payload: &[u8],
+        count: usize,
+        size_byte: i64,
+    ) -> usize {
+        let kind = if size_byte < 0 || Self::is_decoded_multibyte_count(payload, count) {
+            StringCharacterCountKind::Computed
+        } else {
+            StringCharacterCountKind::Supplied
+        };
+        Self::encode_character_count(count, kind)
+    }
+
+    /// Whether COUNT is the decoded character count of the multibyte PAYLOAD.
+    /// A count equal to the byte length is decoded only for ASCII bytes:
+    /// every other character takes two or more bytes, and equal counts are
+    /// what [`Self::has_one_byte_characters`] and compiled code test.
+    fn is_decoded_multibyte_count(payload: &[u8], count: usize) -> bool {
+        if count == payload.len() {
+            payload.is_ascii()
+        } else {
+            emacs_char::chars_in_multibyte(payload) == count
+        }
+    }
+
+    #[inline]
+    pub(crate) fn character_count_kind(&self) -> StringCharacterCountKind {
+        let flags = StringCharacterCountFlags::from_bits_truncate(self.size);
+        if flags.contains(StringCharacterCountFlags::SUPPLIED) {
+            StringCharacterCountKind::Supplied
+        } else {
+            StringCharacterCountKind::Computed
+        }
+    }
+
+    /// Whether each character is one stored byte, so a character index is a
+    /// byte index and the byte is the character: unibyte storage, or a
+    /// multibyte string whose computed count equals its byte count (all
+    /// ASCII). This compares the encoded size word, so a supplied count never
+    /// qualifies, even one equal to the byte count. Compiled `aref`/`aset`
+    /// test the same raw words.
+    #[inline]
+    pub(crate) fn has_one_byte_characters(&self) -> bool {
+        self.size_byte < 0 || self.size == self.size_byte as usize
+    }
+
+    /// Character count, excluding immutable proof metadata.
+    #[inline]
     pub fn schars(&self) -> usize {
-        self.size
+        self.size & Self::CHARACTER_COUNT_MASK
     }
 
     /// Byte count.  For multibyte strings this is `data.len()`; for unibyte
     /// strings this is also `data.len()` (= size, since each byte is one char).
     pub fn sbytes(&self) -> usize {
         if self.size_byte < 0 {
-            self.size
+            self.schars()
         } else {
             self.size_byte as usize
         }
@@ -858,30 +1082,37 @@ impl LispString {
         let char_pos = char_pos.min(schars);
         if !self.is_multibyte() || schars == self.sbytes() {
             char_pos
-        } else if char_pos > schars / 2 {
-            // Nearer the end: walk back from it, as GNU does.
+        } else if char_pos > 0 && char_pos >= schars - char_pos {
+            // GNU chooses the backward route on equal distances too
+            // (fns.c:1220-1241). Keep zero at the initialized payload start.
             emacs_char::char_to_byte_pos_from_end(self.as_bytes(), schars - char_pos)
         } else {
             emacs_char::char_to_byte_pos(self.as_bytes(), char_pos)
         }
     }
 
-    /// Return the character position for a byte offset.
+    /// GNU's signed character coordinate for a physical byte offset.
     ///
-    /// Mirrors GNU `string_byte_to_char`'s `SCHARS == SBYTES` fast path.
-    pub(crate) fn byte_to_char_pos(&self, byte_pos: usize) -> usize {
+    /// Like `string_byte_to_char` (fns.c:1260-1294), the nearest end and
+    /// backward ties use supplied SCHARS rather than a payload recount.
+    /// Negative results are valid GNU positions, not unsigned coordinates.
+    /// String metadata must be representable by GNU ptrdiff_t: normal owned
+    /// sizes are bounded by Vec's isize::MAX and supplied counts validate that
+    /// bound. Existing dump constructors require valid GNU metadata too.
+    /// Physical scans stay inside the initialized byte slice.
+    pub(crate) fn byte_to_gnu_char_pos(&self, byte_pos: usize) -> GnuStringCharPos {
         let sbytes = self.sbytes();
         let byte_pos = byte_pos.min(sbytes);
-        if !self.is_multibyte() || self.schars() == sbytes {
-            byte_pos
-        } else if byte_pos > sbytes / 2 {
-            // Characters before BYTE_POS = all of them less those starting
-            // at or after it -- the same count, read from the nearer end.
-            self.schars()
-                - emacs_char::byte_to_char_pos(&self.as_bytes()[byte_pos..], sbytes - byte_pos)
+        let char_pos = if !self.is_multibyte() || self.schars() == sbytes {
+            byte_pos as i64
+        } else if byte_pos < sbytes - byte_pos {
+            emacs_char::byte_to_char_pos(self.as_bytes(), byte_pos) as i64
         } else {
-            emacs_char::byte_to_char_pos(self.as_bytes(), byte_pos)
-        }
+            self.schars() as i64
+                - emacs_char::byte_to_char_pos(&self.as_bytes()[byte_pos..], sbytes - byte_pos)
+                    as i64
+        };
+        GnuStringCharPos::new(char_pos)
     }
 
     /// Heap bytes reserved by an owned byte backing, including capacity for
@@ -984,7 +1215,8 @@ impl LispString {
         Some(if self.size_byte >= 0 {
             // multibyte
             if let Some(char_len) = char_len {
-                Self::from_owned_payload(Self::copy_payload(slice), char_len, slice.len() as i64)
+                let count = Self::encode_character_count(char_len, self.character_count_kind());
+                Self::from_owned_payload(Self::copy_payload(slice), count, slice.len() as i64)
             } else {
                 Self::from_emacs_bytes(Self::copy_payload(slice))
             }
@@ -1008,8 +1240,12 @@ impl LispString {
     /// Callers use this where GNU produces a string by printing into a buffer
     /// and reading it back, a route that never carries properties across.
     pub fn without_properties(&self) -> Self {
-        self.slice_no_properties(0, self.as_bytes().len())
-            .unwrap_or_else(|| self.clone())
+        // GNU copies the declaration; rescanning can discard shorthand counts.
+        Self::from_owned_payload(
+            Self::copy_payload(self.as_bytes()),
+            self.size,
+            self.size_byte,
+        )
     }
 
     /// Byte-index slice without text properties when the caller already knows
@@ -1031,7 +1267,14 @@ impl LispString {
     /// `substring`/`substring_both`.
     pub fn slice(&self, start: usize, end: usize) -> Option<Self> {
         let (char_start, char_end) = if self.is_multibyte() {
-            (self.byte_to_char_pos(start), self.byte_to_char_pos(end))
+            (
+                CharPos0::try_from(self.byte_to_gnu_char_pos(start))
+                    .ok()?
+                    .get(),
+                CharPos0::try_from(self.byte_to_gnu_char_pos(end))
+                    .ok()?
+                    .get(),
+            )
         } else {
             (start, end)
         };
@@ -1220,6 +1463,41 @@ impl std::fmt::Debug for LispString {
     }
 }
 
+/// Decode a GNU-declared multibyte string character within initialized bytes.
+///
+/// GNU shorthand names retain supplied character counts and may contain raw
+/// noncanonical bytes. Trust the lead-byte arithmetic as GNU does, but model a
+/// short or exhausted tail with zeros instead of reading outside the payload.
+/// That tail is a bounded emulator policy, not portable GNU memory behavior.
+/// Invalid heads or out-of-range results use the existing raw-byte fallback.
+/// The borrowed bytes and stack padding are local to the calling mutator.
+#[inline]
+pub(crate) fn decode_declared_multibyte_char(bytes: &[u8]) -> (u32, usize) {
+    let Some(&first) = bytes.first() else {
+        return (0, 1);
+    };
+    if first < 0x80 {
+        return (u32::from(first), 1);
+    }
+    // GNU assumes a legal head and in-range result. Its behavior outside
+    // those assumptions is undefined; use the existing raw-byte policy.
+    if !(0xc0..=0xf8).contains(&first) {
+        return (emacs_char::byte8_to_char(first), 1);
+    }
+    let decoded = if bytes.len() >= emacs_char::MAX_MULTIBYTE_LENGTH {
+        emacs_char::string_char_unchecked(bytes)
+    } else {
+        let mut tail = [0; emacs_char::MAX_MULTIBYTE_LENGTH];
+        tail[..bytes.len()].copy_from_slice(bytes);
+        emacs_char::string_char_unchecked(&tail)
+    };
+    if decoded.0 <= emacs_char::MAX_CHAR {
+        decoded
+    } else {
+        (emacs_char::byte8_to_char(first), 1)
+    }
+}
+
 impl PartialEq for LispString {
     fn eq(&self, other: &Self) -> bool {
         self.is_multibyte() == other.is_multibyte() && self.as_bytes() == other.as_bytes()
@@ -1242,7 +1520,7 @@ impl Serialize for LispString {
     {
         let mut state = serializer.serialize_struct("LispString", 3)?;
         state.serialize_field("data", self.as_bytes())?;
-        state.serialize_field("size", &self.size)?;
+        state.serialize_field("size", &self.schars())?;
         state.serialize_field("size_byte", &self.size_byte)?;
         state.end()
     }
@@ -1270,6 +1548,10 @@ impl<'de> Deserialize<'de> for LispString {
 mod tests;
 
 #[cfg(test)]
+#[path = "heap_types/tests/declared_character_count.rs"]
+mod declared_character_count_tests;
+
+#[cfg(test)]
 #[path = "heap_types/tests/string_collection_capacity_test.rs"]
 mod string_collection_capacity_tests;
 
@@ -1280,6 +1562,10 @@ mod text_property_view_tests;
 #[cfg(test)]
 #[path = "heap_types/tests/clear_string_in_place_test.rs"]
 mod clear_string_in_place_tests;
+
+#[cfg(test)]
+#[path = "heap_types/tests/declared_string_safety.rs"]
+mod declared_string_safety_tests;
 
 #[derive(Debug)]
 pub struct OverlayData {
@@ -1395,3 +1681,15 @@ pub struct LispMarker {
 #[cfg(test)]
 #[path = "tests/heap_types_marker_test.rs"]
 mod marker_test;
+
+#[cfg(test)]
+#[path = "heap_types/tests/char_byte_midpoint.rs"]
+mod char_byte_midpoint_tests;
+
+#[cfg(test)]
+#[path = "heap_types/tests/signed_string_positions.rs"]
+mod signed_string_positions_tests;
+
+#[cfg(test)]
+#[path = "heap_types/tests/character_count_kind.rs"]
+mod character_count_kind_tests;

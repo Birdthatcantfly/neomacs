@@ -577,15 +577,16 @@ fn directory_files_and_attributes_from_reader(
                         0,
                         false,
                     )
-                    .map_err(|msg| {
-                        signal(
+                    .map_err(|error| match error {
+                        super::builtins::search::FastStringMatchError::Regexp(msg) => signal(
                             LispCondition::InvalidRegexp,
                             vec![Value::string(format!(
                                 "Invalid regexp \"{}\": {}",
                                 super::emacs_char::to_utf8_lossy(pattern.as_bytes()),
                                 msg
                             ))],
-                        )
+                        ),
+                        error => error.into_signal(),
                     })?;
                 if matched.is_none() {
                     continue;

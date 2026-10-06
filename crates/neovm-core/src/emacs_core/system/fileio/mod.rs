@@ -1557,6 +1557,7 @@ enum DirectoryFilesError {
         err: std::io::Error,
     },
     InvalidRegexp(String),
+    MatchSyntax(super::builtins::search::FastStringMatchError),
 }
 
 #[cfg(test)]
@@ -1615,12 +1616,15 @@ fn directory_files_with_decoder(
                     0,
                     false,
                 )
-                .map_err(|msg| {
-                    DirectoryFilesError::InvalidRegexp(format!(
-                        "Invalid regexp \"{}\": {}",
-                        crate::emacs_core::emacs_char::to_utf8_lossy(pattern.as_bytes()),
-                        msg
-                    ))
+                .map_err(|error| match error {
+                    super::builtins::search::FastStringMatchError::Regexp(msg) => {
+                        DirectoryFilesError::InvalidRegexp(format!(
+                            "Invalid regexp \"{}\": {}",
+                            crate::emacs_core::emacs_char::to_utf8_lossy(pattern.as_bytes()),
+                            msg
+                        ))
+                    }
+                    error => DirectoryFilesError::MatchSyntax(error),
                 })?;
             if matched.is_none() {
                 continue;
@@ -3169,6 +3173,7 @@ fn signal_directory_files_error(
         DirectoryFilesError::InvalidRegexp(msg) => {
             signal(LispCondition::InvalidRegexp, vec![Value::string(msg)])
         }
+        DirectoryFilesError::MatchSyntax(error) => error.into_signal(),
     }
 }
 
@@ -4916,7 +4921,7 @@ fn find_file_name_handler_lisp_with_values(
     // Walk the alist exactly like GNU's loop, picking the entry with
     // the strictly-greatest match position.
     let mut best: Value = Value::NIL;
-    let mut best_pos: i64 = -1;
+    let mut best_pos: Option<crate::buffer::EmacsBytePos> = None;
     let mut cursor = alist;
     while cursor.is_cons() {
         let entry = cursor.cons_car();
@@ -4964,11 +4969,11 @@ fn find_file_name_handler_lisp_with_values(
             0,
             false,
         ) {
-            Ok(Some(success)) => success.into_parts().0.get() as i64,
+            Ok(Some(success)) => success.into_byte_start(),
             _ => continue,
         };
 
-        if match_pos > best_pos {
+        if best_pos.is_none_or(|best| match_pos > best) {
             // Skip if this handler is inhibited for the current operation.
             if let Some(inh) = inhibited {
                 let mut inh_cursor = inh;
@@ -4985,7 +4990,7 @@ fn find_file_name_handler_lisp_with_values(
                 }
             }
             best = handler;
-            best_pos = match_pos;
+            best_pos = Some(match_pos);
         }
     }
     best

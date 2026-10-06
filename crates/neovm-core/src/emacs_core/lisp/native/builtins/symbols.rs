@@ -1516,8 +1516,15 @@ pub(super) fn resolve_indirect_symbol(eval: &super::eval::Context, name: &str) -
 
 /// Hash a string for custom obarray bucket index.
 pub(crate) fn obarray_hash_lisp_string(s: &crate::heap_types::LispString, len: usize) -> usize {
-    let normalized = crate::emacs_core::intern::normalize_symbol_name_lisp_string(s);
-    obarray_hash_bytes(normalized.as_bytes(), len)
+    obarray_hash_name_query(crate::emacs_core::intern::SymbolNameQuery::from(s), len)
+}
+
+#[inline]
+fn obarray_hash_name_query(
+    query: crate::emacs_core::intern::SymbolNameQuery<'_>,
+    len: usize,
+) -> usize {
+    obarray_hash_bytes(query.as_bytes(), len)
 }
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
@@ -1639,11 +1646,18 @@ pub(crate) fn obarray_bucket_find(
     bucket: Value,
     name: &crate::heap_types::LispString,
 ) -> Option<Value> {
-    // Normalize BOTH sides: a symbol created from an ascii-only multibyte name
-    // keeps that multibyte string as its name object (GNU `intern_driver`), so
-    // the stored name can carry a representation the query does not. GNU's
-    // `oblookup` never compares the multibyte flag, only chars and bytes.
-    let normalized = crate::emacs_core::intern::normalize_symbol_name_lisp_string(name);
+    obarray_bucket_find_name_query(
+        bucket,
+        crate::emacs_core::intern::SymbolNameQuery::from(name),
+    )
+}
+
+fn obarray_bucket_find_name_query(
+    bucket: Value,
+    query: crate::emacs_core::intern::SymbolNameQuery<'_>,
+) -> Option<Value> {
+    // GNU lread.c:4945 compares characters and bytes, never the MB flag.
+    // Supplied shorthand character counts need not equal a payload rescan.
     let mut current = bucket;
     loop {
         match current.kind() {
@@ -1652,9 +1666,7 @@ pub(crate) fn obarray_bucket_find(
                 let car = current.cons_car();
                 let cdr = current.cons_cdr();
                 if let Some(sym_name) = obarray_lookup_name(car)
-                    && crate::emacs_core::intern::normalize_symbol_name_lisp_string(sym_name.text())
-                        .as_ref()
-                        == normalized.as_ref()
+                    && query.matches(sym_name.text())
                 {
                     return Some(car);
                 }
@@ -1811,10 +1823,11 @@ pub(crate) fn builtin_intern_fn(eval: &mut super::eval::Context, args: Vec<Value
         }
     }
     let name = eval.expect_lisp_string(args[0])?;
-    let name_value = intern_shorthand_name(eval, name)
-        .map(Value::heap_string)
-        .unwrap_or(args[0]);
-    let name = eval.expect_lisp_string(name_value)?;
+    let rewritten = intern_shorthand_name(eval, name).map_err(shorthand_character_count_error)?;
+    let query = rewritten
+        .as_ref()
+        .map(RewrittenSymbolName::as_query)
+        .unwrap_or_else(|| crate::emacs_core::intern::SymbolNameQuery::from(name));
 
     let effective_obarray = effective_obarray_arg(eval, &args);
 
@@ -1828,11 +1841,11 @@ pub(crate) fn builtin_intern_fn(eval: &mut super::eval::Context, args: Vec<Value
                 vec![Value::symbol("obarrayp"), effective_obarray],
             ));
         }
-        let bucket_idx = obarray_hash_lisp_string(name, vec_len);
+        let bucket_idx = obarray_hash_name_query(query, vec_len);
         let bucket = obarray_bucket(obarray_val, bucket_idx).unwrap_or(Value::NIL);
 
         // Check if already interned
-        if let Some(sym) = obarray_bucket_find(bucket, name) {
+        if let Some(sym) = obarray_bucket_find_name_query(bucket, query) {
             return Ok(sym);
         }
 
@@ -1845,6 +1858,9 @@ pub(crate) fn builtin_intern_fn(eval: &mut super::eval::Context, args: Vec<Value
         // spelling to its unibyte bytes (`obarray_hash_lisp_string`,
         // `obarray_bucket_find`), so identity does not depend on the name
         // object's representation.
+        let name_value = rewritten
+            .map(|name| Value::heap_string(name.into_lisp_string()))
+            .unwrap_or(args[0]);
         let sym = Value::from_sym_id(
             crate::emacs_core::intern::make_uninterned_symbol_with_name_value(name_value),
         );
@@ -1858,6 +1874,17 @@ pub(crate) fn builtin_intern_fn(eval: &mut super::eval::Context, args: Vec<Value
     // Global obarray path. Pass the string OBJECT, not just its bytes: when
     // this call creates the symbol that object becomes its name, so
     // `symbol-name` returns it with the text properties it was read from.
+    if rewritten.is_some() {
+        if let Some(id) = eval.obarray().intern_soft_name_query(query) {
+            return Ok(Value::from_sym_id(id));
+        }
+    }
+    // GNU lread.c:4798 constructs only after lookup. Empty construction can
+    // normalize the supplied count; the inherited registry cannot represent
+    // GNU duplicate canonical spellings arising at that boundary.
+    let name_value = rewritten
+        .map(|name| Value::heap_string(name.into_lisp_string()))
+        .unwrap_or(args[0]);
     let sym = eval.obarray_mut().intern_lisp_value(name_value);
     Ok(Value::from_sym_id(sym))
 }
@@ -1878,7 +1905,8 @@ pub(crate) fn builtin_intern_soft_2(
 /// evaluator's mutator and introduce no shared mutable Lisp state.
 #[derive(Debug)]
 enum InternSoftQuery<'a> {
-    Spelling(std::borrow::Cow<'a, crate::heap_types::LispString>),
+    Spelling(&'a crate::heap_types::LispString),
+    Rewritten(RewrittenSymbolName),
     Exact {
         id: SymId,
         original: Value,
@@ -1888,16 +1916,19 @@ enum InternSoftQuery<'a> {
 }
 
 impl InternSoftQuery<'_> {
-    fn name(&self) -> &crate::heap_types::LispString {
+    fn name_query(&self) -> crate::emacs_core::intern::SymbolNameQuery<'_> {
         match self {
-            Self::Spelling(name) => name.as_ref(),
-            Self::Exact { name, .. } => name.text(),
+            Self::Spelling(name) => crate::emacs_core::intern::SymbolNameQuery::from(*name),
+            Self::Rewritten(name) => name.as_query(),
+            Self::Exact { name, .. } => {
+                crate::emacs_core::intern::SymbolNameQuery::from(name.text())
+            }
         }
     }
 
     fn resolve(&self, found: Value) -> Value {
         match self {
-            Self::Spelling(_) => found,
+            Self::Spelling(_) | Self::Rewritten(_) => found,
             Self::Exact { id, original, .. } => {
                 if symbol_id(&found, SymbolMode::Bare) == Some(*id) {
                     *original
@@ -1941,6 +1972,26 @@ enum SelectedInternSoftObarray {
 
 static_assertions::assert_not_impl_any!(SelectedInternSoftObarray: Send, Sync);
 
+/// Raw shorthand result before GNU name construction changes its metadata.
+/// Threading: owns only Rust bytes and numeric metadata, no Lisp references.
+#[derive(Debug)]
+struct RewrittenSymbolName {
+    bytes: Vec<u8>,
+    chars: crate::heap_types::GnuDeclaredCharacterCount,
+}
+
+impl RewrittenSymbolName {
+    fn as_query(&self) -> crate::emacs_core::intern::SymbolNameQuery<'_> {
+        crate::emacs_core::intern::SymbolNameQuery::new(&self.bytes, self.chars)
+    }
+
+    fn into_lisp_string(self) -> crate::heap_types::LispString {
+        crate::heap_types::LispString::from_emacs_bytes_with_declared_chars(self.bytes, self.chars)
+    }
+}
+
+static_assertions::assert_impl_all!(RewrittenSymbolName: Send, Sync);
+
 /// GNU oblookup_considering_shorthand (lread.c:4966-5010) scans valid
 /// pairs in source order. Nil, the overwhelmingly common binding, allocates
 /// nothing. The rewritten builtin name is multibyte (Fintern, 4793-4796).
@@ -1948,7 +1999,7 @@ static_assertions::assert_not_impl_any!(SelectedInternSoftObarray: Send, Sync);
 fn intern_shorthand_name(
     eval: &super::eval::Context,
     name: &crate::heap_types::LispString,
-) -> Option<crate::heap_types::LispString> {
+) -> Result<Option<RewrittenSymbolName>, crate::heap_types::GnuDeclaredCharacterCountError> {
     static SHORTHANDS: std::sync::OnceLock<SymId> = std::sync::OnceLock::new();
     let id = *SHORTHANDS.get_or_init(|| intern("read-symbol-shorthands"));
     // A plain value cell already is the visible dynamic binding. Aliases,
@@ -1965,7 +2016,7 @@ fn intern_shorthand_name(
     };
     let value = visible.unwrap_or(Value::NIL);
     if value.is_nil() {
-        return None;
+        return Ok(None);
     }
     rewrite_intern_shorthand(value, name)
 }
@@ -1977,21 +2028,53 @@ fn intern_shorthand_name(
 fn rewrite_intern_shorthand(
     value: Value,
     name: &crate::heap_types::LispString,
-) -> Option<crate::heap_types::LispString> {
-    crate::emacs_core::value::list_iter(value).find_map(|pair| {
-        if !pair.is_cons() {
-            return None;
-        }
-        let short = pair.cons_car();
-        let long = pair.cons_cdr();
-        let short = short.as_lisp_string()?;
-        let long = long.as_lisp_string()?;
-        let suffix = name.as_bytes().strip_prefix(short.as_bytes())?;
-        let mut rewritten = Vec::with_capacity(long.sbytes() + suffix.len());
-        rewritten.extend_from_slice(long.as_bytes());
-        rewritten.extend_from_slice(suffix);
-        Some(crate::heap_types::LispString::from_emacs_bytes(rewritten))
-    })
+) -> Result<Option<RewrittenSymbolName>, crate::heap_types::GnuDeclaredCharacterCountError> {
+    crate::emacs_core::value::list_iter(value)
+        .find_map(|pair| {
+            if !pair.is_cons() {
+                return None;
+            }
+            let short = pair.cons_car();
+            let long = pair.cons_cdr();
+            let short = short.as_lisp_string()?;
+            let long = long.as_lisp_string()?;
+            let suffix = name.as_bytes().strip_prefix(short.as_bytes())?;
+            let Some(capacity) = long
+                .sbytes()
+                .checked_add(suffix.len())
+                .filter(|&capacity| capacity <= isize::MAX as usize)
+            else {
+                return Some(Err(
+                    crate::heap_types::GnuDeclaredCharacterCountError::TooLarge,
+                ));
+            };
+            let mut rewritten = Vec::with_capacity(capacity);
+            rewritten.extend_from_slice(long.as_bytes());
+            rewritten.extend_from_slice(suffix);
+            // GNU lread.c:5004 uses signed character-count arithmetic; native
+            // Fintern then preserves it in make_multibyte_string (4798).
+            let declared = long.schars() as i128 - short.schars() as i128 + name.schars() as i128;
+            Some(
+                crate::heap_types::GnuDeclaredCharacterCount::try_from(declared).map(|chars| {
+                    RewrittenSymbolName {
+                        bytes: rewritten,
+                        chars,
+                    }
+                }),
+            )
+        })
+        .transpose()
+}
+
+/// GNU aborts on negative native creation counts (alloc.c:2330). Represent
+/// that invalid allocation request safely as a Lisp error instead of a Rust
+/// panic. Intern-soft does not allocate and handles negative queries as misses.
+#[cold]
+#[inline(never)]
+fn shorthand_character_count_error(
+    error: crate::heap_types::GnuDeclaredCharacterCountError,
+) -> Flow {
+    signal(LispCondition::Error, vec![Value::string(error.to_string())])
 }
 
 pub(crate) fn intern_soft_impl(eval: &super::eval::Context, args: &[Value]) -> EvalResult {
@@ -2014,15 +2097,36 @@ pub(crate) fn intern_soft_impl(eval: &super::eval::Context, args: &[Value]) -> E
         }
     } else {
         let name = eval.expect_lisp_string(args[0])?;
-        let name = intern_shorthand_name(eval, name)
-            .map(std::borrow::Cow::Owned)
-            .unwrap_or(std::borrow::Cow::Borrowed(name));
-        InternSoftQuery::Spelling(name)
+        let name = match intern_shorthand_name(eval, name) {
+            Ok(Some(rewritten)) => InternSoftQuery::Rewritten(rewritten),
+            Ok(None) => InternSoftQuery::Spelling(name),
+            Err(crate::heap_types::GnuDeclaredCharacterCountError::Negative) => {
+                // GNU only calls oblookup for intern-soft (lread.c:4830):
+                // no allocated name has a negative count, so this misses.
+                // Keep the custom zero-bucket validation before returning.
+                match &selected {
+                    SelectedInternSoftObarray::Global => {}
+                    SelectedInternSoftObarray::Custom(checked) => {
+                        if obarray_len(checked.value).unwrap_or(0) == 0 {
+                            return Err(signal(
+                                LispCondition::WrongTypeArgument,
+                                vec![Value::symbol("obarrayp"), effective_obarray],
+                            ));
+                        }
+                    }
+                }
+                return Ok(Value::NIL);
+            }
+            Err(error @ crate::heap_types::GnuDeclaredCharacterCountError::TooLarge) => {
+                return Err(shorthand_character_count_error(error));
+            }
+        };
+        name
     };
     let found = match selected {
         SelectedInternSoftObarray::Global => eval
             .obarray()
-            .intern_soft_lisp_string(query.name())
+            .intern_soft_name_query(query.name_query())
             .map(Value::from_sym_id)
             .unwrap_or(Value::NIL),
         SelectedInternSoftObarray::Custom(checked) => {
@@ -2034,9 +2138,9 @@ pub(crate) fn intern_soft_impl(eval: &super::eval::Context, args: &[Value]) -> E
                     vec![Value::symbol("obarrayp"), effective_obarray],
                 ));
             }
-            let bucket_idx = obarray_hash_lisp_string(query.name(), vec_len);
+            let bucket_idx = obarray_hash_name_query(query.name_query(), vec_len);
             let bucket = obarray_bucket(obarray_val, bucket_idx).unwrap_or(Value::NIL);
-            obarray_bucket_find(bucket, query.name()).unwrap_or(Value::NIL)
+            obarray_bucket_find_name_query(bucket, query.name_query()).unwrap_or(Value::NIL)
         }
     };
     Ok(query.resolve(found))

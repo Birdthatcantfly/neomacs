@@ -351,10 +351,109 @@ impl NameAtomStorage {
     }
 }
 
+/// Character-count metadata used for GNU symbol-name identity.
+/// Threading: immutable numeric metadata, containing no Lisp state.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct SymbolNameCharacterCount(usize);
+
+impl From<&LispString> for SymbolNameCharacterCount {
+    fn from(name: &LispString) -> Self {
+        Self(name.schars())
+    }
+}
+
+impl From<&str> for SymbolNameCharacterCount {
+    fn from(name: &str) -> Self {
+        Self(if name.is_ascii() {
+            name.len()
+        } else {
+            name.chars().count()
+        })
+    }
+}
+
+/// Borrowed GNU symbol-name lookup metadata, before any string construction.
+///
+/// The declared character count and raw bytes remain distinct: constructing
+/// an empty multibyte name can coalesce its count to zero. Threading: queries
+/// stay confined to the borrowing mutator; no callback/GC point may outlive
+/// their source borrow. They own no Lisp references and add no TLS state.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SymbolNameQuery<'a> {
+    bytes: &'a [u8],
+    chars: SymbolNameCharacterCount,
+    _mutator: std::marker::PhantomData<*const ()>,
+}
+
+impl<'a> SymbolNameQuery<'a> {
+    pub(crate) fn new(
+        bytes: &'a [u8],
+        chars: crate::heap_types::GnuDeclaredCharacterCount,
+    ) -> Self {
+        Self {
+            bytes,
+            chars: SymbolNameCharacterCount(usize::from(chars)),
+            _mutator: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) fn as_bytes(self) -> &'a [u8] {
+        self.bytes
+    }
+
+    pub(crate) fn matches(self, name: &LispString) -> bool {
+        name.schars() == self.chars.0 && name.as_bytes() == self.bytes
+    }
+}
+
+impl<'a> From<&'a LispString> for SymbolNameQuery<'a> {
+    fn from(name: &'a LispString) -> Self {
+        Self {
+            bytes: name.as_bytes(),
+            chars: SymbolNameCharacterCount::from(name),
+            _mutator: std::marker::PhantomData,
+        }
+    }
+}
+
+static_assertions::assert_not_impl_any!(SymbolNameQuery<'static>: Send, Sync);
+
+/// A key referring only to append-only, immutable NameAtomStorage.
+/// GNU `oblookup` compares character count and bytes, ignoring the MB flag
+/// (`lread.c:4945`). This is deliberately separate from LispString Eq/Hash.
+/// Threading: the referenced atom never moves or mutates; registry locking
+/// serializes publication and map changes. It carries no mutator-owned Value.
+#[derive(Clone, Copy, Debug)]
+struct SymbolNameKey(NameAtomRef);
+
+impl SymbolNameKey {
+    fn name(self) -> &'static LispString {
+        self.0.0
+    }
+}
+
+impl PartialEq for SymbolNameKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.name().schars() == other.name().schars()
+            && self.name().as_bytes() == other.name().as_bytes()
+    }
+}
+
+impl Eq for SymbolNameKey {}
+
+impl Hash for SymbolNameKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name().as_bytes().hash(state);
+        SymbolNameCharacterCount::from(self.name()).hash(state);
+    }
+}
+
+static_assertions::assert_impl_all!(SymbolNameCharacterCount: Send, Sync);
+
 /// Append-only string interner used only for symbol names.
 pub struct StringInterner {
     strings: NameAtomStorage,
-    map: HashMap<NameAtomRef, NameId, FxBuildHasher>,
+    map: HashMap<SymbolNameKey, NameId, FxBuildHasher>,
 }
 
 static_assertions::assert_impl_all!(StringInterner: Send, Sync);
@@ -365,18 +464,14 @@ impl Default for StringInterner {
     }
 }
 
-/// Fold a symbol name to the representation symbol IDENTITY is decided on.
+/// Preserve the existing canonical atom storage for ordinary ASCII names.
 ///
-/// GNU's `oblookup` compares a name's char count, byte count and bytes, never
-/// its multibyte FLAG (lread.c), so an ascii-only multibyte spelling and its
-/// unibyte spelling name the same symbol. Folding ascii-only multibyte names to
-/// unibyte reproduces that on our flag-sensitive `LispString` comparison.
-///
-/// This is about identity ONLY. Which string object `symbol-name` returns is a
-/// separate question, answered by the name object a symbol was created from --
-/// GNU keeps that unfolded, multibyte flag and all.
+/// SymbolNameKey decides identity by SCHARS and bytes independently of this
+/// storage choice. Fold only when the declared count equals the byte count:
+/// supplied shorthand counts may differ even for ASCII payloads. The actual
+/// Lisp-visible symbol-name object retains its original MB flag/properties.
 pub(crate) fn normalize_symbol_name_lisp_string(s: &LispString) -> Cow<'_, LispString> {
-    if s.is_ascii() && s.is_multibyte() {
+    if s.schars() == s.sbytes() && s.is_ascii() && s.is_multibyte() {
         Cow::Owned(LispString::from_unibyte_slice(s.as_bytes()))
     } else {
         Cow::Borrowed(s)
@@ -401,22 +496,21 @@ impl StringInterner {
     }
 
     #[inline]
-    fn hash_name_parts(&self, bytes: &[u8], multibyte: bool) -> u64 {
-        // Keep this exactly aligned with `LispString::hash` so a borrowed
-        // byte/representation query lands in the canonical map's bucket.
+    fn hash_name_parts(&self, bytes: &[u8], chars: SymbolNameCharacterCount) -> u64 {
+        // Match SymbolNameKey::hash exactly for allocation-free raw queries.
         let mut hasher = self.map.hasher().build_hasher();
         bytes.hash(&mut hasher);
-        multibyte.hash(&mut hasher);
+        chars.hash(&mut hasher);
         hasher.finish()
     }
 
     #[inline]
-    fn lookup_name_parts(&self, bytes: &[u8], multibyte: bool) -> Option<NameId> {
-        let hash = self.hash_name_parts(bytes, multibyte);
+    fn lookup_name_parts(&self, bytes: &[u8], chars: SymbolNameCharacterCount) -> Option<NameId> {
+        let hash = self.hash_name_parts(bytes, chars);
         self.map
             .raw_entry()
             .from_hash(hash, |candidate| {
-                candidate.0.is_multibyte() == multibyte && candidate.0.as_bytes() == bytes
+                candidate.name().schars() == chars.0 && candidate.name().as_bytes() == bytes
             })
             .map(|(_, id)| *id)
     }
@@ -431,8 +525,8 @@ impl StringInterner {
 
     /// Intern a symbol-name atom, returning its unique id.
     pub fn intern(&mut self, s: &str) -> NameId {
-        let multibyte = !s.is_ascii();
-        if let Some(idx) = self.lookup_name_parts(s.as_bytes(), multibyte) {
+        let chars = SymbolNameCharacterCount::from(s);
+        if let Some(idx) = self.lookup_name_parts(s.as_bytes(), chars) {
             return idx;
         }
         let atom = Self::name_atom_from_str(s);
@@ -441,11 +535,10 @@ impl StringInterner {
 
     /// Intern a symbol-name atom from an exact Lisp string representation.
     pub fn intern_lisp_string(&mut self, s: &LispString) -> NameId {
-        let normalized = Self::normalize_symbol_name_lisp_string(s);
-        if let Some(idx) = self.lookup_name_parts(normalized.as_bytes(), normalized.is_multibyte())
-        {
+        if let Some(idx) = self.lookup_name_parts(s.as_bytes(), SymbolNameCharacterCount::from(s)) {
             return idx;
         }
+        let normalized = Self::normalize_symbol_name_lisp_string(s);
         let idx = NameId(self.strings.len() as u32);
         // `NameId(u32::MAX)` is reserved as the obarray empty-slot presence
         // sentinel (`symbol::SYMBOL_NAME_SENTINEL`): a `LispSymbol` slot is
@@ -459,7 +552,7 @@ impl StringInterner {
              obarray empty-slot presence sentinel (u32::MAX)",
         );
         let interned = self.strings.push(normalized.into_owned());
-        self.map.insert(interned, idx);
+        self.map.insert(SymbolNameKey(interned), idx);
         idx
     }
 
@@ -481,13 +574,13 @@ impl StringInterner {
             return self.intern_lisp_string(name);
         };
         let bytes = name.as_bytes();
-        let multibyte = name.is_multibyte();
+        let chars = SymbolNameCharacterCount::from(name);
         // One hash per name: the probe and the insert share it. The lookup
         // followed by `map.insert` hashed every new dump name twice -- 18K
         // names per load.
-        let hash = self.hash_name_parts(bytes, multibyte);
+        let hash = self.hash_name_parts(bytes, chars);
         match self.map.raw_entry_mut().from_hash(hash, |candidate| {
-            candidate.0.is_multibyte() == multibyte && candidate.0.as_bytes() == bytes
+            candidate.name().schars() == chars.0 && candidate.name().as_bytes() == bytes
         }) {
             hashbrown::hash_map::RawEntryMut::Occupied(entry) => *entry.get(),
             hashbrown::hash_map::RawEntryMut::Vacant(entry) => {
@@ -499,7 +592,7 @@ impl StringInterner {
                      obarray empty-slot presence sentinel (u32::MAX)",
                 );
                 let interned = self.strings.push(alias);
-                entry.insert_hashed_nocheck(hash, interned, idx);
+                entry.insert_hashed_nocheck(hash, SymbolNameKey(interned), idx);
                 idx
             }
         }
@@ -507,13 +600,17 @@ impl StringInterner {
 
     /// Look up a symbol-name atom without interning it.
     pub fn lookup(&self, s: &str) -> Option<NameId> {
-        self.lookup_name_parts(s.as_bytes(), !s.is_ascii())
+        self.lookup_name_parts(s.as_bytes(), SymbolNameCharacterCount::from(s))
     }
 
     /// Look up a symbol-name atom without interning it.
     pub fn lookup_lisp_string(&self, s: &LispString) -> Option<NameId> {
-        let normalized = Self::normalize_symbol_name_lisp_string(s);
-        self.lookup_name_parts(normalized.as_bytes(), normalized.is_multibyte())
+        self.lookup_name_parts(s.as_bytes(), SymbolNameCharacterCount::from(s))
+    }
+
+    /// Look up raw supplied metadata without first constructing a Lisp string.
+    pub(crate) fn lookup_name_query(&self, query: SymbolNameQuery<'_>) -> Option<NameId> {
+        self.lookup_name_parts(query.bytes, query.chars)
     }
 
     /// Resolve a name id back to its string. Panics if id is invalid.
@@ -1283,6 +1380,14 @@ pub fn intern_lisp_string(s: &LispString) -> SymId {
     registry.intern_lisp_string(s)
 }
 
+/// Look up supplied name metadata without changing its character count.
+#[inline]
+pub(crate) fn lookup_interned_name_query(query: SymbolNameQuery<'_>) -> Option<SymId> {
+    let registry = global_symbol_registry().read();
+    let name = registry.names.lookup_name_query(query)?;
+    registry.canonical_by_name.get(&name).copied()
+}
+
 /// Create an uninterned symbol using the global runtime symbol registry.
 /// Always creates a new unique SymId, never reuses an existing one.
 #[inline]
@@ -1964,3 +2069,7 @@ mod seed_prefix_tests;
 #[cfg(test)]
 #[path = "tests/gc_tls_ownership_test.rs"]
 mod gc_tls_ownership_tests;
+
+#[cfg(test)]
+#[path = "tests/declared_name_identity.rs"]
+mod declared_name_identity_tests;

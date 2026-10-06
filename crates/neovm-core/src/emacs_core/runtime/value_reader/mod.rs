@@ -20,7 +20,9 @@ use malachite::integer::Integer;
 // bytes_to_unibyte_storage_string and encode_nonunicode_char_for_storage
 // imports removed — using emacs_char + Vec<u8> directly
 use super::emacs_char;
-use crate::buffer::{Buffer, EmacsByteLen, EmacsBytePos, EmacsByteRange};
+use crate::buffer::{
+    Buffer, CharLen, CharPos0, CharRange, EmacsByteLen, EmacsBytePos, EmacsByteRange,
+};
 use crate::tagged::SymbolMode;
 use smallvec::SmallVec;
 use std::cell::Cell;
@@ -97,12 +99,16 @@ pub fn read_all_lisp_source(
     input: &crate::heap_types::LispString,
     obarray: &super::symbol::Obarray,
 ) -> Result<Vec<Value>, ReadError> {
-    let source = LispReadSource::new(input);
+    let range = CharRange::from_start_len(CharPos0::new(0), CharLen::new(input.schars()));
+    let range = CharacterReadRange::for_source(input, range, EmacsBytePos::ZERO)?;
+    let mut reader = Reader::new_lisp_string(input, LispReaderRange::Characters(range), obarray);
     let mut forms = Vec::new();
-    let mut pos = 0;
-    while let Some((form, next_pos)) = source.read_one(pos, obarray)? {
-        forms.push(form);
-        pos = next_pos;
+    while reader.skip_ws_and_comments() {
+        // GNU resets read_objects_map for every read; labels never cross forms.
+        reader.read_labels = ReadLabels::for_source(&reader.source);
+        reader.dot_syntax.set(None);
+        reader.step_cache.set(None);
+        forms.push(reader.read_form()?);
     }
     Ok(forms)
 }
@@ -131,7 +137,7 @@ pub fn read_one_with_source_multibyte(
         ReaderSourceSemantics::for_lisp_object(source_multibyte),
         obarray,
     );
-    reader.pos = start;
+    reader.advance_raw_to(EmacsBytePos::new(start));
     if !reader.skip_ws_and_comments() {
         return Ok(None);
     }
@@ -151,7 +157,7 @@ pub(crate) fn read_one_from_encoded_file_bytes(
 ) -> Result<Option<(Value, usize)>, ReadError> {
     let mut reader = Reader::new_file_bytes(input, obarray);
     reader.shorthands = shorthands.into();
-    reader.pos = start;
+    reader.advance_raw_to(EmacsBytePos::new(start));
     if !reader.skip_ws_and_comments() {
         return Ok(None);
     }
@@ -192,7 +198,7 @@ pub fn read_one_with_locate_syms_with_symbols(
         ReaderSourceSemantics::for_lisp_object(source_multibyte),
         obarray,
     );
-    reader.pos = start;
+    reader.advance_raw_to(EmacsBytePos::new(start));
     reader.readchar_offset_origin = ReadcharOffsetOrigin::RelativeToSourceByte(start);
     reader.symbol_position_mode = SymbolPositionMode::from(locate_syms);
     reader.symbol_mode = mode;
@@ -271,14 +277,14 @@ impl<'a> LispReadSource<'a> {
             "LispReadSource end {end} exceeds logical length {}",
             self.logical_len()
         );
-        let slice = self
-            .input
-            .slice(start, end)
-            .expect("LispReadSource range should stay within source");
+        // A preview is a validated BYTE span, even when the source's GNU
+        // declaration maps its endpoints to negative character coordinates.
+        // It does not construct a substring or carry text properties.
+        let slice = &self.input.as_bytes()[start..end];
         // Issue #131: this slice is only used for human-readable load/trace form
         // previews, so a lossy UTF-8 rendering (real PUA preserved, eight-bit ->
         // U+FFFD) is correct and avoids the buggy storage-string sentinels.
-        crate::emacs_core::emacs_char::to_utf8_lossy(slice.as_bytes())
+        crate::emacs_core::emacs_char::to_utf8_lossy(slice)
     }
 
     pub fn read_one(
@@ -295,7 +301,14 @@ impl<'a> LispReadSource<'a> {
         obarray: &super::symbol::Obarray,
         shorthands: Option<&ReadSymbolShorthands>,
     ) -> Result<Option<(Value, usize)>, ReadError> {
-        let mut reader = Reader::new_lisp_string(self.input, start, self.logical_len(), obarray);
+        let mut reader = Reader::new_lisp_string(
+            self.input,
+            LispReaderRange::Bytes(EmacsByteRange::new(
+                EmacsBytePos::new(start),
+                EmacsBytePos::new(self.logical_len()),
+            )),
+            obarray,
+        );
         reader.shorthands = shorthands.into();
         if !reader.skip_ws_and_comments() {
             return Ok(None);
@@ -310,7 +323,14 @@ impl<'a> LispReadSource<'a> {
         end: usize,
         obarray: &super::symbol::Obarray,
     ) -> Result<Option<(Value, usize)>, ReadError> {
-        let mut reader = Reader::new_lisp_string(self.input, start, end, obarray);
+        let mut reader = Reader::new_lisp_string(
+            self.input,
+            LispReaderRange::Bytes(EmacsByteRange::new(
+                EmacsBytePos::new(start),
+                EmacsBytePos::new(end),
+            )),
+            obarray,
+        );
         if !reader.skip_ws_and_comments() {
             return Ok(None);
         }
@@ -344,6 +364,50 @@ impl<'a> LispReadSource<'a> {
         )
     }
 
+    pub(crate) fn read_one_character_range_with_locate_syms(
+        &self,
+        range: CharacterReadRange<'a>,
+        symbol_position_mode: SymbolPositionMode,
+        obarray: &super::symbol::Obarray,
+        shorthands: ReadSymbolShorthandBinding<'_>,
+    ) -> Result<Option<(Value, CharPos0)>, ReadError> {
+        self.read_one_character_range_with_locate_syms_with_symbols(
+            range,
+            symbol_position_mode,
+            obarray,
+            shorthands,
+            SymbolMode::Bare,
+        )
+    }
+
+    /// Lisp START/END are logical character coordinates, not byte bounds.
+    pub(crate) fn read_one_character_range_with_locate_syms_with_symbols(
+        &self,
+        range: CharacterReadRange<'a>,
+        symbol_position_mode: SymbolPositionMode,
+        obarray: &super::symbol::Obarray,
+        shorthands: ReadSymbolShorthandBinding<'_>,
+        mode: SymbolMode,
+    ) -> Result<Option<(Value, CharPos0)>, ReadError> {
+        let mut reader =
+            Reader::new_lisp_string(self.input, LispReaderRange::Characters(range), obarray);
+        reader.symbol_position_mode = symbol_position_mode;
+        reader.symbol_mode = mode;
+        reader.shorthands = match shorthands {
+            ReadSymbolShorthandBinding::Unbound => ReaderShorthands::Unbound,
+            ReadSymbolShorthandBinding::Snapshot(snapshot) => ReaderShorthands::Snapshot(snapshot),
+        };
+        if !reader.skip_ws_and_comments() {
+            return Ok(None);
+        }
+        let value = reader.read_form()?;
+        let position = reader
+            .character_cursor
+            .position()
+            .ok_or_else(|| reader.ordinary_error("Character cursor unavailable for byte source"))?;
+        Ok(Some((value, position)))
+    }
+
     pub(crate) fn read_one_range_with_locate_syms_with_symbols(
         &self,
         start: usize,
@@ -353,7 +417,14 @@ impl<'a> LispReadSource<'a> {
         shorthands: Option<&ReadSymbolShorthands>,
         mode: SymbolMode,
     ) -> Result<Option<(Value, usize)>, ReadError> {
-        let mut reader = Reader::new_lisp_string(self.input, start, end, obarray);
+        let mut reader = Reader::new_lisp_string(
+            self.input,
+            LispReaderRange::Bytes(EmacsByteRange::new(
+                EmacsBytePos::new(start),
+                EmacsBytePos::new(end),
+            )),
+            obarray,
+        );
         reader.symbol_position_mode = symbol_position_mode;
         reader.symbol_mode = mode;
         reader.shorthands = shorthands.into();
@@ -409,22 +480,80 @@ impl ReadSymbolShorthands {
     pub(crate) fn rewrite(
         &self,
         name: &crate::heap_types::LispString,
-    ) -> Option<crate::heap_types::LispString> {
+    ) -> Result<Option<crate::heap_types::LispString>, ReadShorthandError> {
         let input = name.as_bytes();
         for (short, long) in &self.pairs {
             let short_bytes = short.as_bytes();
-            if input.starts_with(short_bytes) {
-                let mut rewritten = long.as_bytes().to_vec();
-                rewritten.extend_from_slice(&input[short_bytes.len()..]);
-                return Some(if name.is_multibyte() {
-                    crate::heap_types::LispString::from_emacs_bytes(rewritten)
-                } else {
-                    crate::heap_types::LispString::from_unibyte(rewritten)
-                });
+            if let Some(suffix) = input.strip_prefix(short_bytes) {
+                let capacity = long
+                    .sbytes()
+                    .checked_add(suffix.len())
+                    .filter(|&capacity| capacity <= isize::MAX as usize)
+                    .ok_or(crate::heap_types::GnuDeclaredCharacterCountError::TooLarge)?;
+                let mut rewritten = Vec::with_capacity(capacity);
+                rewritten.extend_from_slice(long.as_bytes());
+                rewritten.extend_from_slice(suffix);
+                if !name.is_multibyte() {
+                    // Keep the inherited UB representation. GNU contradictory
+                    // UB headers/padding require a separate registry/source
+                    // contract and are outside this bounded metadata repair.
+                    return Ok(Some(crate::heap_types::LispString::from_unibyte(rewritten)));
+                }
+                // GNU lread.c:5004 preserves this signed arithmetic when the
+                // reader calls make_specified_string (alloc.c:2273-2290).
+                let declared =
+                    long.schars() as i128 - short.schars() as i128 + name.schars() as i128;
+                let chars = match crate::heap_types::GnuDeclaredCharacterCount::try_from(declared) {
+                    Ok(chars) => chars,
+                    Err(crate::heap_types::GnuDeclaredCharacterCountError::Negative) => {
+                        recount_specified_multibyte_name(&rewritten)?
+                    }
+                    Err(error @ crate::heap_types::GnuDeclaredCharacterCountError::TooLarge) => {
+                        return Err(error.into());
+                    }
+                };
+                return Ok(Some(
+                    crate::heap_types::LispString::from_emacs_bytes_with_declared_chars(
+                        rewritten, chars,
+                    ),
+                ));
             }
         }
-        None
+        Ok(None)
     }
+}
+
+/// Invalid GNU specified-name construction metadata.
+/// Threading: immutable error data without Lisp references or callbacks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum ReadShorthandError {
+    #[error(transparent)]
+    CharacterCount(#[from] crate::heap_types::GnuDeclaredCharacterCountError),
+    #[error("Invalid multibyte symbol-name encoding during character recount")]
+    InvalidMultibyteRecount,
+}
+
+static_assertions::assert_impl_all!(ReadShorthandError: Send, Sync);
+
+/// GNU make_specified_string uses negative counts as a recount sentinel.
+/// Its strict scanner aborts on invalid sequences (character.c:519-535).
+/// This bounded scanner reports typed failure instead of a Rust panic.
+#[cold]
+fn recount_specified_multibyte_name(
+    bytes: &[u8],
+) -> Result<crate::heap_types::GnuDeclaredCharacterCount, ReadShorthandError> {
+    let mut remaining = bytes;
+    let mut count = 0usize;
+    while !remaining.is_empty() {
+        let width = emacs_char::multibyte_length(remaining, true)
+            .filter(|&width| width > 0 && width <= remaining.len())
+            .ok_or(ReadShorthandError::InvalidMultibyteRecount)?;
+        remaining = &remaining[width..];
+        count += 1;
+    }
+    Ok(crate::heap_types::GnuDeclaredCharacterCount::try_from(
+        count as i128,
+    )?)
 }
 
 // ---------------------------------------------------------------------------
@@ -526,6 +655,27 @@ impl ReaderEnvironment<'_> {
     }
 }
 
+/// Snapshot shorthand binding at Lisp string entry. A snapshot borrows
+/// owned LispString data under its existing Send/Sync contract, with no
+/// evaluator, callback, GC handle or TLS state. Optionality is converted
+/// only at inherited API boundaries.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ReadSymbolShorthandBinding<'a> {
+    Unbound,
+    Snapshot(&'a ReadSymbolShorthands),
+}
+
+static_assertions::assert_impl_all!(ReadSymbolShorthandBinding<'static>: Send, Sync);
+
+impl<'a> From<Option<&'a ReadSymbolShorthands>> for ReadSymbolShorthandBinding<'a> {
+    fn from(value: Option<&'a ReadSymbolShorthands>) -> Self {
+        match value {
+            None => Self::Unbound,
+            Some(snapshot) => Self::Snapshot(snapshot),
+        }
+    }
+}
+
 /// Shorthand binding lifetime: byte-backed input snapshots its binding; a
 /// callable may change it at every get/unget boundary in the current mutator.
 #[derive(Clone, Copy, Debug)]
@@ -548,14 +698,17 @@ impl ReaderShorthands<'_> {
     fn rewrite(
         self,
         name: &crate::heap_types::LispString,
-    ) -> Option<crate::heap_types::LispString> {
+    ) -> Result<Option<crate::heap_types::LispString>, ReadShorthandError> {
         match self {
-            Self::Unbound => None,
+            Self::Unbound => Ok(None),
             Self::Snapshot(shorthands) => shorthands.rewrite(name),
-            Self::LiveCallable(source) => source
+            Self::LiveCallable(source) => match source
                 .variable("read-symbol-shorthands")
                 .and_then(ReadSymbolShorthands::from_lisp_value)
-                .and_then(|shorthands| shorthands.rewrite(name)),
+            {
+                Some(shorthands) => shorthands.rewrite(name),
+                None => Ok(None),
+            },
         }
     }
 }
@@ -570,7 +723,7 @@ enum ReadLabels {
 }
 
 impl ReadLabels {
-    fn for_source(source: ReaderSource<'_>) -> Self {
+    fn for_source(source: &ReaderSource<'_>) -> Self {
         match source {
             ReaderSource::Callable(_) => Self::Callable(std::collections::HashMap::new()),
             ReaderSource::Runtime(_)
@@ -599,11 +752,249 @@ impl ReadLabels {
     }
 }
 
+/// A source range keeps byte-oriented load callers distinct from Lisp bounds.
+#[derive(Clone, Copy, Debug)]
+enum LispReaderRange<'a> {
+    Bytes(EmacsByteRange),
+    Characters(CharacterReadRange<'a>),
+}
+
+/// The original Lisp string and its payload belong to one mutator. The
+/// parser may own a snapshot, but GNU's position cache must retain this actual
+/// object identity and actual payload pointer (lread.c:433-437).
+#[derive(Clone, Copy, Debug)]
+struct OriginalStringReadSource<'a> {
+    identity: Value,
+    payload: &'a crate::heap_types::LispString,
+    _mutator: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum OriginalStringReadSourceError {
+    #[error("Original character reader source is not a Lisp string")]
+    NotString,
+}
+static_assertions::assert_impl_all!(OriginalStringReadSourceError: Send, Sync);
+
+impl<'a> TryFrom<&'a Value> for OriginalStringReadSource<'a> {
+    type Error = OriginalStringReadSourceError;
+
+    fn try_from(identity: &'a Value) -> Result<Self, Self::Error> {
+        let payload = identity
+            .as_lisp_string()
+            .ok_or(OriginalStringReadSourceError::NotString)?;
+        Ok(Self {
+            identity: *identity,
+            payload,
+            _mutator: std::marker::PhantomData,
+        })
+    }
+}
+static_assertions::assert_not_impl_any!(OriginalStringReadSource<'static>: Send, Sync);
+
+/// Detached byte-backed snapshots have no Lisp object identity. Native string
+/// character reads carry their original heap payload alongside the snapshot.
+/// Threading: original Lisp values/borrows cannot leave their current mutator;
+/// the existing context-owned position cache is reused, with no new TLS.
+#[derive(Clone, Copy, Debug)]
+enum OriginalStringCacheBinding<'a> {
+    Uncached,
+    Original(OriginalStringReadSource<'a>),
+}
+static_assertions::assert_not_impl_any!(OriginalStringCacheBinding<'static>: Send, Sync);
+
+/// Logical bounds paired with START's byte coordinate chosen at the entry
+/// boundary. An original binding retains the identity used by GNU unget.
+/// Threading: may borrow mutator-local heap data; never Send or Sync.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CharacterReadRange<'a> {
+    characters: CharRange,
+    start_byte: EmacsBytePos,
+    original: OriginalStringCacheBinding<'a>,
+}
+
+impl<'a> CharacterReadRange<'a> {
+    pub(crate) fn for_source(
+        source: &crate::heap_types::LispString,
+        characters: CharRange,
+        start_byte: EmacsBytePos,
+    ) -> Result<Self, ReadError> {
+        if characters.start().get() > characters.end().get()
+            || characters.end().get() > source.schars()
+            || start_byte.get() > source.sbytes()
+        {
+            return Err(ReadError {
+                message: "Character reader range exceeds source".into(),
+                position: start_byte.get(),
+                kind: ReadErrorKind::Error,
+                signal_symbol: None,
+                signal_data: Vec::new(),
+            });
+        }
+        Ok(Self {
+            characters,
+            start_byte,
+            original: OriginalStringCacheBinding::Uncached,
+        })
+    }
+
+    pub(crate) fn for_original(
+        identity: &'a Value,
+        characters: CharRange,
+        start_byte: EmacsBytePos,
+    ) -> Result<Self, ReadError> {
+        let original = OriginalStringReadSource::try_from(identity).map_err(|error| ReadError {
+            message: error.to_string(),
+            position: start_byte.get(),
+            kind: ReadErrorKind::Error,
+            signal_symbol: None,
+            signal_data: Vec::new(),
+        })?;
+        let mut range = Self::for_source(original.payload, characters, start_byte)?;
+        range.original = OriginalStringCacheBinding::Original(original);
+        Ok(range)
+    }
+}
+static_assertions::assert_not_impl_any!(CharacterReadRange<'static>: Send, Sync);
+
+/// Logical source progress without rescanning a normal source at creation.
+/// PhysicalEnd is a proof that the requested character count is at least the
+/// remaining byte length: every bounded decode consumes at least one byte.
+/// Threading: immutable numeric units except for reader-local cursor updates;
+/// no Lisp state, heap reference, callback or TLS cache.
+#[derive(Clone, Copy, Debug)]
+enum SourceCharacterCursor {
+    Bytes,
+    PhysicalEnd { position: CharPos0, end: CharPos0 },
+    CharacterEnd { position: CharPos0, end: CharPos0 },
+}
+
+impl SourceCharacterCursor {
+    fn for_character_range(range: CharRange, available_bytes: EmacsByteLen) -> Self {
+        if range.len().get() >= available_bytes.get() {
+            Self::PhysicalEnd {
+                position: range.start(),
+                end: range.end(),
+            }
+        } else {
+            Self::CharacterEnd {
+                position: range.start(),
+                end: range.end(),
+            }
+        }
+    }
+
+    #[inline]
+    fn permits_offset(self, offset: CharLen) -> bool {
+        match self {
+            Self::Bytes | Self::PhysicalEnd { .. } => true,
+            Self::CharacterEnd { position, end } => {
+                offset.get() < end.get().saturating_sub(position.get())
+            }
+        }
+    }
+
+    #[inline]
+    fn ascii_limit(self, byte: EmacsBytePos, limit: EmacsBytePos) -> EmacsBytePos {
+        match self {
+            Self::Bytes | Self::PhysicalEnd { .. } => limit,
+            Self::CharacterEnd { position, end } => EmacsBytePos::new(
+                limit.get().min(
+                    byte.get()
+                        .saturating_add(end.get().saturating_sub(position.get())),
+                ),
+            ),
+        }
+    }
+
+    #[inline]
+    fn advance(&mut self, chars: CharLen) {
+        match self {
+            Self::Bytes => {}
+            Self::PhysicalEnd { position, .. } => *position = position.add_len(chars),
+            Self::CharacterEnd { position, end } => {
+                *position =
+                    CharPos0::new(position.get().saturating_add(chars.get()).min(end.get()));
+            }
+        }
+    }
+
+    /// Rare physical-EOF check: admit only initialized byte SBYTES, and
+    /// only while the requested logical interval still contains this step.
+    fn permits_initialized_terminator(self, offset: CharLen) -> bool {
+        match self {
+            Self::Bytes => false,
+            Self::PhysicalEnd { position, end } | Self::CharacterEnd { position, end } => {
+                offset.get() < end.get().saturating_sub(position.get())
+            }
+        }
+    }
+
+    fn after_unread_at(self, byte: EmacsBytePos, limit: EmacsBytePos) -> Self {
+        match self {
+            Self::Bytes => Self::Bytes,
+            Self::PhysicalEnd { position, end } | Self::CharacterEnd { position, end } => {
+                Self::for_character_range(
+                    CharRange::from_start_len(
+                        position,
+                        CharLen::new(end.get().saturating_sub(position.get())),
+                    ),
+                    EmacsByteLen::new(limit.get().saturating_sub(byte.get())),
+                )
+            }
+        }
+    }
+
+    #[inline]
+    fn position(self) -> Option<CharPos0> {
+        match self {
+            Self::Bytes => None,
+            Self::PhysicalEnd { position, .. } | Self::CharacterEnd { position, .. } => {
+                Some(position)
+            }
+        }
+    }
+}
+
+/// Validated internal source spans. InitializedTerminator carries only the
+/// physical payload interval; rendering appends exactly GNU's initialized NUL.
+/// Threading: numeric positions only, with no Lisp value or callback state.
+#[derive(Clone, Copy, Debug)]
+enum ReaderSourceSpan {
+    Payload(EmacsByteRange),
+    InitializedTerminator(EmacsByteRange),
+}
+static_assertions::assert_impl_all!(ReaderSourceSpan: Send, Sync);
+
+/// Both coordinate domains must be restored when GNU unreads an error char.
+#[derive(Clone, Copy, Debug)]
+struct ReaderCursorCheckpoint {
+    byte: EmacsBytePos,
+    characters: SourceCharacterCursor,
+}
+
+static_assertions::assert_not_impl_any!(LispReaderRange<'static>: Send, Sync);
+static_assertions::assert_impl_all!(SourceCharacterCursor: Send, Sync);
+static_assertions::assert_impl_all!(ReaderCursorCheckpoint: Send, Sync);
+
+/// GNU's dot probe unreads the character after '.', before the grammar
+/// consumes the period. A changed byte mapping is resumed when that period is
+/// consumed; both domains remain paired. Pure numeric reader-local metadata.
+#[derive(Clone, Copy, Debug)]
+struct DotUnreadCursor {
+    period: EmacsBytePos,
+    after_period: ReaderCursorCheckpoint,
+}
+static_assertions::assert_impl_all!(DotUnreadCursor: Send, Sync);
+
 struct Reader<'a> {
     source: ReaderSource<'a>,
     source_semantics: ReaderSourceSemantics,
     pos: usize,
     limit: usize,
+    character_cursor: SourceCharacterCursor,
+    original_string: OriginalStringCacheBinding<'a>,
+    dot_unread: Cell<Option<DotUnreadCursor>>,
     /// `#N=EXPR` / `#N#` read labels for shared structure in `.elc` files.
     read_labels: ReadLabels,
     /// Materialization mode for reader symbols and their source positions.
@@ -808,7 +1199,10 @@ impl<'a> Reader<'a> {
             source_semantics,
             pos: 0,
             limit: input.len(),
-            read_labels: ReadLabels::for_source(ReaderSource::Runtime(input)),
+            character_cursor: SourceCharacterCursor::Bytes,
+            original_string: OriginalStringCacheBinding::Uncached,
+            dot_unread: Cell::new(None),
+            read_labels: ReadLabels::for_source(&ReaderSource::Runtime(input)),
             symbol_position_mode: SymbolPositionMode::Bare,
             symbol_mode: SymbolMode::Bare,
             readchar_offset_origin: ReadcharOffsetOrigin::RelativeToSourceByte(0),
@@ -829,7 +1223,10 @@ impl<'a> Reader<'a> {
             source_semantics: ReaderSourceSemantics::EncodedFileBytes,
             pos: 0,
             limit: input.len(),
-            read_labels: ReadLabels::for_source(ReaderSource::FileBytes(input)),
+            character_cursor: SourceCharacterCursor::Bytes,
+            original_string: OriginalStringCacheBinding::Uncached,
+            dot_unread: Cell::new(None),
+            read_labels: ReadLabels::for_source(&ReaderSource::FileBytes(input)),
             symbol_position_mode: SymbolPositionMode::Bare,
             symbol_mode: SymbolMode::Bare,
             readchar_offset_origin: ReadcharOffsetOrigin::RelativeToSourceByte(0),
@@ -842,10 +1239,28 @@ impl<'a> Reader<'a> {
 
     fn new_lisp_string(
         input: &'a crate::heap_types::LispString,
-        start: usize,
-        end: usize,
+        range: LispReaderRange<'a>,
         obarray: &'a super::symbol::Obarray,
     ) -> Self {
+        let (start, end, character_cursor, original_string) = match range {
+            LispReaderRange::Bytes(bytes) => (
+                bytes.start().get(),
+                bytes.end().get(),
+                SourceCharacterCursor::Bytes,
+                OriginalStringCacheBinding::Uncached,
+            ),
+            LispReaderRange::Characters(range) => {
+                // GNU read_internal_start computes cached START's byte position
+                // but retains END as characters (lread.c:2554-2560).
+                let start = range.start_byte.get();
+                let end = input.sbytes();
+                let cursor = SourceCharacterCursor::for_character_range(
+                    range.characters,
+                    EmacsByteLen::new(end.saturating_sub(start)),
+                );
+                (start, end, cursor, range.original)
+            }
+        };
         assert!(start <= end, "invalid Lisp reader range: {start}..{end}");
         assert!(
             end <= input.sbytes(),
@@ -857,7 +1272,10 @@ impl<'a> Reader<'a> {
             source_semantics: ReaderSourceSemantics::for_lisp_object(input.is_multibyte()),
             pos: start,
             limit: end,
-            read_labels: ReadLabels::for_source(ReaderSource::LispString(input)),
+            character_cursor,
+            original_string,
+            dot_unread: Cell::new(None),
+            read_labels: ReadLabels::for_source(&ReaderSource::LispString(input)),
             symbol_position_mode: SymbolPositionMode::Bare,
             symbol_mode: SymbolMode::Bare,
             readchar_offset_origin: ReadcharOffsetOrigin::RelativeToSourceByte(start),
@@ -887,7 +1305,10 @@ impl<'a> Reader<'a> {
             source_semantics: ReaderSourceSemantics::for_lisp_object(input.get_multibyte()),
             pos: start,
             limit: end,
-            read_labels: ReadLabels::for_source(ReaderSource::Buffer(input)),
+            character_cursor: SourceCharacterCursor::Bytes,
+            original_string: OriginalStringCacheBinding::Uncached,
+            dot_unread: Cell::new(None),
+            read_labels: ReadLabels::for_source(&ReaderSource::Buffer(input)),
             symbol_position_mode: SymbolPositionMode::Bare,
             symbol_mode: SymbolMode::Bare,
             readchar_offset_origin: match readchar_offset_origin {
@@ -911,11 +1332,15 @@ impl<'a> Reader<'a> {
         loop {
             if let Some(src) = self.byte_backed_source() {
                 let mut p = self.pos;
+                let ascii_end = self.ascii_limit(EmacsBytePos::new(src.len()));
                 loop {
-                    while p < src.len() && src[p] <= 32 {
+                    while p < ascii_end && src[p] <= 32 {
                         p += 1;
                     }
-                    if p < src.len() && src[p] == b';' {
+                    if p < src.len()
+                        && src[p] == b';'
+                        && matches!(self.character_cursor, SourceCharacterCursor::Bytes)
+                    {
                         match memchr::memchr(b'\n', &src[p..]) {
                             Some(off) => {
                                 p += off + 1;
@@ -926,7 +1351,7 @@ impl<'a> Reader<'a> {
                     }
                     break;
                 }
-                self.pos = p;
+                self.advance_ascii_to(EmacsBytePos::new(p));
             }
             let Some(ch) = self.current_code() else {
                 return false;
@@ -938,6 +1363,28 @@ impl<'a> Reader<'a> {
             if ch == b';' as u32 {
                 // Line comment
                 while let Some(c) = self.current_code() {
+                    if let Some(src) = self.byte_backed_source() {
+                        let end = self.ascii_limit(EmacsBytePos::new(src.len()));
+                        let span = &src[self.pos..end];
+                        let newline = memchr::memchr(b'\n', span);
+                        let candidate = newline.map_or(end, |offset| self.pos + offset + 1);
+                        let prefix = &src[self.pos..candidate];
+                        if !prefix.is_empty() && prefix.is_ascii() {
+                            self.advance_ascii_to(EmacsBytePos::new(candidate));
+                            if newline.is_some() {
+                                break;
+                            }
+                            continue;
+                        }
+                        let ascii = prefix
+                            .iter()
+                            .position(|byte| *byte >= 0x80)
+                            .unwrap_or(prefix.len());
+                        if ascii > 0 {
+                            self.advance_ascii_to(EmacsBytePos::new(self.pos + ascii));
+                            continue;
+                        }
+                    }
                     self.bump();
                     if c == b'\n' as u32 {
                         break;
@@ -1199,6 +1646,24 @@ impl<'a> Reader<'a> {
                 .unwrap_or(EmacsBytePos::new(self.pos));
             let _ = source.unread(next);
             self.step_cache.set(None);
+        } else if matches!(self.original_string,
+                OriginalStringCacheBinding::Original(original)
+                    if original.payload.schars() != original.payload.sbytes())
+            && following.is_some()
+            && let Some(position) = self.character_cursor.position()
+            && let Some(mapped) = self.original_unread_byte(position.add_len(CharLen::new(1)))
+            && self.next_pos(self.pos) != Some(mapped.get())
+        {
+            let mut characters = self.character_cursor;
+            characters.advance(CharLen::new(1));
+            characters = characters.after_unread_at(mapped, EmacsBytePos::new(self.limit));
+            self.dot_unread.set(Some(DotUnreadCursor {
+                period: EmacsBytePos::new(self.pos),
+                after_period: ReaderCursorCheckpoint {
+                    byte: mapped,
+                    characters,
+                },
+            }));
         }
         let syntax = match following {
             None => DotSyntax::TailMarker,
@@ -1281,7 +1746,8 @@ impl<'a> Reader<'a> {
             if let Some(src) = byte_source {
                 let start = self.pos;
                 let mut p = start;
-                while p < src.len() {
+                let ascii_end = self.ascii_limit(EmacsBytePos::new(src.len()));
+                while p < ascii_end {
                     let b = src[p];
                     if b >= 0x80 || b == b'"' || b == b'\\' {
                         break;
@@ -1290,7 +1756,7 @@ impl<'a> Reader<'a> {
                 }
                 if p > start {
                     buf.extend_from_slice(&src[start..p]);
-                    self.pos = p;
+                    self.advance_ascii_to(EmacsBytePos::new(p));
                 }
             }
             let Some(ch) = self.current_code() else {
@@ -1707,7 +2173,7 @@ impl<'a> Reader<'a> {
                 self.bump();
                 let token = self.read_symbol_token()?;
                 if token.bytes.is_empty() {
-                    return Ok(self.intern_empty_symbol());
+                    return self.intern_empty_symbol();
                 }
                 let name = token.to_lisp_string();
                 Ok(Value::from_sym_id(super::intern::intern_lisp_value(
@@ -1786,12 +2252,12 @@ impl<'a> Reader<'a> {
                 if self.current_code() != Some(b'[' as u32) {
                     // GNU buffers the offending character, then unreads it
                     // before signalling (src/lread.c:3889-3906).
-                    let offending_position = self.pos;
+                    let offending_position = self.cursor_checkpoint();
                     if self.current_code().is_some() {
                         self.bump();
                     }
-                    let message = self.source_slice_string(syntax_start, self.pos);
-                    self.pos = offending_position;
+                    let message = self.source_syntax_string(syntax_start, self.pos);
+                    self.restore_cursor(offending_position);
                     self.unread_source_lookahead()?;
                     return Err(self.error(&message));
                 }
@@ -1864,7 +2330,7 @@ impl<'a> Reader<'a> {
             x if x == b'#' as u32 => {
                 // ## — symbol with empty name.
                 self.bump();
-                Ok(self.intern_empty_symbol())
+                self.intern_empty_symbol()
             }
             x if x == b'b' as u32 || x == b'B' as u32 => {
                 // #b... binary integer
@@ -1892,7 +2358,7 @@ impl<'a> Reader<'a> {
                     // that character while the stream leaves it unconsumed
                     // (e.g. "#s[").  Mirror that: append the consumed character
                     // to the "#s" prefix, or report just "#s" at end of input.
-                    let offending_position = self.pos;
+                    let offending_position = self.cursor_checkpoint();
                     let mut message = String::from("#s");
                     if let Some(code) = self.current_code() {
                         self.bump();
@@ -1900,8 +2366,11 @@ impl<'a> Reader<'a> {
                             message.push(ch);
                         }
                     }
-                    self.pos = offending_position;
+                    self.restore_cursor(offending_position);
                     self.unread_source_lookahead()?;
+                    if let Some(nul) = message.find('\0') {
+                        message.truncate(nul);
+                    }
                     Err(self.error(&message))
                 }
             }
@@ -1921,7 +2390,7 @@ impl<'a> Reader<'a> {
                             .checked_mul(10)
                             .and_then(|value| value.checked_add(i64::from(d as u8 - b'0')))
                             .ok_or_else(|| {
-                                self.error(&self.source_slice_string(syntax_start, self.pos))
+                                self.error(&self.source_syntax_string(syntax_start, self.pos))
                             })?;
                     } else {
                         break;
@@ -1977,10 +2446,10 @@ impl<'a> Reader<'a> {
                     {
                         // #N# — reference previously defined label N
                         self.read_labels.get(&label).copied().ok_or_else(|| {
-                            self.error(&self.source_slice_string(syntax_start, self.pos))
+                            self.error(&self.source_syntax_string(syntax_start, self.pos))
                         })
                     }
-                    _ => Err(self.error(&self.source_slice_string(syntax_start, self.pos))),
+                    _ => Err(self.error(&self.source_syntax_string(syntax_start, self.pos))),
                 }
             }
             _ => Err(self.error_after_current(&format!("#{}", source_code_for_error(ch)))),
@@ -2116,8 +2585,9 @@ impl<'a> Reader<'a> {
             }
         }
 
+        let digits_end = self.pos;
         self.unread_source_lookahead()?;
-        let digits_source = self.source_slice_string(start, self.pos);
+        let digits_source = self.source_slice_string(start, digits_end);
         let digits: String = digits_source
             .chars()
             .filter(|c| *c != '-' && *c != '+')
@@ -2345,7 +2815,7 @@ impl<'a> Reader<'a> {
 
             // Emacs reader shorthand: bare ## reads as the symbol with empty name.
             if token_text == "##" && token.quoting == SymbolQuoting::Plain {
-                return Ok(self.intern_empty_symbol());
+                return self.intern_empty_symbol();
             }
         }
 
@@ -2370,7 +2840,7 @@ impl<'a> Reader<'a> {
 
         // Cold path: non-ASCII / escaped / shorthand-rewritten symbols keep the
         // exact LispString encoding.
-        let name = self.to_lisp_string_for_token(&token);
+        let name = self.to_lisp_string_for_token(&token)?;
         let id = super::intern::lookup_interned_lisp_string(&name)
             .unwrap_or_else(|| super::intern::intern_lisp_value(Value::heap_string(name)));
         Ok(Value::from_sym_id(id))
@@ -2380,19 +2850,26 @@ impl<'a> Reader<'a> {
     /// (GNU lread.c:3851, 3999). Rewritten builtin names are multibyte
     /// (lread.c:4793-4796), independently of the reader source encoding.
     #[cold]
-    fn intern_empty_symbol(&self) -> Value {
+    fn intern_empty_symbol(&self) -> Result<Value, ReadError> {
         let empty = crate::heap_types::LispString::from_emacs_bytes(Vec::new());
-        match self.shorthands.rewrite(&empty) {
+        let rewritten = self
+            .shorthands
+            .rewrite(&empty)
+            .map_err(|error| self.ordinary_error(&error.to_string()))?;
+        Ok(match rewritten {
             Some(name) => {
                 Value::from_sym_id(super::intern::intern_lisp_value(Value::heap_string(name)))
             }
             None => Value::from_sym_id(intern("")),
-        }
+        })
     }
 
     /// Build the token's exact `LispString` name, applying any active reader
     /// shorthand rewrite (`read-symbol-shorthands`).
-    fn to_lisp_string_for_token(&self, token: &ReaderToken) -> crate::heap_types::LispString {
+    fn to_lisp_string_for_token(
+        &self,
+        token: &ReaderToken,
+    ) -> Result<crate::heap_types::LispString, ReadError> {
         let name = token.to_lisp_string();
         // GNU exempts only names made entirely of core operator constituents
         // (lread.c:3545-3552, 4222-4229), including escaped spellings.
@@ -2402,22 +2879,37 @@ impl<'a> Reader<'a> {
                 b'^' | b'*' | b'+' | b'-' | b'/' | b'<' | b'=' | b'>' | b'_' | b'|'
             )
         }) {
-            return name;
+            return Ok(name);
         }
-        self.shorthands.rewrite(&name).unwrap_or(name)
+        Ok(self
+            .shorthands
+            .rewrite(&name)
+            .map_err(|error| self.ordinary_error(&error.to_string()))?
+            .unwrap_or(name))
     }
 
     fn read_symbol_token(&mut self) -> Result<ReaderToken, ReadError> {
         let mut bytes = ReaderTokenBytes::new();
         let mut quoting = SymbolQuoting::Plain;
         let byte_source = self.byte_backed_source();
+        if self
+            .dot_unread
+            .get()
+            .is_some_and(|pending| pending.period.get() == self.pos)
+        {
+            // GNU already buffered this period before probing/unreading the
+            // next character. Consume it once before the ordinary token run.
+            self.push_symbol_token_code(&mut bytes, u32::from(b'.'));
+            self.bump();
+        }
         loop {
             // The ASCII run of the token in one copy; an escape, a non-ASCII
             // character or the delimiter is left to the per-character step.
             if let Some(src) = byte_source {
                 let start = self.pos;
                 let mut p = start;
-                while p < src.len() {
+                let ascii_end = self.ascii_limit(EmacsBytePos::new(src.len()));
+                while p < ascii_end {
                     let b = src[p];
                     if b >= 0x80 || b == b'\\' || is_symbol_delimiter_code(u32::from(b)) {
                         break;
@@ -2426,7 +2918,7 @@ impl<'a> Reader<'a> {
                 }
                 if p > start {
                     bytes.extend_from_slice(&src[start..p]);
-                    self.pos = p;
+                    self.advance_ascii_to(EmacsBytePos::new(p));
                 }
             }
             let Some(ch) = self.current_code() else {
@@ -2491,9 +2983,9 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Match GNU unreadchar for peeks made by the grammar. Byte-backed
-    /// sources retain their ordinary cursor; a callable's cached lookahead
-    /// is evicted and its Lisp unget function is called at this boundary.
+    /// Match GNU unreadchar for actual grammar lookahead. Callable input
+    /// invokes Lisp unget; original string input remaps through its position
+    /// cache. Detached byte-backed sources retain their byte cursor.
     fn unread_source_lookahead(&mut self) -> Result<(), ReadError> {
         if let ReaderSource::Callable(source) = self.source {
             let outcome = source.unread(EmacsBytePos::new(self.pos));
@@ -2501,24 +2993,135 @@ impl<'a> Reader<'a> {
             // The source retains the original Flow. Stop immediately before
             // any Lisp object is constructed; finish returns that Flow.
             outcome.map_err(|_| self.end_of_file_error())?;
+        } else if matches!(self.original_string,
+                OriginalStringCacheBinding::Original(original)
+                    if original.payload.schars() != original.payload.sbytes())
+            && self.current_code().is_some()
+            && let Some(position) = self.character_cursor.position()
+            && let Some(byte) = self.original_unread_byte(position)
+        {
+            // GNU readchar has consumed the lookahead, then unreadchar
+            // decrements to this same logical position and remaps its byte
+            // coordinate through the ORIGINAL source's shared cache.
+            self.pos = byte.get();
+            self.character_cursor = self
+                .character_cursor
+                .after_unread_at(byte, EmacsBytePos::new(self.limit));
+            self.step_cache.set(None);
+            self.dot_syntax.set(None);
+            self.dot_unread.set(None);
         }
         Ok(())
     }
 
+    /// Called only for an actual lookahead: GNU unreadchar(-1) does not
+    /// update the source/cache. Equal-count byte strings need no cache walk.
+    #[cold]
+    #[inline(never)]
+    fn original_unread_byte(&self, position: CharPos0) -> Option<EmacsBytePos> {
+        match self.original_string {
+            OriginalStringCacheBinding::Uncached => None,
+            OriginalStringCacheBinding::Original(original) => {
+                if original.payload.schars() == original.payload.sbytes() {
+                    return None;
+                }
+                Some(EmacsBytePos::new(
+                    crate::emacs_core::string_pos_cache::string_char_to_byte(
+                        original.identity,
+                        original.payload,
+                        position.get(),
+                    ),
+                ))
+            }
+        }
+    }
+
+    fn cursor_checkpoint(&self) -> ReaderCursorCheckpoint {
+        ReaderCursorCheckpoint {
+            byte: EmacsBytePos::new(self.pos),
+            characters: self.character_cursor,
+        }
+    }
+
+    fn restore_cursor(&mut self, checkpoint: ReaderCursorCheckpoint) {
+        self.pos = checkpoint.byte.get();
+        self.character_cursor = checkpoint.characters;
+        self.dot_syntax.set(None);
+        self.dot_unread.set(None);
+        self.step_cache.set(None);
+    }
+
+    #[inline]
+    fn advance_ascii_to(&mut self, next: EmacsBytePos) {
+        self.character_cursor
+            .advance(CharLen::new(next.get().saturating_sub(self.pos)));
+        self.pos = next.get();
+    }
+
+    #[inline]
+    fn advance_decoded_to(&mut self, next: EmacsBytePos) {
+        self.character_cursor.advance(CharLen::new(1));
+        self.pos = next.get();
+    }
+
+    /// Raw positioning is used only by explicitly byte-domain sources.
+    #[inline]
+    fn advance_raw_to(&mut self, next: EmacsBytePos) {
+        self.pos = next.get();
+    }
+
+    #[inline]
+    fn ascii_limit(&self, end: EmacsBytePos) -> usize {
+        self.character_cursor
+            .ascii_limit(EmacsBytePos::new(self.pos), end)
+            .get()
+    }
+
+    #[inline]
     fn current_code(&self) -> Option<u32> {
-        self.source_code_at(self.pos)
+        self.character_cursor
+            .permits_offset(CharLen::new(0))
+            .then(|| self.source_code_at(self.pos, CharLen::ZERO))
+            .flatten()
     }
 
     fn peek_code_at(&self, offset: usize) -> Option<u32> {
-        let mut pos = self.pos;
-        for _ in 0..offset {
-            pos = self.next_pos(pos)?;
+        if !self.character_cursor.permits_offset(CharLen::new(offset)) {
+            return None;
         }
-        self.source_code_at(pos)
+        let mut pos = self.pos;
+        for step in 0..offset {
+            pos = self.next_pos(pos).or_else(|| {
+                self.initialized_terminator_next(EmacsBytePos::new(pos), CharLen::new(step))
+                    .map(EmacsBytePos::get)
+            })?;
+        }
+        self.source_code_at(pos, CharLen::new(offset))
     }
 
+    #[inline]
     fn bump(&mut self) {
-        self.pos = self.next_pos(self.pos).unwrap_or(self.limit);
+        if !self.character_cursor.permits_offset(CharLen::new(0)) {
+            return;
+        }
+        if let Some(pending) = self.dot_unread.take()
+            && pending.period.get() == self.pos
+        {
+            self.restore_cursor(pending.after_period);
+            return;
+        }
+        let next = self.next_pos(self.pos).or_else(|| {
+            self.initialized_terminator_next(EmacsBytePos::new(self.pos), CharLen::ZERO)
+                .map(EmacsBytePos::get)
+        });
+        match next {
+            Some(next) => self.advance_decoded_to(EmacsBytePos::new(next)),
+            None => match self.character_cursor {
+                SourceCharacterCursor::Bytes => self.advance_raw_to(EmacsBytePos::new(self.limit)),
+                SourceCharacterCursor::PhysicalEnd { .. }
+                | SourceCharacterCursor::CharacterEnd { .. } => {}
+            },
+        }
     }
 
     fn error(&self, message: &str) -> ReadError {
@@ -2583,13 +3186,36 @@ impl<'a> Reader<'a> {
         match self.source {
             ReaderSource::Callable(source) => {
                 while let Some((_, next)) = source.code_and_next(EmacsBytePos::new(self.pos)) {
-                    self.pos = next.get();
+                    self.advance_decoded_to(next);
                 }
             }
-            ReaderSource::Runtime(_)
-            | ReaderSource::FileBytes(_)
-            | ReaderSource::LispString(_)
-            | ReaderSource::Buffer(_) => self.pos = self.limit,
+            ReaderSource::Runtime(_) | ReaderSource::FileBytes(_) | ReaderSource::Buffer(_) => {
+                self.advance_raw_to(EmacsBytePos::new(self.limit))
+            }
+            ReaderSource::LispString(_) => match self.character_cursor {
+                SourceCharacterCursor::Bytes => self.advance_raw_to(EmacsBytePos::new(self.limit)),
+                SourceCharacterCursor::PhysicalEnd { .. }
+                | SourceCharacterCursor::CharacterEnd { .. } => {
+                    while self.current_code().is_some() {
+                        if let Some(src) = self.byte_backed_source() {
+                            let end = self.ascii_limit(EmacsBytePos::new(src.len()));
+                            let span = &src[self.pos..end];
+                            let ascii = if span.is_ascii() {
+                                span.len()
+                            } else {
+                                span.iter()
+                                    .position(|byte| *byte >= 0x80)
+                                    .unwrap_or(span.len())
+                            };
+                            if ascii > 0 {
+                                self.advance_ascii_to(EmacsBytePos::new(self.pos + ascii));
+                                continue;
+                            }
+                        }
+                        self.bump();
+                    }
+                }
+            },
         }
     }
 
@@ -2611,7 +3237,7 @@ impl<'a> Reader<'a> {
                     let Some((_, next)) = source.code_and_next(EmacsBytePos::new(self.pos)) else {
                         return Err(self.end_of_file_error());
                     };
-                    self.pos = next.get();
+                    self.advance_decoded_to(next);
                 }
                 Ok(())
             }
@@ -2625,7 +3251,7 @@ impl<'a> Reader<'a> {
                 if end > self.limit {
                     return Err(self.error("byte skip past end of input"));
                 }
-                self.pos = end;
+                self.advance_raw_to(EmacsBytePos::new(end));
                 Ok(())
             }
             ReaderSource::Runtime(input) => {
@@ -2637,7 +3263,7 @@ impl<'a> Reader<'a> {
                         None => return Err(self.error("byte skip past end of input")),
                     }
                 }
-                self.pos += bytes_advanced;
+                self.advance_raw_to(EmacsBytePos::new(self.pos + bytes_advanced));
                 Ok(())
             }
             ReaderSource::LispString(_) => {
@@ -2648,7 +3274,15 @@ impl<'a> Reader<'a> {
                 if end > self.limit {
                     return Err(self.error("byte skip past end of input"));
                 }
-                self.pos = end;
+                while self.pos < end {
+                    if self.current_code().is_none() {
+                        return Err(self.end_of_file_error());
+                    }
+                    self.bump();
+                }
+                if self.pos != end {
+                    return Err(self.error("byte skip is not a character boundary"));
+                }
                 Ok(())
             }
             ReaderSource::Buffer(_) => {
@@ -2659,14 +3293,39 @@ impl<'a> Reader<'a> {
                 if end > self.limit {
                     return Err(self.error("byte skip past end of input"));
                 }
-                self.pos = end;
+                self.advance_raw_to(EmacsBytePos::new(end));
                 Ok(())
             }
         }
     }
 
-    fn source_code_at(&self, pos: usize) -> Option<u32> {
-        self.code_and_next(pos).map(|(code, _)| code)
+    #[inline]
+    fn source_code_at(&self, pos: usize, offset: CharLen) -> Option<u32> {
+        self.code_and_next(pos).map(|(code, _)| code).or_else(|| {
+            self.initialized_terminator_next(EmacsBytePos::new(pos), offset)
+                .map(|_| 0)
+        })
+    }
+
+    /// The only modeled byte outside the payload is its initialized NUL
+    /// (GNU alloc.c:1812). Byte ranges/files/buffers/callables never use it.
+    /// The logical range gates admission, and equality prevents a second
+    /// virtual step or any access to unspecified GNU padding beyond it.
+    #[cold]
+    fn initialized_terminator_next(
+        &self,
+        pos: EmacsBytePos,
+        offset: CharLen,
+    ) -> Option<EmacsBytePos> {
+        match self.source {
+            ReaderSource::LispString(_) => (pos.get() == self.limit
+                && self.character_cursor.permits_initialized_terminator(offset))
+            .then(|| pos.add_len(EmacsByteLen::new(1))),
+            ReaderSource::Runtime(_)
+            | ReaderSource::FileBytes(_)
+            | ReaderSource::Buffer(_)
+            | ReaderSource::Callable(_) => None,
+        }
     }
 
     fn next_pos(&self, pos: usize) -> Option<usize> {
@@ -2821,13 +3480,54 @@ impl<'a> Reader<'a> {
         Some((code, width))
     }
 
-    fn source_slice_string(&self, start: usize, end: usize) -> String {
-        assert!(start <= end, "invalid reader slice: {start}..{end}");
+    /// Validate grammar-produced cursor spans before any physical slicing.
+    /// A consumed logical terminator is explicit, never a clipped payload.
+    fn source_span(&self, range: EmacsByteRange) -> ReaderSourceSpan {
+        assert!(range.start() <= range.end(), "invalid reader source span");
+        if range.end().get() <= self.limit {
+            return ReaderSourceSpan::Payload(range);
+        }
         assert!(
-            end <= self.limit,
-            "reader slice end {end} exceeds limit {}",
-            self.limit
+            matches!(self.source, ReaderSource::LispString(_))
+                && !matches!(self.character_cursor, SourceCharacterCursor::Bytes)
+                && range.start().get() <= self.limit
+                && self.limit.checked_add(1) == Some(range.end().get())
+                && range.end().get() <= self.pos,
+            "reader source span exceeds initialized data"
         );
+        ReaderSourceSpan::InitializedTerminator(EmacsByteRange::new(
+            range.start(),
+            EmacsBytePos::new(self.limit),
+        ))
+    }
+
+    /// GNU invalid_syntax_with_buffer ends at the first C NUL (lread.c:3713-3716,
+    /// 657-659). Numeric source extraction separately preserves that byte.
+    fn source_syntax_string(&self, start: usize, end: usize) -> String {
+        let mut message = self.source_slice_string(start, end);
+        if let Some(nul) = message.find('\0') {
+            message.truncate(nul);
+        }
+        message
+    }
+
+    fn source_slice_string(&self, start: usize, end: usize) -> String {
+        let range = EmacsByteRange::new(EmacsBytePos::new(start), EmacsBytePos::new(end));
+        let range = match self.source_span(range) {
+            ReaderSourceSpan::Payload(range) => range,
+            ReaderSourceSpan::InitializedTerminator(payload) => {
+                let ReaderSource::LispString(input) = self.source else {
+                    unreachable!("validated logical-string source span");
+                };
+                let mut text = crate::emacs_core::emacs_char::to_utf8_lossy(
+                    &input.as_bytes()[payload.start().get()..payload.end().get()],
+                );
+                text.push('\0');
+                return text;
+            }
+        };
+        let start = range.start().get();
+        let end = range.end().get();
         match self.source {
             ReaderSource::Callable(source) => {
                 source.slice(EmacsBytePos::new(start), EmacsBytePos::new(end))
@@ -3337,3 +4037,15 @@ fn maybe_recombine_latin1_emacs(data: Vec<u8>) -> crate::heap_types::LispString 
 #[cfg(test)]
 #[path = "tests/value_reader_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/declared_shorthand_counts.rs"]
+mod declared_shorthand_count_tests;
+
+#[cfg(test)]
+#[path = "tests/logical_source_cursor.rs"]
+mod logical_source_cursor_tests;
+
+#[cfg(test)]
+#[path = "tests/original_string_unread.rs"]
+mod original_string_unread_tests;

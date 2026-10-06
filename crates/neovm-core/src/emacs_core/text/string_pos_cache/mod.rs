@@ -21,17 +21,21 @@ use std::cell::Cell;
 
 use crate::emacs_core::emacs_char;
 use crate::emacs_core::value::Value;
-use crate::heap_types::LispString;
+use crate::heap_types::{GnuStringCharPos, LispString};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Entry {
     string: Value,
     data: *const u8,
     sbytes: usize,
     epoch: u64,
-    char_pos: usize,
+    char_pos: GnuStringCharPos,
     byte_pos: usize,
 }
+
+// This existing TLS entry remains owned by the activated mutator/heap.
+// Signed numeric metadata adds no new TLS or cross-mutator ownership.
+static_assertions::assert_not_impl_any!(Entry: Send, Sync);
 
 thread_local! {
     static CACHE: Cell<Option<Entry>> = const { Cell::new(None) };
@@ -118,7 +122,7 @@ pub(crate) fn collect_string_pos_cache_gc_roots(
     });
 }
 
-fn cached_pair(string: Value, s: &LispString) -> Option<(usize, usize)> {
+fn cached_pair(string: Value, s: &LispString) -> Option<(GnuStringCharPos, usize)> {
     let entry = CACHE.with(Cell::get)?;
     (entry.string.bits() == string.bits()
         && entry.data == s.as_bytes().as_ptr()
@@ -127,7 +131,7 @@ fn cached_pair(string: Value, s: &LispString) -> Option<(usize, usize)> {
     .then_some((entry.char_pos, entry.byte_pos))
 }
 
-fn remember(string: Value, s: &LispString, char_pos: usize, byte_pos: usize) {
+fn remember(string: Value, s: &LispString, char_pos: GnuStringCharPos, byte_pos: usize) {
     let entry = Entry {
         string,
         data: s.as_bytes().as_ptr(),
@@ -139,8 +143,10 @@ fn remember(string: Value, s: &LispString, char_pos: usize, byte_pos: usize) {
     CACHE.with(|cache| cache.set(Some(entry)));
 }
 
-/// The byte offset of character `char_index` of `string` (`s` is its
-/// payload), clamped to the end.  GNU `string_char_to_byte`.
+/// The byte offset of nonnegative character `char_index`, clamped to SCHARS.
+/// GNU fns.c:1194-1241 keeps even a negative cached anchor signed.
+/// Valid GNU metadata fits ptrdiff_t (owned bytes and supplied counts are
+/// bounded by isize::MAX); absolute signed distances fit usize on that domain.
 pub(crate) fn string_char_to_byte(string: Value, s: &LispString, char_index: usize) -> usize {
     let schars = s.schars();
     let sbytes = s.sbytes();
@@ -148,54 +154,70 @@ pub(crate) fn string_char_to_byte(string: Value, s: &LispString, char_index: usi
     if !s.is_multibyte() || schars == sbytes {
         return char_index;
     }
+    let target = char_index as i64;
     let bytes = s.as_bytes();
-    let (mut below, mut below_byte, mut above, mut above_byte) = (0, 0, schars, sbytes);
+    let (mut below, mut below_byte, mut above, mut above_byte) = (0_i64, 0, schars as i64, sbytes);
     if let Some((char_pos, byte_pos)) = cached_pair(string, s) {
-        if char_pos < char_index {
-            (below, below_byte) = (char_pos, byte_pos);
+        if char_pos.get() < target {
+            (below, below_byte) = (char_pos.get(), byte_pos);
         } else {
-            (above, above_byte) = (char_pos, byte_pos);
+            (above, above_byte) = (char_pos.get(), byte_pos);
         }
     }
-    let byte_index = if char_index - below < above - char_index {
-        below_byte + emacs_char::char_to_byte_pos(&bytes[below_byte..], char_index - below)
+    // abs_diff is defined even across zero: target - a negative cached anchor
+    // must not wrap or overflow. Both distances fit the string's usize domain.
+    let below_distance = target.abs_diff(below) as usize;
+    let above_distance = above.abs_diff(target) as usize;
+    let byte_index = if below_distance < above_distance {
+        below_byte + emacs_char::char_to_byte_pos(&bytes[below_byte..], below_distance)
     } else {
-        emacs_char::char_to_byte_pos_from_end(&bytes[..above_byte], above - char_index)
+        emacs_char::char_to_byte_pos_from_end(&bytes[..above_byte], above_distance)
     };
-    remember(string, s, char_index, byte_index);
+    remember(string, s, GnuStringCharPos::new(target), byte_index);
     byte_index
 }
 
-/// The number of characters of `string` that start before byte offset
-/// `byte_index` (clamped to the end).  GNU `string_byte_to_char`.
-pub(crate) fn string_byte_to_char(string: Value, s: &LispString, byte_index: usize) -> usize {
+/// GNU's signed character coordinate at byte_index, clamped to physical SBYTES.
+/// fns.c:1260-1308 preserves signed cached anchors and SCHARS-minus-suffix.
+/// Initialized physical bytes bound every scan; GNU-representable metadata
+/// bounds its signed result. Invalid Rust-only dump headers are not admitted
+/// by the supplied-count constructor and must be rejected by their caller.
+pub(crate) fn string_byte_to_gnu_char(
+    string: Value,
+    s: &LispString,
+    byte_index: usize,
+) -> GnuStringCharPos {
     let schars = s.schars();
     let sbytes = s.sbytes();
     let byte_index = byte_index.min(sbytes);
     if !s.is_multibyte() || schars == sbytes {
-        return byte_index;
+        return GnuStringCharPos::new(byte_index as i64);
     }
     let bytes = s.as_bytes();
-    let (mut below, mut below_byte, mut above, mut above_byte) = (0, 0, schars, sbytes);
+    let (mut below, mut below_byte, mut above, mut above_byte) = (0_i64, 0, schars as i64, sbytes);
     if let Some((char_pos, byte_pos)) = cached_pair(string, s) {
         if byte_pos < byte_index {
-            (below, below_byte) = (char_pos, byte_pos);
+            (below, below_byte) = (char_pos.get(), byte_pos);
         } else {
-            (above, above_byte) = (char_pos, byte_pos);
+            (above, above_byte) = (char_pos.get(), byte_pos);
         }
     }
     let char_index = if byte_index - below_byte < above_byte - byte_index {
         below
             + emacs_char::byte_to_char_pos(&bytes[below_byte..byte_index], byte_index - below_byte)
+                as i64
     } else {
         above
             - emacs_char::byte_to_char_pos(&bytes[byte_index..above_byte], above_byte - byte_index)
+                as i64
     };
-    // Only a character boundary is a pair a later conversion can start from.
+    let char_pos = GnuStringCharPos::new(char_index);
+    // Preserve the existing boundary-only cache rule. Interior continuation
+    // offsets are not safe physical anchors for another conversion.
     if byte_index == sbytes || (bytes[byte_index] & 0xC0) != 0x80 {
-        remember(string, s, char_index, byte_index);
+        remember(string, s, char_pos, byte_index);
     }
-    char_index
+    char_pos
 }
 
 #[cfg(test)]
@@ -213,3 +235,7 @@ mod gc_collection_epoch_tests;
 #[cfg(test)]
 #[path = "tests/gc_collection_epoch_minor_test.rs"]
 mod gc_collection_epoch_minor_tests;
+
+#[cfg(test)]
+#[path = "tests/signed_string_positions.rs"]
+mod signed_string_positions_tests;

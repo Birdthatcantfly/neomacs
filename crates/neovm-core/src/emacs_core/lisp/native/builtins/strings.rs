@@ -272,16 +272,25 @@ fn substring_impl(name: &str, args: &[Value], preserve_props: bool) -> EvalResul
                 let (byte_from, byte_to) = if src.is_multibyte() {
                     // Through the position cache: `split-string' and friends
                     // take pieces left to right.
-                    let bf = crate::emacs_core::string_pos_cache::string_char_to_byte(
-                        args[0], src, from,
-                    );
-                    let bt =
-                        crate::emacs_core::string_pos_cache::string_char_to_byte(args[0], src, to);
+                    let supplied = src.character_count_kind()
+                        == crate::heap_types::StringCharacterCountKind::Supplied;
+                    // GNU fns.c:1601-1604: these physical endpoint proofs
+                    // bypass the cache, whose logical anchors may differ.
+                    let bf = if supplied && from == 0 {
+                        0
+                    } else {
+                        crate::emacs_core::string_pos_cache::string_char_to_byte(args[0], src, from)
+                    };
+                    let bt = if supplied && to == src.schars() {
+                        src.sbytes()
+                    } else {
+                        crate::emacs_core::string_pos_cache::string_char_to_byte(args[0], src, to)
+                    };
                     (bf, bt)
                 } else {
                     (from, to)
                 };
-                if byte_to > src_bytes.len() {
+                if byte_to > src_bytes.len() || byte_from > byte_to {
                     return Err(signal(
                         LispCondition::ArgsOutOfRange,
                         vec![
@@ -529,6 +538,54 @@ pub(crate) fn builtin_concat_slice(args: &[Value]) -> EvalResult {
             }
         }
 
+        // GNU fns.c:853,903,934 retains SCHARS separately from copied bytes.
+        fn supplied_concat_count(
+            chars: usize,
+        ) -> Result<crate::heap_types::GnuDeclaredCharacterCount, Flow> {
+            if chars > crate::tagged::value::TaggedValue::MOST_POSITIVE_FIXNUM as usize {
+                return Err(concat_count_overflow());
+            }
+            crate::heap_types::GnuDeclaredCharacterCount::try_from(chars as i128).map_err(|error| {
+                match error {
+                    crate::heap_types::GnuDeclaredCharacterCountError::Negative
+                    | crate::heap_types::GnuDeclaredCharacterCountError::TooLarge => {
+                        concat_count_overflow()
+                    }
+                }
+            })
+        }
+        fn concat_count_overflow() -> Flow {
+            signal(
+                LispCondition::Error,
+                vec![Value::string(
+                    "Memory exhausted--use M-x save-some-buffers then exit and restart Emacs",
+                )],
+            )
+        }
+        fn checked_concat_chars(total: usize, more: usize) -> Result<usize, Flow> {
+            let sum = total.checked_add(more).ok_or_else(concat_count_overflow)?;
+            if sum > crate::tagged::value::TaggedValue::MOST_POSITIVE_FIXNUM as usize {
+                return Err(concat_count_overflow());
+            }
+            Ok(sum)
+        }
+        fn concat_multibyte_result(
+            bytes: Vec<u8>,
+            chars: usize,
+            kind: crate::heap_types::StringCharacterCountKind,
+        ) -> Result<crate::heap_types::LispString, Flow> {
+            Ok(match kind {
+                crate::heap_types::StringCharacterCountKind::Computed => {
+                    crate::heap_types::LispString::from_emacs_bytes(bytes)
+                }
+                crate::heap_types::StringCharacterCountKind::Supplied => {
+                    crate::heap_types::LispString::from_emacs_bytes_with_declared_chars(
+                        bytes,
+                        supplied_concat_count(chars)?,
+                    )
+                }
+            })
+        }
         if args.iter().all(|arg| arg.is_string()) {
             let dest_multibyte = args.iter().any(|arg| {
                 arg.as_lisp_string()
@@ -537,16 +594,22 @@ pub(crate) fn builtin_concat_slice(args: &[Value]) -> EvalResult {
             let mut combined = Vec::new();
             let mut string_sources: Vec<(Value, usize)> = Vec::new();
             let mut result_chars = 0usize;
+            let mut count_kind = crate::heap_types::StringCharacterCountKind::Computed;
             for arg in args {
                 if let Some(string) = arg.as_lisp_string() {
                     string_sources.push((*arg, result_chars));
-                    result_chars += string.schars();
+                    result_chars = checked_concat_chars(result_chars, string.schars())?;
+                    if string.character_count_kind()
+                        == crate::heap_types::StringCharacterCountKind::Supplied
+                    {
+                        count_kind = crate::heap_types::StringCharacterCountKind::Supplied;
+                    }
                     append_lisp_string_bytes(&mut combined, string, dest_multibyte);
                 }
             }
 
             let new_val = Value::heap_string(if dest_multibyte {
-                crate::heap_types::LispString::from_emacs_bytes(combined)
+                concat_multibyte_result(combined, result_chars, count_kind)?
             } else {
                 crate::heap_types::LispString::from_unibyte(combined)
             });
@@ -568,6 +631,7 @@ pub(crate) fn builtin_concat_slice(args: &[Value]) -> EvalResult {
         });
         let mut result: Vec<u8> = Vec::with_capacity(preallocated_len);
         let mut result_chars = 0usize;
+        let mut count_kind = crate::heap_types::StringCharacterCountKind::Computed;
         // Track string sources with their character offsets for property preservation.
         let mut string_sources: Vec<(Value, usize)> = Vec::new();
 
@@ -577,7 +641,12 @@ pub(crate) fn builtin_concat_slice(args: &[Value]) -> EvalResult {
                     let offset = result_chars;
                     if let Some(ls) = arg.as_lisp_string() {
                         append_lisp_string_bytes(&mut result, ls, dest_multibyte);
-                        result_chars += ls.schars();
+                        result_chars = checked_concat_chars(result_chars, ls.schars())?;
+                        if ls.character_count_kind()
+                            == crate::heap_types::StringCharacterCountKind::Supplied
+                        {
+                            count_kind = crate::heap_types::StringCharacterCountKind::Supplied;
+                        }
                     }
                     string_sources.push((*arg, offset));
                 }
@@ -590,8 +659,10 @@ pub(crate) fn builtin_concat_slice(args: &[Value]) -> EvalResult {
                             ValueKind::Cons => {
                                 let pair_car = cursor.cons_car();
                                 let pair_cdr = cursor.cons_cdr();
-                                result_chars +=
-                                    push_concat_element(&mut result, &pair_car, dest_multibyte)?;
+                                result_chars = checked_concat_chars(
+                                    result_chars,
+                                    push_concat_element(&mut result, &pair_car, dest_multibyte)?,
+                                )?;
                                 cursor = pair_cdr;
                             }
                             _tail => {
@@ -606,7 +677,10 @@ pub(crate) fn builtin_concat_slice(args: &[Value]) -> EvalResult {
                 ValueKind::Veclike(VecLikeType::Vector) => {
                     let items = arg.as_vector_data().unwrap().clone();
                     for item in items.iter() {
-                        result_chars += push_concat_element(&mut result, item, dest_multibyte)?;
+                        result_chars = checked_concat_chars(
+                            result_chars,
+                            push_concat_element(&mut result, item, dest_multibyte)?,
+                        )?;
                     }
                 }
                 _ => {
@@ -619,7 +693,7 @@ pub(crate) fn builtin_concat_slice(args: &[Value]) -> EvalResult {
         }
 
         let new_val = Value::heap_string(if dest_multibyte {
-            crate::heap_types::LispString::from_emacs_bytes(result)
+            concat_multibyte_result(result, result_chars, count_kind)?
         } else {
             crate::heap_types::LispString::from_unibyte(result)
         });
@@ -3871,6 +3945,83 @@ pub(crate) fn builtin_string_width(ctx: &mut super::eval::Context, args: Vec<Val
         }
         width
     };
+    if ls.character_count_kind() == crate::heap_types::StringCharacterCountKind::Supplied {
+        // GNU character.c:352-356 starts FROM=0 at byte zero, otherwise
+        // through this object's cache, then walks only TO-FROM characters.
+        let len = ls.schars() as i64;
+        let bounds_error = || {
+            signal(
+                LispCondition::ArgsOutOfRange,
+                vec![
+                    args[0],
+                    args.get(1).copied().unwrap_or(Value::fixnum(0)),
+                    args.get(2).copied().unwrap_or(Value::NIL),
+                ],
+            )
+        };
+        let normalize = |value: Value, default: i64| -> Result<usize, Flow> {
+            let raw = if value.is_nil() {
+                default
+            } else {
+                expect_int(&value)?
+            };
+            let index = if raw < 0 { len + raw } else { raw };
+            if !(0..=len).contains(&index) {
+                return Err(bounds_error());
+            }
+            Ok(index as usize)
+        };
+        let from = normalize(args.get(1).copied().unwrap_or(Value::NIL), 0)?;
+        let to = normalize(args.get(2).copied().unwrap_or(Value::NIL), len)?;
+        if from > to {
+            return Err(bounds_error());
+        }
+        let mut byte = if from == 0 {
+            0
+        } else {
+            crate::emacs_core::string_pos_cache::string_char_to_byte(args[0], ls, from)
+        };
+        let decode_multibyte = ls.schars() < ls.sbytes();
+        let mut width = 0usize;
+        for _ in from..to {
+            let (code, step) = if byte < data.len() {
+                if decode_multibyte {
+                    crate::heap_types::decode_declared_multibyte_char(&data[byte..])
+                } else {
+                    (u32::from(data[byte]), 1)
+                }
+            } else if byte == data.len() {
+                // The sole initialized trailing NUL; never read extra padding.
+                (0, 1)
+            } else {
+                return Err(bounds_error());
+            };
+            if step > data.len().saturating_sub(byte) && byte < data.len() {
+                return Err(bounds_error());
+            }
+            let ordinary_width =
+                if decode_multibyte && crate::emacs_core::emacs_char::char_byte8_p(code) {
+                    4
+                } else if decode_multibyte || code < 0x80 {
+                    char::from_u32(code)
+                        .map(crate::encoding::char_width)
+                        .unwrap_or(1)
+                } else {
+                    1
+                };
+            width = width
+                .checked_add(unit_width(code, ordinary_width))
+                .filter(|sum| *sum <= isize::MAX as usize)
+                .ok_or_else(|| {
+                    signal(
+                        LispCondition::Error,
+                        vec![Value::string("Maximum string size exceeded")],
+                    )
+                })?;
+            byte += step;
+        }
+        return Ok(Value::fixnum(width as i64));
+    }
     if args.len() <= 1
         || (args.len() == 2 && args[1] == Value::NIL)
         || (args.len() <= 3
