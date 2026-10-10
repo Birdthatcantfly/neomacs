@@ -217,9 +217,13 @@ pub(crate) mod retreat;
 /// feature. See `jit/bg.rs`.
 #[cfg(feature = "jit")]
 pub(crate) mod bg;
+
 /// Per-source feedback (`SourceFeedback`). Always built: `RuntimeState`
 /// holds it.
 pub(crate) mod feedback;
+#[cfg(test)]
+#[path = "tests/test_support.rs"]
+pub(crate) mod test_support;
 
 /// The tier spine's trigger: the T1 countdown, its request and the upgrade
 /// decision (`NEOVM_JIT_TIER2`). Only built with the `jit` feature. See

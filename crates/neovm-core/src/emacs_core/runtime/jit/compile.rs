@@ -4227,6 +4227,8 @@ pub(crate) mod switch_dispatch;
 #[path = "tests/direct_call_test.rs"]
 mod direct_call_tests;
 #[cfg(test)]
+pub(crate) use direct_call_tests::{eval_fixture_program, eval_fixture_program_named};
+#[cfg(test)]
 #[path = "tests/direct_self_test.rs"]
 mod direct_self_tests;
 #[cfg(test)]

@@ -401,7 +401,8 @@ fn jit_final_report_collects_named_leaves_from_a_context() {
         .expect("bound");
     let bc = fval.get_bytecode_data().expect("bytecode");
     let ctx = &mut ev as *mut Context;
-    let run = |arg: Value| crate::emacs_core::jit::try_run_compiled(ctx, bc, fval, &[arg]);
+    let run =
+        |arg: Value| crate::emacs_core::jit::test_support::run_compiled(ctx, bc, fval, &[arg]);
     assert_eq!(
         run(Value::make_int(41)).expect("no signal"),
         Some(Value::make_int(42).bits())

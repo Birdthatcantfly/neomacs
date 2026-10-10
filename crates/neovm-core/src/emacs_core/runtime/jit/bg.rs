@@ -1419,3 +1419,32 @@ mod soak_tests;
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 #[path = "bg/tests/mutator_test.rs"]
 mod mutator_tests;
+
+/// Scoped ownership for tests of a particular backend's thread-local module.
+/// Native execution fixtures should await the real worker instead.
+#[cfg(test)]
+#[must_use]
+pub(crate) struct TestModeScope {
+    prior: Option<BgMode>,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+impl TestModeScope {
+    pub(crate) fn enter(mode: BgMode) -> Self {
+        // Backend ownership is mutator-local; do not snapshot or rewrite
+        // the separate process-wide stress knob across independent mutators.
+        let prior = MODE_TEST_OVERRIDE.with(|override_| override_.replace(Some(mode)));
+        Self {
+            prior,
+            _thread: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestModeScope {
+    fn drop(&mut self) {
+        MODE_TEST_OVERRIDE.with(|override_| override_.set(self.prior));
+    }
+}

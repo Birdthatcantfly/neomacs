@@ -87,7 +87,7 @@ fn countdown_loop() -> ByteCodeFunction {
 
 fn run(ctx: &mut Context, f: &ByteCodeFunction, args: &[Value]) -> Option<Value> {
     let fv = Value::NIL;
-    cache::try_run_compiled(ctx, f, fv, args)
+    crate::emacs_core::jit::test_support::run_compiled(ctx, f, fv, args)
         .expect("no signal")
         .map(|bits| Value::from_bits(bits))
 }
@@ -206,6 +206,9 @@ fn tier2_fast_leaf_retiers_at_the_countdown() {
     );
     assert_eq!(t1.obs.t2.budget.get(), DISARMED);
     assert_eq!(run(&mut ev, &f, &[]), Some(Value::make_int(7)));
+    // The next entry queues the real backend job; wait for owner publication
+    // without adding a profiling entry or replaying the Lisp body.
+    crate::emacs_core::jit::test_support::settle(&mut ev);
     let t1p = current(&f);
     assert!(!std::ptr::eq(t1p, t1), "the seam compiled the upgrade");
     assert_eq!(t1p.regalloc, RegallocChoice::Full);
@@ -259,11 +262,24 @@ fn tier2_spec_reached_leaf_upgrades_and_serves_the_work() {
     let callee_data = callee.get_bytecode_data().expect("byte-code");
     let caller_data = caller.get_bytecode_data().expect("byte-code");
     let ctx = &mut ev as *mut Context;
+    // Preserve FirstSight admission while staging the callee without executing
+    // it: every one of the measured callbacks must be a native entry.
+    assert!(crate::emacs_core::jit::test_support::resolve_leaf(ctx, callee_data).is_some());
     for _ in 0..CALLS {
         assert_eq!(
-            cache::try_run_compiled(ctx, caller_data, caller, &[]).unwrap(),
+            crate::emacs_core::jit::test_support::run_compiled(ctx, caller_data, caller, &[])
+                .unwrap(),
             Some(Value::make_int(7).bits())
         );
+        if callee_data
+            .jit_runtime()
+            .compiled_id()
+            .is_some_and(|id| cache::cache_entry_kind_for_test(id) == "upgrading")
+        {
+            // Wait only after a real callback requested its backend upgrade.
+            // The next callback observes T2; no callback is replayed or added.
+            crate::emacs_core::jit::test_support::settle(ctx);
+        }
     }
     let id = callee_data
         .jit_runtime()

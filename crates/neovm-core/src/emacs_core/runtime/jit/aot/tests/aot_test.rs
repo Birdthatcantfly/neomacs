@@ -1213,7 +1213,7 @@ fn r2_prepopulate_never_overwrites_existing_jit_leaf() {
         .symbol_function_id(sym)
         .and_then(|v| v.get_bytecode_data())
         .expect("bc");
-    let got = super::super::cache::try_run_compiled(
+    let got = crate::emacs_core::jit::test_support::run_compiled(
         std::ptr::null_mut(),
         f,
         Value::NIL,

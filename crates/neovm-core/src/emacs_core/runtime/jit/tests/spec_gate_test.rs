@@ -67,8 +67,8 @@ fn spec_fast_path_engages_for_one_two_and_three_arguments() {
     for nargs in 1..=3usize {
         let name = format!("neo-spec-gate-g{nargs}");
         let g = Value::symbol(&name);
-        ev.obarray
-            .set_symbol_function_id(intern(&name), callee(nargs));
+        let target = callee(nargs);
+        ev.obarray.set_symbol_function_id(intern(&name), target);
         // (lambda (x) (G x x ... x))
         let mut ops = vec![Op::Constant(0)];
         for i in 0..nargs {
@@ -78,7 +78,15 @@ fn spec_fast_path_engages_for_one_two_and_three_arguments() {
         ops.push(Op::Return);
         let caller = lambda(1, true, ops, vec![g]);
         let arg = Value::make_int(7);
-        // The first call compiles the caller and arms the site; the rest
+        crate::emacs_core::jit::test_support::prepare_entry(
+            &mut ev,
+            target.get_bytecode_data().expect("callee bytecode"),
+        );
+        crate::emacs_core::jit::test_support::prepare_entry(
+            &mut ev,
+            caller.get_bytecode_data().expect("caller bytecode"),
+        );
+        // Code is ready; the first original call arms the site, and the rest
         // take the armed fast path.
         assert_eq!(ev.funcall_general_untraced(caller, vec![arg]).unwrap(), arg);
         let before = shim_fast();

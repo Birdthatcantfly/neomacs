@@ -1010,6 +1010,14 @@ fn osr_lookup(ctx: *mut Context, func: &ByteCodeFunction, osr_pc: usize, id: u64
                     },
                 )
             });
+            #[cfg(test)]
+            if super::test_support::awaits_osr() {
+                assert!(
+                    super::bg::quiesce_for_test(std::time::Duration::from_secs(60)),
+                    "native OSR observation waits for its worker"
+                );
+                return probe_osr_pending(key, Some(live)).unwrap_or(OsrLookup::Pending);
+            }
             OsrLookup::Pending
         }
         (compiled, deferred) => {
@@ -2792,7 +2800,11 @@ pub fn try_run_compiled(
     // Execute OUTSIDE the cache borrow (see `CacheEntry::Compiled`).
     match leaf {
         None => Ok(None),
-        Some(leaf) => run_resolved_leaf(ctx, func, func_value, &leaf, args),
+        Some(leaf) => {
+            #[cfg(test)]
+            super::test_support::note_native_dispatch();
+            run_resolved_leaf(ctx, func, func_value, &leaf, args)
+        }
     }
 }
 
@@ -3405,3 +3417,98 @@ mod osr_inline_tests;
 #[cfg(test)]
 #[path = "cache/tests/hof_regalloc_test.rs"]
 mod hof_regalloc_tests;
+
+/// Prepare an entry through its real front/backend protocol without executing
+/// the body. Native-observation tests call this at explicit fixture boundaries;
+/// pending/cancellation tests use the production seam directly.
+#[cfg(test)]
+pub(crate) fn prepare_entry_for_test(ctx: *mut Context, func: &ByteCodeFunction) {
+    use std::time::Duration;
+    sync_cache_to_current_heap();
+    let id = func.jit_runtime().compiled_id_or_assign();
+    COMPILED.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.get(id).is_none() {
+            // SAFETY: the fixture owns this dormant Context (null means no speculation).
+            let obarray = unsafe { ctx.as_ref() }.map(|ctx| &*ctx.obarray);
+            let _vars = super::compile::inline_vars::CompileEnvScope::enter(ctx);
+            let entry = compile_cache_entry(
+                id,
+                func,
+                obarray,
+                CompileRequest {
+                    regalloc: RegallocPolicy::Auto,
+                    bypass_profit_gate: false,
+                    origin: stats::CompileOrigin::Dispatch,
+                    tier: super::tier2::CompileTier::T1,
+                },
+                None,
+            );
+            cache.insert(id, entry);
+        }
+    });
+    assert!(
+        super::bg::quiesce_for_test(Duration::from_secs(60)),
+        "backend readiness timed out"
+    );
+    COMPILED.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if matches!(cache.get(id), Some(CacheEntry::Pending(job)) if job.is_ready()) {
+            // SAFETY: the fixture still owns the same dormant Context.
+            install_pending(&mut cache, id, Some(func.jit_runtime()), unsafe {
+                ctx.as_ref()
+            });
+        }
+        if matches!(cache.get(id), Some(CacheEntry::Compiled(_))) {
+            // An idle drain may already have installed without this RuntimeState.
+            // This explicit native fixture boundary also clears an existing
+            // admission hold; deferral-policy tests must use the raw seams.
+            func.jit_runtime().defer_tier_up(0);
+        }
+    });
+}
+
+/// Compile/await OSR without transferring control into it: observations retain
+/// their original counters, side effects, stack snapshot and binding depths.
+#[cfg(test)]
+pub(crate) fn prepare_osr_for_test(ctx: *mut Context, func: &ByteCodeFunction, pc: usize) {
+    use std::time::Duration;
+    assert!(
+        !ctx.is_null(),
+        "OSR preparation requires the owning Context"
+    );
+    sync_cache_to_current_heap();
+    let id = func.jit_runtime().compiled_id_or_assign();
+    let _ = osr_lookup(ctx, func, pc, id);
+    assert!(
+        super::bg::quiesce_for_test(Duration::from_secs(60)),
+        "OSR backend readiness timed out"
+    );
+    assert!(
+        matches!(osr_lookup(ctx, func, pc, id), OsrLookup::Entry(_)),
+        "OSR job must finish"
+    );
+}
+
+/// Observe an admitted upgrade without executing the retained T1 while its
+/// backend is pending. The production probe keeps budget, policy and hold
+/// decisions intact; this fixture helper does not promise an upgrade.
+#[cfg(test)]
+pub(crate) fn prepare_upgrade_for_test(ctx: *mut Context, func: &ByteCodeFunction) {
+    use std::time::Duration;
+    sync_cache_to_current_heap();
+    let Some(id) = func.jit_runtime().compiled_id() else {
+        return;
+    };
+    if super::compile::jit_tier_upgrade_enabled() {
+        COMPILED.with(|cache| {
+            probe_tier2_upgrade(&mut cache.borrow_mut(), id, func, ctx);
+        });
+        assert!(
+            super::bg::quiesce_for_test(Duration::from_secs(60)),
+            "upgrade backend readiness timed out"
+        );
+        // SAFETY: the fixture owns this dormant Context, or uses no shims.
+        drain_ready_pending(unsafe { ctx.as_ref() });
+    }
+}

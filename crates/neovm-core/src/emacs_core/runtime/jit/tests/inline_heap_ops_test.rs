@@ -1010,7 +1010,7 @@ fn osr_into_a_cons_loop_allocates_inline() {
     let snapshot = [Value::make_int(500), Value::NIL];
     ctx.bc_buf.extend_from_slice(&snapshot);
     let before = conses_counted();
-    let run = crate::emacs_core::jit::cache::try_run_osr(&mut ctx, &f, 1, &snapshot, &[]);
+    let run = crate::emacs_core::jit::test_support::run_osr(&mut ctx, &f, 1, &snapshot, &[]);
     let Some(NativeRun::Ok(bits)) = run else {
         panic!("the OSR transfer must run the loop natively: {run:?}");
     };
