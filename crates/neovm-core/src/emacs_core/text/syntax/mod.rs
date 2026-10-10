@@ -3784,6 +3784,7 @@ pub(crate) enum StringSyntaxPositionError {
 }
 
 impl StringSyntaxPositionError {
+    #[cfg(test)]
     pub(crate) const fn position(self) -> Option<GnuStringCharPos> {
         match self {
             Self::OutOfRange { position } => Some(position),
@@ -3832,7 +3833,8 @@ impl std::fmt::Debug for StringSyntaxPropByteRun<'_> {
 }
 
 impl<'a> StringSyntaxPropByteRun<'a> {
-    /// Legacy Rust-owned lookup; computed strings keep their byte-run path.
+    /// Legacy Rust-owned lookup used by coordinate-contract tests.
+    #[cfg(test)]
     pub(crate) fn new(
         props: SyntaxProperties<'a>,
         string: &'a LispString,
