@@ -187,14 +187,15 @@ fn issue554_positioned_setq_rhs_runs_before_symbol_error() {
     // GNU eval.c:491-502 (setq),1104-1108 (let*),1154-1180 (let),
     // and1477 (throw EQ before unwinding),lisp.h:1316-1323 (EQ policy).
     return_if_neovm_enable_oracle_proptest_not_set!();
+    // Exercise dynamic binding explicitly inside the lexical oracle wrapper.
     check(
-        r#"(let ((symbols-with-pos-enabled nil)
+        r#"(eval '(let ((symbols-with-pos-enabled nil)
       (ran nil)
       (swp (position-symbol 'issue554-binding-n 8)))
   (let ((result (condition-case err
                     (eval (list 'setq swp '(setq ran t)))
                   (error (car err)))))
-    (list result ran)))"#,
+    (list result ran))) nil)"#,
         "(wrong-type-argument t)",
     );
 }
@@ -204,8 +205,9 @@ fn issue554_positioned_let_initializers_run_before_symbol_error() {
     // GNU eval.c:491-502 (setq),1104-1108 (let*),1154-1180 (let),
     // and1477 (throw EQ before unwinding),lisp.h:1316-1323 (EQ policy).
     return_if_neovm_enable_oracle_proptest_not_set!();
+    // Exercise dynamic binding explicitly inside the lexical oracle wrapper.
     check(
-        r#"(let ((symbols-with-pos-enabled nil)
+        r#"(eval '(let ((symbols-with-pos-enabled nil)
       (ran nil)
       (swp (position-symbol 'issue554-binding-n 8)))
   (let ((result (condition-case err
@@ -213,7 +215,7 @@ fn issue554_positioned_let_initializers_run_before_symbol_error() {
                                           '(issue554-binding-switch (setq ran t)))
                                 'issue554-binding-n))
                   (error (car err)))))
-    (list result ran)))"#,
+    (list result ran))) nil)"#,
         "(wrong-type-argument t)",
     );
 }

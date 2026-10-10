@@ -201,14 +201,15 @@ fn issue554_oracle_compile_load_sly_macro() {
 #[test]
 fn issue554_positioned_feature_membership_and_original_storage_oracle() {
     return_if_neovm_enable_oracle_proptest_not_set!();
+    // Exercise dynamic binding explicitly inside the lexical oracle wrapper.
     check(
-        "(let ((features nil) (sp (position-symbol 'issue554-feature 0)))
+        "(eval '(let ((features nil) (sp (position-symbol 'issue554-feature 0)))
            (list (let ((symbols-with-pos-enabled t))
                    (provide sp)
                    (list (featurep 'issue554-feature)
                          (symbol-with-pos-p (car features))))
                  (let ((symbols-with-pos-enabled nil)) (featurep 'issue554-feature))
-                 (let ((symbols-with-pos-enabled t)) (featurep 'issue554-feature))))",
+                 (let ((symbols-with-pos-enabled t)) (featurep 'issue554-feature)))) nil)",
         "((t t) nil t)",
     );
 }
