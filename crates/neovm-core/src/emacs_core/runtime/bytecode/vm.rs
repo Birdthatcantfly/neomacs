@@ -7439,7 +7439,14 @@ impl<'a> Vm<'a> {
         let bc = if ptr.is_null() {
             let bc = callee.get_bytecode_data()?;
             let ctx_ptr = core::ptr::from_mut(&mut *ctx);
-            ptr = crate::emacs_core::jit::cache::resolve_compiled_leaf_ptr(ctx_ptr, bc)?;
+            match crate::emacs_core::jit::cache::resolve_spec_call_leaf(ctx_ptr, bc)? {
+                crate::emacs_core::jit::cache::SpecCallLeaf::Armable(ready) => ptr = ready,
+                crate::emacs_core::jit::cache::SpecCallLeaf::RetainedUpgrade(leaf) => {
+                    return Self::run_retained_upgrade_from_spec(
+                        ctx, called, callee, bc, &leaf, args_ptr, nargs,
+                    );
+                }
+            }
             // Arm the shim's fast-path key with the leaf: this site's
             // argument count is fixed, so how the leaf takes the call is
             // decided here, once -- as laid out, or normalized into a frame
@@ -7501,6 +7508,38 @@ impl<'a> Vm<'a> {
         // falling back to call_for_jit_stack on every call). Counted here rather
         // than in the shared runner below so it stays a count of SPECULATED
         // calls, not of every native-to-native call.
+        #[cfg(any(test, debug_assertions))]
+        if leaf.accepts(nargs) {
+            crate::emacs_core::jit::compile::SPEC_FAST_CALL_COUNT
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+        Self::run_leaf_native_to_native(
+            ctx,
+            called,
+            callee,
+            bc,
+            leaf,
+            args_ptr,
+            nargs,
+            CalleeFrameArgs::CallerSlot,
+        )
+    }
+
+    /// Pending upgrades retain executable T1 without publishing it into the
+    /// spec slot. Keep this rare route out of the ordinary arming path; the
+    /// owning handle survives any replacement during the activation.
+    #[cfg(feature = "jit")]
+    #[cold]
+    #[inline(never)]
+    fn run_retained_upgrade_from_spec(
+        ctx: &mut crate::emacs_core::eval::Context,
+        called: Value,
+        callee: Value,
+        bc: &ByteCodeFunction,
+        leaf: &crate::emacs_core::jit::compile::CompiledLeaf,
+        args_ptr: *const i64,
+        nargs: usize,
+    ) -> Option<crate::emacs_core::jit::cache::NativeCallOutcome> {
         #[cfg(any(test, debug_assertions))]
         if leaf.accepts(nargs) {
             crate::emacs_core::jit::compile::SPEC_FAST_CALL_COUNT

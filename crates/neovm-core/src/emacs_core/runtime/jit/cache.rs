@@ -2937,11 +2937,29 @@ pub(crate) fn arm_leaf_slot(ctx: *mut Context, func: &ByteCodeFunction) {
     }
 }
 
+/// A spec call can execute a retained T1 while its replacement is pending,
+/// but must not arm that T1: the next call must still probe for installation.
+pub(crate) enum SpecCallLeaf {
+    Armable(*const CompiledLeaf),
+    RetainedUpgrade(Rc<CompiledLeaf>),
+}
+
 #[inline(never)]
 pub(crate) fn resolve_compiled_leaf_ptr(
     ctx: *mut Context,
     func: &ByteCodeFunction,
 ) -> Option<*const CompiledLeaf> {
+    match resolve_spec_call_leaf(ctx, func) {
+        Some(SpecCallLeaf::Armable(ptr)) => Some(ptr),
+        Some(SpecCallLeaf::RetainedUpgrade(_)) | None => None,
+    }
+}
+
+#[inline(never)]
+pub(crate) fn resolve_spec_call_leaf(
+    ctx: *mut Context,
+    func: &ByteCodeFunction,
+) -> Option<SpecCallLeaf> {
     let id = func.jit_runtime().compiled_id_or_assign();
     if id > max_compiled_id() {
         return None;
@@ -2954,8 +2972,9 @@ pub(crate) fn resolve_compiled_leaf_ptr(
             install_pending(&mut cache, id, Some(func.jit_runtime()), live);
         }
         // An unfinished upgrade deliberately does not re-arm raw/spec
-        // slots with old: those paths would stop probing forever. The
-        // strict call path still enters old through try_run_compiled.
+        // slots with old: those paths would stop probing forever. Spec
+        // calls receive a retained handle instead, so a cold source need
+        // not fall through the interpreter's initial heat threshold.
         if super::compile::jit_tier_upgrade_enabled() {
             probe_tier2_upgrade(&mut cache, id, func, ctx);
         }
@@ -2993,7 +3012,12 @@ pub(crate) fn resolve_compiled_leaf_ptr(
             CacheEntry::Compiled(leaf)
                 if leaf.inline_deps().is_empty() || leaf.inline_epoch().is_none() =>
             {
-                Some(Rc::as_ptr(leaf))
+                Some(SpecCallLeaf::Armable(Rc::as_ptr(leaf)))
+            }
+            CacheEntry::CompiledUpgrading(upgrade)
+                if upgrade.old.inline_deps().is_empty() || upgrade.old.inline_epoch().is_none() =>
+            {
+                Some(SpecCallLeaf::RetainedUpgrade(Rc::clone(&upgrade.old)))
             }
             _ => None,
         }

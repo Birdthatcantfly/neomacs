@@ -265,11 +265,65 @@ fn tier2_spec_reached_leaf_upgrades_and_serves_the_work() {
     // Preserve FirstSight admission while staging the callee without executing
     // it: every one of the measured callbacks must be a native entry.
     assert!(crate::emacs_core::jit::test_support::resolve_leaf(ctx, callee_data).is_some());
-    for _ in 0..CALLS {
+    let callee_id = callee_data
+        .jit_runtime()
+        .compiled_id()
+        .expect("staged callee");
+    let census = || {
+        let (rows, _) = cache::leaf_report_rows();
+        let caller_id = caller_data.jit_runtime().compiled_id();
+        rows.into_iter()
+            .filter(|row| row.id == callee_id || Some(row.id) == caller_id)
+            .map(|row| {
+                (
+                    row.id,
+                    row.state,
+                    row.regalloc,
+                    row.obs.entries,
+                    row.obs.t2.origin,
+                    row.obs.t2.state,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let source_state = || {
+        (
+            callee_data.jit_runtime().heat(),
+            callee_data.jit_runtime().deferred_heat(),
+            cache::cache_entry_kind_for_test(callee_id),
+            caller_data
+                .jit_runtime()
+                .compiled_id()
+                .map_or("unassigned", cache::cache_entry_kind_for_test),
+        )
+    };
+    for callback in 0..CALLS {
+        let before_rows = census();
+        let before_entries: u64 = before_rows
+            .iter()
+            .filter(|row| row.0 == callee_id)
+            .map(|row| row.3)
+            .sum();
+        let before_source = source_state();
         assert_eq!(
             crate::emacs_core::jit::test_support::run_compiled(ctx, caller_data, caller, &[])
                 .unwrap(),
             Some(Value::make_int(7).bits())
+        );
+        let after_rows = census();
+        let after_entries: u64 = after_rows
+            .iter()
+            .filter(|row| row.0 == callee_id)
+            .map(|row| row.3)
+            .sum();
+        assert_eq!(
+            after_entries,
+            before_entries + 1,
+            "callback {callback} (zero-based) must add exactly one native callee entry; \
+             source=(heat, deferred_hold, callee_kind, caller_kind) before={before_source:?} \
+             after={:?}; rows=(id,state,regalloc,entries,t2_origin,t2_state) \
+             before={before_rows:?} after={after_rows:?}",
+            source_state(),
         );
         if callee_data
             .jit_runtime()
