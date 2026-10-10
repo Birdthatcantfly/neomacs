@@ -3437,8 +3437,8 @@ fn compiled_aset_matches_the_builtin() {
             args.cons_cdr().cons_cdr().cons_car(),
         );
         let reference = match crate::emacs_core::builtins::builtin_aset_args(
-            &[a, i, v],
             crate::emacs_core::builtins::ArraySymbolSource::Bare,
+            &[a, i, v],
         )
         .kinded()
         {

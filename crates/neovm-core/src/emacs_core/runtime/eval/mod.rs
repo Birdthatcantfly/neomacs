@@ -4177,10 +4177,6 @@ fn bind_lexical_value_rooted_in_specpdl(
     }
 }
 
-fn lambda_arg_symbol_id(value: Value, symbol_mode: crate::tagged::SymbolMode) -> Option<SymId> {
-    value.as_symbol_id(symbol_mode)
-}
-
 /// Panic-safe scope for [`Context::gc_inhibit_depth`]: construction increments
 /// the depth, `Drop` decrements it, so the inhibition rebalances even when the
 /// wrapped code unwinds — a leaked increment would disable safe-point GC for

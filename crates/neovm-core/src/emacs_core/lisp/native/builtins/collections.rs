@@ -139,7 +139,7 @@ pub(crate) fn builtin_vector_slice(_eval: &mut super::eval::Context, args: &[Val
 #[cfg(test)]
 pub(crate) fn builtin_aref(args: Vec<Value>) -> EvalResult {
     expect_args("aref", &args, 2)?;
-    builtin_aref_values(args[0], args[1], ArraySymbolSource::Bare)
+    builtin_aref_values(ArraySymbolSource::Bare, args[0], args[1])
 }
 
 #[inline(always)]
@@ -156,14 +156,14 @@ pub(crate) fn builtin_aref_values_in_state(
     array: Value,
     index: Value,
 ) -> EvalResult {
-    builtin_aref_values(array, index, ArraySymbolSource::Context(eval))
+    builtin_aref_values(ArraySymbolSource::Context(eval), array, index)
 }
 
 #[inline(never)]
 pub(crate) fn builtin_aref_values(
+    symbols: ArraySymbolSource<'_>,
     array: Value,
     index: Value,
-    symbols: ArraySymbolSource<'_>,
 ) -> EvalResult {
     let idx_fixnum = expect_fixnum(&index)?;
     match array.kind() {
@@ -298,7 +298,7 @@ pub(crate) fn aset_string_replacement(
 /// (`dhrystone`: 370,708 clones and 305,131 `Vec::from_iter` calls).
 #[cfg(test)]
 pub(crate) fn builtin_aset(args: Vec<Value>) -> EvalResult {
-    builtin_aset_args(&args, ArraySymbolSource::Bare)
+    builtin_aset_args(ArraySymbolSource::Bare, &args)
 }
 
 pub(crate) fn builtin_aset_args_in_state(
@@ -312,12 +312,12 @@ pub(crate) fn builtin_aset_args_in_context(
     eval: &super::eval::Context,
     args: &[Value],
 ) -> EvalResult {
-    builtin_aset_args(args, ArraySymbolSource::Context(eval))
+    builtin_aset_args(ArraySymbolSource::Context(eval), args)
 }
 
 /// `aset` reading its arguments in place.
 #[inline(never)]
-pub(crate) fn builtin_aset_args(args: &[Value], symbols: ArraySymbolSource<'_>) -> EvalResult {
+pub(crate) fn builtin_aset_args(symbols: ArraySymbolSource<'_>, args: &[Value]) -> EvalResult {
     expect_args("aset", args, 3)?;
     // GNU src/data.c:Faset starts with CHECK_FIXNUM (idx) before checking
     // whether ARRAY is mutable by `aset`.

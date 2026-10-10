@@ -168,3 +168,29 @@ fn issue554_watcher_membership_follow_symbol_policy() {
         "((2 1) (1 0))",
     );
 }
+
+#[test]
+fn issue554_formal_watchers_change_policy_before_the_next_formal() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    // Both nil->t and t->nil changes happen in a previous binder's watcher.
+    check(
+        r#"(mapcar
+ (lambda (initial)
+   (let* ((symbols-with-pos-enabled initial)
+          (variable (make-symbol "issue554-watched-formal"))
+          (target (not initial))
+          (watcher (list 'lambda '(_symbol _newval operation _where)
+                         (list 'if '(eq operation 'let)
+                               (list 'setq 'symbols-with-pos-enabled target))))
+          (function (list 'lambda
+                          (list variable (position-symbol 'n 0)) 'n)))
+     (unwind-protect
+         (progn
+           (add-variable-watcher variable watcher)
+           (condition-case err (funcall function 1 7)
+             (error (car err))))
+       (remove-variable-watcher variable watcher))))
+ '(nil t))"#,
+        "(7 invalid-function)",
+    );
+}

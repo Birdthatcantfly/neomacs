@@ -254,8 +254,8 @@ fn gen0_inline_string_aset_invalidates_and_observes_collection_reads() {
         let revision = LispCollectionRevision::current();
         let (interpreted_result, interpreted_reads) = capture(|| {
             crate::emacs_core::builtins::builtin_aset_args(
-                &args,
                 crate::emacs_core::builtins::ArraySymbolSource::Bare,
+                &args,
             )
             .expect("interpreted string setter")
         });

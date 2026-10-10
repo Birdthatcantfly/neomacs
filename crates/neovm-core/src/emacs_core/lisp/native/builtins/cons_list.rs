@@ -2169,9 +2169,9 @@ pub(crate) fn bytecode_elt_values_in_state(
     n: Value,
 ) -> EvalResult {
     bytecode_elt_values(
+        super::collections::ArraySymbolSource::Context(eval),
         sequence,
         n,
-        super::collections::ArraySymbolSource::Context(eval),
     )
 }
 
@@ -2182,9 +2182,9 @@ pub(crate) fn bytecode_elt_values_in_state(
 /// `(wrong-type-argument listp 2)` in GNU. Everything else is `Felt`'s.
 #[inline(never)]
 pub(crate) fn bytecode_elt_values(
+    source: super::collections::ArraySymbolSource<'_>,
     sequence: Value,
     n: Value,
-    source: super::collections::ArraySymbolSource<'_>,
 ) -> EvalResult {
     if sequence.is_cons()
         && let Some(count) = n.as_fixnum()
@@ -2192,7 +2192,7 @@ pub(crate) fn bytecode_elt_values(
     {
         return bytecode_nth_values(n, sequence);
     }
-    builtin_elt_values(sequence, n, source)
+    builtin_elt_values(source, sequence, n)
 }
 
 pub(crate) fn builtin_elt_values_in_state(
@@ -2201,25 +2201,25 @@ pub(crate) fn builtin_elt_values_in_state(
     n: Value,
 ) -> EvalResult {
     builtin_elt_values(
+        super::collections::ArraySymbolSource::Context(eval),
         sequence,
         n,
-        super::collections::ArraySymbolSource::Context(eval),
     )
 }
 
 /// GNU fns.c:1855 validates SEQUENCE before Faref checks N. The source is
 /// passed through only for valid array shapes; list behavior stays Fnthcdr.
 pub(crate) fn builtin_elt_values(
+    source: super::collections::ArraySymbolSource<'_>,
     sequence: Value,
     n: Value,
-    source: super::collections::ArraySymbolSource<'_>,
 ) -> EvalResult {
     match sequence.kind() {
         ValueKind::Cons | ValueKind::Nil => builtin_nth_values(n, sequence),
         ValueKind::Veclike(VecLikeType::Vector)
         | ValueKind::Veclike(VecLikeType::CharTable)
         | ValueKind::Veclike(VecLikeType::BoolVector)
-        | ValueKind::String => builtin_aref_values(sequence, n, source),
+        | ValueKind::String => builtin_aref_values(source, sequence, n),
         _ => Err(signal(
             LispCondition::WrongTypeArgument,
             vec![Value::symbol("sequencep"), sequence],

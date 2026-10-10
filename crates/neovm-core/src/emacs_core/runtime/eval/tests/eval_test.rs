@@ -28351,3 +28351,30 @@ fn issue554_watcher_membership_follow_symbol_policy() {
         "OK ((2 1) (1 0))"
     );
 }
+
+#[test]
+fn issue554_formal_watchers_change_policy_before_the_next_formal() {
+    // GNU eval.c:3399-3405/3439: observe each preceding specbind/watcher.
+    assert_eq!(
+        bootstrap_eval_one(
+            r#"(mapcar
+ (lambda (initial)
+   (let* ((symbols-with-pos-enabled initial)
+          (variable (make-symbol "issue554-watched-formal"))
+          (target (not initial))
+          (watcher (list 'lambda '(_symbol _newval operation _where)
+                         (list 'if '(eq operation 'let)
+                               (list 'setq 'symbols-with-pos-enabled target))))
+          (function (list 'lambda
+                          (list variable (position-symbol 'n 0)) 'n)))
+     (unwind-protect
+         (progn
+           (add-variable-watcher variable watcher)
+           (condition-case err (funcall function 1 7)
+             (error (car err))))
+       (remove-variable-watcher variable watcher))))
+ '(nil t))"#
+        ),
+        "OK (7 invalid-function)"
+    );
+}

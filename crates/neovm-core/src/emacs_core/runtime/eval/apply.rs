@@ -3931,11 +3931,7 @@ impl Context {
         arglist: Value,
         args: &[Value],
     ) -> Result<(), Flow> {
-        walk_lambda_formals(fun, arglist, args, self.symbol_mode(), |sym, arg| {
-            self.try_specbind(sym, arg)?;
-            // A formal can bind the flag itself, or a watcher can change it.
-            Ok(self.symbol_mode())
-        })
+        walk_lambda_formals(fun, arglist, args, &mut DynamicFormalBindings(self))
     }
 
     #[inline(never)]
@@ -3966,11 +3962,10 @@ impl Context {
         // installed with one `LexicalEnv` entry (GNU's one `specbind` of
         // `internal-interpreter-environment`) and retired inline.
         if !raw_cons_lambda && let Some(env) = env {
-            let new_env =
-                match bind_lexical_formals(env, func_value, arglist, &args, self.symbol_mode()) {
-                    Ok(new_env) => new_env,
-                    Err(flow) => return self.unbind_to_with_result(root_count, Err(flow)),
-                };
+            let new_env = match bind_lexical_formals(env, func_value, arglist, &args, self) {
+                Ok(new_env) => new_env,
+                Err(flow) => return self.unbind_to_with_result(root_count, Err(flow)),
+            };
             let result = if self.tier_i.engaged() {
                 self.tier_i_run_lexical_body(arglist, new_env, body)
             } else {
@@ -4037,7 +4032,7 @@ impl Context {
             func,
             arglist,
             &self.bc_buf[first_arg..first_arg + nargs],
-            self.symbol_mode(),
+            self,
         )?;
         if self.tier_i.engaged() {
             return self.tier_i_run_lexical_body(arglist, new_env, body);
@@ -4093,6 +4088,69 @@ impl Context {
     }
 }
 
+/// Formal binding owns its policy source so dynamic binding and the next
+/// formal's projection cannot borrow the same Context independently.
+trait FormalBindings {
+    fn symbol_mode(&self) -> crate::tagged::SymbolMode;
+    fn bind(&mut self, symbol: SymId, argument: Value) -> Result<(), Flow>;
+
+    fn symbol_id(&self, value: Value) -> Option<SymId> {
+        // Canonical formals need neither a flag read nor a policy enum.
+        if let Some(symbol) = value.as_bare_symbol_id() {
+            return Some(symbol);
+        }
+        // Read live policy only after the physical tag fails. A previous
+        // dynamic binder or its watcher may have changed it.
+        value.as_symbol_id(self.symbol_mode())
+    }
+}
+
+struct DynamicFormalBindings<'a>(&'a mut Context);
+
+impl std::fmt::Debug for DynamicFormalBindings<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DynamicFormalBindings")
+            .finish_non_exhaustive()
+    }
+}
+
+impl FormalBindings for DynamicFormalBindings<'_> {
+    fn symbol_mode(&self) -> crate::tagged::SymbolMode {
+        self.0.symbol_mode()
+    }
+
+    fn bind(&mut self, symbol: SymId, argument: Value) -> Result<(), Flow> {
+        self.0.try_specbind(symbol, argument)
+    }
+}
+
+struct LexicalFormalBindings<'a> {
+    context: &'a Context,
+    lexenv: Value,
+}
+
+impl std::fmt::Debug for LexicalFormalBindings<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LexicalFormalBindings")
+            .field("lexenv", &self.lexenv)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FormalBindings for LexicalFormalBindings<'_> {
+    fn symbol_mode(&self) -> crate::tagged::SymbolMode {
+        self.context.symbol_mode()
+    }
+
+    fn bind(&mut self, symbol: SymId, argument: Value) -> Result<(), Flow> {
+        self.lexenv = Value::make_cons(
+            Value::make_cons(lexenv_binding_symbol_value(symbol), argument),
+            self.lexenv,
+        );
+        Ok(())
+    }
+}
+
 /// GNU `funcall_lambda`'s arglist walk: validate FUN's ARGLIST against ARGS
 /// and hand each formal its value -- the next argument, nil for a missing
 /// `&optional` one, the list of the rest for `&rest`. `invalid-function`
@@ -4102,8 +4160,7 @@ fn walk_lambda_formals(
     fun: Value,
     arglist: Value,
     args: &[Value],
-    mut symbol_mode: crate::tagged::SymbolMode,
-    mut bind: impl FnMut(SymId, Value) -> Result<crate::tagged::SymbolMode, Flow>,
+    bindings: &mut impl FormalBindings,
 ) -> Result<(), Flow> {
     // Two string interns per interpreted lambda application: 423,456 of
     // them on one rust-lsp-typing capture, for two symbols whose ids are
@@ -4120,7 +4177,7 @@ fn walk_lambda_formals(
     while syms_left.is_cons() {
         let next = syms_left.cons_car();
         syms_left = syms_left.cons_cdr();
-        let Some(next_id) = lambda_arg_symbol_id(next, symbol_mode) else {
+        let Some(next_id) = bindings.symbol_id(next) else {
             return Err(signal(LispCondition::InvalidFunction, vec![fun]));
         };
 
@@ -4152,7 +4209,7 @@ fn walk_lambda_formals(
             } else {
                 Value::NIL
             };
-            symbol_mode = bind(next_id, arg)?;
+            bindings.bind(next_id, arg)?;
             previous_rest = false;
         }
     }
@@ -4182,17 +4239,14 @@ fn bind_lexical_formals(
     fun: Value,
     arglist: Value,
     args: &[Value],
-    symbol_mode: crate::tagged::SymbolMode,
+    context: &Context,
 ) -> Result<Value, Flow> {
-    let mut lexenv = env;
-    walk_lambda_formals(fun, arglist, args, symbol_mode, |sym, arg| {
-        lexenv = Value::make_cons(
-            Value::make_cons(lexenv_binding_symbol_value(sym), arg),
-            lexenv,
-        );
-        Ok(symbol_mode)
-    })?;
-    Ok(lexenv)
+    let mut bindings = LexicalFormalBindings {
+        context,
+        lexenv: env,
+    };
+    walk_lambda_formals(fun, arglist, args, &mut bindings)?;
+    Ok(bindings.lexenv)
 }
 
 /// How many argument words a `BacktraceNative` entry records, as the shapes
