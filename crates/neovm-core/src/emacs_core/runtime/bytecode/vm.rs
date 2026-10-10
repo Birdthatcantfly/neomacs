@@ -6217,8 +6217,9 @@ impl<'a> Vm<'a> {
                         let len = stk!().len();
                         let array = stk!()[len - 2];
                         let index = stk!()[len - 1];
-                        let result =
-                            vm_try!(builtins::builtin_aref_2(&mut *self.ctx, array, index));
+                        let result = vm_try!(builtins::builtin_aref_values_in_vm_context_slot(
+                            &self.ctx, array, index
+                        ));
                         stk!()[len - 2] = result;
                         stk!().pop();
                     }
@@ -6227,8 +6228,8 @@ impl<'a> Vm<'a> {
                         // of advice or the symbol's function cell. The primitive
                         // may allocate or signal, but cannot run Lisp or collect.
                         let start = stk!().len().saturating_sub(3);
-                        let result = vm_try_pure!(builtins::builtin_aset_args_in_state(
-                            self.ctx,
+                        let result = vm_try_pure!(builtins::builtin_aset_args_in_vm_context_slot(
+                            &self.ctx,
                             &stk!()[start..]
                         ));
                         stk!().truncate(start);

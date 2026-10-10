@@ -98,7 +98,14 @@ impl std::fmt::Debug for ArraySymbolSource<'_> {
     }
 }
 
-impl ArraySymbolSource<'_> {
+/// A source is resolved only after the shared array dispatch selects a char table.
+/// Separate source types let the VM borrow its Context slot without loading it
+/// for vector, string, record or bool-vector operations.
+pub(crate) trait ArraySymbolPolicy {
+    fn mode(self) -> SymbolMode;
+}
+
+impl ArraySymbolPolicy for ArraySymbolSource<'_> {
     fn mode(self) -> SymbolMode {
         match self {
             Self::Bare => SymbolMode::Bare,
@@ -110,6 +117,34 @@ impl ArraySymbolSource<'_> {
 const _: () = assert!(
     std::mem::size_of::<ArraySymbolSource<'_>>() == std::mem::size_of::<&super::eval::Context>()
 );
+
+/// A shared borrow of the VM's owning Context slot. This carries no policy
+/// snapshot and cannot replace or mutably access the Context through the slot.
+/// The borrow ends when the synchronous array operation returns.
+struct VmArraySymbolSource<'slot, 'context>(&'slot &'context mut super::eval::Context);
+
+impl ArraySymbolPolicy for VmArraySymbolSource<'_, '_> {
+    fn mode(self) -> SymbolMode {
+        self.0.symbol_mode()
+    }
+}
+
+/// Used only by run_loop: defer the VM Context-slot load to the char-table arm.
+pub(crate) fn builtin_aref_values_in_vm_context_slot(
+    context_slot: &&mut super::eval::Context,
+    array: Value,
+    index: Value,
+) -> EvalResult {
+    builtin_aref_values(VmArraySymbolSource(context_slot), array, index)
+}
+
+/// Used only by run_loop: the ordinary vector write does not read the slot.
+pub(crate) fn builtin_aset_args_in_vm_context_slot(
+    context_slot: &&mut super::eval::Context,
+    args: &[Value],
+) -> EvalResult {
+    builtin_aset_args(VmArraySymbolSource(context_slot), args)
+}
 
 pub(crate) fn builtin_make_vector(args: Vec<Value>) -> EvalResult {
     make_vector(args).map_err(crate::emacs_core::alloc::AllocationFailure::into_flow)
@@ -161,7 +196,7 @@ pub(crate) fn builtin_aref_values_in_state(
 
 #[inline(never)]
 pub(crate) fn builtin_aref_values(
-    symbols: ArraySymbolSource<'_>,
+    symbols: impl ArraySymbolPolicy,
     array: Value,
     index: Value,
 ) -> EvalResult {
@@ -317,7 +352,7 @@ pub(crate) fn builtin_aset_args_in_context(
 
 /// `aset` reading its arguments in place.
 #[inline(never)]
-pub(crate) fn builtin_aset_args(symbols: ArraySymbolSource<'_>, args: &[Value]) -> EvalResult {
+pub(crate) fn builtin_aset_args(symbols: impl ArraySymbolPolicy, args: &[Value]) -> EvalResult {
     expect_args("aset", args, 3)?;
     // GNU src/data.c:Faset starts with CHECK_FIXNUM (idx) before checking
     // whether ARRAY is mutable by `aset`.
