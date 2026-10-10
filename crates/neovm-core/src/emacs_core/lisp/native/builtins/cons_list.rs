@@ -2151,28 +2151,42 @@ pub(crate) fn builtin_delq_values(
 
 pub(crate) fn builtin_elt(args: Vec<Value>) -> EvalResult {
     expect_args("elt", &args, 2)?;
-    match args[0].kind() {
-        ValueKind::Cons | ValueKind::Nil => builtin_nth(vec![args[1], args[0]]),
-        ValueKind::Veclike(VecLikeType::Vector)
-        | ValueKind::Veclike(VecLikeType::CharTable)
-        | ValueKind::Veclike(VecLikeType::BoolVector)
-        | ValueKind::String => builtin_aref(vec![args[0], args[1]]),
-        _ => Err(signal(
-            LispCondition::WrongTypeArgument,
-            vec![Value::symbol("sequencep"), args[0]],
-        )),
-    }
+    builtin_elt_values(
+        args[0],
+        args[1],
+        super::collections::ArraySymbolSource::Bare,
+    )
+}
+
+pub(crate) fn builtin_elt_in_state(
+    eval: &mut super::eval::Context,
+    args: Vec<Value>,
+) -> EvalResult {
+    expect_args("elt", &args, 2)?;
+    builtin_elt_values_in_state(eval, args[0], args[1])
 }
 
 /// The byte-code `elt` (`Op::Elt`): [`bytecode_elt_values`]. (The Lisp
 /// function `elt` is [`builtin_elt`], `Felt`.)
 #[inline(always)]
 pub(crate) fn builtin_elt_2(
-    _eval: &mut super::eval::Context,
+    eval: &mut super::eval::Context,
     sequence: Value,
     n: Value,
 ) -> EvalResult {
-    bytecode_elt_values(sequence, n)
+    bytecode_elt_values_in_state(eval, sequence, n)
+}
+
+pub(crate) fn bytecode_elt_values_in_state(
+    eval: &super::eval::Context,
+    sequence: Value,
+    n: Value,
+) -> EvalResult {
+    bytecode_elt_values(
+        sequence,
+        n,
+        super::collections::ArraySymbolSource::Context(eval),
+    )
 }
 
 /// GNU `Belt` (`bytecode.c`), the byte-code `elt`: on a cons with a count
@@ -2181,25 +2195,45 @@ pub(crate) fn builtin_elt_2(
 /// with the whole list: byte-compiled `(elt '(1 . 2) 3)` is
 /// `(wrong-type-argument listp 2)` in GNU. Everything else is `Felt`'s.
 #[inline(never)]
-pub(crate) fn bytecode_elt_values(sequence: Value, n: Value) -> EvalResult {
+pub(crate) fn bytecode_elt_values(
+    sequence: Value,
+    n: Value,
+    source: super::collections::ArraySymbolSource<'_>,
+) -> EvalResult {
     if sequence.is_cons()
         && let Some(count) = n.as_fixnum()
         && (0..=127).contains(&count)
     {
         return bytecode_nth_values(n, sequence);
     }
-    builtin_elt_values(sequence, n)
+    builtin_elt_values(sequence, n, source)
 }
 
-/// `elt` over values alone: its list arm is `nth` and its array arm `aref`,
-/// neither of which touches the evaluator.
-pub(crate) fn builtin_elt_values(sequence: Value, n: Value) -> EvalResult {
+pub(crate) fn builtin_elt_values_in_state(
+    eval: &super::eval::Context,
+    sequence: Value,
+    n: Value,
+) -> EvalResult {
+    builtin_elt_values(
+        sequence,
+        n,
+        super::collections::ArraySymbolSource::Context(eval),
+    )
+}
+
+/// GNU fns.c:1855 validates SEQUENCE before Faref checks N. The source is
+/// passed through only for valid array shapes; list behavior stays Fnthcdr.
+pub(crate) fn builtin_elt_values(
+    sequence: Value,
+    n: Value,
+    source: super::collections::ArraySymbolSource<'_>,
+) -> EvalResult {
     match sequence.kind() {
         ValueKind::Cons | ValueKind::Nil => builtin_nth_values(n, sequence),
         ValueKind::Veclike(VecLikeType::Vector)
         | ValueKind::Veclike(VecLikeType::CharTable)
         | ValueKind::Veclike(VecLikeType::BoolVector)
-        | ValueKind::String => builtin_aref_values(sequence, n),
+        | ValueKind::String => builtin_aref_values(sequence, n, source),
         _ => Err(signal(
             LispCondition::WrongTypeArgument,
             vec![Value::symbol("sequencep"), sequence],
@@ -2291,3 +2325,7 @@ mod collection_scan_capture;
 #[cfg(test)]
 #[path = "tests/gdn_equality_test.rs"]
 mod gdn_equality;
+
+#[cfg(test)]
+#[path = "tests/positioned_elt_test.rs"]
+mod positioned_elt;

@@ -74,6 +74,35 @@ fn allocate_vector_elements(
         }
     }
 }
+/// The owning symbol policy is consulted only by the char-table arm.
+/// Ordinary array access carries one pointer-sized source without reading it.
+#[derive(Clone, Copy)]
+pub(crate) enum ArraySymbolSource<'a> {
+    Bare,
+    Context(&'a super::eval::Context),
+}
+
+impl std::fmt::Debug for ArraySymbolSource<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Bare => "Bare",
+            Self::Context(_) => "Context",
+        })
+    }
+}
+
+impl ArraySymbolSource<'_> {
+    fn mode(self) -> SymbolMode {
+        match self {
+            Self::Bare => SymbolMode::Bare,
+            Self::Context(context) => context.symbol_mode(),
+        }
+    }
+}
+
+const _: () = assert!(
+    std::mem::size_of::<ArraySymbolSource<'_>>() == std::mem::size_of::<&super::eval::Context>()
+);
 
 pub(crate) fn builtin_make_vector(args: Vec<Value>) -> EvalResult {
     make_vector(args).map_err(crate::emacs_core::alloc::AllocationFailure::into_flow)
@@ -102,7 +131,7 @@ pub(crate) fn builtin_vector_slice(_eval: &mut super::eval::Context, args: &[Val
 
 pub(crate) fn builtin_aref(args: Vec<Value>) -> EvalResult {
     expect_args("aref", &args, 2)?;
-    builtin_aref_values(args[0], args[1])
+    builtin_aref_values(args[0], args[1], ArraySymbolSource::Bare)
 }
 
 #[inline(always)]
@@ -114,28 +143,25 @@ pub(crate) fn builtin_aref_2(
     builtin_aref_values_in_state(eval, array, index)
 }
 
-// Query the Context policy only for the char-table arm; vector/string VM
-// accesses keep their existing helper and instruction path.
-
 pub(crate) fn builtin_aref_values_in_state(
     eval: &super::eval::Context,
     array: Value,
     index: Value,
 ) -> EvalResult {
-    if array.is_char_table() {
-        let ch = expect_char_table_index(&index)?;
-        return super::chartable::ct_lookup_with_symbols(&array, ch, eval.symbol_mode());
-    }
-    builtin_aref_values(array, index)
+    builtin_aref_values(array, index, ArraySymbolSource::Context(eval))
 }
 
 #[inline(never)]
-pub(crate) fn builtin_aref_values(array: Value, index: Value) -> EvalResult {
+pub(crate) fn builtin_aref_values(
+    array: Value,
+    index: Value,
+    symbols: ArraySymbolSource<'_>,
+) -> EvalResult {
     let idx_fixnum = expect_fixnum(&index)?;
     match array.kind() {
         ValueKind::Veclike(VecLikeType::CharTable) => {
             let ch = expect_char_table_index(&index)?;
-            super::chartable::ct_lookup(&array, ch)
+            super::chartable::ct_lookup_with_symbols(&array, ch, symbols.mode())
         }
         // A vector or record slot: no in-band tags (P3.2 L0.8), so slot 0
         // is just slot 0, as in GNU `Faref`. A negative index wraps to a huge
@@ -264,32 +290,26 @@ pub(crate) fn aset_string_replacement(
 /// (`dhrystone`: 370,708 clones and 305,131 `Vec::from_iter` calls).
 #[cfg(test)]
 pub(crate) fn builtin_aset(args: Vec<Value>) -> EvalResult {
-    builtin_aset_args(&args)
+    builtin_aset_args(&args, ArraySymbolSource::Bare)
 }
 
 pub(crate) fn builtin_aset_args_in_state(
     eval: &mut super::eval::Context,
     args: &[Value],
 ) -> EvalResult {
-    builtin_aset_args_with_symbols(args, eval.symbol_mode())
+    builtin_aset_args_in_context(eval, args)
 }
 
-pub(crate) fn builtin_aset_args_with_symbols(args: &[Value], mode: SymbolMode) -> EvalResult {
-    if let Some(array) = args.first().filter(|array| array.is_char_table()) {
-        expect_args("aset", args, 3)?;
-        let ch = expect_char_table_index(&args[1])?;
-        return super::chartable::builtin_set_char_table_range_with_symbols(
-            vec![*array, Value::fixnum(ch), args[2]],
-            None,
-            mode,
-        );
-    }
-    builtin_aset_args(args)
+pub(crate) fn builtin_aset_args_in_context(
+    eval: &super::eval::Context,
+    args: &[Value],
+) -> EvalResult {
+    builtin_aset_args(args, ArraySymbolSource::Context(eval))
 }
 
 /// `aset` reading its arguments in place.
 #[inline(never)]
-pub(crate) fn builtin_aset_args(args: &[Value]) -> EvalResult {
+pub(crate) fn builtin_aset_args(args: &[Value], symbols: ArraySymbolSource<'_>) -> EvalResult {
     expect_args("aset", args, 3)?;
     // GNU src/data.c:Faset starts with CHECK_FIXNUM (idx) before checking
     // whether ARRAY is mutable by `aset`.
@@ -297,9 +317,10 @@ pub(crate) fn builtin_aset_args(args: &[Value]) -> EvalResult {
     match args[0].kind() {
         ValueKind::Veclike(VecLikeType::CharTable) => {
             let ch = expect_char_table_index(&args[1])?;
-            super::chartable::builtin_set_char_table_range(
+            super::chartable::builtin_set_char_table_range_with_symbols(
                 vec![args[0], Value::fixnum(ch), args[2]],
                 None,
+                symbols.mode(),
             )
         }
         // A vector or record slot (no in-band tags, P3.2 L0.8).

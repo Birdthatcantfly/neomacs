@@ -60,8 +60,8 @@ fn pure_nth(_: &Context, n: Value, list: Value) -> Result<Value, Flow> {
 fn pure_nthcdr(_: &Context, n: Value, list: Value) -> Result<Value, Flow> {
     b::builtin_nthcdr_values(n, list)
 }
-fn pure_elt(_: &Context, sequence: Value, n: Value) -> Result<Value, Flow> {
-    b::bytecode_elt_values(sequence, n)
+fn pure_elt(context: &Context, sequence: Value, n: Value) -> Result<Value, Flow> {
+    b::bytecode_elt_values_in_state(context, sequence, n)
 }
 fn pure_member(ctx: &Context, target: Value, list: Value) -> Result<Value, Flow> {
     b::builtin_member_values(target, list, ctx.symbols_with_pos_enabled)
@@ -824,7 +824,7 @@ fn aset_slow(ctx: *mut u8, array: Value, index: Value, value: Value) -> i64 {
     jit_shim_contain!(ctx, VALUE_SHIM_SIGNAL, {
         // SAFETY: live dormant Context supplied by the JIT shim contract.
         let context = unsafe { &*(ctx as *const Context) };
-        match b::builtin_aset_args_with_symbols(&[array, index, value], context.symbol_mode()) {
+        match b::builtin_aset_args_in_context(context, &[array, index, value]) {
             Ok(value) => value.bits() as i64,
             Err(flow) => {
                 stash_pending_flow(flow);

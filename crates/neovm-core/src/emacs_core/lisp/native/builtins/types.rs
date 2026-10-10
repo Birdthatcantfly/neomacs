@@ -47,12 +47,7 @@ pub(crate) fn builtin_vectorp_1(_eval: &mut super::eval::Context, arg: Value) ->
 }
 
 pub(crate) fn keywordp_swp(arg: Value, symbols_with_pos_enabled: bool) -> bool {
-    let bare = if symbols_with_pos_enabled && arg.is_symbol_with_pos() {
-        arg.as_symbol_with_pos_sym().unwrap_or(arg)
-    } else {
-        arg
-    };
-    bare.is_bare_keyword()
+    arg.is_keyword(crate::tagged::SymbolMode::from(symbols_with_pos_enabled))
 }
 
 pub(crate) fn builtin_keywordp_1(eval: &mut super::eval::Context, arg: Value) -> EvalResult {

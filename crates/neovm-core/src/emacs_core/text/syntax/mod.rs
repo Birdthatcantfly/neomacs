@@ -4215,9 +4215,10 @@ fn effective_syntax_entry_for_char_at_byte(
         return entry;
     }
 
-    if prop_cache.props().symbol_mode() == crate::tagged::SymbolMode::Bare
-        && let Some(entry) = prop_cache.ascii_entry(table, ch)
-    {
+    // GNU CHAR_TABLE_REF_ASCII (lisp.h:2133-2146) reads stored ASCII,
+    // default and parent slots without testing purpose. Both symbol policies
+    // therefore share this memo after the positional property lookup above.
+    if let Some(entry) = prop_cache.ascii_entry(table, ch) {
         return entry;
     }
 
@@ -4355,9 +4356,8 @@ fn effective_syntax_entry_for_abs_char(
         return entry;
     }
 
-    if prop_cache.props().symbol_mode() == crate::tagged::SymbolMode::Bare
-        && let Some(entry) = prop_cache.ascii_entry(table, ch)
-    {
+    // ASCII table reads are policy-independent, as on the byte path above.
+    if let Some(entry) = prop_cache.ascii_entry(table, ch) {
         return entry;
     }
 
@@ -7849,6 +7849,10 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/flat_ascii_syntax_entry_cache_test.rs"]
 mod flat_ascii_syntax_entry_cache_tests;
+
+#[cfg(test)]
+#[path = "tests/issue554_ascii_memo_test.rs"]
+mod issue554_ascii_memo_tests;
 
 #[cfg(test)]
 #[path = "tests/scan_error_data_gnu_test.rs"]

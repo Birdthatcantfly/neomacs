@@ -21,3 +21,5 @@ mod issue554_runtime_boundaries;
 mod issue554_control;
 
 mod issue554_final_boundaries;
+
+mod issue554_elt;

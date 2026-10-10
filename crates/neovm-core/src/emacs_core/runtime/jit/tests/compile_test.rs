@@ -3436,7 +3436,12 @@ fn compiled_aset_matches_the_builtin() {
             args.cons_cdr().cons_car(),
             args.cons_cdr().cons_cdr().cons_car(),
         );
-        let reference = match crate::emacs_core::builtins::builtin_aset_args(&[a, i, v]).kinded() {
+        let reference = match crate::emacs_core::builtins::builtin_aset_args(
+            &[a, i, v],
+            crate::emacs_core::builtins::ArraySymbolSource::Bare,
+        )
+        .kinded()
+        {
             Ok(v) => Ok(v),
             Err(FlowKind::Signal(sig)) => Err(format!("signal {}", sig.symbol_name())),
             Err(other) => Err(format!("{other:?}")),

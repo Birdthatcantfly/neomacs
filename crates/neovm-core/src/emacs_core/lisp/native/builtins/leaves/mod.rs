@@ -402,8 +402,8 @@ pub(crate) static ELT: LeafSpec = LeafSpec::new(
     Containment::Catch,
 );
 
-pub(crate) fn elt(_: &Context, sequence: Value, n: Value) -> LeafResult {
-    Ok(bytecode_elt_values(sequence, n)?)
+pub(crate) fn elt(context: &Context, sequence: Value, n: Value) -> LeafResult {
+    Ok(bytecode_elt_values_in_state(context, sequence, n)?)
 }
 
 /// `Bmemq` (`Op::Memq`). Compiled `memq` sites keep their value shim

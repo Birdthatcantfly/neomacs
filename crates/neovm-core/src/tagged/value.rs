@@ -1311,6 +1311,16 @@ pub enum SymbolMode {
     Positioned,
 }
 
+impl From<bool> for SymbolMode {
+    fn from(enabled: bool) -> Self {
+        if enabled {
+            Self::Positioned
+        } else {
+            Self::Bare
+        }
+    }
+}
+
 impl SymbolMode {
     /// Mirror `maybe_remove_pos_from_symbol` without changing other values.
     #[inline]
@@ -1341,7 +1351,15 @@ impl TaggedValue {
 
     #[inline]
     pub fn is_symbol(self, mode: SymbolMode) -> bool {
-        self.as_symbol_id(mode).is_some()
+        // GNU SYMBOLP tests the wrapper tag; XSYMBOL alone projects its
+        // payload. Keep the common bare tag ahead of the policy test.
+        if self.is_bare_symbol() {
+            return true;
+        }
+        match mode {
+            SymbolMode::Bare => false,
+            SymbolMode::Positioned => self.is_symbol_with_pos(),
+        }
     }
 
     pub fn as_symbol_lisp_string(self, mode: SymbolMode) -> Option<&'static LispString> {

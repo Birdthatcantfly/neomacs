@@ -6110,8 +6110,7 @@ impl<'a> Vm<'a> {
                     // Pure inline tag checks, zero function calls. Matches GNU exactly.
                     Op::Symbolp => {
                         let top = stk!().last_mut().unwrap();
-                        let is_sym = top.is_bare_symbol()
-                            || (self.ctx.symbols_with_pos_enabled && top.is_symbol_with_pos());
+                        let is_sym = top.is_symbol(self.ctx.symbol_mode());
                         *top = if is_sym { Value::T } else { Value::NIL };
                     }
                     Op::Consp => {

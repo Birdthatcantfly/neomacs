@@ -3849,7 +3849,7 @@ pub(crate) fn register_subrs(ctx: &mut crate::emacs_core::eval::Context) {
     );
     ctx.register_subr(SubrSpec::new(
         "elt",
-        NativeFn::ContextVec(|_ctx, args| builtin_elt(args)),
+        NativeFn::ContextVec(builtin_elt_in_state),
         SubrArity::new(2, Some(2)),
     ));
     ctx.register_subr(SubrSpec::fixed2("memql", builtin_memql_2, FixedMin2::Two));
