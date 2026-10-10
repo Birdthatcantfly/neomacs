@@ -136,8 +136,11 @@ fn const_sym_id(constants: &[Value], idx: u16) -> Result<u32, CompileError> {
     let v = constants
         .get(idx as usize)
         .ok_or(CompileError::BadOperand)?;
-    v.as_symbol_id()
-        .or_else(|| v.as_symbol_with_pos_sym().and_then(|s| s.as_symbol_id()))
+    v.as_bare_symbol_id()
+        .or_else(|| {
+            v.as_symbol_with_pos_sym()
+                .and_then(|s| s.as_bare_symbol_id())
+        })
         .map(|id| id.0)
         .ok_or(CompileError::BadOperand)
 }
@@ -409,7 +412,7 @@ fn jit_profile_emit(
     let fingerprint: Vec<String> = f
         .constants
         .iter()
-        .filter(|v| v.as_symbol_id().is_some())
+        .filter(|v| v.as_bare_symbol_id().is_some())
         .take(6)
         .map(|v| crate::emacs_core::print::print_value(v).replace(',', ";"))
         .collect();
@@ -569,7 +572,7 @@ fn arith_intrinsic_call_sites(
             Op::Constant(cidx) => {
                 let tag = constants
                     .get(*cidx as usize)
-                    .and_then(|v| v.as_symbol_id())
+                    .and_then(|v| v.as_bare_symbol_id())
                     .map(|_| *cidx);
                 tags.push(tag);
             }
@@ -614,8 +617,9 @@ fn arith_intrinsic_call_sites(
                 let nargs = *n as usize;
                 if tags.len() > nargs
                     && let Some(cidx) = tags[tags.len() - 1 - nargs]
-                    && let Some(sym_id) =
-                        constants.get(cidx as usize).and_then(|v| v.as_symbol_id())
+                    && let Some(sym_id) = constants
+                        .get(cidx as usize)
+                        .and_then(|v| v.as_bare_symbol_id())
                     && let Some(arith_op) = arith_intrinsic_op_by_name(resolve_sym(sym_id), nargs)
                 {
                     out.push((i, sym_id, arith_op));
@@ -992,7 +996,7 @@ fn body_calls_itself(f: &ByteCodeFunction, obarray: Option<&Obarray>) -> bool {
         return false;
     }
     f.constants.iter().any(|c| {
-        c.as_symbol_id()
+        c.as_bare_symbol_id()
             .and_then(|id| obarray.symbol_function_id(id))
             .is_some_and(|binding| binding.is_bytecode_object_of(f))
     })
@@ -1016,7 +1020,7 @@ const MAX_INLINE_INSTS: usize = 8;
 /// unless it is a required-only lexical bytecode function (so `build_mir`'s
 /// argument seeding matches the arity).
 fn resolve_inline_callee(ob: &Obarray, sym: Value) -> Option<mir::MirFunction> {
-    let sym_id = sym.as_symbol_id()?;
+    let sym_id = sym.as_bare_symbol_id()?;
     // A callee that keeps being redefined is called, not inlined: each
     // redefinition would evict and recompile every caller that inlined it.
     if super::cache::inline_callee_is_unstable(sym_id) {
@@ -1957,7 +1961,7 @@ fn find_spec_sites(
                 && tags.len() > nargs
                 && let Some(cidx) = tags[tags.len() - 1 - nargs]
                 && let Some(sym_val) = constants.get(cidx as usize)
-                && let Some(sym_id) = sym_val.as_symbol_id()
+                && let Some(sym_id) = sym_val.as_bare_symbol_id()
                 && let Some(binding) = obarray.symbol_function_id(sym_id)
             {
                 let kind = if binding.is_bytecode() {
@@ -1999,7 +2003,7 @@ pub(crate) fn spec_tag_transfer(op: &Op, constants: &[Value], tags: &mut Vec<Opt
             // re-checks which it has.
             let tag = constants
                 .get(*cidx as usize)
-                .filter(|v| v.as_symbol_id().is_some() || v.is_bytecode())
+                .filter(|v| v.as_bare_symbol_id().is_some() || v.is_bytecode())
                 .map(|_| *cidx);
             tags.push(tag);
         }

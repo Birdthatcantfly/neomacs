@@ -638,7 +638,7 @@ fn neovm_jit_call_general(
             // `(apply F ...)` into a compiled F, also without leaving native
             // code.
             if nargs >= 2
-                && func_val.as_symbol_id() == Some(Vm::apply_builtin_id())
+                && func_val.as_bare_symbol_id() == Some(Vm::apply_builtin_id())
                 && let Some(outcome) = Vm::call_apply_native(ctx_ref, func_val, args_ptr, nargs)
             {
                 return native_call_status(outcome, out);
@@ -649,7 +649,7 @@ fn neovm_jit_call_general(
             ctx_ref.bc_buf.extend_from_slice(unsafe {
                 core::slice::from_raw_parts(args_ptr as *const Value, nargs)
             });
-            if func_val.is_symbol()
+            if func_val.is_bare_symbol()
                 && let Some(res) =
                     Vm::call_builtin_symbol_for_jit(ctx_ref, func_val, args_start, nargs)
             {

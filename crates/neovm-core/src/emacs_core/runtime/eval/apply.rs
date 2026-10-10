@@ -132,7 +132,10 @@ impl Context {
         &mut self,
         value: Value,
     ) -> Result<Option<Value>, Flow> {
-        if !value.is_cons() || value.cons_car().as_symbol_name() != Some(":documentation") {
+        let symbol_mode = self.symbol_mode();
+        if !value.is_cons()
+            || value.cons_car().as_symbol_name(symbol_mode) != Some(":documentation")
+        {
             return Ok(None);
         }
 
@@ -2431,7 +2434,8 @@ impl Context {
     /// compiler overrides).
     #[inline(never)]
     pub(crate) fn resolve_mapped_subr_callee(&mut self, function: Value) -> Option<(Value, u64)> {
-        let sym_id = function.as_symbol_id()?;
+        let symbol_mode = self.symbol_mode();
+        let sym_id = function.as_symbol_id(symbol_mode)?;
         if self.compiler_function_overrides_active()
             || !super::builtins::is_canonical_symbol_id(sym_id)
         {
@@ -3022,12 +3026,14 @@ impl Context {
                 self.funcall_general_untraced(bare, args)
             }
             ValueKind::Cons => {
-                if super::super::autoload::is_autoload_value(&function) {
+                if super::super::autoload::is_autoload_value(&function, self.symbol_mode()) {
                     Err(signal(
                         LispCondition::WrongTypeArgument,
                         vec![Value::symbol("symbolp"), function],
                     ))
-                } else if cons_head_symbol_id(&function) == Some(lambda_symbol()) {
+                } else if cons_head_symbol_id(&function, self.symbol_mode())
+                    == Some(lambda_symbol())
+                {
                     self.apply_lambda(function, args)
                 } else {
                     Err(signal(LispCondition::InvalidFunction, vec![function]))
@@ -3041,6 +3047,7 @@ impl Context {
     /// `Value::Lambda`.  This mirrors GNU Emacs's `funcall_lambda` which
     /// handles both forms.  Used by both the interpreter and the bytecode VM.
     pub(crate) fn instantiate_callable_cons_form(&mut self, function: Value) -> EvalResult {
+        let symbol_mode = self.symbol_mode();
         if !function.is_cons() {
             return Err(signal(LispCondition::InvalidFunction, vec![function]));
         }
@@ -3051,7 +3058,7 @@ impl Context {
         // Unwrap symbol-with-pos on the car so (lambda ...) / (closure ...)
         // forms with position-wrapped heads are recognized.
         let head_val = self.unwrap_symbol(function.cons_car());
-        let Some(head_id) = head_val.as_symbol_id() else {
+        let Some(head_id) = head_val.as_symbol_id(symbol_mode) else {
             return Err(signal(LispCondition::InvalidFunction, vec![function]));
         };
         let mut tail = function.cons_cdr();
@@ -3117,7 +3124,7 @@ impl Context {
         while tail.is_cons() {
             let item = tail.cons_car();
             if !item.is_cons()
-                || item.cons_car().as_symbol_id() != Some(declare_symbol())
+                || item.cons_car().as_symbol_id(symbol_mode) != Some(declare_symbol())
                 || list_length(&item).is_none()
             {
                 break;
@@ -3127,7 +3134,9 @@ impl Context {
 
         let iform_value = if tail.is_cons() {
             let item = tail.cons_car();
-            if item.is_cons() && item.cons_car().as_symbol_id() == Some(interactive_symbol_id()) {
+            if item.is_cons()
+                && item.cons_car().as_symbol_id(symbol_mode) == Some(interactive_symbol_id())
+            {
                 tail = tail.cons_cdr();
                 item
             } else {
@@ -3585,30 +3594,31 @@ impl Context {
             }
         }
 
-        let target =
-            if let Some(func) = compiler_function_override_in_obarray(&self.obarray, sym_id) {
-                NamedCallTarget::Obarray(func)
-            } else if let Some(func) = self.obarray.symbol_function_id(sym_id) {
-                match func.kind() {
-                    ValueKind::Nil => NamedCallTarget::Void,
-                    // `(fset 'foo (symbol-function 'foo))` writes `#<subr foo>` into
-                    // the function cell. Treat this as the canonical callable
-                    // object, not an obarray indirection cycle.
-                    ValueKind::Subr(sid) if sid == sym_id => {
-                        NamedCallTarget::Subr(Value::subr_from_sym_id(sid))
-                    }
-                    ValueKind::Veclike(VecLikeType::Subr) if func.as_subr_id() == Some(sym_id) => {
-                        NamedCallTarget::Subr(func)
-                    }
-                    _ => NamedCallTarget::Obarray(func),
+        let target = if let Some(func) =
+            compiler_function_override_in_obarray(&self.obarray, sym_id, self.symbol_mode())
+        {
+            NamedCallTarget::Obarray(func)
+        } else if let Some(func) = self.obarray.symbol_function_id(sym_id) {
+            match func.kind() {
+                ValueKind::Nil => NamedCallTarget::Void,
+                // `(fset 'foo (symbol-function 'foo))` writes `#<subr foo>` into
+                // the function cell. Treat this as the canonical callable
+                // object, not an obarray indirection cycle.
+                ValueKind::Subr(sid) if sid == sym_id => {
+                    NamedCallTarget::Subr(Value::subr_from_sym_id(sid))
                 }
-            } else if self.obarray.is_function_unbound_id(sym_id) {
-                NamedCallTarget::Void
-            } else if lookup_global_subr_entry(sym_id).is_some() {
-                NamedCallTarget::Subr(Value::subr_from_sym_id(sym_id))
-            } else {
-                NamedCallTarget::Void
-            };
+                ValueKind::Veclike(VecLikeType::Subr) if func.as_subr_id() == Some(sym_id) => {
+                    NamedCallTarget::Subr(func)
+                }
+                _ => NamedCallTarget::Obarray(func),
+            }
+        } else if self.obarray.is_function_unbound_id(sym_id) {
+            NamedCallTarget::Void
+        } else if lookup_global_subr_entry(sym_id).is_some() {
+            NamedCallTarget::Subr(Value::subr_from_sym_id(sym_id))
+        } else {
+            NamedCallTarget::Void
+        };
 
         if !compiler_overrides_active {
             // Cap the cache to avoid unbounded growth on pathologic
@@ -3697,7 +3707,7 @@ impl Context {
     ) -> EvalResult {
         match self.resolve_named_call_target_by_id(sym_id) {
             NamedCallTarget::Obarray(func) => {
-                if super::super::autoload::is_autoload_value(&func) {
+                if super::super::autoload::is_autoload_value(&func, self.symbol_mode()) {
                     return self.apply_named_autoload_callable_by_id(
                         sym_id,
                         func,
@@ -3745,7 +3755,7 @@ impl Context {
     ) -> EvalResult {
         match self.resolve_named_call_target(name) {
             NamedCallTarget::Obarray(func) => {
-                if super::super::autoload::is_autoload_value(&func) {
+                if super::super::autoload::is_autoload_value(&func, self.symbol_mode()) {
                     return self.apply_named_autoload_callable(
                         name,
                         func,
@@ -3870,7 +3880,7 @@ impl Context {
 
         Ok(if loaded.is_nil() {
             NamedAutoloadCallStep::Void
-        } else if super::super::autoload::is_autoload_value(&loaded) {
+        } else if super::super::autoload::is_autoload_value(&loaded, self.symbol_mode()) {
             NamedAutoloadCallStep::RetrySymbol {
                 autoload_form: loaded,
             }
@@ -3898,7 +3908,7 @@ impl Context {
                 let tag = args[0];
                 let value = args[1];
                 if self.has_active_catch(&tag) {
-                    Err(Flow::throw(tag, value))
+                    Err(Flow::throw_with_symbols(tag, value, self.symbol_mode()))
                 } else {
                     Err(signal(LispCondition::NoCatch, vec![tag, value]))
                 }

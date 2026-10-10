@@ -248,7 +248,7 @@ fn credit_generic(
     // name the native mapping subr; a closure or advice wrapper gets no credit.
     let native = callee.as_subr_id().or_else(|| {
         callee
-            .as_symbol_id()
+            .as_bare_symbol_id()
             .and_then(|sym| ctx.obarray.symbol_function_id(sym))
             .and_then(|v| v.as_subr_id())
     });

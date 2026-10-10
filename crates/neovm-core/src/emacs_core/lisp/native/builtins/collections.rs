@@ -6,6 +6,7 @@ use crate::emacs_core::eval::LispArgVec;
 use crate::emacs_core::hashtab::hash_key_to_visible_value;
 use crate::emacs_core::heap_registry::{HeapRegistryHandle, HeapRegistrySlot};
 use crate::emacs_core::value::{HashProbe, HashTableMakeKeyword, ValueKind, VecLikeType};
+use crate::tagged::value::SymbolMode;
 
 // ===========================================================================
 // Vector operations
@@ -106,10 +107,25 @@ pub(crate) fn builtin_aref(args: Vec<Value>) -> EvalResult {
 
 #[inline(always)]
 pub(crate) fn builtin_aref_2(
-    _eval: &mut super::eval::Context,
+    eval: &mut super::eval::Context,
     array: Value,
     index: Value,
 ) -> EvalResult {
+    builtin_aref_values_in_state(eval, array, index)
+}
+
+// Query the Context policy only for the char-table arm; vector/string VM
+// accesses keep their existing helper and instruction path.
+
+pub(crate) fn builtin_aref_values_in_state(
+    eval: &super::eval::Context,
+    array: Value,
+    index: Value,
+) -> EvalResult {
+    if array.is_char_table() {
+        let ch = expect_char_table_index(&index)?;
+        return super::chartable::ct_lookup_with_symbols(&array, ch, eval.symbol_mode());
+    }
     builtin_aref_values(array, index)
 }
 
@@ -249,6 +265,26 @@ pub(crate) fn aset_string_replacement(
 #[cfg(test)]
 pub(crate) fn builtin_aset(args: Vec<Value>) -> EvalResult {
     builtin_aset_args(&args)
+}
+
+pub(crate) fn builtin_aset_args_in_state(
+    eval: &mut super::eval::Context,
+    args: &[Value],
+) -> EvalResult {
+    builtin_aset_args_with_symbols(args, eval.symbol_mode())
+}
+
+pub(crate) fn builtin_aset_args_with_symbols(args: &[Value], mode: SymbolMode) -> EvalResult {
+    if let Some(array) = args.first().filter(|array| array.is_char_table()) {
+        expect_args("aset", args, 3)?;
+        let ch = expect_char_table_index(&args[1])?;
+        return super::chartable::builtin_set_char_table_range_with_symbols(
+            vec![*array, Value::fixnum(ch), args[2]],
+            None,
+            mode,
+        );
+    }
+    builtin_aset_args(args)
 }
 
 /// `aset` reading its arguments in place.
@@ -439,13 +475,22 @@ fn invalid_hash_table_keyword_argument(arg: Value) -> Flow {
     )
 }
 
-fn hash_test_from_designator(value: &Value) -> Option<HashTableTest> {
-    HashTableTest::from_symbol_value(value)
+fn hash_test_from_designator(value: &Value, mode: SymbolMode) -> Option<HashTableTest> {
+    HashTableTest::from_symbol_value(
+        &value
+            .as_symbol_id(mode)
+            .map(Value::from_sym_id)
+            .unwrap_or(*value),
+    )
 }
 
-fn hash_test_from_user_test_pair(test: &Value, hash: &Value) -> Option<HashTableTest> {
-    let test_name = test.as_symbol_name()?;
-    let hash_name = hash.as_symbol_name()?;
+fn hash_test_from_user_test_pair(
+    test: &Value,
+    hash: &Value,
+    mode: SymbolMode,
+) -> Option<HashTableTest> {
+    let test_name = test.as_symbol_name(mode)?;
+    let hash_name = hash.as_symbol_name(mode)?;
     match (test_name, hash_name) {
         ("eq", "sxhash-eq") => Some(HashTableTest::Eq),
         ("eql", "sxhash-eql") => Some(HashTableTest::Eql),
@@ -490,16 +535,28 @@ fn maybe_resize_hash_table_for_insert(table: &mut LispHashTable, inserting_new_k
     // each backing collection grow with the entries actually inserted.
 }
 
+#[cfg(test)]
 pub(crate) fn builtin_define_hash_table_test(args: Vec<Value>) -> EvalResult {
+    define_hash_table_test_with_symbols(args, SymbolMode::Bare)
+}
+
+pub(crate) fn builtin_define_hash_table_test_in_state(
+    eval: &mut super::eval::Context,
+    args: Vec<Value>,
+) -> EvalResult {
+    define_hash_table_test_with_symbols(args, eval.symbol_mode())
+}
+
+fn define_hash_table_test_with_symbols(args: Vec<Value>, mode: SymbolMode) -> EvalResult {
     expect_args("define-hash-table-test", &args, 3)?;
-    let Some(alias_name) = args[0].as_symbol_name() else {
+    let Some(alias_name) = args[0].as_symbol_name(mode) else {
         return Err(signal(
             LispCondition::WrongTypeArgument,
             vec![Value::symbol("symbolp"), args[0]],
         ));
     };
-    let standard_test = hash_test_from_user_test_pair(&args[1], &args[2])
-        .or_else(|| hash_test_from_designator(&args[1]));
+    let standard_test = hash_test_from_user_test_pair(&args[1], &args[2], mode)
+        .or_else(|| hash_test_from_designator(&args[1], mode));
     // GNU chooses built-in tests only from make-hash-table's :test NAME.
     // A custom NAME always retains both callbacks, even when its comparison
     // designator is eq, eql, or equal. Keep the storage-test classification;
@@ -521,6 +578,17 @@ pub(crate) fn builtin_make_hash_table(args: Vec<Value>) -> EvalResult {
 }
 
 pub(crate) fn builtin_make_hash_table_slice(args: &[Value]) -> EvalResult {
+    make_hash_table_with_symbols(args, SymbolMode::Bare)
+}
+
+pub(crate) fn builtin_make_hash_table_in_state(
+    eval: &mut super::eval::Context,
+    args: &[Value],
+) -> EvalResult {
+    make_hash_table_with_symbols(args, eval.symbol_mode())
+}
+
+fn make_hash_table_with_symbols(args: &[Value], mode: SymbolMode) -> EvalResult {
     if !args.len().is_multiple_of(2) {
         return Err(signal(
             "error",
@@ -535,9 +603,9 @@ pub(crate) fn builtin_make_hash_table_slice(args: &[Value]) -> EvalResult {
     let mut i = args.len();
     while i >= 2 {
         i -= 1;
-        let arg = args[i];
+        let arg = mode.unwrap(args[i]);
         i -= 1;
-        let kw = args[i];
+        let kw = mode.unwrap(args[i]);
         match HashTableMakeKeyword::from_symbol_value(&kw) {
             Some(HashTableMakeKeyword::Test) => test_arg = arg,
             Some(HashTableMakeKeyword::Weakness) => weakness_arg = arg,
@@ -554,7 +622,7 @@ pub(crate) fn builtin_make_hash_table_slice(args: &[Value]) -> EvalResult {
     let (test, test_name) = match test_arg.kind() {
         ValueKind::Nil => (HashTableTest::Eql, None),
         _ => {
-            let Some(name) = test_arg.as_symbol_name() else {
+            let Some(name) = test_arg.as_symbol_name(mode) else {
                 return Err(signal(
                     LispCondition::WrongTypeArgument,
                     vec![Value::symbol("symbolp"), test_arg],
@@ -563,7 +631,7 @@ pub(crate) fn builtin_make_hash_table_slice(args: &[Value]) -> EvalResult {
             let test = match HashTableTest::from_symbol_name(name) {
                 Some(test)
                     if !super::super::hashtab::hash_test_parity_enabled()
-                        || test_arg.as_symbol_id() == Some(intern(test.name())) =>
+                        || test_arg.as_symbol_id(mode) == Some(intern(test.name())) =>
                 {
                     test
                 }
@@ -579,7 +647,7 @@ pub(crate) fn builtin_make_hash_table_slice(args: &[Value]) -> EvalResult {
                 }
             };
             let test_name = if super::super::hashtab::hash_test_parity_enabled() {
-                test_arg.as_symbol_id()
+                test_arg.as_symbol_id(mode)
             } else {
                 Some(intern(name))
             };
@@ -593,7 +661,7 @@ pub(crate) fn builtin_make_hash_table_slice(args: &[Value]) -> EvalResult {
         ValueKind::Nil => None,
         ValueKind::T => Some(HashTableWeakness::KeyAndValue),
         _ => {
-            let Some(name) = weakness_arg.as_symbol_name() else {
+            let Some(name) = weakness_arg.as_symbol_name(mode) else {
                 return Err(signal(
                     "error",
                     vec![Value::string("Invalid hash table weakness"), weakness_arg],
@@ -1831,3 +1899,7 @@ mod gc_tls_ownership_tests;
 #[cfg(test)]
 #[path = "tests/vector_storage_test.rs"]
 mod vector_storage_tests;
+
+#[cfg(test)]
+#[path = "tests/positioned_builtin_classes_test.rs"]
+mod positioned_builtin_classes_tests;

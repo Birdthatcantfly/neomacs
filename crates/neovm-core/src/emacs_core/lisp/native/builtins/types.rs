@@ -23,8 +23,7 @@ pub(crate) fn builtin_nlistp_1(_eval: &mut super::eval::Context, arg: Value) -> 
 }
 
 pub(crate) fn builtin_symbolp_1(eval: &mut super::eval::Context, arg: Value) -> EvalResult {
-    let is_sym = arg.is_symbol() || (eval.symbols_with_pos_enabled && arg.is_symbol_with_pos());
-    Ok(Value::bool_val(is_sym))
+    Ok(Value::bool_val(arg.is_symbol(eval.symbol_mode())))
 }
 
 pub(crate) fn builtin_numberp_1(_eval: &mut super::eval::Context, arg: Value) -> EvalResult {
@@ -53,7 +52,7 @@ pub(crate) fn keywordp_swp(arg: Value, symbols_with_pos_enabled: bool) -> bool {
     } else {
         arg
     };
-    bare.is_keyword()
+    bare.is_bare_keyword()
 }
 
 pub(crate) fn builtin_keywordp_1(eval: &mut super::eval::Context, arg: Value) -> EvalResult {
@@ -165,15 +164,6 @@ fn is_runtime_function_object(value: &Value) -> bool {
     }
 }
 
-fn autoload_type_of(value: &Value) -> Option<super::autoload::AutoloadType> {
-    if !super::autoload::is_autoload_value(value) {
-        return None;
-    }
-    let items = list_to_vec(value)?;
-    let type_value = items.get(4).cloned().unwrap_or(Value::NIL);
-    Some(super::autoload::AutoloadType::from_value(&type_value))
-}
-
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
 pub(crate) fn builtin_functionp(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {
     expect_args("functionp", &args, 1)?;
@@ -191,8 +181,13 @@ pub(crate) fn value_is_function(eval: &super::eval::Context, arg: Value) -> bool
         if let Some(function) =
             resolve_indirect_symbol_by_id_in_obarray(&eval.obarray, symbol).map(|(_, value)| value)
         {
-            if let Some(autoload_type) = autoload_type_of(&function) {
-                matches!(autoload_type, super::autoload::AutoloadType::Function)
+            if super::autoload::is_autoload_value(&function, eval.symbol_mode()) {
+                // GNU FUNCTIONP accepts autoloads only with a raw nil TYPE.
+                // Non-nil types include positioned symbols even in bare mode.
+                list_to_vec(&function)
+                    .and_then(|items| items.get(4).copied())
+                    .unwrap_or(Value::NIL)
+                    .is_nil()
             } else {
                 is_runtime_function_object(&function)
                     || is_lambda_form_list(&function, eval.symbols_with_pos_enabled)
@@ -254,7 +249,9 @@ pub(crate) fn builtin_type_of_with_ctx_1(
     // Stale tagged pointer detection is not applicable with tagged pointers —
     // the old generation-based check relied on tagged pointer indirection which
     // no longer exists.  Just delegate directly.
-    let _ = ctx; // suppress unused warning
+    if object.is_symbol(ctx.symbol_mode()) {
+        return Ok(Value::symbol("symbol"));
+    }
     builtin_type_of(&args)
 }
 

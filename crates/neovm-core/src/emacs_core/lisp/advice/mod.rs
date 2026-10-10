@@ -199,7 +199,7 @@ pub(crate) fn builtin_add_variable_watcher(
 ) -> EvalResult {
     expect_args("add-variable-watcher", &args, 2)?;
 
-    let symbol = super::builtins::symbols::expect_symbol_id(&args[0])?;
+    let symbol = super::builtins::symbols::expect_symbol_id(&args[0], eval.symbol_mode())?;
     let resolved =
         super::builtins::symbols::resolve_variable_alias_id_in_obarray(&eval.obarray, symbol)?;
     let callback = args[1];
@@ -218,7 +218,7 @@ pub(crate) fn builtin_remove_variable_watcher(
 ) -> EvalResult {
     expect_args("remove-variable-watcher", &args, 2)?;
 
-    let symbol = super::builtins::symbols::expect_symbol_id(&args[0])?;
+    let symbol = super::builtins::symbols::expect_symbol_id(&args[0], eval.symbol_mode())?;
     let resolved =
         super::builtins::symbols::resolve_variable_alias_id_in_obarray(&eval.obarray, symbol)?;
     let callback = args[1];
@@ -238,7 +238,7 @@ pub(crate) fn builtin_get_variable_watchers(
 ) -> EvalResult {
     expect_args("get-variable-watchers", &args, 1)?;
 
-    let symbol = super::builtins::symbols::expect_symbol_id(&args[0])?;
+    let symbol = super::builtins::symbols::expect_symbol_id(&args[0], eval.symbol_mode())?;
     let resolved =
         super::builtins::symbols::resolve_variable_alias_id_in_obarray(&eval.obarray, symbol)?;
     Ok(Value::list(eval.watchers.get_watchers(resolved)))

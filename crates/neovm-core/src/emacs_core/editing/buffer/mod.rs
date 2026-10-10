@@ -19,6 +19,7 @@ use crate::emacs_core::value::{
     ValueKind, VecLikeType, equal_value, get_string_text_properties_table_for_value,
     set_string_text_properties_table_for_value,
 };
+use crate::tagged::value::SymbolMode;
 use crate::window::FrameManager;
 
 #[derive(Clone, Copy)]
@@ -90,8 +91,8 @@ fn delete_quit_restore_popup_windows_showing_buffer(
                             match crate::emacs_core::value::list_to_vec(&quit_restore) {
                                 Some(items) => {
                                     items.len() >= 4
-                                        && items[0].as_symbol_name() == Some("window")
-                                        && items[1].as_symbol_name() == Some("window")
+                                        && items[0].as_bare_symbol_name() == Some("window")
+                                        && items[1].as_bare_symbol_name() == Some("window")
                                         && eq_value(&items[3], &buffer_value)
                                 }
                                 None => false,
@@ -336,11 +337,12 @@ pub(crate) fn builtin_get_buffer(eval: &mut super::eval::Context, args: Vec<Valu
 }
 
 pub(crate) fn builtin_find_buffer(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {
+    let symbol_mode = eval.symbol_mode();
     let obarray = eval.obarray();
     let dynamic: &[OrderedRuntimeBindingMap] = &[];
     let buffers = &eval.buffers;
     expect_args("find-buffer", &args, 2)?;
-    let name = args[0].as_symbol_name().ok_or_else(|| {
+    let name = args[0].as_symbol_name(symbol_mode).ok_or_else(|| {
         signal(
             LispCondition::WrongTypeArgument,
             vec![Value::symbol("symbolp"), args[0]],
@@ -3740,6 +3742,7 @@ pub(crate) fn apply_inherited_text_properties(
     current_id: BufferId,
     old_pt: usize,
     text_len: usize,
+    mode: SymbolMode,
 ) {
     if text_len == 0 {
         return;
@@ -3749,7 +3752,7 @@ pub(crate) fn apply_inherited_text_properties(
         .get(current_id)
         .map(|buf| {
             super::builtins::misc_eval::inherited_text_properties_for_inserted_range_in_state(
-                obarray, dynamic, buffers, buf, old_pt, text_len,
+                obarray, dynamic, buffers, buf, old_pt, text_len, mode,
             )
         })
         .unwrap_or_default();
@@ -3982,6 +3985,7 @@ fn insert_one_pending(
         insert_pos,
         insert_extent,
     )?;
+    let mode = eval.symbol_mode();
     insert_pieces_in_state(
         &eval.obarray,
         &[],
@@ -3989,6 +3993,7 @@ fn insert_one_pending(
         pieces,
         marker_placement,
         property_mode,
+        mode,
     )?;
     super::editfns::signal_after_text_change(eval, change)?;
     eval.restore_specpdl_roots(piece_root_scope);
@@ -4047,6 +4052,7 @@ fn insert_pieces_in_state(
     pieces: Vec<InsertPiece>,
     marker_placement: InsertPieceMarkerPlacement,
     property_mode: InsertPiecePropertyMode,
+    mode: SymbolMode,
 ) -> EvalResult {
     if pieces.iter().all(|piece| piece.text.is_empty()) {
         return Ok(Value::NIL);
@@ -4100,6 +4106,7 @@ fn insert_pieces_in_state(
                 current_id,
                 insert_pos.get(),
                 piece.text.sbytes(),
+                mode,
             );
             if piece.text_props.is_none() {
                 let _ = buffers.merge_adjacent_equal_buffer_text_properties(
@@ -4127,6 +4134,7 @@ pub(crate) fn insert_string_value_in_current_buffer(
     value: Value,
     marker_placement: InsertPieceMarkerPlacement,
     property_mode: InsertPiecePropertyMode,
+    mode: SymbolMode,
 ) -> EvalResult {
     let target_multibyte = current_buffer_multibyte(buffers)?;
     let piece = buffer_insert_piece_from_string(value, target_multibyte)?;
@@ -4137,6 +4145,7 @@ pub(crate) fn insert_string_value_in_current_buffer(
         vec![piece],
         marker_placement,
         property_mode,
+        mode,
     )
 }
 
@@ -4221,6 +4230,7 @@ pub(crate) fn builtin_insert_char(eval: &mut super::eval::Context, args: Vec<Val
         .buffers
         .insert_lisp_string_into_buffer(current_id, &to_insert);
     if args.get(2).is_some_and(|value| value.is_truthy()) {
+        let mode = eval.symbol_mode();
         apply_inherited_text_properties(
             &eval.obarray,
             &[],
@@ -4228,6 +4238,7 @@ pub(crate) fn builtin_insert_char(eval: &mut super::eval::Context, args: Vec<Val
             current_id,
             insert_pos.get(),
             text_len.get(),
+            mode,
         );
         let _ = eval.buffers.merge_adjacent_equal_buffer_text_properties(
             current_id,
@@ -4315,6 +4326,7 @@ pub(crate) fn builtin_insert_byte(eval: &mut super::eval::Context, args: Vec<Val
         .buffers
         .insert_lisp_string_into_buffer(current_id, &to_insert);
     if args.get(2).is_some_and(|value| value.is_truthy()) {
+        let mode = eval.symbol_mode();
         apply_inherited_text_properties(
             &eval.obarray,
             &[],
@@ -4322,6 +4334,7 @@ pub(crate) fn builtin_insert_byte(eval: &mut super::eval::Context, args: Vec<Val
             current_id,
             insert_pos.get(),
             text_len.get(),
+            mode,
         );
         let _ = eval.buffers.merge_adjacent_equal_buffer_text_properties(
             current_id,
@@ -5053,14 +5066,15 @@ pub(crate) fn builtin_generate_new_buffer_name(
     eval: &mut super::eval::Context,
     args: Vec<Value>,
 ) -> EvalResult {
+    let symbol_mode = eval.symbol_mode();
     expect_min_args("generate-new-buffer-name", &args, 1)?;
     expect_max_args("generate-new-buffer-name", &args, 2)?;
     if args.len() == 2
         && !(args[1].is_nil()
             || args[1].is_t()
             || args[1].is_string()
-            || args[1].is_symbol()
-            || args[1].as_keyword_id().is_some())
+            || args[1].is_symbol(symbol_mode)
+            || args[1].as_keyword_id(symbol_mode).is_some())
     {
         return Err(signal(
             LispCondition::WrongTypeArgument,
@@ -5675,7 +5689,7 @@ pub(crate) fn builtin_overlay_put_in_buffers(
         && changed
     {
         let _ = buffers.note_overlay_modification(buf_id);
-        let evaporate = args[1].is_symbol_named("evaporate") && val.is_truthy();
+        let evaporate = args[1].is_bare_symbol_named("evaporate") && val.is_truthy();
         let is_empty = buffers
             .get(buf_id)
             .and_then(|buf| {

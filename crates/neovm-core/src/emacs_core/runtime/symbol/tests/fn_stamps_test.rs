@@ -201,7 +201,7 @@ fn an_abbrev_hook_stamps_its_table_symbol() {
         vec![Value::string("neovm--fs-abbrev"), table],
     )
     .expect("abbrev symbol")
-    .as_symbol_id()
+    .as_bare_symbol_id()
     .expect("symbol id");
     let after = ev.obarray.function_epoch();
     assert_eq!(after, before + 1);

@@ -261,7 +261,7 @@ fn census_counts_a_direct_path_deopt_once() {
     // (lambda (n) (if n (1- n) 0))
     let step = Value::symbol("reopt-census-step");
     ev.obarray.set_symbol_function_id(
-        step.as_symbol_id().unwrap(),
+        step.as_bare_symbol_id().unwrap(),
         Value::make_bytecode(function(
             vec![
                 Op::StackRef(0),
@@ -630,7 +630,7 @@ fn no_inline_bit_skips_the_mir_inliner() {
     // (defun reopt-sq (x) (* x x))
     let sq = Value::symbol("reopt-sq");
     ev.obarray.set_symbol_function_id(
-        sq.as_symbol_id().unwrap(),
+        sq.as_bare_symbol_id().unwrap(),
         Value::make_bytecode(function(
             vec![Op::StackRef(0), Op::Dup, Op::Mul, Op::Return],
             vec![],
@@ -647,7 +647,11 @@ fn no_inline_bit_skips_the_mir_inliner() {
     };
     let f = mk();
     let leaf = compile_bytecode_function_with(&f, Some(&ev.obarray)).expect("compiles");
-    assert_eq!(leaf.inline_deps(), &[sq.as_symbol_id().unwrap()], "inlined");
+    assert_eq!(
+        leaf.inline_deps(),
+        &[sq.as_bare_symbol_id().unwrap()],
+        "inlined"
+    );
     let g = mk();
     g.jit_runtime()
         .mark_call_site_no_inline(2, g.executable_ops().len());

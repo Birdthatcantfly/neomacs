@@ -69,11 +69,12 @@ impl Context {
     /// 3. Cons → special form / macro / function call
     #[inline(never)]
     pub fn eval_sub(&mut self, form: Value) -> EvalResult {
+        let symbol_mode = self.symbol_mode();
         crate::emacs_core::subr::leaf::debug_assert_no_leaf_active!("eval");
         // 1. Symbol → variable lookup (GNU eval.c:2554-2562)
         // Also unwrap symbol-with-pos when symbols-with-pos-enabled is true.
         let form_unwrapped = self.unwrap_symbol(form);
-        if let Some(sym_id) = form_unwrapped.as_symbol_id() {
+        if let Some(sym_id) = form_unwrapped.as_symbol_id(symbol_mode) {
             // Route the variable-lookup result through the signal dispatcher so a
             // void-variable enters the debugger (debug-on-error) at signal time,
             // while dynamic bindings are still active — symmetric with the cons
@@ -313,8 +314,9 @@ impl Context {
         original_args: Value,
         outer_bt_count: usize,
     ) -> EvalResult {
+        let symbol_mode = self.symbol_mode();
         // Resolve function (GNU eval.c:2600-2605)
-        let sym_id = original_fun.as_symbol_id();
+        let sym_id = original_fun.as_symbol_id(symbol_mode);
 
         // Everything this head decides -- whether it is an evaluator-internal
         // literal form, what its function cell holds, and whether that cell is
@@ -446,7 +448,9 @@ impl Context {
         let func = if let Some(sym_id) = sym_id {
             if let Some(override_func) = self
                 .compiler_function_overrides_active()
-                .then(|| compiler_function_override_in_obarray(&self.obarray, sym_id))
+                .then(|| {
+                    compiler_function_override_in_obarray(&self.obarray, sym_id, self.symbol_mode())
+                })
                 .flatten()
             {
                 override_func
@@ -455,13 +459,13 @@ impl Context {
                     Some(f) => {
                         let mut f = f;
                         // Follow symbol indirection (GNU eval.c:2604)
-                        if let Some(alias_id) = f.as_symbol_id()
+                        if let Some(alias_id) = f.as_symbol_id(symbol_mode)
                             && let Some(resolved) = self.obarray.indirect_function_id(alias_id)
                         {
                             f = resolved;
                         }
                         loop {
-                            if !super::super::autoload::is_autoload_value(&f) {
+                            if !super::super::autoload::is_autoload_value(&f, self.symbol_mode()) {
                                 break f;
                             }
 
@@ -499,7 +503,8 @@ impl Context {
             // `(lambda ...)` forms; byte-code objects, subrs, and malformed
             // values are quoted through to the normal callable validation
             // below.
-            if original_fun.is_cons() && cons_head_symbol_id(&original_fun) == Some(lambda_symbol())
+            if original_fun.is_cons()
+                && cons_head_symbol_id(&original_fun, self.symbol_mode()) == Some(lambda_symbol())
             {
                 self.instantiate_callable_cons_form(original_fun)?
             } else {
@@ -562,7 +567,7 @@ impl Context {
             let result = self.eval_sub(expanded);
             return self.unbind_to_with_result(expanded_root_count, result);
         }
-        if cons_head_symbol_id(&func) == Some(macro_symbol()) {
+        if cons_head_symbol_id(&func, self.symbol_mode()) == Some(macro_symbol()) {
             // Cons-cell macro: (macro . fn) — GNU eval.c:2730
             // Same up-front `apply1`/`list_length` validation as the
             // `func.is_macro()` branch above (GNU eval.c:2766).

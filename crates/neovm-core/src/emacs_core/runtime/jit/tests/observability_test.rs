@@ -22,7 +22,7 @@ fn function(ops: Vec<Op>, constants: Vec<Value>, arity: usize) -> ByteCodeFuncti
 fn install(ev: &mut Context, name: &str, f: ByteCodeFunction) -> Value {
     let sym = Value::symbol(name);
     ev.obarray
-        .set_symbol_function_id(sym.as_symbol_id().unwrap(), Value::make_bytecode(f));
+        .set_symbol_function_id(sym.as_bare_symbol_id().unwrap(), Value::make_bytecode(f));
     sym
 }
 
@@ -197,7 +197,7 @@ fn jit_obs_direct_path_deopt_counted_once() {
     }
     let callee_id = ev
         .obarray
-        .symbol_function_id(step.as_symbol_id().unwrap())
+        .symbol_function_id(step.as_bare_symbol_id().unwrap())
         .and_then(|v| v.get_bytecode_data())
         .and_then(|bc| bc.jit_runtime().compiled_id())
         .expect("the speculated call compiled the callee");
@@ -263,7 +263,7 @@ fn jit_obs_signal_exit_counted() {
     assert_eq!(leaf.obs.signals.get(), 2, "the caller exits with it too");
     let g_id = ev
         .obarray
-        .symbol_function_id(g.as_symbol_id().unwrap())
+        .symbol_function_id(g.as_bare_symbol_id().unwrap())
         .and_then(|v| v.get_bytecode_data())
         .and_then(|bc| bc.jit_runtime().compiled_id())
         .expect("the speculated call compiled the callee");
@@ -370,7 +370,7 @@ fn jit_obs_inline_eviction_counted() {
     let r =
         crate::emacs_core::jit::test_support::run_compiled(ctx, &f, f_val, &[Value::make_int(5)]);
     assert!(matches!(r, Ok(Some(b)) if b == Value::make_int(25).bits()));
-    let c_id = c_sym.as_symbol_id().unwrap();
+    let c_id = c_sym.as_bare_symbol_id().unwrap();
     assert_eq!(
         crate::emacs_core::jit::cache::inline_dependent_count_for_test(c_id),
         1,
@@ -416,7 +416,7 @@ fn jit_obs_label_names_symbol_callee() {
     );
     let callee_bc = ev
         .obarray
-        .symbol_function_id(named.as_symbol_id().unwrap())
+        .symbol_function_id(named.as_bare_symbol_id().unwrap())
         .and_then(|v| v.get_bytecode_data())
         .expect("bytecode");
     callee_bc.jit_runtime().set_hot_for_test();
@@ -610,7 +610,7 @@ fn jit_obs_entry_counter_counts_every_path() {
     assert_eq!(leaf.obs.entries.get(), 3, "the caller, entered directly");
     let step_id = ev
         .obarray
-        .symbol_function_id(step.as_symbol_id().unwrap())
+        .symbol_function_id(step.as_bare_symbol_id().unwrap())
         .and_then(|v| v.get_bytecode_data())
         .and_then(|bc| bc.jit_runtime().compiled_id())
         .expect("the speculated call compiled the callee");

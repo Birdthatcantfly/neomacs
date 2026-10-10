@@ -1109,7 +1109,7 @@ impl HashTableStorage {
         const SCAN_SLOTS: usize = 32;
         if self.slots.len() > SCAN_SLOTS
             || symbols_with_pos_enabled
-            || !(value.is_fixnum() || value.is_symbol())
+            || !(value.is_fixnum() || value.is_bare_symbol())
         {
             return None;
         }
@@ -1629,7 +1629,7 @@ impl HashTableTest {
     }
 
     pub fn from_symbol_value(value: &Value) -> Option<Self> {
-        Self::from_symbol_name(value.as_symbol_name()?)
+        Self::from_symbol_name(value.as_bare_symbol_name()?)
     }
 
     pub fn name(self) -> &'static str {
@@ -1674,7 +1674,7 @@ impl HashTableWeakness {
     }
 
     pub fn from_symbol_value(value: &Value) -> Option<Self> {
-        Self::from_symbol_name(value.as_symbol_name()?)
+        Self::from_symbol_name(value.as_bare_symbol_name()?)
     }
 
     pub fn name(self) -> &'static str {
@@ -1699,7 +1699,7 @@ impl HashTableMakeKeyword {
     }
 
     pub(crate) fn from_symbol_value(value: &Value) -> Option<Self> {
-        Self::from_symbol_name(value.as_symbol_name()?)
+        Self::from_symbol_name(value.as_bare_symbol_name()?)
     }
 
     #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
@@ -1726,7 +1726,7 @@ impl HashTableLiteralKey {
     }
 
     pub(crate) fn from_symbol_value(value: &Value) -> Option<Self> {
-        Self::from_symbol_name(value.as_symbol_name()?)
+        Self::from_symbol_name(value.as_bare_symbol_name()?)
     }
 
     #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
@@ -4585,7 +4585,7 @@ fn equal_value_inner(
         return true;
     }
 
-    if left.is_fixnum() || right.is_fixnum() || left.is_symbol() || right.is_symbol() {
+    if left.is_fixnum() || right.is_fixnum() || left.is_bare_symbol() || right.is_bare_symbol() {
         return false;
     }
 
@@ -4863,7 +4863,7 @@ fn try_equal_value_inner(
         return Ok(true);
     }
 
-    if left.is_fixnum() || right.is_fixnum() || left.is_symbol() || right.is_symbol() {
+    if left.is_fixnum() || right.is_fixnum() || left.is_bare_symbol() || right.is_bare_symbol() {
         return Ok(false);
     }
 

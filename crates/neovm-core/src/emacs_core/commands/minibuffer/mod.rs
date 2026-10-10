@@ -2238,7 +2238,7 @@ impl ScanningCompletionPredicate {
     fn classify(predicate: Value) -> Self {
         if predicate.is_nil() {
             Self::AcceptAll
-        } else if predicate.as_symbol_id() == Some(super::interactive::CommandpSymbol::id()) {
+        } else if predicate.as_bare_symbol_id() == Some(super::interactive::CommandpSymbol::id()) {
             Self::CommandpPrimitive
         } else {
             Self::Callable(predicate)

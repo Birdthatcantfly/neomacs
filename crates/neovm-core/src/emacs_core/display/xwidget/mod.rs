@@ -503,7 +503,7 @@ fn expect_buffer(value: Value) -> Result<Value, Flow> {
 }
 
 fn expect_symbol(value: Value) -> Result<Value, Flow> {
-    if value.is_symbol() {
+    if value.is_bare_symbol() {
         Ok(value)
     } else {
         Err(signal(

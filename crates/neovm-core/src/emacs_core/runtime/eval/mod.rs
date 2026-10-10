@@ -62,6 +62,7 @@ pub use world::{ContextShutdownError, ObarrayWriteAccess, OutstandingWorldViews}
 pub(crate) use world::{ObarrayView, OwnedRootRegistryView, WorldView};
 
 mod callback;
+mod lexical_symbols;
 pub(crate) use callback::{CheckedNativeCallback, native_callback_cache_enabled};
 mod subrs;
 #[cfg(test)]
@@ -185,8 +186,12 @@ enum TaggedLoadHistoryKind {
 }
 
 impl LoadHistoryEntry {
-    pub(crate) fn function(symbol: Value, definition: Value) -> Self {
-        let definition_kind = if super::autoload::is_autoload_value(&definition) {
+    pub(crate) fn function(
+        symbol: Value,
+        definition: Value,
+        symbol_mode: crate::tagged::SymbolMode,
+    ) -> Self {
+        let definition_kind = if super::autoload::is_autoload_value(&definition, symbol_mode) {
             FunctionDefinitionKind::Autoload
         } else {
             FunctionDefinitionKind::Concrete
@@ -936,13 +941,14 @@ fn internal_make_interpreted_closure_function_symbol() -> SymId {
 pub(crate) fn compiler_function_override_in_obarray(
     obarray: &Obarray,
     sym_id: SymId,
+    mode: crate::tagged::SymbolMode,
 ) -> Option<Value> {
     let overrides_sym = internal_compiler_function_overrides_sym();
     let mut cursor = obarray.symbol_value_id_or_nil(overrides_sym);
     while cursor.is_cons() {
         let entry = cursor.cons_car();
         cursor = cursor.cons_cdr();
-        if entry.is_cons() && entry.cons_car().as_symbol_id() == Some(sym_id) {
+        if entry.is_cons() && entry.cons_car().as_symbol_id(mode) == Some(sym_id) {
             return Some(entry.cons_cdr());
         }
     }
@@ -1972,17 +1978,11 @@ fn is_lambda_like_symbol_id(id: SymId) -> bool {
     id == lambda_symbol() || id == closure_symbol()
 }
 
-fn cons_head_symbol_id(value: &Value) -> Option<SymId> {
-    if value.is_cons() {
-        let car = value.cons_car();
-        // Try bare symbol first, then transparently unwrap symbol-with-pos.
-        car.as_symbol_id().or_else(|| {
-            car.as_symbol_with_pos_sym()
-                .and_then(|sym| sym.as_symbol_id())
-        })
-    } else {
-        None
-    }
+fn cons_head_symbol_id(value: &Value, mode: crate::tagged::SymbolMode) -> Option<SymId> {
+    value
+        .is_cons()
+        .then(|| value.cons_car())
+        .and_then(|head| head.as_symbol_id(mode))
 }
 
 struct CoreEvalSymbols {
@@ -2103,6 +2103,7 @@ pub(crate) fn sync_features_variable_in_state(obarray: &mut Obarray, features: &
 pub(crate) fn refresh_features_from_variable_in_state(
     obarray: &Obarray,
     features: &mut Vec<SymId>,
+    mode: crate::tagged::SymbolMode,
 ) {
     let current = obarray
         .symbol_value_copied("features")
@@ -2110,7 +2111,7 @@ pub(crate) fn refresh_features_from_variable_in_state(
     let mut parsed = Vec::new();
     if let Some(items) = list_to_vec(&current) {
         for item in items {
-            if let Some(id) = item.as_symbol_id() {
+            if let Some(id) = item.as_symbol_id(mode) {
                 parsed.push(id);
             }
         }
@@ -2122,21 +2123,32 @@ pub(crate) fn feature_present_in_state(
     obarray: &Obarray,
     features: &mut Vec<SymId>,
     name: &str,
+    mode: crate::tagged::SymbolMode,
 ) -> bool {
-    refresh_features_from_variable_in_state(obarray, features);
+    refresh_features_from_variable_in_state(obarray, features, mode);
     let id = intern(name);
     features.contains(&id)
 }
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
-pub(crate) fn add_feature_in_state(obarray: &mut Obarray, features: &mut Vec<SymId>, name: &str) {
-    refresh_features_from_variable_in_state(obarray, features);
+pub(crate) fn add_feature_in_state(
+    obarray: &mut Obarray,
+    features: &mut Vec<SymId>,
+    name: &str,
+    mode: crate::tagged::SymbolMode,
+) {
+    refresh_features_from_variable_in_state(obarray, features, mode);
     let id = intern(name);
-    add_feature_id_in_state(obarray, features, id);
+    add_feature_id_in_state(obarray, features, id, mode);
 }
 
-pub(crate) fn add_feature_id_in_state(obarray: &mut Obarray, features: &mut Vec<SymId>, id: SymId) {
-    refresh_features_from_variable_in_state(obarray, features);
+pub(crate) fn add_feature_id_in_state(
+    obarray: &mut Obarray,
+    features: &mut Vec<SymId>,
+    id: SymId,
+    mode: crate::tagged::SymbolMode,
+) {
+    refresh_features_from_variable_in_state(obarray, features, mode);
     if features.contains(&id) {
         return;
     }
@@ -2152,8 +2164,9 @@ pub(crate) fn remove_feature_in_state(
     obarray: &mut Obarray,
     features: &mut Vec<SymId>,
     name: &str,
+    mode: crate::tagged::SymbolMode,
 ) {
-    refresh_features_from_variable_in_state(obarray, features);
+    refresh_features_from_variable_in_state(obarray, features, mode);
     let id = intern(name);
     features.retain(|feature| *feature != id);
     sync_features_variable_in_state(obarray, features);
@@ -2164,9 +2177,10 @@ pub(crate) fn provide_value_in_state(
     features: &mut Vec<SymId>,
     feature: Value,
     subfeatures: Option<Value>,
+    mode: crate::tagged::SymbolMode,
 ) -> EvalResult {
     // Use symbol_id to transparently handle symbol-with-pos wrappers.
-    let sym_id = super::builtins::symbols::symbol_id(&feature).ok_or_else(|| {
+    let sym_id = super::builtins::symbols::symbol_id(&feature, mode).ok_or_else(|| {
         signal(
             LispCondition::WrongTypeArgument,
             vec![Value::symbol("symbolp"), feature],
@@ -2180,13 +2194,31 @@ pub(crate) fn provide_value_in_state(
             ));
         }
         if value.is_nil() {
-            add_feature_id_in_state(obarray, features, sym_id);
+            add_feature_value_in_state(obarray, features, sym_id, feature, mode);
             return Ok(feature);
         }
         obarray.put_property_id(sym_id, intern("subfeatures"), value)?;
     }
-    add_feature_id_in_state(obarray, features, sym_id);
+    add_feature_value_in_state(obarray, features, sym_id, feature, mode);
     Ok(feature)
+}
+
+// GNU Fprovide stores the original symbol object after EQ membership checking.
+fn add_feature_value_in_state(
+    obarray: &mut Obarray,
+    features: &mut Vec<SymId>,
+    id: SymId,
+    original: Value,
+    mode: crate::tagged::SymbolMode,
+) {
+    refresh_features_from_variable_in_state(obarray, features, mode);
+    if !features.contains(&id) {
+        features.insert(0, id);
+        let current = obarray
+            .symbol_value_copied("features")
+            .unwrap_or(Value::NIL);
+        obarray.set_symbol_value("features", Value::cons(original, current));
+    }
 }
 
 /// Limit for stored recent input events to match GNU Emacs: 300 entries.
@@ -2847,7 +2879,7 @@ pub(crate) enum ConditionControlSymbol {
 
 impl ConditionControlSymbol {
     fn from_lisp_value(value: &Value) -> Option<Self> {
-        value.as_symbol_name()?.parse().ok()
+        value.as_bare_symbol_name()?.parse().ok()
     }
 
     #[cfg(test)]
@@ -2868,7 +2900,7 @@ fn condition_value_contains_debug(value: &Value) -> bool {
     }
 }
 
-fn wants_debugger(setting: &Value, conditions: &Value) -> bool {
+fn wants_debugger(setting: &Value, conditions: &Value, mode: crate::tagged::SymbolMode) -> bool {
     if setting.is_nil() {
         return false;
     }
@@ -2876,9 +2908,15 @@ fn wants_debugger(setting: &Value, conditions: &Value) -> bool {
         return true;
     };
     let signal_conditions = list_to_vec(conditions).unwrap_or_else(|| vec![*conditions]);
-    entries
-        .iter()
-        .any(|entry| signal_conditions.iter().any(|condition| condition == entry))
+    entries.iter().any(|entry| {
+        signal_conditions.iter().any(|condition| {
+            crate::emacs_core::value::eq_value_swp(
+                condition,
+                entry,
+                mode == crate::tagged::SymbolMode::Positioned,
+            )
+        })
+    })
 }
 
 fn signal_hook_payload_value(sig: &SignalData) -> Value {
@@ -3857,10 +3895,11 @@ pub(crate) fn plan_require_in_state(
     feature: Value,
     filename: Option<Value>,
     noerror: Option<Value>,
+    mode: crate::tagged::SymbolMode,
 ) -> Result<RequirePlan, Flow> {
-    refresh_features_from_variable_in_state(obarray, features);
+    refresh_features_from_variable_in_state(obarray, features, mode);
     // Use symbol_id to transparently handle symbol-with-pos wrappers.
-    let sym_id = super::builtins::symbols::symbol_id(&feature).ok_or_else(|| {
+    let sym_id = super::builtins::symbols::symbol_id(&feature, mode).ok_or_else(|| {
         signal(
             LispCondition::WrongTypeArgument,
             vec![Value::symbol("symbolp"), feature],
@@ -3868,7 +3907,7 @@ pub(crate) fn plan_require_in_state(
     })?;
     let name = resolve_sym(sym_id).to_owned();
     if features.contains(&sym_id) {
-        return Ok(RequirePlan::Return(Value::symbol(&name)));
+        return Ok(RequirePlan::Return(feature));
     }
 
     // GNU Emacs fns.c:Frequire tracks recursive requires in
@@ -4147,7 +4186,7 @@ fn bare_lambda_arg_symbol_id(value: Value) -> Option<SymId> {
     if value.is_nil() {
         Some(intern("nil"))
     } else {
-        value.as_symbol_id()
+        value.as_bare_symbol_id()
     }
 }
 
@@ -4500,7 +4539,7 @@ impl Context {
     }
 
     pub(crate) fn select_global_map(&mut self, keymap: Value) {
-        self.selected_global_map.select(keymap);
+        self.selected_global_map.select(keymap, self.symbol_mode());
     }
 
     #[inline]
@@ -4602,7 +4641,15 @@ impl Context {
         } else if sym_id == self.noninteractive_symbol {
             self.noninteractive = value.is_truthy();
         } else if sym_id == self.symbols_with_pos_enabled_symbol {
-            self.symbols_with_pos_enabled = value.is_truthy();
+            let enabled = value.is_truthy();
+            if enabled != self.symbols_with_pos_enabled {
+                // EQ changes with this dynamic binding. Cache hits remain
+                // branch-free; invalidate both positive and negative answers.
+                self.lexenv_assq_cache.clear();
+                self.lexenv_special_cache.clear();
+                self.coding_systems.invalidate_lookup_cache();
+            }
+            self.symbols_with_pos_enabled = enabled;
         } else if sym_id == self.print_symbols_bare_symbol {
             self.print_symbols_bare = value.is_truthy();
         } else if sym_id == frame_alpha_lower_limit_symbol() {
@@ -4970,20 +5017,25 @@ impl Context {
     }
 
     pub(crate) fn refresh_features_from_variable(&mut self) {
-        refresh_features_from_variable_in_state(&self.obarray, &mut self.features);
+        let mode = self.symbol_mode();
+        refresh_features_from_variable_in_state(&self.obarray, &mut self.features, mode);
     }
 
     fn has_feature(&mut self, name: &str) -> bool {
-        feature_present_in_state(&self.obarray, &mut self.features, name)
+        {
+            let mode = self.symbol_mode();
+            feature_present_in_state(&self.obarray, &mut self.features, name, mode)
+        }
     }
 
     #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
     pub(crate) fn add_feature(&mut self, name: &str) {
+        let mode = self.symbol_mode();
         // SAFETY: this noncalling helper changes only the feature value/list;
         // it preserves function cells, canonical descriptors and manager identity.
         unsafe {
             self.obarray.with_legacy_value_write(|obarray| {
-                add_feature_in_state(obarray, &mut self.features, name);
+                add_feature_in_state(obarray, &mut self.features, name, mode);
             });
         }
     }
@@ -4994,11 +5046,12 @@ impl Context {
 
     /// Remove a feature (used to undo temporary provides during bootstrap).
     pub(crate) fn remove_feature(&mut self, name: &str) {
+        let mode = self.symbol_mode();
         // SAFETY: this noncalling helper changes only the feature value/list;
         // no dispatch metadata or manager authority leaves the phase.
         unsafe {
             self.obarray.with_legacy_value_write(|obarray| {
-                remove_feature_in_state(obarray, &mut self.features, name);
+                remove_feature_in_state(obarray, &mut self.features, name, mode);
             });
         }
     }
@@ -5017,7 +5070,8 @@ impl Context {
         &self,
         symbol: Value,
     ) -> Option<(u32, &super::builtins::fringe_bitmap::FringeBitmap)> {
-        let sym = symbol.as_symbol_id()?;
+        let symbol_mode = self.symbol_mode();
+        let sym = symbol.as_symbol_id(symbol_mode)?;
         let index = self.fringe_bitmaps.index_of(sym)?;
         let bitmap = self.fringe_bitmaps.get(sym)?;
         Some((index, bitmap))
@@ -5567,7 +5621,7 @@ impl Context {
             let result = self.unbind_to_with_result(specpdl_count, result);
 
             match result {
-                Ok(value) if value.is_symbol_named("dont-clear-message") => {
+                Ok(value) if value.is_symbol_named("dont-clear-message", self.symbol_mode()) => {
                     clear_result = EchoMessageClearResult::PreserveEchoArea;
                 }
                 Ok(_) => {}
@@ -5924,15 +5978,21 @@ impl Context {
         self.noninteractive
     }
 
+    /// Symbol interpretation for this mutator's current dynamic binding.
+    #[inline]
+    pub fn symbol_mode(&self) -> crate::tagged::SymbolMode {
+        if self.symbols_with_pos_enabled {
+            crate::tagged::SymbolMode::Positioned
+        } else {
+            crate::tagged::SymbolMode::Bare
+        }
+    }
+
     /// If `symbols-with-pos-enabled` and `val` is a symbol-with-pos,
     /// return the bare symbol. Otherwise return `val` unchanged.
     #[inline]
     pub fn unwrap_symbol(&self, val: Value) -> Value {
-        if self.symbols_with_pos_enabled && val.is_symbol_with_pos() {
-            val.as_symbol_with_pos_sym().unwrap()
-        } else {
-            val
-        }
+        self.symbol_mode().unwrap(val)
     }
 
     pub(crate) fn sync_thread_runtime_bindings(&mut self) {
@@ -6274,7 +6334,7 @@ impl Context {
         // Handle autoloads for non-canonical symbols the same as canonical
         // ones: trigger autoload-do-load before calling apply, so the raw
         // autoload cons never reaches apply_inner's Value::Cons path.
-        if super::autoload::is_autoload_value(&function) {
+        if super::autoload::is_autoload_value(&function, self.symbol_mode()) {
             let name = resolve_sym(sym_id);
             return self.apply_named_autoload_callable(
                 name,
@@ -6330,7 +6390,7 @@ impl Context {
             ));
         };
 
-        if super::autoload::is_autoload_value(&function) {
+        if super::autoload::is_autoload_value(&function, self.symbol_mode()) {
             let name = resolve_sym(sym_id);
             return self.apply_named_autoload_callable(
                 name,
@@ -6365,7 +6425,7 @@ impl Context {
     ) -> EvalResult {
         match self.resolve_named_call_target_by_id(sym_id) {
             NamedCallTarget::Obarray(func) => {
-                if super::autoload::is_autoload_value(&func) {
+                if super::autoload::is_autoload_value(&func, self.symbol_mode()) {
                     return self.apply_named_autoload_callable_by_id(
                         sym_id,
                         func,
@@ -6422,12 +6482,14 @@ impl Context {
     /// callability is read out of the obarray and can therefore be changed by
     /// the very call being made; that one is still decided up front.
     fn callable_before_call_snapshot(&self, function: &Value) -> Option<bool> {
-        matches!(function.kind(), ValueKind::Symbol(_))
+        function
+            .as_symbol_id(self.symbol_mode())
+            .is_some()
             .then(|| self.function_value_is_callable(function))
     }
 
     pub(crate) fn function_value_is_callable(&self, function: &Value) -> bool {
-        match function.kind() {
+        match self.unwrap_symbol(*function).kind() {
             ValueKind::Veclike(VecLikeType::Lambda)
             | ValueKind::Veclike(VecLikeType::ByteCode)
             | ValueKind::Veclike(VecLikeType::Macro)
@@ -6436,9 +6498,9 @@ impl Context {
                 super::subr_info::subr_is_callable_function_value(function)
             }
             ValueKind::Cons => {
-                super::autoload::is_autoload_value(function)
+                super::autoload::is_autoload_value(function, self.symbol_mode())
                     || matches!(
-                        cons_head_symbol_id(function),
+                        cons_head_symbol_id(function, self.symbol_mode()),
                         Some(id) if id == lambda_symbol() || id == macro_symbol()
                     )
             }
@@ -6963,7 +7025,7 @@ pub(crate) fn check_forwarded_unbind(
         LispCondition::Error,
         vec![Value::string(format!(
             "Built-in variable may not be unbound : {}",
-            crate::emacs_core::intern::resolve_sym(reported.as_symbol_id().unwrap_or(sym_id))
+            crate::emacs_core::intern::resolve_sym(reported.as_bare_symbol_id().unwrap_or(sym_id))
         ))],
     ))
 }
@@ -7017,7 +7079,11 @@ impl Context {
             return (!cell.is_nil()).then_some(cell);
         }
 
-        let cell = lexenv_assq(lexenv, sym_id);
+        let cell = if self.symbols_with_pos_enabled {
+            lexical_symbols::assq(lexenv, sym_id)
+        } else {
+            lexenv_assq(lexenv, sym_id)
+        };
         cache.push(LexenvAssqCacheEntry {
             lexenv_bits,
             symbol: sym_id,
@@ -7038,7 +7104,11 @@ impl Context {
             return declared_special;
         }
 
-        let declared_special = lexenv_declares_special(lexenv, sym_id);
+        let declared_special = if self.symbols_with_pos_enabled {
+            lexical_symbols::declares_special(lexenv, sym_id)
+        } else {
+            lexenv_declares_special(lexenv, sym_id)
+        };
         cache.push(LexenvSpecialCacheEntry {
             lexenv_bits,
             symbol: sym_id,
@@ -7053,7 +7123,12 @@ impl Context {
         // current lexical environment.
         for binding in self.specpdl.iter().rev() {
             if let SpecBinding::LexicalEnv { old_lexenv } = binding
-                && lexenv_assq(*old_lexenv, sym_id).is_some()
+                && (if self.symbols_with_pos_enabled {
+                    lexical_symbols::assq(*old_lexenv, sym_id)
+                } else {
+                    lexenv_assq(*old_lexenv, sym_id)
+                })
+                .is_some()
             {
                 return true;
             }
@@ -7663,6 +7738,10 @@ mod redisplay_mode_line_flow_tests;
 #[path = "tests/leaf_guard_test.rs"]
 mod leaf_guard_tests;
 
+#[cfg(test)]
+#[path = "tests/positioned_lexenv_test.rs"]
+mod positioned_lexenv_tests;
+
 /// Allocator for [`Context::context_instance_id`].
 fn next_context_instance_id() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -7723,3 +7802,7 @@ impl CommandLoopDiagnostic {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/positioned_control_test.rs"]
+mod positioned_control_tests;

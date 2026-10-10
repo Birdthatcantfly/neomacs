@@ -3140,7 +3140,7 @@ fn regalloc_checker_enabled() -> bool {
 /// is correct same-session and keeps the JIT byte-identical); the broader symbol
 /// reloc applies ONLY to AOT. (Audit #16.)
 pub(crate) fn const_relocs_for_aot(v: Value) -> bool {
-    v.is_heap_object() || (v.is_symbol() && v != Value::NIL && v != Value::T)
+    v.is_heap_object() || (v.is_bare_symbol() && v != Value::NIL && v != Value::T)
 }
 
 /// Module-generic build seam for [`lower_mir_with_plan`]: sets up the leaf ABI

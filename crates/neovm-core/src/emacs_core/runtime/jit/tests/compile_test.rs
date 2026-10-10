@@ -1688,8 +1688,10 @@ fn mir_loop_does_not_keep_an_inlined_callee_across_a_gc_hook() {
     callee.lexical = true;
     callee.max_stack = crate::emacs_core::bytecode::StackDepth::for_test(2);
     callee.ops = vec![Op::StackRef(0), Op::Sub1, Op::Return];
-    ev.obarray
-        .set_symbol_function_id(step.as_symbol_id().unwrap(), Value::make_bytecode(callee));
+    ev.obarray.set_symbol_function_id(
+        step.as_bare_symbol_id().unwrap(),
+        Value::make_bytecode(callee),
+    );
     let mut f = ByteCodeFunction::new(LambdaParams {
         required: vec![SymId(1)],
         optional: Vec::new(),
@@ -7481,7 +7483,7 @@ fn contained_shim_panic_is_caught_by_leaf_local_condition_case() {
     };
     let err = Value::from_bits(bits);
     assert_eq!(
-        err.cons_car().as_symbol_name(),
+        err.cons_car().as_bare_symbol_name(),
         Some("error"),
         "binding is (error ...)"
     );
@@ -7561,7 +7563,7 @@ fn contained_shim_panic_with_leaked_callee_handler_still_matches_leaf_handler() 
         };
         let err = Value::from_bits(bits);
         assert_eq!(
-            err.cons_car().as_symbol_name(),
+            err.cons_car().as_bare_symbol_name(),
             Some("error"),
             "binding is (error ...)"
         );
@@ -7798,7 +7800,7 @@ fn parked_panic_survives_leaf_exit_cleanup_running_compiled_code() {
         .symbol_value_copied("jit-fx-witness")
         .unwrap_or(Value::NIL);
     assert_eq!(
-        witness.cons_car().as_symbol_name(),
+        witness.cons_car().as_bare_symbol_name(),
         Some("arith-error"),
         "inner handler must catch its own arith-error, not the parked panic"
     );
@@ -8035,10 +8037,10 @@ fn a_body_that_calls_itself_is_classified_by_identity() {
     let calls = || vec![Op::Constant(0), Op::StackRef(1), Op::Call(1), Op::Return];
     let self_val = Value::make_bytecode(mk(calls(), self_sym));
     ev.obarray
-        .set_symbol_function_id(self_sym.as_symbol_id().unwrap(), self_val);
+        .set_symbol_function_id(self_sym.as_bare_symbol_id().unwrap(), self_val);
     let other_val = Value::make_bytecode(mk(calls(), self_sym));
     ev.obarray
-        .set_symbol_function_id(other_sym.as_symbol_id().unwrap(), other_val);
+        .set_symbol_function_id(other_sym.as_bare_symbol_id().unwrap(), other_val);
     let no_call_val = Value::make_bytecode(mk(vec![Op::Constant(0), Op::Return], self_sym));
 
     let self_data = self_val.get_bytecode_data().unwrap();
@@ -9114,7 +9116,7 @@ fn fboundp_call_sites_answer_as_the_builtin_on_the_fast_path() {
             "(fboundp {})",
             crate::emacs_core::print::print_value(item)
         );
-        if item.as_symbol_id().is_some() || item.is_nil() || item.is_t() {
+        if item.as_bare_symbol_id().is_some() || item.is_nil() || item.is_t() {
             symbols += 1;
         }
     }
@@ -9282,7 +9284,10 @@ fn autoload_do_load_call_sites_answer_as_the_builtin_on_the_fast_path() {
                 "(autoload-do-load {} ...) with {nargs} args",
                 crate::emacs_core::print::print_value(item)
             );
-            if !crate::emacs_core::autoload::is_autoload_value(item) {
+            if !crate::emacs_core::autoload::is_autoload_value(
+                item,
+                crate::tagged::value::SymbolMode::Bare,
+            ) {
                 plain += 1;
             }
         }

@@ -19,6 +19,7 @@ impl Context {
     /// -- this thread's or a suspended one's -- records the symbol.
     #[cfg(feature = "jit")]
     fn trace_jit_redefined_functions(&self, visit: &mut dyn FnMut(Value)) {
+        let symbol_mode = self.symbol_mode();
         use crate::emacs_core::jit::cache;
         if !cache::has_redefined_pins() {
             return;
@@ -35,7 +36,9 @@ impl Context {
                 SpecBinding::Backtrace { function, .. }
                 | SpecBinding::Backtrace1 { function, .. }
                 | SpecBinding::Backtrace2 { function, .. }
-                | SpecBinding::BacktraceNative { function, .. } => function.as_symbol_id(),
+                | SpecBinding::BacktraceNative { function, .. } => {
+                    function.as_symbol_id(symbol_mode)
+                }
                 _ => None,
             })
             .collect();

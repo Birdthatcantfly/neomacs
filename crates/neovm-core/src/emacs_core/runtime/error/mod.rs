@@ -14,6 +14,7 @@ use super::string_escape::{format_lisp_string_bytes_emacs, format_lisp_string_em
 use super::value::{Value, ValueKind, VecLikeType, get_string_text_properties_for_value};
 use crate::buffer::EmacsBytePos;
 use crate::emacs_core::eval::ResumeTarget;
+use crate::tagged::SymbolMode;
 use crate::window::WindowId;
 use strum::{EnumString, IntoStaticStr};
 
@@ -398,6 +399,19 @@ macro_rules! with_signal_result {
 }
 pub(crate) use with_signal_result;
 
+impl Flow {
+    /// Keep GNU's throw-time EQ policy while dynamic bindings unwind.
+    pub(crate) fn throw_with_symbols(
+        tag: Value,
+        value: Value,
+        mode: crate::tagged::SymbolMode,
+    ) -> Self {
+        Self::from_kind(FlowKind::Throw(Box::new(ThrowData::new_with_symbols(
+            tag, value, mode,
+        ))))
+    }
+}
+
 #[cfg(not(feature = "flow-word"))]
 impl Flow {
     /// The only way to build a `throw`: pins `tag` and `value` as GC roots for
@@ -479,6 +493,7 @@ impl InFlightPinned for EvalSignalState {
 pub struct ThrowData {
     pub tag: Value,
     pub value: Value,
+    symbol_mode: crate::tagged::SymbolMode,
     /// See [`SignalData::pin`]. PRIVATE, so `Flow::throw` is the only way in.
     #[allow(dead_code)] // held for its Drop (the GC pin); read only via the sealed trait
     pin: InFlightRoots,
@@ -486,8 +501,28 @@ pub struct ThrowData {
 
 impl ThrowData {
     fn new(tag: Value, value: Value) -> Self {
+        Self::new_with_symbols(tag, value, crate::tagged::SymbolMode::Bare)
+    }
+
+    fn new_with_symbols(tag: Value, value: Value, symbol_mode: crate::tagged::SymbolMode) -> Self {
         let pin = InFlightRoots::pin([tag, value]);
-        Self { tag, value, pin }
+        Self {
+            tag,
+            value,
+            symbol_mode,
+            pin,
+        }
+    }
+
+    pub(crate) fn symbol_mode(&self) -> crate::tagged::SymbolMode {
+        self.symbol_mode
+    }
+
+    /// GNU eval.c:1477 selects the catch before unbinding the throwing extent.
+    pub(crate) fn matches_tag(&self, tag: Value) -> bool {
+        self.tag.bits() == tag.bits()
+            || (self.symbol_mode == crate::tagged::SymbolMode::Positioned
+                && self.symbol_mode.unwrap(self.tag).bits() == self.symbol_mode.unwrap(tag).bits())
     }
 }
 
@@ -544,16 +579,16 @@ pub(crate) enum MemorySignalBindingError {
     NotSymbol,
 }
 
-impl TryFrom<Value> for MemorySignalBinding {
+impl TryFrom<(Value, SymbolMode)> for MemorySignalBinding {
     type Error = MemorySignalBindingError;
 
-    fn try_from(original: Value) -> Result<Self, Self::Error> {
+    fn try_from((original, symbol_mode): (Value, SymbolMode)) -> Result<Self, Self::Error> {
         if !original.is_cons() {
             return Err(MemorySignalBindingError::NotCons);
         }
         let symbol = original
             .cons_car()
-            .as_symbol_id()
+            .as_symbol_id(symbol_mode)
             .ok_or(MemorySignalBindingError::NotSymbol)?;
         Ok(Self {
             original,
@@ -826,7 +861,7 @@ impl InFlightRoots {
         if value.is_nil() || value.is_t() {
             return;
         }
-        if value.is_heap_object() || value.is_symbol() {
+        if value.is_heap_object() || value.is_bare_symbol() {
             values.push(PinnedWord::of(value));
         }
     }
@@ -1158,15 +1193,15 @@ pub(crate) fn signal_from_binding_value(value: Value) -> Option<Flow> {
     let pair_car = value.cons_car();
     let pair_cdr = value.cons_cdr();
     let tail = pair_cdr;
-    let symbol_id = pair_car.as_symbol_id()?;
+    let symbol_id = pair_car.as_bare_symbol_id()?;
     Some(signal_with_data_id(symbol_id, tail))
 }
 
 /// Deliver GNU alloc.c:4142's live memory-signal-data, keeping its original
 /// error object (including a dotted cdr) and the OOM delivery policy together.
 #[cold]
-pub(crate) fn memory_signal_from_binding_value(value: Value) -> Flow {
-    let binding = match MemorySignalBinding::try_from(value) {
+pub(crate) fn memory_signal_from_binding_value(value: Value, symbol_mode: SymbolMode) -> Flow {
+    let binding = match MemorySignalBinding::try_from((value, symbol_mode)) {
         Ok(binding) => binding,
         // Fsignal turns a nil error symbol and non-cons data into an
         // ordinary error (GNU eval.c:1924-1925), preserving its raw cdr.
@@ -1598,7 +1633,7 @@ enum PrintShorthandSymbol {
 
 impl PrintShorthandSymbol {
     fn from_lisp_value(value: &Value) -> Option<Self> {
-        value.as_symbol_name()?.parse().ok()
+        value.as_bare_symbol_name()?.parse().ok()
     }
 
     fn string_form(
@@ -1664,7 +1699,7 @@ fn format_list_shorthand_in_state(
         return None;
     }
 
-    if items[0].as_symbol_name() == Some("make-hash-table-from-literal") {
+    if items[0].as_bare_symbol_name() == Some("make-hash-table-from-literal") {
         let payload = quote_payload(&items[1])?;
         return Some(format!(
             "#s{}",
@@ -1992,7 +2027,7 @@ fn format_list_shorthand_bytes_in_state(
         return None;
     }
 
-    if items[0].as_symbol_name() == Some("make-hash-table-from-literal") {
+    if items[0].as_bare_symbol_name() == Some("make-hash-table-from-literal") {
         let payload = quote_payload(&items[1])?;
         let mut out = Vec::new();
         out.extend_from_slice(b"#s");
@@ -2461,19 +2496,24 @@ impl super::eval::Context {
         data: Value,
         context: Value,
     ) -> Result<(), Flow> {
+        let symbol_mode = self.symbol_mode();
         let context_text = context.as_utf8_str().unwrap_or_default().to_string();
         let rendered = self.error_data_message(data);
         // GNU guards this branch with `!is_minibuffer_quit` (keyboard.c:1064):
         // aborting a minibuffer reports like any other quit but must never take
         // the session down, not even before the first frame is displayed.
         let is_minibuffer_quit = data.is_cons()
-            && data.cons_car().as_symbol_id().is_some_and(|symbol| {
-                super::errors::signal_matches_hierarchical_sym(
-                    &self.obarray,
-                    symbol,
-                    intern("minibuffer-quit"),
-                )
-            });
+            && data
+                .cons_car()
+                .as_symbol_id(symbol_mode)
+                .is_some_and(|symbol| {
+                    super::errors::signal_matches_hierarchical_sym(
+                        &self.obarray,
+                        symbol,
+                        intern("minibuffer-quit"),
+                        self.symbol_mode(),
+                    )
+                });
         if !is_minibuffer_quit && self.noninteractive() {
             eprintln!("{context_text}{rendered}");
             // GNU calls Fkill_emacs (-1) here, which runs kill-emacs-hook and
@@ -2516,3 +2556,7 @@ mod flow_word_tests;
 #[cfg(test)]
 #[path = "tests/flow_word_gc_test.rs"]
 mod flow_word_gc_tests;
+
+#[cfg(test)]
+#[path = "tests/memory_signal_policy_test.rs"]
+mod memory_signal_policy_tests;

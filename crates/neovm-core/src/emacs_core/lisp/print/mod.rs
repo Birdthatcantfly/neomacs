@@ -2156,7 +2156,7 @@ fn write_symbol_with_pos_stateful(
     }
 
     out.push_str("#<symbol ");
-    if sym.is_symbol() {
+    if sym.is_bare_symbol() {
         write_value_stateful(&sym, out, state);
     } else {
         out.push_str("NOT A SYMBOL!!");
@@ -2182,7 +2182,7 @@ fn append_symbol_with_pos_bytes(value: &Value, out: &mut Vec<u8>, options: Print
     }
 
     out.extend_from_slice(b"#<symbol ");
-    if sym.is_symbol() {
+    if sym.is_bare_symbol() {
         append_print_value_bytes(&sym, out, options);
     } else {
         out.extend_from_slice(b"NOT A SYMBOL!!");

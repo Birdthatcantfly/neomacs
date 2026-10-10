@@ -2301,7 +2301,7 @@ fn a_reclaimed_cons_is_recognizable_as_dead() {
     // decodes as a bogus symbol: an aligned raw pointer under TAG_SYMBOL.
     let link = unsafe { (*doomed.xcons_ptr()).load_cdr() };
     assert!(
-        link.is_symbol(),
+        link.is_bare_symbol(),
         "the free-list link decodes through TAG_SYMBOL (bits 0x{:x})",
         link.bits(),
     );

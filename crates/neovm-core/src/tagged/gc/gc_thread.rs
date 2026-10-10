@@ -239,10 +239,10 @@ impl WorkerSymbolMarks for SymbolMarkBits {
     #[inline(always)]
     fn note(&mut self, value: TaggedValue, symbols: &mut Vec<SymId>) -> bool {
         // Exclude identities, never mutable intern membership or namesakes.
-        if !value.is_symbol() || value.bits() <= TaggedValue::UNBOUND.bits() {
+        if !value.is_bare_symbol() || value.bits() <= TaggedValue::UNBOUND.bits() {
             return false;
         }
-        let id = value.xsymbol_id();
+        let id = value.xbare_symbol_id();
         if self.insert_if_absent(id) {
             symbols.push(id);
         }
@@ -1049,7 +1049,7 @@ fn concurrent_trace_mapped_veclike<const MAJOR: bool, const SYMBOLS: bool, E: Cl
             if addr < job.claims.dump_lo || addr >= job.claims.dump_hi {
                 job.gray.push(child);
             }
-        } else if child.is_symbol() {
+        } else if child.is_bare_symbol() {
             if SYMBOLS {
                 logs.note_symbol(child);
             } else if seen_symbols.insert(child.bits()) {
@@ -1258,7 +1258,7 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
                         if addr < job.claims.dump_lo || addr >= job.claims.dump_hi {
                             job.gray.push(child);
                         }
-                    } else if child.is_symbol() {
+                    } else if child.is_bare_symbol() {
                         // Deduped symbol hand-off: `mark_symbol` is
                         // mutator-only, and an uninterned dumped symbol is
                         // reachable only through image data, so each UNIQUE

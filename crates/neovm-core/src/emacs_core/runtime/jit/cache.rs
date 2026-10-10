@@ -1417,7 +1417,7 @@ fn callee_name_hint(ctx: *const Context, id: u64) -> Option<SymId> {
     {
         return Some(sym);
     }
-    let sym = ctx.innermost_backtrace_function(64)?.as_symbol_id()?;
+    let sym = ctx.innermost_backtrace_function(64)?.as_bare_symbol_id()?;
     names_this_leaf(sym).then_some(sym)
 }
 

@@ -385,7 +385,7 @@ fn quoted_lambda_documentation(function: &Value) -> Option<EvalResult> {
 
     let pair_car = function.cons_car();
     let pair_cdr = function.cons_cdr();
-    if pair_car.as_symbol_name() != Some("lambda") {
+    if pair_car.as_bare_symbol_name() != Some("lambda") {
         return None;
     }
 
@@ -423,7 +423,7 @@ fn quoted_macro_invalid_designator(function: &Value) -> Option<EvalResult> {
 
     let pair_car = function.cons_car();
     let pair_cdr = function.cons_cdr();
-    if pair_car.as_symbol_name() != Some("macro") {
+    if pair_car.as_bare_symbol_name() != Some("macro") {
         return None;
     }
 

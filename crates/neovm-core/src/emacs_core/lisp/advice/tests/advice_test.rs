@@ -28,14 +28,14 @@ fn add_and_notify_watcher() {
     assert_eq!(calls.len(), 1);
 
     let (callback, args) = &calls[0];
-    assert!(callback.is_symbol_named("my-watcher"));
+    assert!(callback.is_bare_symbol_named("my-watcher"));
     assert_eq!(args.len(), 4);
     // arg 0: symbol name
-    assert!(args[0].is_symbol_named("my-var"));
+    assert!(args[0].is_bare_symbol_named("my-var"));
     // arg 1: new value
     assert!(&args[1].is_fixnum());
     // arg 2: operation
-    assert!(args[2].is_symbol_named("set"));
+    assert!(args[2].is_bare_symbol_named("set"));
     // arg 3: where (nil)
     assert!(args[3].is_nil());
 }
@@ -58,7 +58,7 @@ fn remove_watcher() {
         &Value::NIL,
     );
     assert_eq!(calls.len(), 1);
-    assert!(calls[0].0.is_symbol_named("watcher2"));
+    assert!(calls[0].0.is_bare_symbol_named("watcher2"));
 }
 
 #[test]

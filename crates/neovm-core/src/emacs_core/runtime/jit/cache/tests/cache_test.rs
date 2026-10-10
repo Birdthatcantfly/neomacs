@@ -669,11 +669,11 @@ fn jit_obs_name_hint_rejects_mismatched_frame() {
     let mut ev = Context::new();
     let sym = Value::symbol("jit-obs-hint-fn");
     let other = Value::symbol("jit-obs-hint-other");
-    let sym_id = sym.as_symbol_id().unwrap();
+    let sym_id = sym.as_bare_symbol_id().unwrap();
     ev.obarray
         .set_symbol_function_id(sym_id, Value::make_bytecode(unary_add_one()));
     ev.obarray.set_symbol_function_id(
-        other.as_symbol_id().unwrap(),
+        other.as_bare_symbol_id().unwrap(),
         Value::make_bytecode(unary_add_one()),
     );
     let id = ev
@@ -823,7 +823,7 @@ fn install_step(ev: &mut crate::emacs_core::eval::Context, name: &str) -> Value 
         1,
     );
     ev.obarray
-        .set_symbol_function_id(sym.as_symbol_id().unwrap(), Value::make_bytecode(step));
+        .set_symbol_function_id(sym.as_bare_symbol_id().unwrap(), Value::make_bytecode(step));
     sym
 }
 

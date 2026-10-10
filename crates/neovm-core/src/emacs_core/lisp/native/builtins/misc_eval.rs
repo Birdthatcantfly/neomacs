@@ -6,6 +6,7 @@ use crate::emacs_core::error::{
 };
 use crate::emacs_core::symbol::Obarray;
 use crate::emacs_core::textprop::{StickinessProperty, TextPropertyControlVariable};
+use crate::tagged::value::SymbolMode;
 
 fn runtime_string_value(value: Value) -> String {
     value
@@ -340,11 +341,12 @@ pub(crate) fn builtin_next_single_char_property_change_4(
     limit: Value,
 ) -> EvalResult {
     let args: [Value; 4] = [position, prop, object, limit];
-    builtin_next_single_char_property_change_in_buffers(
+    builtin_next_single_char_property_change_in_buffers_with_symbols(
         &eval.obarray,
         Some(&eval.frames),
         &eval.buffers,
         &args,
+        eval.symbol_mode(),
     )
 }
 
@@ -418,6 +420,22 @@ pub(crate) fn builtin_next_single_char_property_change_in_buffers(
     buffers: &crate::buffer::BufferManager,
     args: &[Value],
 ) -> EvalResult {
+    builtin_next_single_char_property_change_in_buffers_with_symbols(
+        obarray,
+        frames,
+        buffers,
+        args,
+        SymbolMode::Bare,
+    )
+}
+
+pub(crate) fn builtin_next_single_char_property_change_in_buffers_with_symbols(
+    obarray: &crate::emacs_core::symbol::Obarray,
+    frames: Option<&crate::window::FrameManager>,
+    buffers: &crate::buffer::BufferManager,
+    args: &[Value],
+    mode: SymbolMode,
+) -> EvalResult {
     expect_min_args("next-single-char-property-change", args, 2)?;
     expect_max_args("next-single-char-property-change", args, 4)?;
 
@@ -483,7 +501,12 @@ pub(crate) fn builtin_next_single_char_property_change_in_buffers(
             frames,
             &value_args,
         )?;
-        if !eq_value(&value, &initial_value) || cursor >= point_max {
+        if !eq_value_swp(
+            &value,
+            &initial_value,
+            matches!(mode, SymbolMode::Positioned),
+        ) || cursor >= point_max
+        {
             return Ok(Value::fixnum(cursor));
         }
     }
@@ -493,11 +516,12 @@ pub(crate) fn builtin_previous_single_char_property_change(
     eval: &mut super::eval::Context,
     args: Vec<Value>,
 ) -> EvalResult {
-    builtin_previous_single_char_property_change_in_buffers(
+    builtin_previous_single_char_property_change_in_buffers_with_symbols(
         &eval.obarray,
         Some(&eval.frames),
         &eval.buffers,
         args,
+        eval.symbol_mode(),
     )
 }
 
@@ -506,6 +530,22 @@ pub(crate) fn builtin_previous_single_char_property_change_in_buffers(
     frames: Option<&crate::window::FrameManager>,
     buffers: &crate::buffer::BufferManager,
     args: Vec<Value>,
+) -> EvalResult {
+    builtin_previous_single_char_property_change_in_buffers_with_symbols(
+        obarray,
+        frames,
+        buffers,
+        args,
+        SymbolMode::Bare,
+    )
+}
+
+pub(crate) fn builtin_previous_single_char_property_change_in_buffers_with_symbols(
+    obarray: &crate::emacs_core::symbol::Obarray,
+    frames: Option<&crate::window::FrameManager>,
+    buffers: &crate::buffer::BufferManager,
+    args: Vec<Value>,
+    mode: SymbolMode,
 ) -> EvalResult {
     expect_min_args("previous-single-char-property-change", &args, 2)?;
     expect_max_args("previous-single-char-property-change", &args, 4)?;
@@ -577,14 +617,18 @@ pub(crate) fn builtin_previous_single_char_property_change_in_buffers(
             frames,
             &value_args,
         )?;
-        if !eq_value(&value, &initial_value) {
+        if !eq_value_swp(
+            &value,
+            &initial_value,
+            matches!(mode, SymbolMode::Positioned),
+        ) {
             return Ok(Value::fixnum(cursor));
         }
     }
 }
 
 pub(crate) fn builtin_defalias(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {
-    let plan = plan_defalias_in_obarray(eval.obarray(), &args)?;
+    let plan = plan_defalias_in_obarray(eval.obarray(), &args, eval.symbol_mode())?;
     let DefaliasPlan {
         action,
         docstring,
@@ -595,7 +639,9 @@ pub(crate) fn builtin_defalias(eval: &mut super::eval::Context, args: Vec<Value>
         | DefaliasAction::CallHook { definition, .. } => *definition,
     };
     eval.record_load_history_entry(crate::emacs_core::eval::LoadHistoryEntry::function(
-        result, definition,
+        result,
+        definition,
+        eval.symbol_mode(),
     ));
     eval.record_defalias_function_history(result);
     match action {
@@ -614,15 +660,17 @@ pub(crate) fn builtin_defalias(eval: &mut super::eval::Context, args: Vec<Value>
             eval.apply(hook, vec![symbol_value, definition])?;
         }
     }
-    if let Some(symbol) = result.as_symbol_id() {
+    if let Some(symbol) = result.as_symbol_id(eval.symbol_mode()) {
         let definition = eval
             .obarray
             .symbol_function_id(symbol)
             .unwrap_or(Value::NIL);
+        let mode = eval.symbol_mode();
         crate::emacs_core::interactive::sync_interactive_registry_for_symbol_definition(
             &mut eval.interactive,
             symbol,
             definition,
+            mode,
         );
     }
     if let Some(docstring) = docstring {
@@ -655,11 +703,12 @@ pub(crate) struct DefaliasPlan {
 pub(crate) fn plan_defalias_in_obarray(
     obarray: &Obarray,
     args: &[Value],
+    mode: SymbolMode,
 ) -> Result<DefaliasPlan, Flow> {
     expect_args_range("defalias", args, 2, 3)?;
     // Unwrap symbol-with-pos transparently via symbol_id, which handles
     // bare symbols, nil, t, and symbol-with-pos objects.
-    let symbol = super::symbols::expect_symbol_id(&args[0])?;
+    let symbol = super::symbols::expect_symbol_id(&args[0], mode)?;
     if symbol == intern("nil") {
         return Err(signal(
             LispCondition::SettingConstant,
@@ -667,7 +716,12 @@ pub(crate) fn plan_defalias_in_obarray(
         ));
     }
     let definition = args[1];
-    if super::symbols::would_create_function_alias_cycle_in_obarray(obarray, symbol, &definition) {
+    if super::symbols::would_create_function_alias_cycle_in_obarray(
+        obarray,
+        symbol,
+        &definition,
+        mode,
+    ) {
         return Err(signal(
             LispCondition::CyclicFunctionIndirection,
             vec![args[0]],
@@ -837,6 +891,7 @@ pub(crate) fn inherited_text_properties_for_inserted_range_in_state(
     buf: &crate::buffer::Buffer,
     insert_start: usize,
     insert_len: usize,
+    mode: SymbolMode,
 ) -> Vec<(Value, Value)> {
     let insert_start_char = buf.emacs_byte_pos_to_char_pos_clamped(EmacsBytePos::new(insert_start));
     let left_props = if insert_start_char > buf.point_min_char_pos() {
@@ -862,8 +917,19 @@ pub(crate) fn inherited_text_properties_for_inserted_range_in_state(
         Vec::new()
     };
 
-    let left_map: HashMap<Value, Value> = left_props.iter().cloned().collect();
-    let right_map: HashMap<Value, Value> = right_props.iter().cloned().collect();
+    let key_identity = |key: Value| {
+        key.as_symbol_id(mode)
+            .map(Value::from_sym_id)
+            .unwrap_or(key)
+    };
+    let left_map: HashMap<Value, Value> = left_props
+        .iter()
+        .map(|(key, value)| (key_identity(*key), *value))
+        .collect();
+    let right_map: HashMap<Value, Value> = right_props
+        .iter()
+        .map(|(key, value)| (key_identity(*key), *value))
+        .collect();
     // GNU `adjust_intervals_for_insertion` reads stickiness with `textget`,
     // not direct plist lookup.  In particular, text buttons carry
     // `rear-nonsticky t` on their category symbol rather than on every
@@ -894,18 +960,32 @@ pub(crate) fn inherited_text_properties_for_inserted_range_in_state(
     // adjacent intervals). A real property that is rear-nonsticky (by value or
     // by `text-property-default-nonsticky`) forces a split, so fall through to
     // the merge in that case.
-    if !left_props.is_empty() && !right_props.is_empty() && left_map == right_map {
+    if !left_props.is_empty()
+        && !right_props.is_empty()
+        && left_map.len() == right_map.len()
+        && left_map.iter().all(|(key, value)| {
+            right_map.get(key).is_some_and(|right| {
+                eq_value_swp(value, right, matches!(mode, SymbolMode::Positioned))
+            })
+        })
+    {
         let forces_split = left_props.iter().any(|(name, _)| {
-            if StickinessProperty::FrontSticky.is_value(*name)
-                || StickinessProperty::RearNonsticky.is_value(*name)
-            {
+            if eq_value_swp(
+                name,
+                &StickinessProperty::FrontSticky.value(),
+                matches!(mode, SymbolMode::Positioned),
+            ) || eq_value_swp(
+                name,
+                &StickinessProperty::RearNonsticky.value(),
+                matches!(mode, SymbolMode::Positioned),
+            ) {
                 return false;
             }
             let default_rear_nonsticky = default_nonsticky
                 .as_ref()
-                .and_then(|value| assq_cdr(value, *name))
+                .and_then(|value| assq_cdr(value, *name, mode))
                 .is_some_and(|v| v.is_truthy());
-            matches_rear_nonsticky(left_rear, *name) || default_rear_nonsticky
+            matches_rear_nonsticky(left_rear, *name, mode) || default_rear_nonsticky
         });
         if !forces_split {
             return left_props.clone();
@@ -918,24 +998,33 @@ pub(crate) fn inherited_text_properties_for_inserted_range_in_state(
     let mut seen = HashSet::new();
 
     for (name, right_value) in &right_props {
-        if StickinessProperty::FrontSticky.is_value(*name)
-            || StickinessProperty::RearNonsticky.is_value(*name)
-        {
+        if eq_value_swp(
+            name,
+            &StickinessProperty::FrontSticky.value(),
+            matches!(mode, SymbolMode::Positioned),
+        ) || eq_value_swp(
+            name,
+            &StickinessProperty::RearNonsticky.value(),
+            matches!(mode, SymbolMode::Positioned),
+        ) {
             continue;
         }
-        seen.insert(*name);
+        seen.insert(key_identity(*name));
 
-        let left_present = left_map.contains_key(name);
-        let left_value = left_map.get(name).copied().unwrap_or(Value::NIL);
+        let left_present = left_map.contains_key(&key_identity(*name));
+        let left_value = left_map
+            .get(&key_identity(*name))
+            .copied()
+            .unwrap_or(Value::NIL);
         let default_entry = default_nonsticky
             .as_ref()
-            .and_then(|value| assq_cdr(value, *name));
+            .and_then(|value| assq_cdr(value, *name, mode));
         let default_rear_nonsticky = default_entry.as_ref().is_some_and(|v| v.is_truthy());
         let default_front_sticky = default_entry.is_some_and(|v| v.is_nil());
 
-        let mut use_left =
-            left_present && !(matches_rear_nonsticky(left_rear, *name) || default_rear_nonsticky);
-        let mut use_right = matches_front_sticky(right_front, *name) || default_front_sticky;
+        let mut use_left = left_present
+            && !(matches_rear_nonsticky(left_rear, *name, mode) || default_rear_nonsticky);
+        let mut use_right = matches_front_sticky(right_front, *name, mode) || default_front_sticky;
         if use_left && use_right {
             if left_value.is_nil() {
                 use_left = false;
@@ -946,47 +1035,53 @@ pub(crate) fn inherited_text_properties_for_inserted_range_in_state(
 
         if use_left {
             merged_props.push((*name, left_value));
-            if matches_front_sticky(left_front, *name) {
+            if matches_front_sticky(left_front, *name, mode) {
                 front_sticky.push(*name);
             }
-            if matches_rear_nonsticky(left_rear, *name) {
+            if matches_rear_nonsticky(left_rear, *name, mode) {
                 rear_nonsticky.push(*name);
             }
         } else if use_right {
             merged_props.push((*name, *right_value));
-            if matches_front_sticky(right_front, *name) {
+            if matches_front_sticky(right_front, *name, mode) {
                 front_sticky.push(*name);
             }
-            if matches_rear_nonsticky(right_rear, *name) {
+            if matches_rear_nonsticky(right_rear, *name, mode) {
                 rear_nonsticky.push(*name);
             }
         }
     }
 
     for (name, left_value) in &left_props {
-        if StickinessProperty::FrontSticky.is_value(*name)
-            || StickinessProperty::RearNonsticky.is_value(*name)
-            || seen.contains(name)
+        if eq_value_swp(
+            name,
+            &StickinessProperty::FrontSticky.value(),
+            matches!(mode, SymbolMode::Positioned),
+        ) || eq_value_swp(
+            name,
+            &StickinessProperty::RearNonsticky.value(),
+            matches!(mode, SymbolMode::Positioned),
+        ) || seen.contains(&key_identity(*name))
         {
             continue;
         }
 
         let default_entry = default_nonsticky
             .as_ref()
-            .and_then(|value| assq_cdr(value, *name));
+            .and_then(|value| assq_cdr(value, *name, mode));
         let default_rear_nonsticky = default_entry.as_ref().is_some_and(|v| v.is_truthy());
         let default_front_sticky = default_entry.is_some_and(|v| v.is_nil());
-        let left_nonsticky = matches_rear_nonsticky(left_rear, *name);
-        let right_sticky = matches_front_sticky(right_front, *name) || default_front_sticky;
+        let left_nonsticky = matches_rear_nonsticky(left_rear, *name, mode);
+        let right_sticky = matches_front_sticky(right_front, *name, mode) || default_front_sticky;
 
         if !(left_nonsticky || default_rear_nonsticky) {
             merged_props.push((*name, *left_value));
-            if matches_front_sticky(left_front, *name) {
+            if matches_front_sticky(left_front, *name, mode) {
                 front_sticky.push(*name);
             }
         } else if right_sticky {
             front_sticky.push(*name);
-            if matches_rear_nonsticky(right_rear, *name) {
+            if matches_rear_nonsticky(right_rear, *name, mode) {
                 rear_nonsticky.push(*name);
             }
         }
@@ -1005,14 +1100,20 @@ pub(crate) fn inherited_text_properties_for_inserted_range_in_state(
     let category_front_sticky_t = merged_props
         .iter()
         .find_map(|(name, value)| {
-            (*name == Value::symbol("category"))
-                .then(|| value.as_symbol_id())
-                .flatten()
+            (eq_value_swp(
+                name,
+                &Value::symbol("category"),
+                matches!(mode, SymbolMode::Positioned),
+            ))
+            .then(|| value.as_symbol_id(mode))
+            .flatten()
         })
         .and_then(|category| {
             obarray.get_property_id(category, StickinessProperty::FrontSticky.symbol_id())
         })
-        .is_some_and(|value| value == Value::T);
+        .is_some_and(|value| {
+            eq_value_swp(&value, &Value::T, matches!(mode, SymbolMode::Positioned))
+        });
 
     if !front_sticky.is_empty() && !category_front_sticky_t {
         merged_props.insert(
@@ -1027,28 +1128,35 @@ pub(crate) fn inherited_text_properties_for_inserted_range_in_state(
     merged_props
 }
 
-fn matches_front_sticky(value: Value, prop: Value) -> bool {
-    value.is_t() || value_list_contains(&value, prop)
+fn matches_front_sticky(value: Value, prop: Value, mode: SymbolMode) -> bool {
+    eq_value_swp(&value, &Value::T, matches!(mode, SymbolMode::Positioned))
+        || value_list_contains(&value, prop, mode)
 }
 
-fn matches_rear_nonsticky(value: Value, prop: Value) -> bool {
+fn matches_rear_nonsticky(value: Value, prop: Value, mode: SymbolMode) -> bool {
     if value.is_nil() {
         return false;
     }
     if value.is_cons() {
-        return value_list_contains(&value, prop);
+        return value_list_contains(&value, prop, mode);
     }
     true
 }
 
-fn assq_cdr(list: &Value, prop: Value) -> Option<Value> {
+fn assq_cdr(list: &Value, prop: Value, mode: SymbolMode) -> Option<Value> {
     // GNU `assq`: EQ on the keys. `Value ==` is DEEP equal (the documented
     // footgun) — besides the per-element cost, it would MATCH an `equal`
     // (non-eq) string/float key GNU's assq skips.
     let mut cursor = *list;
     while cursor.is_cons() {
         let entry = cursor.cons_car();
-        if entry.is_cons() && entry.cons_car().bits() == prop.bits() {
+        if entry.is_cons()
+            && eq_value_swp(
+                &entry.cons_car(),
+                &prop,
+                matches!(mode, SymbolMode::Positioned),
+            )
+        {
             return Some(entry.cons_cdr());
         }
         cursor = cursor.cons_cdr();
@@ -1056,12 +1164,12 @@ fn assq_cdr(list: &Value, prop: Value) -> Option<Value> {
     None
 }
 
-fn value_list_contains(list: &Value, prop: Value) -> bool {
+fn value_list_contains(list: &Value, prop: Value, mode: SymbolMode) -> bool {
     // GNU `memq`: EQ on the members (see `assq_cdr` on the `==` footgun).
     let mut cursor = *list;
     while cursor.is_cons() {
         let item = cursor.cons_car();
-        if item.bits() == prop.bits() {
+        if eq_value_swp(&item, &prop, matches!(mode, SymbolMode::Positioned)) {
             return true;
         }
         cursor = cursor.cons_cdr();

@@ -107,7 +107,10 @@ fn documentation_preserves_uninterned_autoload_symbol_identity() {
 
     let function = resolve_documentation_function_value(eval.obarray(), sym, false)
         .expect("documentation resolver should find uninterned symbol function");
-    assert!(crate::emacs_core::autoload::is_autoload_value(&function));
+    assert!(crate::emacs_core::autoload::is_autoload_value(
+        &function,
+        crate::tagged::value::SymbolMode::Bare
+    ));
 }
 
 #[test]
@@ -334,7 +337,10 @@ fn help_function_arglist_is_real_lisp_function_after_bootstrap() {
         .obarray
         .symbol_function("help-function-arglist")
         .expect("missing help-function-arglist bootstrapped function cell");
-    assert!(!crate::emacs_core::autoload::is_autoload_value(&function));
+    assert!(!crate::emacs_core::autoload::is_autoload_value(
+        &function,
+        crate::tagged::value::SymbolMode::Bare
+    ));
 }
 
 #[test]

@@ -2161,7 +2161,7 @@ fn undo_value_label(value: Value) -> String {
     if value.is_t() {
         return "t".to_owned();
     }
-    if let Some(name) = value.as_symbol_name() {
+    if let Some(name) = value.as_bare_symbol_name() {
         return format!("symbol:{name}");
     }
     if let Some(n) = value.as_fixnum() {

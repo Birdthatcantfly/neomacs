@@ -1784,6 +1784,7 @@ fn make_process_stores_pipe_stderr_process_value() {
             Value::string("*proc-stderr-buffer*"),
         ],
         true,
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("make-process");
     let id = process.as_process_id().expect("expected process object id");
@@ -1944,6 +1945,7 @@ fn make_process_stderr_pipe_name_preserves_raw_unibyte_owner_bytes() {
             Value::string("*proc-stderr-raw-buffer*"),
         ],
         true,
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("make-process");
     let id = process.as_process_id().expect("expected process object id");
@@ -1986,6 +1988,7 @@ fn make_process_accepts_existing_pipe_process_for_stderr() {
             Value::keyword(":buffer"),
             Value::string("*proc-existing-stderr-buffer*"),
         ],
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("make-pipe-process");
     let process = builtin_make_process_impl(
@@ -2001,6 +2004,7 @@ fn make_process_accepts_existing_pipe_process_for_stderr() {
             stderrproc,
         ],
         true,
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("make-process");
     let id = process.as_process_id().expect("expected process object id");
@@ -2026,6 +2030,7 @@ fn make_process_merges_stderr_when_deleted_stderr_pipe_is_stale() {
             Value::keyword(":buffer"),
             Value::NIL,
         ],
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("make-pipe-process");
     let stderr_id = stderrproc.as_process_id().expect("stderr pipe process id");
@@ -2046,6 +2051,7 @@ fn make_process_merges_stderr_when_deleted_stderr_pipe_is_stale() {
             Value::symbol("pipe"),
         ],
         false,
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("stale :stderr should merge stderr into stdout");
     let owner_id = process.as_process_id().expect("owner process id");
@@ -2085,6 +2091,7 @@ fn make_process_merges_stderr_when_pipe_writer_was_already_consumed() {
             Value::keyword(":buffer"),
             Value::NIL,
         ],
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("make-pipe-process");
 
@@ -2103,6 +2110,7 @@ fn make_process_merges_stderr_when_pipe_writer_was_already_consumed() {
             Value::symbol("pipe"),
         ],
         false,
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("first make-process");
     let first_id = first.as_process_id().expect("first process id");
@@ -2122,6 +2130,7 @@ fn make_process_merges_stderr_when_pipe_writer_was_already_consumed() {
             Value::symbol("pipe"),
         ],
         false,
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("reusing a consumed stderr pipe should merge stderr");
     let second_id = second.as_process_id().expect("second process id");
@@ -2167,6 +2176,7 @@ fn stderr_pipe_uses_child_stdout_as_its_live_source() {
             Value::keyword(":buffer"),
             Value::NIL,
         ],
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("make-pipe-process");
     let stderr_id = stderrproc.as_process_id().expect("stderr pipe process id");
@@ -2185,6 +2195,7 @@ fn stderr_pipe_uses_child_stdout_as_its_live_source() {
             Value::symbol("pipe"),
         ],
         false,
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("make-process");
     let owner_id = process.as_process_id().expect("owner process id");
@@ -2338,6 +2349,7 @@ fn module_pipe_service_polling_is_nonblocking_before_write_and_services_data() {
                 Value::keyword(":buffer"),
                 Value::make_buffer(buffer_id),
             ],
+            crate::tagged::value::SymbolMode::Bare,
         )
         .expect("make-pipe-process");
         let id = process.as_process_id().expect("pipe process id");
@@ -2418,6 +2430,7 @@ fn module_channel_writes_to_make_pipe_process() {
             Value::keyword(":buffer"),
             Value::NIL,
         ],
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("make-pipe-process");
     let id = process.as_process_id().expect("pipe process id");
@@ -2520,6 +2533,7 @@ fn stderr_pipe_writer_is_restored_after_pipe_spawn_failure() {
             Value::keyword(":buffer"),
             Value::NIL,
         ],
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("make-pipe-process");
     let result = builtin_make_process_impl(
@@ -2537,6 +2551,7 @@ fn stderr_pipe_writer_is_restored_after_pipe_spawn_failure() {
             Value::symbol("pipe"),
         ],
         false,
+        crate::tagged::value::SymbolMode::Bare,
     );
     assert!(result.is_err());
 
@@ -2595,6 +2610,7 @@ fn stderr_pipe_writer_is_restored_after_pty_spawn_failure() {
             Value::keyword(":buffer"),
             Value::NIL,
         ],
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("make-pipe-process");
     let result = builtin_make_process_impl(
@@ -2610,6 +2626,7 @@ fn stderr_pipe_writer_is_restored_after_pty_spawn_failure() {
             stderrproc,
         ],
         true,
+        crate::tagged::value::SymbolMode::Bare,
     );
     assert!(result.is_err());
 
@@ -4387,6 +4404,7 @@ fn process_output_read_errors_remain_distinct_from_clean_eof() {
         ProcessReadOutcome::from_stream_read(&failed_read),
         &[],
         1,
+        crate::tagged::value::SymbolMode::Bare,
     );
     assert!(matches!(result, ProcessBytesRead::Failed));
 
@@ -4411,6 +4429,7 @@ fn process_output_read_errors_remain_distinct_from_clean_eof() {
         ProcessReadOutcome::from_pty_read(&Ok(0)),
         &[],
         1,
+        crate::tagged::value::SymbolMode::Bare,
     );
     assert!(matches!(pty_result, ProcessBytesRead::Eof));
     assert!(
@@ -6855,7 +6874,7 @@ fn accept_process_output_discards_output_when_filter_is_t() {
     while ev
         .processes
         .get(pid)
-        .is_some_and(|process| process.status.is_symbol_named("run"))
+        .is_some_and(|process| process.status.is_bare_symbol_named("run"))
     {
         builtin_accept_process_output(
             &mut ev,
@@ -6909,7 +6928,7 @@ fn process_filter_t_suspends_output_until_filter_is_resumed() {
     while ev
         .processes
         .get(pid)
-        .is_some_and(|process| process.status.is_symbol_named("run"))
+        .is_some_and(|process| process.status.is_bare_symbol_named("run"))
     {
         builtin_accept_process_output(
             &mut ev,

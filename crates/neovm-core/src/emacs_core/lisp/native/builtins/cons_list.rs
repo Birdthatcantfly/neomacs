@@ -406,7 +406,7 @@ pub fn parse_lambda_params_from_value(
         } else {
             *item
         };
-        if let Some(name) = item.as_symbol_name() {
+        if let Some(name) = item.as_bare_symbol_name() {
             match name {
                 "&optional" => {
                     mode = 1;
@@ -419,7 +419,7 @@ pub fn parse_lambda_params_from_value(
                 _ => {}
             }
         }
-        let sym_id = item.as_symbol_id().unwrap_or_else(|| intern("_"));
+        let sym_id = item.as_bare_symbol_id().unwrap_or_else(|| intern("_"));
         match mode {
             0 => required.push(sym_id),
             1 => optional.push(sym_id),
@@ -1449,7 +1449,7 @@ pub(crate) fn listp_error(list: Value) -> Flow {
 // 13.5% of compiling elb-smie.el). The same budgeted scan as the plain case.
 fn builtin_memq_values_swp_scan<const OBSERVED: bool>(target: Value, list: Value) -> EvalResult {
     let bare = positioned_symbol_scan::<OBSERVED>(target).unwrap_or(target);
-    if !bare.is_symbol() {
+    if !bare.is_bare_symbol() {
         return builtin_memq_values_scan::<OBSERVED>(target, list, false);
     }
     let mut tail = list;
@@ -1501,7 +1501,7 @@ fn memq_swp_exact(bare: Value, list: Value) -> EvalResult {
 #[cfg(test)]
 pub(crate) fn memq_exact_for_test(target: Value, list: Value, swp: bool) -> EvalResult {
     let bare = target.as_symbol_with_pos_sym().unwrap_or(target);
-    if swp && bare.is_symbol() {
+    if swp && bare.is_bare_symbol() {
         memq_swp_exact(bare, list)
     } else {
         memq_exact(target, list)
@@ -1763,7 +1763,7 @@ fn assq_exact(key: Value, list: Value) -> EvalResult {
 #[cfg(test)]
 pub(crate) fn assq_exact_for_test(key: Value, list: Value, swp: bool) -> EvalResult {
     let bare = key.as_symbol_with_pos_sym().unwrap_or(key);
-    if swp && bare.is_symbol() {
+    if swp && bare.is_bare_symbol() {
         assq_swp_exact(bare, list)
     } else {
         assq_exact(key, list)
@@ -1772,7 +1772,7 @@ pub(crate) fn assq_exact_for_test(key: Value, list: Value, swp: bool) -> EvalRes
 
 fn builtin_assq_values_swp_scan<const OBSERVED: bool>(key: Value, list: Value) -> EvalResult {
     let bare = positioned_symbol_scan::<OBSERVED>(key).unwrap_or(key);
-    if !bare.is_symbol() {
+    if !bare.is_bare_symbol() {
         return builtin_assq_values_scan::<OBSERVED>(key, list, false);
     }
     let mut tail = list;
@@ -1823,7 +1823,23 @@ pub(crate) fn builtin_copy_sequence(args: Vec<Value>) -> EvalResult {
     copy_sequence_value(args[0])
 }
 
-pub(crate) fn builtin_copy_sequence_1(_eval: &mut super::eval::Context, arg: Value) -> EvalResult {
+pub(crate) fn builtin_copy_sequence_1(eval: &mut super::eval::Context, arg: Value) -> EvalResult {
+    copy_sequence_value_in_state(eval, arg)
+}
+
+pub(crate) fn copy_sequence_value_in_state(
+    eval: &mut super::eval::Context,
+    arg: Value,
+) -> EvalResult {
+    if arg.is_char_table() {
+        return crate::emacs_core::chartable::copy_char_table_with_symbols(arg, eval.symbol_mode())
+            .ok_or_else(|| {
+                signal(
+                    LispCondition::WrongTypeArgument,
+                    vec![Value::symbol("sequencep"), arg],
+                )
+            });
+    }
     copy_sequence_value(arg)
 }
 

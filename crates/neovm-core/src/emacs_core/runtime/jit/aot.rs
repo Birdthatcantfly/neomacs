@@ -344,7 +344,7 @@ pub(crate) fn write_value_recipe(out: &mut Vec<u8>, v: Value) -> Result<(), Unsu
         out.extend_from_slice(bytes);
         return Ok(());
     }
-    if let Some(id) = v.as_symbol_id() {
+    if let Some(id) = v.as_bare_symbol_id() {
         // A symbol is identified across sessions BY NAME, so reloc-by-name is
         // sound ONLY for the CANONICAL interned symbol of that name. An
         // UNINTERNED / gensym (`make-symbol`, cl-macro/pcase expansion output)
@@ -689,7 +689,7 @@ pub(crate) struct AotSpecSite {
     /// `subr_spec_kind(live_cell, sym, nargs)` re-classification.
     pub nargs: u16,
     /// Index into the leaf's reloc vector where the callee symbol lives; the loader
-    /// reads `reloc_data[callee_reloc_idx].as_symbol_id()` to recover the SymId.
+    /// reads `reloc_data[callee_reloc_idx].as_bare_symbol_id()` to recover the SymId.
     pub callee_reloc_idx: u32,
 }
 
@@ -959,7 +959,7 @@ fn resolve_reloc_from_descriptor(
         at = at.checked_add(n)?;
         let resolved = if v == Value::NIL || v == Value::T || v.is_fixnum() {
             v
-        } else if v.as_symbol_id().is_some() {
+        } else if v.as_bare_symbol_id().is_some() {
             // Interning by name already made it the canonical object — the
             // same symbol every tier resolves. No pool-membership demand: a
             // reloc symbol can be DERIVED from a pool constant rather than
@@ -989,7 +989,7 @@ fn recipe_tag_matches(recipe: &[u8], value: Value) -> bool {
         Some(&RECIPE_T) => value == Value::T,
         Some(&RECIPE_FIXNUM) => value.is_fixnum(),
         Some(&RECIPE_STRING) => value.is_string(),
-        Some(&RECIPE_SYMBOL) => value.as_symbol_id().is_some(),
+        Some(&RECIPE_SYMBOL) => value.as_bare_symbol_id().is_some(),
         Some(&RECIPE_CONS) => value.is_cons(),
         _ => false,
     }
@@ -1131,7 +1131,7 @@ fn collect_baseline_aot_relocs(
         }
         // Gensym guard (#16): reloc-by-name is sound only for the CANONICAL interned
         // symbol of a name. An uninterned/gensym symbol → bail the whole leaf.
-        if let Some(id) = v.as_symbol_id()
+        if let Some(id) = v.as_bare_symbol_id()
             && !crate::emacs_core::intern::is_canonical_id(id)
         {
             return None;
@@ -1166,9 +1166,10 @@ fn collect_baseline_aot_relocs(
             // reloc vector at all → the lowering had nothing to load → baked the id.
             Op::VarRef(idx) | Op::VarSet(idx) | Op::VarBind(idx) => {
                 if let Some(v) = constants.get(*idx as usize) {
-                    let sym = v
-                        .as_symbol_id()
-                        .or_else(|| v.as_symbol_with_pos_sym().and_then(|s| s.as_symbol_id()));
+                    let sym = v.as_bare_symbol_id().or_else(|| {
+                        v.as_symbol_with_pos_sym()
+                            .and_then(|s| s.as_bare_symbol_id())
+                    });
                     if let Some(id) = sym {
                         add(Value::symbol(id), &mut out, &mut seen)?;
                     }
@@ -2870,7 +2871,7 @@ pub fn testkit_callbuiltinsym_aot_selftest(dir: &std::path::Path) -> Result<(), 
     let reloc_names: std::collections::HashSet<&str> = leaf
         .reloc_values()
         .iter()
-        .filter_map(|v| v.as_symbol_id())
+        .filter_map(|v| v.as_bare_symbol_id())
         .map(crate::emacs_core::intern::resolve_sym)
         .collect();
     if !reloc_names.contains("length") {
@@ -3261,7 +3262,7 @@ pub fn testkit_baseline_op_symbol_reloc_selftest(dir: &std::path::Path) -> Resul
         let reloc_names: std::collections::HashSet<String> = leaf
             .reloc_values()
             .iter()
-            .filter_map(|v| v.as_symbol_id())
+            .filter_map(|v| v.as_bare_symbol_id())
             .map(|id| crate::emacs_core::intern::resolve_sym(id).to_string())
             .collect();
         if !reloc_names.contains(b.must_contain) {
@@ -3275,13 +3276,13 @@ pub fn testkit_baseline_op_symbol_reloc_selftest(dir: &std::path::Path) -> Resul
             // address calculation directly. Growing the intern table alone
             // never changes a previously interned symbol's identity.
             let original = Value::symbol("aot-dynvar");
-            let original_id = original.as_symbol_id().unwrap().0 as usize;
+            let original_id = original.as_bare_symbol_id().unwrap().0 as usize;
             let slots = crate::emacs_core::symbol::OBARRAY_CHUNK_SLOTS;
             for i in 0..=slots {
                 crate::emacs_core::intern::intern(&format!("aot-varref-offset-decoy-{i}"));
             }
             let relocated = Value::symbol("aot-varref-offset-target");
-            let relocated_id = relocated.as_symbol_id().unwrap().0 as usize;
+            let relocated_id = relocated.as_bare_symbol_id().unwrap().0 as usize;
             assert_ne!(original_id / slots, relocated_id / slots);
             // Keep the original cell bound: an incorrectly baked address must
             // return the wrong value, instead of falling through to the shim.

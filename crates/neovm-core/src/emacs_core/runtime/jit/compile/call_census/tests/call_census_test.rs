@@ -120,7 +120,7 @@ fn the_census_counts_apply_opcode_and_builtin_targets() {
             let symbol = Value::symbol("neovm--cc-applied");
             let object = ev
                 .obarray
-                .symbol_function_id(symbol.as_symbol_id().unwrap())
+                .symbol_function_id(symbol.as_bare_symbol_id().unwrap())
                 .unwrap();
             let tail = Value::list_from_slice(&[Value::make_int(2), Value::make_int(3)]);
             let before = calls(&census_counts(), "apply", "exact");

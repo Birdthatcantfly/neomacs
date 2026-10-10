@@ -1109,7 +1109,10 @@ fn clear_top_level_eval_state_discards_stale_named_call_cache_entries() {
     match ev.resolve_named_call_target_by_id(sym) {
         NamedCallTarget::Obarray(function) => {
             assert!(
-                crate::emacs_core::autoload::is_autoload_value(&function),
+                crate::emacs_core::autoload::is_autoload_value(
+                    &function,
+                    crate::tagged::value::SymbolMode::Bare
+                ),
                 "expected autoload function cell, got {function}"
             );
         }
@@ -1629,6 +1632,7 @@ fn read_char_applies_keyboard_coding_system_to_raw_tty_bytes() {
     crate::emacs_core::coding::builtin_set_keyboard_coding_system(
         &mut ev.coding_systems,
         vec![Value::symbol("iso-latin-9")],
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("set keyboard coding system");
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -1647,6 +1651,7 @@ fn read_char_preserves_emacs_internal_raw_byte_characters() {
     crate::emacs_core::coding::builtin_set_keyboard_coding_system(
         &mut ev.coding_systems,
         vec![Value::symbol("emacs-internal")],
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("set keyboard coding system");
     let raw = crate::emacs_core::emacs_char::EmacsChar::from_byte8(0xa4);
@@ -1679,6 +1684,7 @@ fn read_char_streams_multibyte_keyboard_coding_across_host_reads() {
     crate::emacs_core::coding::builtin_set_keyboard_coding_system(
         &mut ev.coding_systems,
         vec![Value::symbol("chinese-big5")],
+        crate::tagged::value::SymbolMode::Bare,
     )
     .expect("set keyboard coding system");
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -1702,6 +1708,7 @@ fn read_key_sequence_translates_raw_tty_csi_through_input_decode_map() {
         global_map,
         &[Value::symbol("up")],
         Value::symbol("neomacs-test-up-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define up command");
     let input_decode_map = ev
@@ -1715,6 +1722,7 @@ fn read_key_sequence_translates_raw_tty_csi_through_input_decode_map() {
             Value::fixnum('A' as i64),
         ],
         Value::vector(vec![Value::symbol("up")]),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define CSI translation");
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -2546,6 +2554,7 @@ fn nested_recursive_edit_propagates_top_level_and_runs_unwind_cleanup() {
         global_map,
         &[Value::fixnum('q' as i64)],
         Value::symbol("neo-throw-top-level"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define top-level test command");
     ev.command_loop
@@ -2625,6 +2634,7 @@ fn command_loop_runs_initial_post_command_hook_before_first_command() {
         global_map,
         &[Value::fixnum('q' as i64)],
         Value::symbol("neo-exit-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define exit command");
     ev.command_loop
@@ -3283,12 +3293,14 @@ fn read_key_sequence_prefers_bound_gui_return_before_ascii_fallback() {
         global_map,
         &[Value::symbol("return")],
         Value::symbol("gui-return-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define symbolic Return binding");
     crate::emacs_core::keymap::list_keymap_define_seq(
         global_map,
         &[Value::fixnum('\r' as i64)],
         Value::symbol("ascii-ret-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define ASCII RET binding");
     let local_function_key_map = ev
@@ -3298,6 +3310,7 @@ fn read_key_sequence_prefers_bound_gui_return_before_ascii_fallback() {
         local_function_key_map,
         &[Value::symbol("return")],
         Value::vector(vec![Value::fixnum('\r' as i64)]),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define GNU Return fallback");
 
@@ -3324,12 +3337,14 @@ fn read_key_sequence_prefers_bound_gui_tab_before_ascii_fallback() {
         global_map,
         &[Value::symbol("tab")],
         Value::symbol("gui-tab-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define symbolic Tab binding");
     crate::emacs_core::keymap::list_keymap_define_seq(
         global_map,
         &[Value::fixnum('\t' as i64)],
         Value::symbol("ascii-tab-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define ASCII TAB binding");
     let local_function_key_map = ev
@@ -3339,6 +3354,7 @@ fn read_key_sequence_prefers_bound_gui_tab_before_ascii_fallback() {
         local_function_key_map,
         &[Value::symbol("tab")],
         Value::vector(vec![Value::fixnum('\t' as i64)]),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define GNU Tab fallback");
 
@@ -3365,6 +3381,7 @@ fn read_key_sequence_falls_back_from_unbound_gui_return_to_ascii_ret() {
         global_map,
         &[Value::fixnum('\r' as i64)],
         Value::symbol("ascii-ret-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define ASCII RET binding");
     let local_function_key_map = ev
@@ -3374,6 +3391,7 @@ fn read_key_sequence_falls_back_from_unbound_gui_return_to_ascii_ret() {
         local_function_key_map,
         &[Value::symbol("return")],
         Value::vector(vec![Value::fixnum('\r' as i64)]),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define GNU Return fallback");
 
@@ -3400,6 +3418,7 @@ fn read_key_sequence_falls_back_from_unbound_gui_tab_to_ascii_tab() {
         global_map,
         &[Value::fixnum('\t' as i64)],
         Value::symbol("ascii-tab-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define ASCII TAB binding");
     let local_function_key_map = ev
@@ -3409,6 +3428,7 @@ fn read_key_sequence_falls_back_from_unbound_gui_tab_to_ascii_tab() {
         local_function_key_map,
         &[Value::symbol("tab")],
         Value::vector(vec![Value::fixnum('\t' as i64)]),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define GNU Tab fallback");
 
@@ -3435,12 +3455,14 @@ fn read_key_sequence_prefers_bound_gui_escape_before_ascii_fallback() {
         global_map,
         &[Value::symbol("escape")],
         Value::symbol("gui-escape-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define symbolic Escape binding");
     crate::emacs_core::keymap::list_keymap_define_seq(
         global_map,
         &[Value::fixnum(27)],
         Value::symbol("ascii-esc-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define ASCII ESC binding");
     let local_function_key_map = ev
@@ -3450,6 +3472,7 @@ fn read_key_sequence_prefers_bound_gui_escape_before_ascii_fallback() {
         local_function_key_map,
         &[Value::symbol("escape")],
         Value::vector(vec![Value::fixnum(27)]),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define GNU Escape fallback");
 
@@ -3476,6 +3499,7 @@ fn read_key_sequence_falls_back_from_unbound_gui_escape_to_ascii_esc() {
         global_map,
         &[Value::fixnum(27)],
         Value::symbol("ascii-esc-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define ASCII ESC binding");
     let local_function_key_map = ev
@@ -3485,6 +3509,7 @@ fn read_key_sequence_falls_back_from_unbound_gui_escape_to_ascii_esc() {
         local_function_key_map,
         &[Value::symbol("escape")],
         Value::vector(vec![Value::fixnum(27)]),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define GNU Escape fallback");
 
@@ -3522,6 +3547,7 @@ fn read_key_sequence_function_translation_receives_prompt() {
         global_map,
         &[Value::symbol("f1")],
         Value::symbol("neomacs-test-read-key-sequence-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define translated command");
 
@@ -3532,6 +3558,7 @@ fn read_key_sequence_function_translation_receives_prompt() {
         key_translation_map,
         &[Value::fixnum('a' as i64)],
         Value::symbol("neomacs-test-key-translation"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define translation");
 
@@ -3580,6 +3607,7 @@ fn read_key_sequence_stops_at_an_exhausted_kbd_macro_boundary() {
         global_map,
         &[Value::fixnum('x' as i64)],
         prefix_map,
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define prefix key");
     // The probes' contract: the Lisp-visible macro value forces the exit.
@@ -3648,6 +3676,7 @@ fn read_key_sequence_prompt_preserves_text_properties_in_echo_area() {
         global_map,
         &[Value::fixnum('a' as i64)],
         Value::symbol("neomacs-test-prompt-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define prompt test command");
 
@@ -3697,6 +3726,7 @@ fn read_key_sequence_continues_through_pending_suffix_translation_prefix() {
         global_map,
         &[Value::fixnum('a' as i64), Value::symbol("f1")],
         Value::symbol("neomacs-test-suffix-translation-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define suffix command");
 
@@ -3707,6 +3737,7 @@ fn read_key_sequence_continues_through_pending_suffix_translation_prefix() {
         input_decode_map,
         &[Value::fixnum('b' as i64), Value::fixnum('c' as i64)],
         Value::vector(vec![Value::symbol("f1")]),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define input-decode suffix translation");
 
@@ -3756,6 +3787,7 @@ fn fast_read_key_sequence_does_not_publish_or_log_a_prefix_echo() {
         global_map,
         &events,
         Value::symbol("neomacs-test-prefix-target-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define prefix command");
     for event in events {
@@ -3801,6 +3833,7 @@ fn prefix_without_a_blocking_input_source_is_not_eagerly_echoed() {
         global_map,
         &[Value::fixnum(' ' as i64), Value::fixnum('f' as i64)],
         Value::symbol("neomacs-test-prefix-target-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define prefix command");
     ev.command_loop
@@ -3832,6 +3865,7 @@ fn help_prefix_without_a_blocking_input_source_is_not_eagerly_echoed() {
         global_map,
         &[Value::fixnum(8), Value::fixnum('?' as i64)],
         Value::symbol("neomacs-test-help-target-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define help prefix command");
     ev.command_loop
@@ -3861,6 +3895,7 @@ fn read_key_sequence_shift_translates_uppercase_binding() {
         global_map,
         &[Value::fixnum('a' as i64)],
         Value::symbol("neomacs-test-shift-translation-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define lowercase command");
 
@@ -3900,6 +3935,7 @@ fn read_key_sequence_dont_downcase_last_restores_original_event() {
         global_map,
         &[Value::fixnum('a' as i64)],
         Value::symbol("neomacs-test-shift-translation-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define lowercase command");
 
@@ -3972,6 +4008,7 @@ fn read_key_sequence_shift_translates_shifted_function_key() {
         global_map,
         &[Value::symbol("f1")],
         Value::symbol("neomacs-test-shifted-function-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define function-key command");
 
@@ -4110,6 +4147,7 @@ fn read_key_sequence_defers_switch_frame_until_after_current_key_sequence() {
         global_map,
         &[Value::fixnum('a' as i64), Value::fixnum('b' as i64)],
         Value::symbol("neomacs-test-switch-frame-deferred-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define command");
 
@@ -4164,6 +4202,7 @@ fn read_key_sequence_can_return_switch_frame_at_sequence_start() {
         global_map,
         &[Value::symbol("switch-frame")],
         Value::symbol("handle-switch-frame"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define switch-frame binding");
 
@@ -4207,24 +4246,28 @@ fn special_event_map_bootstraps_delete_frame_and_focus_handlers() {
         &[special_event_map],
         &[Value::symbol("delete-frame")],
         true,
+        crate::tagged::SymbolMode::Bare,
     );
     let focus_in = crate::emacs_core::keymap::lookup_key_in_keymaps_in_obarray(
         ev.obarray(),
         &[special_event_map],
         &[Value::symbol("focus-in")],
         true,
+        crate::tagged::SymbolMode::Bare,
     );
     let focus_out = crate::emacs_core::keymap::lookup_key_in_keymaps_in_obarray(
         ev.obarray(),
         &[special_event_map],
         &[Value::symbol("focus-out")],
         true,
+        crate::tagged::SymbolMode::Bare,
     );
     let file_notify = crate::emacs_core::keymap::lookup_key_in_keymaps_in_obarray(
         ev.obarray(),
         &[special_event_map],
         &[Value::symbol("file-notify")],
         true,
+        crate::tagged::SymbolMode::Bare,
     );
 
     assert_eq!(delete_frame, Value::symbol("handle-delete-frame"));
@@ -4356,6 +4399,7 @@ fn read_key_sequence_defers_select_window_until_after_current_key_sequence() {
         global_map,
         &[Value::fixnum('a' as i64), Value::fixnum('b' as i64)],
         Value::symbol("neomacs-test-select-window-deferred-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define command");
 
@@ -4424,6 +4468,7 @@ fn read_key_sequence_can_return_select_window_at_sequence_start() {
         global_map,
         &[Value::symbol("select-window")],
         Value::symbol("neomacs-test-handle-select-window"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define select-window binding");
 
@@ -4600,6 +4645,7 @@ fn read_key_sequence_uses_clicked_window_local_map_for_mouse_event() {
         local_map,
         &[Value::symbol("mouse-1")],
         Value::symbol("neomacs-mouse-click-target-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define mouse binding");
 
@@ -4713,6 +4759,7 @@ fn read_key_sequence_drops_unbound_down_mouse_before_bound_click() {
         local_map,
         &[Value::symbol("mouse-1")],
         Value::symbol("neomacs-mouse-click-target-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define mouse binding");
 
@@ -4825,6 +4872,7 @@ fn read_key_sequence_drops_unbound_menu_bar_down_mouse_before_bound_click() {
         global_map,
         &[Value::symbol("menu-bar"), Value::symbol("mouse-1")],
         Value::symbol("neomacs-menu-bar-click-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define menu-bar mouse binding");
 
@@ -4892,11 +4940,13 @@ fn read_key_sequence_dispatches_gui_tool_bar_click_by_item_key() {
             Value::symbol(":image"),
             Value::string("open.svg"),
         ]),
+        crate::tagged::SymbolMode::Bare,
     );
     crate::emacs_core::keymap::list_keymap_define_seq(
         global_map,
         &[Value::symbol("tool-bar"), Value::symbol("open-file")],
         Value::symbol("neomacs-tool-bar-click-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define tool-bar binding");
 
@@ -4955,6 +5005,7 @@ fn read_key_sequence_dispatches_gui_tool_bar_click_from_owning_frame() {
             Value::symbol(":image"),
             Value::string("primary.svg"),
         ]),
+        crate::tagged::SymbolMode::Bare,
     );
     crate::emacs_core::keymap::list_keymap_define(
         secondary_tool_bar_map,
@@ -4966,11 +5017,13 @@ fn read_key_sequence_dispatches_gui_tool_bar_click_from_owning_frame() {
             Value::symbol(":image"),
             Value::string("secondary.svg"),
         ]),
+        crate::tagged::SymbolMode::Bare,
     );
     crate::emacs_core::keymap::list_keymap_define_seq(
         global_map,
         &[Value::symbol("tool-bar"), Value::symbol("secondary-action")],
         Value::symbol("neomacs-secondary-tool-bar-click-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define secondary tool-bar binding");
 
@@ -5038,6 +5091,7 @@ fn read_key_sequence_gui_tool_bar_frame_fallback_ignores_current_buffer_local_ma
             Value::symbol(":image"),
             Value::string("primary-local.svg"),
         ]),
+        crate::tagged::SymbolMode::Bare,
     );
     crate::emacs_core::keymap::list_keymap_define(
         default_tool_bar_map,
@@ -5049,11 +5103,13 @@ fn read_key_sequence_gui_tool_bar_frame_fallback_ignores_current_buffer_local_ma
             Value::symbol(":image"),
             Value::string("default.svg"),
         ]),
+        crate::tagged::SymbolMode::Bare,
     );
     crate::emacs_core::keymap::list_keymap_define_seq(
         global_map,
         &[Value::symbol("tool-bar"), Value::symbol("default-action")],
         Value::symbol("neomacs-default-tool-bar-click-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define default tool-bar binding");
 
@@ -5099,6 +5155,7 @@ fn read_key_sequence_dispatches_gui_menu_bar_click_with_frame_id() {
         global_map,
         &[Value::symbol("menu-bar"), Value::symbol("mouse-1")],
         Value::symbol("neomacs-menu-bar-click-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define menu-bar binding");
 
@@ -5178,12 +5235,14 @@ fn read_key_sequence_drops_unbound_down_mouse_without_losing_keyboard_prefix() {
         global_map,
         &[Value::fixnum('a' as i64)],
         prefix_map,
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define prefix");
     crate::emacs_core::keymap::list_keymap_define_seq(
         prefix_map,
         &[Value::symbol("mouse-1")],
         Value::symbol("neomacs-prefixed-mouse-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define mouse binding");
 
@@ -5231,6 +5290,7 @@ fn read_key_sequence_reduces_unbound_triple_mouse_to_bound_click() {
         global_map,
         &[Value::symbol("mouse-1")],
         Value::symbol("neomacs-triple-mouse-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define mouse binding");
 
@@ -5290,6 +5350,7 @@ fn read_key_sequence_uses_clicked_window_buffer_local_minor_mode_maps() {
         minor_map,
         &[Value::symbol("mouse-1")],
         Value::symbol("neomacs-mouse-minor-mode-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define minor mode binding");
     ev.assign(
@@ -5407,6 +5468,7 @@ fn read_key_sequence_prefixes_mode_line_mouse_click_for_lookup() {
         local_map,
         &[Value::symbol("mode-line"), Value::symbol("mouse-1")],
         Value::symbol("neomacs-mode-line-click-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define mode-line mouse binding");
 
@@ -11702,7 +11764,7 @@ fn run_window_configuration_change_hook_uses_window_buffer_context() {
     let items = list_to_vec(&hook_log).expect("hook log list");
     let names: Vec<String> = items
         .iter()
-        .map(|value| value.as_symbol_name().expect("symbol").to_string())
+        .map(|value| value.as_bare_symbol_name().expect("symbol").to_string())
         .collect();
     assert!(names.iter().any(|name| name == "wcch-a"), "names={names:?}");
     assert!(names.iter().any(|name| name == "wcch-b"), "names={names:?}");
@@ -23440,6 +23502,7 @@ fn run_command_loop_error_commands(ev: &mut Context, global_map: Value, commands
             global_map,
             &[Value::symbol(key)],
             Value::symbol(command),
+            crate::tagged::SymbolMode::Bare,
         )
         .expect("define signaling command");
         ev.command_loop.unread_event(Value::symbol(key));
@@ -23448,6 +23511,7 @@ fn run_command_loop_error_commands(ev: &mut Context, global_map: Value, commands
         global_map,
         &[Value::fixnum('q' as i64)],
         Value::symbol("neo-stop-command-loop-error-test-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .expect("define stop command");
     ev.command_loop.unread_event(Value::fixnum('q' as i64));
@@ -28027,6 +28091,7 @@ fn native_input_progress_waits_through_command_hooks_and_finalization() {
         global_map,
         &[Value::fixnum('q' as i64)],
         Value::symbol("neo-stop-command-loop-error-test-command"),
+        crate::tagged::SymbolMode::Bare,
     )
     .unwrap();
     let stream = neomacs_display_protocol::input_progress::InputStream::default();
@@ -28210,3 +28275,7 @@ fn unbind_watcher_panic_restores_quit_and_vm_roots() {
         root_count
     );
 }
+
+#[cfg(test)]
+#[path = "issue554_binding_policy.rs"]
+mod issue554_binding_policy;

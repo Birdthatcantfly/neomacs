@@ -507,7 +507,7 @@ fn cached_form_requires_eager_replay(form: Value) -> bool {
     form.is_cons()
         && form
             .cons_car()
-            .as_symbol_name()
+            .as_bare_symbol_name()
             .is_some_and(|name| matches!(name, "eval-and-compile" | "eval-when-compile"))
 }
 
@@ -539,10 +539,11 @@ fn try_eval_generated_loaddefs_form(
     eval: &mut super::eval::Context,
     form: Value,
 ) -> Result<Option<Value>, EvalError> {
+    let symbol_mode = eval.symbol_mode();
     let Some(items) = list_to_vec(&form) else {
         return Ok(None);
     };
-    let Some(head_sym) = items.first().and_then(|v| v.as_symbol_name()) else {
+    let Some(head_sym) = items.first().and_then(|v| v.as_symbol_name(symbol_mode)) else {
         return Ok(None);
     };
     let tail = &items[1..];
@@ -1585,6 +1586,7 @@ fn eager_expansion_falls_back(flow: &Flow) -> bool {
 /// into errors, which propagate (see [`EagerExpansionFailure`]).
 #[tracing::instrument(level = "debug", skip(eval))]
 pub(crate) fn get_eager_macroexpand_fn(eval: &super::eval::Context) -> Option<Value> {
+    let symbol_mode = eval.symbol_mode();
     // Respect the Elisp `macroexp--pending-eager-loads` variable.
     // When it starts with `skip`, eager expansion is suppressed (mirrors
     // the check in `internal-macroexpand-for-load` in macroexp.el).
@@ -1592,7 +1594,7 @@ pub(crate) fn get_eager_macroexpand_fn(eval: &super::eval::Context) -> Option<Va
         .obarray()
         .symbol_value_copied("macroexp--pending-eager-loads")
         && val.is_cons()
-        && val.cons_car().is_symbol_named("skip")
+        && val.cons_car().is_symbol_named("skip", symbol_mode)
     {
         return None;
     }
@@ -1631,6 +1633,7 @@ pub(crate) fn eager_expand_toplevel_forms(
     macroexpand_fn: Value,
     sink: &mut impl FnMut(&mut super::eval::Context, Value, Value, bool) -> Result<Value, EvalError>,
 ) -> Result<Value, EvalError> {
+    let symbol_mode = eval.symbol_mode();
     let original_form = form_value;
     let mutation_epoch_before = eval.macro_expansion_mutation_epoch();
     // Step 1: one-level expand — val = (internal-macroexpand-for-load val nil)
@@ -1666,7 +1669,7 @@ pub(crate) fn eager_expand_toplevel_forms(
     if val.is_cons() {
         let car = val.cons_car();
         let cdr = val.cons_cdr();
-        if car.is_symbol_named("progn") {
+        if car.is_symbol_named("progn", symbol_mode) {
             let roots = eval.save_specpdl_roots();
             eval.push_specpdl_root(val);
             let result = (|| -> Result<Value, EvalError> {
@@ -1714,7 +1717,9 @@ pub(crate) fn eager_expand_toplevel_forms(
     eval.note_eager_macro_perf_step3(d3);
     if eval.macro_perf_enabled() && d3.as_millis() > 200 {
         let head = if val.is_cons() {
-            val.cons_car().as_symbol_name().unwrap_or("<non-symbol>")
+            val.cons_car()
+                .as_symbol_name(symbol_mode)
+                .unwrap_or("<non-symbol>")
         } else {
             "<atom>"
         };
@@ -1957,6 +1962,7 @@ fn streaming_readevalloop_lisp_source(
     shorthands: Option<&ReadSymbolShorthands>,
     macroexpand_fn: Option<Value>,
 ) -> Result<Value, EvalError> {
+    let symbol_mode = eval.symbol_mode();
     let file_name = path
         .file_name()
         .unwrap_or_default()
@@ -2049,7 +2055,7 @@ fn streaming_readevalloop_lisp_source(
             let read_hook = eval
                 .obarray
                 .symbol_value_copied("load-read-function")
-                .filter(|hook| !hook.is_nil() && !hook.is_symbol_named("read"));
+                .filter(|hook| !hook.is_nil() && !hook.is_symbol_named("read", symbol_mode));
             let (form, next_pos) = match read_hook {
                 Some(hook) => {
                     let hooked = eval
@@ -2192,8 +2198,9 @@ fn streaming_readevalloop_eager_expand_eval_inner(
     expanded: Value,
     macroexpand: Value,
 ) -> Result<Value, EvalError> {
+    let symbol_mode = eval.symbol_mode();
     // Step 2: if (progn ...), iterate subforms
-    if expanded.is_cons() && expanded.cons_car().is_symbol_named("progn") {
+    if expanded.is_cons() && expanded.cons_car().is_symbol_named("progn", symbol_mode) {
         let mut cursor = expanded.cons_cdr();
         let mut last_val = Value::NIL;
         while cursor.is_cons() {
@@ -4062,21 +4069,21 @@ fn ensure_startup_compat_variables(eval: &mut super::eval::Context, project_root
 }
 
 fn value_symbol_name(value: Value) -> Option<String> {
-    if let Some(name) = value.as_symbol_name() {
+    if let Some(name) = value.as_bare_symbol_name() {
         return Some(name.to_owned());
     }
     value_quoted_symbol_name(value)
 }
 
 fn value_quoted_symbol_name(value: Value) -> Option<String> {
-    if let Some(name) = value.as_symbol_name() {
+    if let Some(name) = value.as_bare_symbol_name() {
         return Some(name.to_owned());
     }
     // Handle (quote sym) form: a two-element list where the first element is
     // the symbol `quote` and the second is the symbol to extract.
     let items = list_to_vec(&value)?;
-    if items.len() == 2 && items[0].is_symbol_named("quote") {
-        return items[1].as_symbol_name().map(|s| s.to_owned());
+    if items.len() == 2 && items[0].is_bare_symbol_named("quote") {
+        return items[1].as_bare_symbol_name().map(|s| s.to_owned());
     }
     None
 }
@@ -4132,7 +4139,7 @@ fn collect_source_surface(form: Value, state: &mut SourceFileSurfaceState) {
     let Some(head) = items.first() else {
         return;
     };
-    let Some(head_name) = head.as_symbol_name() else {
+    let Some(head_name) = head.as_bare_symbol_name() else {
         return;
     };
 
@@ -4375,7 +4382,7 @@ fn collect_loaddefs_autoload_args(
     let Some(head) = items.first() else {
         return;
     };
-    if !head.is_symbol_named("autoload") {
+    if !head.is_bare_symbol_named("autoload") {
         return;
     }
 
@@ -4427,7 +4434,7 @@ fn collect_loaddefs_property_forms(
     let Some(head) = items.first() else {
         return;
     };
-    let Some(head_name) = head.as_symbol_name() else {
+    let Some(head_name) = head.as_bare_symbol_name() else {
         return;
     };
     if head_name != "function-put" && head_name != "put" && head_name != "define-symbol-prop" {
@@ -4452,7 +4459,7 @@ fn collect_loaddefs_property_forms(
 fn loaddefs_keymap_replay_target(expr: Value) -> Option<String> {
     let items = list_to_vec(&expr)?;
     let head = items.first()?;
-    match head.as_symbol_name()? {
+    match head.as_bare_symbol_name()? {
         "define-key" | "keymap-set" => items.get(1).and_then(|value| value_symbol_name(*value)),
         "if" | "progn" | "unless" | "when" => items
             .iter()
@@ -4483,7 +4490,7 @@ fn collect_loaddefs_keymap_defvar_form(expr: Value, state: &mut LoaddefsSurfaceS
     let Some(head) = items.first() else {
         return;
     };
-    if !head.is_symbol_named("defvar") {
+    if !head.is_bare_symbol_named("defvar") {
         return;
     }
     let Some(name) = items.get(1).and_then(|value| value_symbol_name(*value)) else {
@@ -4901,6 +4908,7 @@ pub(crate) fn apply_ldefs_boot_autoloads_for_names(
     eval: &mut super::eval::Context,
     names: &[&str],
 ) -> Result<(), EvalError> {
+    let symbol_mode = eval.symbol_mode();
     let project_root = runtime_project_root();
     let ldefs_path = project_root.join("lisp/ldefs-boot.el");
     let bytes = fs::read(&ldefs_path).map_err(|err| {
@@ -4949,7 +4957,7 @@ pub(crate) fn apply_ldefs_boot_autoloads_for_names(
             let Some(head) = items.first() else {
                 continue;
             };
-            if head.is_symbol_named("autoload")
+            if head.is_symbol_named("autoload", symbol_mode)
                 && let Some(name) = items.get(1).and_then(|v| value_quoted_symbol_name(*v))
                 && wanted.contains(&name)
             {
@@ -4965,7 +4973,7 @@ pub(crate) fn apply_ldefs_boot_autoloads_for_names(
             let Some(head) = items.first() else {
                 continue;
             };
-            let Some(head_name) = head.as_symbol_name() else {
+            let Some(head_name) = head.as_symbol_name(symbol_mode) else {
                 continue;
             };
             if head_name != "function-put" && head_name != "put" {
@@ -5213,7 +5221,7 @@ fn normalize_bootstrap_runtime_surface(
                 let Some(value) = eval.obarray().symbol_value_copied(&replay.target) else {
                     continue;
                 };
-                if !is_list_keymap(&value) {
+                if !is_list_keymap(&value, eval.symbol_mode()) {
                     continue;
                 }
                 eval_runtime_form(eval, replay.form)?;
@@ -5846,13 +5854,14 @@ fn restore_final_image_interpreted_closure_filter(eval: &mut super::eval::Contex
 }
 
 fn sync_runtime_interpreted_closure_filter(eval: &mut super::eval::Context) {
+    let symbol_mode = eval.symbol_mode();
     let closure_filter_sym = super::intern::intern("internal-make-interpreted-closure-function");
     let cconv_sym = super::intern::intern("cconv-make-interpreted-closure");
     let filter_fn = eval
         .obarray()
         .symbol_value_id_copied(closure_filter_sym)
         .and_then(|value| {
-            if value.as_symbol_id() == Some(cconv_sym) {
+            if value.as_symbol_id(symbol_mode) == Some(cconv_sym) {
                 eval.obarray().symbol_function_id(cconv_sym)
             } else {
                 None

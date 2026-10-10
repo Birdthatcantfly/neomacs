@@ -4156,7 +4156,7 @@ fn insert_file_contents_sets_last_coding_before_after_insert_hook() {
 
     assert_eq!(
         eval.visible_variable_value_or_nil("neomacs-test-last-coding-in-hook")
-            .as_symbol_name(),
+            .as_bare_symbol_name(),
         Some("undecided-unix")
     );
 
@@ -4254,7 +4254,7 @@ fn insert_file_contents_preserves_lone_cr_in_lf_text() {
     assert_eq!(buf.buffer_string(), "(setq probe \"a\rb\")\n");
     assert_eq!(
         eval.visible_variable_value_or_nil("last-coding-system-used")
-            .as_symbol_name(),
+            .as_bare_symbol_name(),
         Some("undecided-unix")
     );
 }
@@ -4277,7 +4277,7 @@ fn insert_file_contents_consumes_utf8_signature() {
     assert_eq!(buf.buffer_string(), ";;; bom-source.el --- fixture\n");
     assert_eq!(
         eval.visible_variable_value_or_nil("last-coding-system-used")
-            .as_symbol_name(),
+            .as_bare_symbol_name(),
         Some("utf-8-with-signature-unix")
     );
 }
@@ -4382,7 +4382,7 @@ fn insert_file_contents_preserves_decoded_charset_text_property() {
             crate::buffer::EmacsBytePos::new(0),
             Value::symbol("charset")
         )
-        .and_then(|value| value.as_symbol_name()),
+        .and_then(|value| value.as_bare_symbol_name()),
         Some("chinese-gb2312")
     );
     assert_eq!(
@@ -4390,7 +4390,7 @@ fn insert_file_contents_preserves_decoded_charset_text_property() {
             crate::buffer::EmacsBytePos::new("一".len()),
             Value::symbol("charset")
         )
-        .and_then(|value| value.as_symbol_name()),
+        .and_then(|value| value.as_bare_symbol_name()),
         Some("chinese-gb2312")
     );
 }
@@ -6408,7 +6408,7 @@ fn find_file_name_handler_reads_current_buffer_syntax_table() {
         vec![Value::string("zzz"), Value::symbol("insert-file-contents")],
     )
     .unwrap();
-    let hit_name = hit.as_symbol_name().map(|name| name.to_string());
+    let hit_name = hit.as_bare_symbol_name().map(|name| name.to_string());
     LAST_TEST_CTX.with(|slot| slot.borrow_mut().push(eval));
     assert_eq!(
         hit_name.as_deref(),

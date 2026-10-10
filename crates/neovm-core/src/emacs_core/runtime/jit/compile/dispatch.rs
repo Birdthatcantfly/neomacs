@@ -83,8 +83,8 @@ fn pure_setcar(_: &Context, cons: Value, new_car: Value) -> Result<Value, Flow> 
 fn pure_setcdr(_: &Context, cons: Value, new_cdr: Value) -> Result<Value, Flow> {
     b::builtin_setcdr_values(cons, new_cdr)
 }
-fn pure_aref(_: &Context, array: Value, index: Value) -> Result<Value, Flow> {
-    b::builtin_aref_values(array, index)
+fn pure_aref(ctx: &Context, array: Value, index: Value) -> Result<Value, Flow> {
+    b::builtin_aref_values_in_state(ctx, array, index)
 }
 fn pure_get(ctx: &Context, symbol: Value, prop: Value) -> Result<Value, Flow> {
     Ok(b::symbol_property_get(ctx, symbol, prop)?
@@ -416,7 +416,9 @@ fn aref_slow(ctx: *mut u8, array: Value, index: Value) -> i64 {
     #[cfg(test)]
     ARRAY_SHIM_SLOW_CALLS.with(|c| c.set(c.get() + 1));
     jit_shim_contain!(ctx, VALUE_SHIM_SIGNAL, {
-        match b::builtin_aref_values(array, index) {
+        // SAFETY: live dormant Context supplied by the JIT shim contract.
+        let context = unsafe { &*(ctx as *const Context) };
+        match b::builtin_aref_values_in_state(context, array, index) {
             Ok(value) => value.bits() as i64,
             Err(flow) => {
                 stash_pending_flow(flow);
@@ -820,7 +822,9 @@ fn aset_slow(ctx: *mut u8, array: Value, index: Value, value: Value) -> i64 {
     #[cfg(test)]
     ARRAY_SHIM_SLOW_CALLS.with(|c| c.set(c.get() + 1));
     jit_shim_contain!(ctx, VALUE_SHIM_SIGNAL, {
-        match b::builtin_aset_args(&[array, index, value]) {
+        // SAFETY: live dormant Context supplied by the JIT shim contract.
+        let context = unsafe { &*(ctx as *const Context) };
+        match b::builtin_aset_args_with_symbols(&[array, index, value], context.symbol_mode()) {
             Ok(value) => value.bits() as i64,
             Err(flow) => {
                 stash_pending_flow(flow);
@@ -1560,10 +1564,10 @@ fn call_spec_slow(
     // and a panic path on every slow call were measured, so debug-only).
     let called = Value::from_bits(sym_bits as usize);
     debug_assert!(
-        called.is_symbol(),
+        called.is_bare_symbol(),
         "a speculated call site's callee is a symbol"
     );
-    let sym = called.xsymbol_id();
+    let sym = called.xbare_symbol_id();
     jit_shim_contain!(detach args_ptr, ctx, STATUS_SIGNAL, {
         // Build a rooted LispArgVec from the caller's call-args slot — used only by
         // the strict-call fallback paths (call_for_jit), inside their own
@@ -2272,7 +2276,7 @@ pub extern "C" fn neovm_jit_pred_spec(
             // only FUNDEF here). An autoload object bounces to the generic
             // call, which does the load with its frame and roots.
             PRED_KIND_AUTOLOAD_DO_LOAD => {
-                if crate::emacs_core::autoload::is_autoload_value(&v) {
+                if crate::emacs_core::autoload::is_autoload_value(&v, ctx.symbol_mode()) {
                     return STATUS_NEED_GENERIC;
                 }
                 v
@@ -2301,7 +2305,7 @@ pub extern "C" fn neovm_jit_pred_spec(
             _ if let Some(type_symbol) = crate::emacs_core::builtins::types::record_type_of(v) => {
                 type_symbol
             }
-            _ => match pred_spec_type_of_non_record(kind, v) {
+            _ => match pred_spec_type_of_non_record(ctx, kind, v) {
                 Some(value) => value,
                 None => return STATUS_NEED_GENERIC,
             },
@@ -2322,9 +2326,9 @@ pub extern "C" fn neovm_jit_pred_spec(
 /// their register spills.
 #[cold]
 #[inline(never)]
-fn pred_spec_type_of_non_record(kind: i64, v: Value) -> Option<Value> {
+fn pred_spec_type_of_non_record(ctx: &mut Context, kind: i64, v: Value) -> Option<Value> {
     let answer = if kind == PRED_KIND_TYPE_OF {
-        crate::emacs_core::builtins::types::builtin_type_of(&[v])
+        crate::emacs_core::builtins::types::builtin_type_of_with_ctx_1(ctx, v)
     } else {
         debug_assert_eq!(kind, PRED_KIND_CL_TYPE_OF);
         crate::emacs_core::builtins::types::builtin_cl_type_of(&[v])
@@ -3160,7 +3164,9 @@ pub extern "C" fn neovm_jit_match_handler(ctx: *mut u8, ours: i64, out: *mut i64
                 }
                 FlowKind::Throw(thrown) => {
                     let (tag, value) = (thrown.tag, thrown.value);
-                    let Some(selected) = ctx.matching_catch_resume(&tag) else {
+                    let Some(selected) =
+                        ctx.matching_catch_resume_with_symbols(&tag, thrown.symbol_mode())
+                    else {
                         // No matching catch anywhere: unwind all our frames and
                         // propagate `no-catch` (resume_nonlocal parity).
                         for _ in 0..remaining {

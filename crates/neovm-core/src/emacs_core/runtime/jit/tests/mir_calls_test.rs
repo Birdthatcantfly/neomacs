@@ -19,7 +19,7 @@ fn function(ops: Vec<Op>, constants: Vec<Value>, arity: usize) -> ByteCodeFuncti
 fn install(ev: &mut Context, name: &str, f: ByteCodeFunction) -> Value {
     let sym = Value::symbol(name);
     ev.obarray
-        .set_symbol_function_id(sym.as_symbol_id().unwrap(), Value::make_bytecode(f));
+        .set_symbol_function_id(sym.as_bare_symbol_id().unwrap(), Value::make_bytecode(f));
     sym
 }
 

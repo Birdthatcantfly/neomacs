@@ -1316,7 +1316,7 @@ fn builtin_top_level_throws_top_level_tag() {
     assert!(matches!(
         result.kinded_ref(),
         Err(FlowRef::Throw(ref thrown))
-            if thrown.tag.is_symbol_named("top-level") && thrown.value.is_nil()
+            if thrown.tag.is_bare_symbol_named("top-level") && thrown.value.is_nil()
     ));
 }
 
@@ -1450,7 +1450,7 @@ fn builtin_exit_minibuffer_throws_exit_tag() {
     assert!(matches!(
         result.kinded_ref(),
         Err(FlowRef::Throw(ref thrown))
-            if thrown.tag.is_symbol_named("exit") && thrown.value.is_nil()
+            if thrown.tag.is_bare_symbol_named("exit") && thrown.value.is_nil()
     ));
 }
 

@@ -2064,23 +2064,30 @@ impl Context {
         // GNU Emacs: local-function-key-map inherits from function-key-map
         // (keyboard.c:13097). Without this, bindings in function-key-map
         // (like [backspace] → [?\C-?]) are not found during key translation.
-        list_keymap_set_parent(local_function_key_map, function_key_map);
+        list_keymap_set_parent(
+            local_function_key_map,
+            function_key_map,
+            crate::tagged::SymbolMode::Bare,
+        );
         // GNU keyboard.c seeds special-event-map with delete-frame and focus
         // handlers at C bootstrap time and leaves hook semantics to frame.el.
         list_keymap_define(
             special_event_map,
             Value::symbol("delete-frame"),
             Value::symbol("handle-delete-frame"),
+            crate::tagged::SymbolMode::Bare,
         );
         list_keymap_define(
             special_event_map,
             Value::symbol("focus-in"),
             Value::symbol("handle-focus-in"),
+            crate::tagged::SymbolMode::Bare,
         );
         list_keymap_define(
             special_event_map,
             Value::symbol("focus-out"),
             Value::symbol("handle-focus-out"),
+            crate::tagged::SymbolMode::Bare,
         );
         // GNU's `dbus-event' entry (src/keyboard.c:14576-14579) is inside
         // `#ifdef HAVE_DBUS'.
@@ -2090,6 +2097,7 @@ impl Context {
                     special_event_map,
                     Value::symbol("dbus-event"),
                     Value::symbol("dbus-handle-event"),
+                    crate::tagged::SymbolMode::Bare,
                 );
             }
             _ => {}
@@ -2100,6 +2108,7 @@ impl Context {
             special_event_map,
             Value::symbol("file-notify"),
             Value::symbol("file-notify-handle-event"),
+            crate::tagged::SymbolMode::Bare,
         );
 
         let standard_syntax_table = super::super::syntax::builtin_standard_syntax_table(Vec::new())

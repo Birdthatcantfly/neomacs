@@ -394,10 +394,10 @@ fn jit_final_report_collects_named_leaves_from_a_context() {
     f.seal_hand_assembled_ops();
     let sym = Value::symbol("jit-report-add");
     ev.obarray
-        .set_symbol_function_id(sym.as_symbol_id().unwrap(), Value::make_bytecode(f));
+        .set_symbol_function_id(sym.as_bare_symbol_id().unwrap(), Value::make_bytecode(f));
     let fval = ev
         .obarray
-        .symbol_function_id(sym.as_symbol_id().unwrap())
+        .symbol_function_id(sym.as_bare_symbol_id().unwrap())
         .expect("bound");
     let bc = fval.get_bytecode_data().expect("bytecode");
     let ctx = &mut ev as *mut Context;

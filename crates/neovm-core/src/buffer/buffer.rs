@@ -435,7 +435,7 @@ impl BufferSlotPredicate {
             Self::Unrestricted => Ok(()),
             Self::String if value.is_string() => Ok(()),
             Self::String => Err(WrongType("stringp")),
-            Self::Symbol if value.is_symbol() => Ok(()),
+            Self::Symbol if value.is_bare_symbol() => Ok(()),
             Self::Symbol => Err(WrongType("symbolp")),
             Self::Integer if value.is_integer() => Ok(()),
             Self::Integer => Err(WrongType("integerp")),
@@ -459,8 +459,8 @@ impl BufferSlotPredicate {
             }
             Self::VerticalScrollBar
                 if value.is_t()
-                    || value.is_symbol_named("left")
-                    || value.is_symbol_named("right") =>
+                    || value.is_bare_symbol_named("left")
+                    || value.is_bare_symbol_named("right") =>
             {
                 Ok(())
             }
@@ -468,8 +468,8 @@ impl BufferSlotPredicate {
                 Err(Choice("One of nil, t, left or right should be specified"))
             }
             Self::OverwriteMode
-                if value.is_symbol_named("overwrite-mode-textual")
-                    || value.is_symbol_named("overwrite-mode-binary") =>
+                if value.is_bare_symbol_named("overwrite-mode-textual")
+                    || value.is_bare_symbol_named("overwrite-mode-binary") =>
             {
                 Ok(())
             }
@@ -1756,7 +1756,7 @@ impl LocalVariableBindings {
                 if !entry.is_cons() {
                     continue;
                 }
-                if let Some(id) = entry.cons_car().as_symbol_id() {
+                if let Some(id) = entry.cons_car().as_bare_symbol_id() {
                     // `assq` observes the first duplicate entry. Preserve that
                     // behavior even though ordinary mutation APIs never create
                     // duplicates.
@@ -1909,8 +1909,8 @@ pub(crate) fn preserve_partial_permanent_local_hook_value(
     while cursor.is_cons() {
         let elt = cursor.cons_car();
         cursor = cursor.cons_cdr();
-        if elt.is_symbol_named("t")
-            || elt.as_symbol_name().is_some_and(|name| {
+        if elt.is_bare_symbol_named("t")
+            || elt.as_bare_symbol_name().is_some_and(|name| {
                 obarray
                     .get_property(name, "permanent-local-hook")
                     .is_some_and(|prop| !prop.is_nil())
@@ -4459,6 +4459,18 @@ impl Buffer {
         &self,
         composition_function_table: Value,
     ) -> std::rc::Rc<Vec<crate::emacs_core::composite::AutomaticCompositionSpan>> {
+        self.automatic_composition_spans_with_symbols(
+            composition_function_table,
+            crate::tagged::SymbolMode::Bare,
+        )
+    }
+
+    /// Capture-time symbol policy; positioned scans bypass the bare-only memo.
+    pub fn automatic_composition_spans_with_symbols(
+        &self,
+        composition_function_table: Value,
+        symbol_mode: crate::tagged::SymbolMode,
+    ) -> std::rc::Rc<Vec<crate::emacs_core::composite::AutomaticCompositionSpan>> {
         let key = AutomaticCompositionKey {
             chars_tick: self.chars_modified_tick(),
             props_tick: self.props_modified_tick(),
@@ -4467,6 +4479,7 @@ impl Buffer {
         };
         if let Some((cached_key, spans)) = self.automatic_composition_cache.borrow().as_ref()
             && *cached_key == key
+            && symbol_mode == crate::tagged::SymbolMode::Bare
         {
             return std::rc::Rc::clone(spans);
         }
@@ -4484,14 +4497,18 @@ impl Buffer {
         // starts at point-min, not zero -- and a caller that then added the
         // offset itself would count it twice.
         let spans = std::rc::Rc::new(
-            crate::emacs_core::composite::automatic_composition_spans_in(
+            crate::emacs_core::composite::automatic_composition_spans_in_with_symbols(
                 self,
                 composition_function_table,
                 &text,
                 self.point_min_char_pos().get(),
+                symbol_mode,
             ),
         );
-        *self.automatic_composition_cache.borrow_mut() = Some((key, std::rc::Rc::clone(&spans)));
+        if symbol_mode == crate::tagged::SymbolMode::Bare {
+            *self.automatic_composition_cache.borrow_mut() =
+                Some((key, std::rc::Rc::clone(&spans)));
+        }
         spans
     }
 
@@ -4518,6 +4535,22 @@ impl Buffer {
         first_char: usize,
         budget: usize,
     ) -> std::rc::Rc<Vec<crate::emacs_core::composite::AutomaticCompositionSpan>> {
+        self.automatic_composition_spans_visible_with_symbols(
+            composition_function_table,
+            first_char,
+            budget,
+            crate::tagged::SymbolMode::Bare,
+        )
+    }
+
+    /// Capture-time symbol policy; positioned scans bypass the bare-only memo.
+    pub fn automatic_composition_spans_visible_with_symbols(
+        &self,
+        composition_function_table: Value,
+        first_char: usize,
+        budget: usize,
+        symbol_mode: crate::tagged::SymbolMode,
+    ) -> std::rc::Rc<Vec<crate::emacs_core::composite::AutomaticCompositionSpan>> {
         use crate::emacs_core::composite::MAX_AUTO_COMPOSITION_LOOKBACK;
         let accessible_start = self.point_min_char_pos().get();
         let accessible_end = self.point_max_char_pos().get();
@@ -4536,15 +4569,17 @@ impl Buffer {
             self.char_pos_to_emacs_byte_pos_clamped(CharPos0::new(end)),
         );
         let fast = crate::emacs_core::composite::fast_path::enabled();
-        let key = fast.then(|| AutomaticCompositionVisibleKey {
-            chars_tick: self.chars_modified_tick(),
-            props_tick: self.props_modified_tick(),
-            table: composition_function_table.bits(),
-            syntax_table: self.slots[BUFFER_SLOT_SYNTAX_TABLE.index()].bits(),
-            category_table: self.slots[BUFFER_SLOT_CATEGORY_TABLE.index()].bits(),
-            char_table_tick: crate::emacs_core::chartable::char_table_write_tick(),
-            start,
-            end,
+        let key = (fast && symbol_mode == crate::tagged::SymbolMode::Bare).then(|| {
+            AutomaticCompositionVisibleKey {
+                chars_tick: self.chars_modified_tick(),
+                props_tick: self.props_modified_tick(),
+                table: composition_function_table.bits(),
+                syntax_table: self.slots[BUFFER_SLOT_SYNTAX_TABLE.index()].bits(),
+                category_table: self.slots[BUFFER_SLOT_CATEGORY_TABLE.index()].bits(),
+                char_table_tick: crate::emacs_core::chartable::char_table_write_tick(),
+                start,
+                end,
+            }
         });
         if let Some(key) = key {
             if let Some((cached_key, spans)) =
@@ -4556,8 +4591,9 @@ impl Buffer {
             // Pure ASCII with no ASCII rule composes nothing: skip the copy
             // and the per-character walk (see the predicate's doc).
             if self.text.emacs_byte_range_is_ascii(byte_range)
-                && crate::emacs_core::composite::ascii_has_no_composition_rules(
+                && crate::emacs_core::composite::ascii_has_no_composition_rules_with_symbols(
                     composition_function_table,
+                    symbol_mode,
                 )
             {
                 let spans = std::rc::Rc::new(Vec::new());
@@ -4570,11 +4606,12 @@ impl Buffer {
         crate::emacs_core::composite::BYTES_SCANNED
             .fetch_add(text.len(), std::sync::atomic::Ordering::Relaxed);
         let spans = std::rc::Rc::new(
-            crate::emacs_core::composite::automatic_composition_spans_in(
+            crate::emacs_core::composite::automatic_composition_spans_in_with_symbols(
                 self,
                 composition_function_table,
                 &text,
                 start,
+                symbol_mode,
             ),
         );
         if let Some(key) = key {
@@ -4808,7 +4845,7 @@ impl Buffer {
         // the very cons it started at before and only interior entries are
         // unlinked. Head identity therefore proves nothing here.
         self.local_var_alist.retain_bindings(|entry| {
-            let Some(name) = entry.cons_car().as_symbol_name() else {
+            let Some(name) = entry.cons_car().as_bare_symbol_name() else {
                 return BindingRetention::Drop;
             };
             if !kill_permanent
@@ -4816,7 +4853,7 @@ impl Buffer {
                     .get_property(name, "permanent-local")
                     .filter(|v| !v.is_nil())
             {
-                if prop.is_symbol_named("permanent-local-hook") {
+                if prop.is_bare_symbol_named("permanent-local-hook") {
                     // Partial-preserve: filter the value and mutate the
                     // existing cell's cdr in place, so a BLV valcell aimed at
                     // this cons observes the filtered list without re-swapping.
@@ -4903,7 +4940,7 @@ impl Buffer {
     /// values for LOCALIZED symbols without going through the
     /// obarray's BLV swap-in.
     pub fn find_in_local_var_alist(&self, key: Value) -> Option<Value> {
-        if let Some(sym_id) = key.as_symbol_id() {
+        if let Some(sym_id) = key.as_bare_symbol_id() {
             return self.local_var_alist.value(sym_id);
         }
         let mut alist = self.local_var_alist.as_lisp_alist();
@@ -5118,7 +5155,7 @@ impl Buffer {
             if !entry.is_cons() {
                 continue;
             }
-            if let Some(sym_id) = entry.cons_car().as_symbol_id() {
+            if let Some(sym_id) = entry.cons_car().as_bare_symbol_id() {
                 let cdr = entry.cons_cdr();
                 let binding = if cdr.is_unbound() {
                     RuntimeBindingValue::Void

@@ -53,7 +53,8 @@ fn keyboard_variable_may_not_be_buffer_local(
     if obarray.forward_type(resolved) != Some(LispFwdType::KboardObj) {
         return Ok(());
     }
-    let name = crate::emacs_core::intern::resolve_sym(reported.as_symbol_id().unwrap_or(resolved));
+    let name =
+        crate::emacs_core::intern::resolve_sym(reported.as_bare_symbol_id().unwrap_or(resolved));
     Err(signal(
         "error",
         vec![Value::string(format!(
@@ -456,7 +457,7 @@ pub(crate) fn builtin_buffer_local_toplevel_value(
     expect_min_args("buffer-local-toplevel-value", &args, 1)?;
     expect_max_args("buffer-local-toplevel-value", &args, 2)?;
 
-    let symbol = super::builtins::symbols::expect_symbol_id(&args[0])?;
+    let symbol = super::builtins::symbols::expect_symbol_id(&args[0], ctx.symbol_mode())?;
     let resolved = super::builtins::resolve_variable_alias_id_in_obarray(&ctx.obarray, symbol)?;
     let buffer_id =
         buffer_arg_or_current(ctx, "buffer-local-toplevel-value", args.get(1).copied())?;
@@ -486,7 +487,7 @@ pub(crate) fn builtin_set_buffer_local_toplevel_value(
     expect_min_args("set-buffer-local-toplevel-value", &args, 2)?;
     expect_max_args("set-buffer-local-toplevel-value", &args, 3)?;
 
-    let symbol = super::builtins::symbols::expect_symbol_id(&args[0])?;
+    let symbol = super::builtins::symbols::expect_symbol_id(&args[0], ctx.symbol_mode())?;
     let resolved = super::builtins::resolve_variable_alias_id_in_obarray(&ctx.obarray, symbol)?;
     let buffer_id =
         buffer_arg_or_current(ctx, "set-buffer-local-toplevel-value", args.get(2).copied())?;

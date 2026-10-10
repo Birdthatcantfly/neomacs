@@ -321,7 +321,7 @@ fn obarray_init_standard_errors() {
     init_standard_errors(&mut ob);
     // Check that error-conditions is set for 'error' itself.
     let conds = ob.get_property("error", "error-conditions").unwrap();
-    let items = iter_symbol_list(&conds);
+    let items = iter_symbol_list(&conds, crate::tagged::SymbolMode::Bare);
     assert_eq!(items, vec!["error"]);
 }
 
@@ -333,7 +333,7 @@ fn obarray_void_variable_conditions() {
     let conds = ob
         .get_property("void-variable", "error-conditions")
         .unwrap();
-    let items = iter_symbol_list(&conds);
+    let items = iter_symbol_list(&conds, crate::tagged::SymbolMode::Bare);
     assert!(items.contains(&"void-variable".to_string()));
     assert!(items.contains(&"error".to_string()));
 }
@@ -345,35 +345,42 @@ fn obarray_quit_conditions_match_gnu_non_error_hierarchy() {
     init_standard_errors(&mut ob);
 
     let quit_conds = ob.get_property("quit", "error-conditions").unwrap();
-    assert_eq!(iter_symbol_list(&quit_conds), vec!["quit"]);
+    assert_eq!(
+        iter_symbol_list(&quit_conds, crate::tagged::SymbolMode::Bare),
+        vec!["quit"]
+    );
 
     let minibuffer_quit_conds = ob
         .get_property("minibuffer-quit", "error-conditions")
         .unwrap();
     assert_eq!(
-        iter_symbol_list(&minibuffer_quit_conds),
+        iter_symbol_list(&minibuffer_quit_conds, crate::tagged::SymbolMode::Bare),
         vec!["minibuffer-quit", "quit"]
     );
 
     assert!(signal_matches_condition_value(
         &ob,
         "quit",
-        &Value::symbol("quit")
+        &Value::symbol("quit"),
+        crate::tagged::SymbolMode::Bare
     ));
     assert!(!signal_matches_condition_value(
         &ob,
         "quit",
-        &Value::symbol("error")
+        &Value::symbol("error"),
+        crate::tagged::SymbolMode::Bare
     ));
     assert!(signal_matches_condition_value(
         &ob,
         "minibuffer-quit",
-        &Value::symbol("quit")
+        &Value::symbol("quit"),
+        crate::tagged::SymbolMode::Bare
     ));
     assert!(!signal_matches_condition_value(
         &ob,
         "minibuffer-quit",
-        &Value::symbol("error")
+        &Value::symbol("error"),
+        crate::tagged::SymbolMode::Bare
     ));
 }
 
@@ -391,14 +398,21 @@ fn condition_handlers_use_canonical_t_identity_without_reading_symbol_names() {
     assert!(!signal_matches_condition_value_sym(
         &ob,
         signal,
-        &Value::from_sym_id(raw_condition)
+        &Value::from_sym_id(raw_condition),
+        crate::tagged::SymbolMode::Bare
     ));
     assert!(!signal_matches_condition_value_sym(
         &ob,
         signal,
-        &Value::from_sym_id(uninterned_t)
+        &Value::from_sym_id(uninterned_t),
+        crate::tagged::SymbolMode::Bare
     ));
-    assert!(signal_matches_condition_value_sym(&ob, signal, &Value::T));
+    assert!(signal_matches_condition_value_sym(
+        &ob,
+        signal,
+        &Value::T,
+        crate::tagged::SymbolMode::Bare
+    ));
 }
 
 #[test]
@@ -409,7 +423,7 @@ fn obarray_overflow_error_conditions() {
     let conds = ob
         .get_property("overflow-error", "error-conditions")
         .unwrap();
-    let items = iter_symbol_list(&conds);
+    let items = iter_symbol_list(&conds, crate::tagged::SymbolMode::Bare);
     assert!(items.contains(&"overflow-error".to_string()));
     assert!(items.contains(&"arith-error".to_string()));
     assert!(items.contains(&"error".to_string()));
@@ -421,7 +435,7 @@ fn obarray_file_missing_conditions() {
     let mut ob = Obarray::new();
     init_standard_errors(&mut ob);
     let conds = ob.get_property("file-missing", "error-conditions").unwrap();
-    let items = iter_symbol_list(&conds);
+    let items = iter_symbol_list(&conds, crate::tagged::SymbolMode::Bare);
     assert!(items.contains(&"file-missing".to_string()));
     assert!(items.contains(&"file-error".to_string()));
     assert!(items.contains(&"error".to_string()));
@@ -447,8 +461,8 @@ fn obarray_dbus_error_condition_follows_the_transport() {
             let conds = ob
                 .get_property("dbus-error", "error-conditions")
                 .expect("dbus-error is registered with the transport");
-            assert!(iter_symbol_list(&conds).contains(&"dbus-error".to_string()));
-            assert!(iter_symbol_list(&conds).contains(&"error".to_string()));
+            assert!(iter_symbol_list(&conds, crate::tagged::SymbolMode::Bare).contains(&"dbus-error".to_string()));
+            assert!(iter_symbol_list(&conds, crate::tagged::SymbolMode::Bare).contains(&"error".to_string()));
         }
         _ => {
             assert_eq!(ob.get_property("dbus-error", "error-conditions"), None);
@@ -461,7 +475,10 @@ fn obarray_dbus_error_condition_follows_the_transport() {
     let conds = ob
         .get_property("file-notify-error", "error-conditions")
         .expect("file-notify-error keeps its conditions");
-    assert!(iter_symbol_list(&conds).contains(&"file-error".to_string()));
+    assert!(
+        iter_symbol_list(&conds, crate::tagged::SymbolMode::Bare)
+            .contains(&"file-error".to_string())
+    );
 }
 
 #[test]
@@ -473,14 +490,14 @@ fn obarray_cyclic_indirection_conditions() {
     let function_conds = ob
         .get_property("cyclic-function-indirection", "error-conditions")
         .unwrap();
-    let function_items = iter_symbol_list(&function_conds);
+    let function_items = iter_symbol_list(&function_conds, crate::tagged::SymbolMode::Bare);
     assert!(function_items.contains(&"cyclic-function-indirection".to_string()));
     assert!(function_items.contains(&"error".to_string()));
 
     let variable_conds = ob
         .get_property("cyclic-variable-indirection", "error-conditions")
         .unwrap();
-    let variable_items = iter_symbol_list(&variable_conds);
+    let variable_items = iter_symbol_list(&variable_conds, crate::tagged::SymbolMode::Bare);
     assert!(variable_items.contains(&"cyclic-variable-indirection".to_string()));
     assert!(variable_items.contains(&"error".to_string()));
 }
@@ -490,21 +507,29 @@ fn obarray_hierarchical_match() {
     crate::test_utils::init_test_tracing();
     let mut ob = Obarray::new();
     init_standard_errors(&mut ob);
-    assert!(signal_matches_hierarchical(&ob, "void-variable", "error"));
+    assert!(signal_matches_hierarchical(
+        &ob,
+        "void-variable",
+        "error",
+        crate::tagged::SymbolMode::Bare
+    ));
     assert!(signal_matches_hierarchical(
         &ob,
         "overflow-error",
-        "arith-error"
+        "arith-error",
+        crate::tagged::SymbolMode::Bare
     ));
     assert!(signal_matches_hierarchical(
         &ob,
         "file-missing",
-        "file-error"
+        "file-error",
+        crate::tagged::SymbolMode::Bare
     ));
     assert!(!signal_matches_hierarchical(
         &ob,
         "void-variable",
-        "arith-error"
+        "arith-error",
+        crate::tagged::SymbolMode::Bare
     ));
 }
 
@@ -516,7 +541,8 @@ fn obarray_hierarchical_match_exact() {
     assert!(signal_matches_hierarchical(
         &ob,
         "void-variable",
-        "void-variable"
+        "void-variable",
+        crate::tagged::SymbolMode::Bare
     ));
 }
 
@@ -525,7 +551,12 @@ fn obarray_hierarchical_match_t() {
     crate::test_utils::init_test_tracing();
     let mut ob = Obarray::new();
     init_standard_errors(&mut ob);
-    assert!(signal_matches_hierarchical(&ob, "void-variable", "t"));
+    assert!(signal_matches_hierarchical(
+        &ob,
+        "void-variable",
+        "t",
+        crate::tagged::SymbolMode::Bare
+    ));
 }
 
 #[test]
@@ -546,7 +577,12 @@ fn obarray_condition_pattern_symbol() {
     let mut ob = Obarray::new();
     init_standard_errors(&mut ob);
     let pat = Value::symbol("error");
-    assert!(signal_matches_condition_value(&ob, "void-variable", &pat));
+    assert!(signal_matches_condition_value(
+        &ob,
+        "void-variable",
+        &pat,
+        crate::tagged::SymbolMode::Bare
+    ));
 }
 
 #[test]
@@ -558,9 +594,24 @@ fn obarray_condition_pattern_list() {
         Value::symbol("arith-error"),
         Value::symbol("file-error"),
     ]);
-    assert!(signal_matches_condition_value(&ob, "overflow-error", &pat));
-    assert!(signal_matches_condition_value(&ob, "file-missing", &pat));
-    assert!(!signal_matches_condition_value(&ob, "void-variable", &pat));
+    assert!(signal_matches_condition_value(
+        &ob,
+        "overflow-error",
+        &pat,
+        crate::tagged::SymbolMode::Bare
+    ));
+    assert!(signal_matches_condition_value(
+        &ob,
+        "file-missing",
+        &pat,
+        crate::tagged::SymbolMode::Bare
+    ));
+    assert!(!signal_matches_condition_value(
+        &ob,
+        "void-variable",
+        &pat,
+        crate::tagged::SymbolMode::Bare
+    ));
 }
 
 #[test]
@@ -569,13 +620,24 @@ fn obarray_unknown_signal_no_conditions() {
     let mut ob = Obarray::new();
     init_standard_errors(&mut ob);
     // A signal that was never registered — only exact match works.
-    assert!(!signal_matches_hierarchical(&ob, "unknown-error", "error"));
+    assert!(!signal_matches_hierarchical(
+        &ob,
+        "unknown-error",
+        "error",
+        crate::tagged::SymbolMode::Bare
+    ));
     assert!(signal_matches_hierarchical(
         &ob,
         "unknown-error",
-        "unknown-error"
+        "unknown-error",
+        crate::tagged::SymbolMode::Bare
     ));
-    assert!(signal_matches_hierarchical(&ob, "unknown-error", "t"));
+    assert!(signal_matches_hierarchical(
+        &ob,
+        "unknown-error",
+        "t",
+        crate::tagged::SymbolMode::Bare
+    ));
 }
 
 // =======================================================================
@@ -594,7 +656,7 @@ fn define_error_basic() {
         .obarray
         .get_property("my-error", "error-conditions")
         .unwrap();
-    let items = iter_symbol_list(&conds);
+    let items = iter_symbol_list(&conds, crate::tagged::SymbolMode::Bare);
     assert!(items.contains(&"my-error".to_string()));
     assert!(items.contains(&"error".to_string()));
 
@@ -615,12 +677,14 @@ fn define_error_with_parent() {
     assert!(signal_matches_hierarchical(
         &evaluator.obarray,
         "my-file-error",
-        "file-error"
+        "file-error",
+        crate::tagged::SymbolMode::Bare
     ));
     assert!(signal_matches_hierarchical(
         &evaluator.obarray,
         "my-file-error",
-        "error"
+        "error",
+        crate::tagged::SymbolMode::Bare
     ));
 }
 
@@ -635,17 +699,20 @@ fn define_error_with_parent_list() {
     assert!(signal_matches_hierarchical(
         &evaluator.obarray,
         "multi-error",
-        "file-error"
+        "file-error",
+        crate::tagged::SymbolMode::Bare
     ));
     assert!(signal_matches_hierarchical(
         &evaluator.obarray,
         "multi-error",
-        "arith-error"
+        "arith-error",
+        crate::tagged::SymbolMode::Bare
     ));
     assert!(signal_matches_hierarchical(
         &evaluator.obarray,
         "multi-error",
-        "error"
+        "error",
+        crate::tagged::SymbolMode::Bare
     ));
 }
 
@@ -1467,9 +1534,24 @@ fn obarray_define_then_match() {
     let cond_refs: Vec<&str> = conds.iter().map(|s| s.as_str()).collect();
     put_error_properties(&mut ob, "my-error", "My custom error", cond_refs);
 
-    assert!(signal_matches_hierarchical(&ob, "my-error", "user-error"));
-    assert!(signal_matches_hierarchical(&ob, "my-error", "error"));
-    assert!(!signal_matches_hierarchical(&ob, "my-error", "file-error"));
+    assert!(signal_matches_hierarchical(
+        &ob,
+        "my-error",
+        "user-error",
+        crate::tagged::SymbolMode::Bare
+    ));
+    assert!(signal_matches_hierarchical(
+        &ob,
+        "my-error",
+        "error",
+        crate::tagged::SymbolMode::Bare
+    ));
+    assert!(!signal_matches_hierarchical(
+        &ob,
+        "my-error",
+        "file-error",
+        crate::tagged::SymbolMode::Bare
+    ));
 }
 
 #[test]
@@ -1485,11 +1567,36 @@ fn obarray_deep_hierarchy() {
     // level3 -> level2 -> level1 -> file-error -> error
     register_simple(&mut ob, "level3", "L3", &["level2"]);
 
-    assert!(signal_matches_hierarchical(&ob, "level3", "level2"));
-    assert!(signal_matches_hierarchical(&ob, "level3", "level1"));
-    assert!(signal_matches_hierarchical(&ob, "level3", "file-error"));
-    assert!(signal_matches_hierarchical(&ob, "level3", "error"));
-    assert!(!signal_matches_hierarchical(&ob, "level3", "arith-error"));
+    assert!(signal_matches_hierarchical(
+        &ob,
+        "level3",
+        "level2",
+        crate::tagged::SymbolMode::Bare
+    ));
+    assert!(signal_matches_hierarchical(
+        &ob,
+        "level3",
+        "level1",
+        crate::tagged::SymbolMode::Bare
+    ));
+    assert!(signal_matches_hierarchical(
+        &ob,
+        "level3",
+        "file-error",
+        crate::tagged::SymbolMode::Bare
+    ));
+    assert!(signal_matches_hierarchical(
+        &ob,
+        "level3",
+        "error",
+        crate::tagged::SymbolMode::Bare
+    ));
+    assert!(!signal_matches_hierarchical(
+        &ob,
+        "level3",
+        "arith-error",
+        crate::tagged::SymbolMode::Bare
+    ));
 }
 
 #[test]
@@ -1583,7 +1690,7 @@ fn obarray_all_standard_errors_include_self_in_conditions() {
 
     for name in &standard {
         let conds = ob.get_property(name, "error-conditions").unwrap();
-        let items = iter_symbol_list(&conds);
+        let items = iter_symbol_list(&conds, crate::tagged::SymbolMode::Bare);
         assert!(
             items.contains(&name.to_string()),
             "{} should contain itself in error-conditions",
@@ -1607,7 +1714,7 @@ fn obarray_treesit_query_error_matches_gnu_c_defined_hierarchy() {
         .get_property("treesit-query-error", "error-conditions")
         .expect("treesit-query-error should have error-conditions");
     assert_eq!(
-        iter_symbol_list(&conds),
+        iter_symbol_list(&conds, crate::tagged::SymbolMode::Bare),
         vec!["treesit-query-error", "treesit-error", "error"]
     );
 }

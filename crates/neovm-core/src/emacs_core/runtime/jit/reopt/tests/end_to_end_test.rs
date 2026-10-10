@@ -110,13 +110,13 @@ fn caller_of(sym: Value) -> ByteCodeFunction {
 fn install(ev: &mut Context, name: &str, f: ByteCodeFunction) -> Value {
     let sym = Value::symbol(name);
     ev.obarray
-        .set_symbol_function_id(sym.as_symbol_id().unwrap(), Value::make_bytecode(f));
+        .set_symbol_function_id(sym.as_bare_symbol_id().unwrap(), Value::make_bytecode(f));
     sym
 }
 
 fn bytecode_of(ev: &Context, sym: Value) -> &'static ByteCodeFunction {
     ev.obarray
-        .symbol_function_id(sym.as_symbol_id().unwrap())
+        .symbol_function_id(sym.as_bare_symbol_id().unwrap())
         .and_then(Value::get_bytecode_data)
         .expect("bytecode")
 }
@@ -897,7 +897,7 @@ fn inline_epoch_moved_recompiles_once() {
     // SAFETY: the test owns `ev` and no native frame is live.
     unsafe { &mut *ctx_w }
         .obarray
-        .set_symbol_function_id(zz.as_symbol_id().unwrap(), Value::make_int(0));
+        .set_symbol_function_id(zz.as_bare_symbol_id().unwrap(), Value::make_int(0));
     let now = unsafe { &*ctx_w }.obarray.function_epoch();
     assert_ne!(now, armed);
     assert_eq!(run(4), Value::make_int(14), "the deopt resumes correctly");

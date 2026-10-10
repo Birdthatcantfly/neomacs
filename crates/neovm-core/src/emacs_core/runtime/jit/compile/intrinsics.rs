@@ -606,7 +606,9 @@ fn emit_memq(
     miss: Block,
 ) -> bool {
     let key_const = constant_bits(fb, key).map(|bits| Value::from_bits(bits as usize));
-    if which == Intrinsic::Member && key_const.is_some_and(|k| !(k.is_symbol() || k.is_fixnum())) {
+    if which == Intrinsic::Member
+        && key_const.is_some_and(|k| !(k.is_bare_symbol() || k.is_fixnum()))
+    {
         return false;
     }
     let nil = Value::NIL.bits() as i64;
@@ -729,7 +731,7 @@ fn emit_symbol_value(
     let (sym_v, refuse_nil) = match constant_bits(fb, symbol) {
         Some(bits) => {
             let v = Value::from_bits(bits as usize);
-            let Some(sym) = v.as_symbol_id() else {
+            let Some(sym) = v.as_bare_symbol_id() else {
                 // A constant non-symbol: always the call's (it signals).
                 return false;
             };

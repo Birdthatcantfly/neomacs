@@ -1835,7 +1835,7 @@ impl ResolvedBuiltinCallee {
     /// them), or from the static registry for a bare static symbol.
     #[inline(always)]
     fn dispatch_parts(self) -> (SymId, Option<SubrFn>, u16, Option<u16>) {
-        if let Some(sym_id) = self.0.as_symbol_id() {
+        if let Some(sym_id) = self.0.as_bare_symbol_id() {
             let entry = lookup_global_subr_entry(sym_id)
                 .expect("resolved static builtin must retain its registered entry");
             debug_assert_eq!(entry.dispatch_kind, SubrDispatchKind::Builtin);
@@ -1855,7 +1855,7 @@ impl ResolvedBuiltinCallee {
     }
     #[inline]
     fn wrong_arity_value(self) -> Value {
-        if let Some(sym_id) = self.0.as_symbol_id() {
+        if let Some(sym_id) = self.0.as_bare_symbol_id() {
             Value::subr_from_sym_id(sym_id)
         } else {
             self.0
@@ -6110,7 +6110,7 @@ impl<'a> Vm<'a> {
                     // Pure inline tag checks, zero function calls. Matches GNU exactly.
                     Op::Symbolp => {
                         let top = stk!().last_mut().unwrap();
-                        let is_sym = top.is_symbol()
+                        let is_sym = top.is_bare_symbol()
                             || (self.ctx.symbols_with_pos_enabled && top.is_symbol_with_pos());
                         *top = if is_sym { Value::T } else { Value::NIL };
                     }
@@ -6228,7 +6228,10 @@ impl<'a> Vm<'a> {
                         // of advice or the symbol's function cell. The primitive
                         // may allocate or signal, but cannot run Lisp or collect.
                         let start = stk!().len().saturating_sub(3);
-                        let result = vm_try_pure!(builtins::builtin_aset_args(&stk!()[start..]));
+                        let result = vm_try_pure!(builtins::builtin_aset_args_in_state(
+                            self.ctx,
+                            &stk!()[start..]
+                        ));
                         stk!().truncate(start);
                         stk_push!(result);
                     }
@@ -8215,7 +8218,7 @@ impl<'a> Vm<'a> {
         args_start: usize,
         nargs: usize,
     ) -> Option<EvalResult> {
-        let sym_id = func_val.as_symbol_id()?;
+        let sym_id = func_val.as_bare_symbol_id()?;
         if ctx.compiler_function_overrides_active() {
             return None;
         }
@@ -8813,7 +8816,7 @@ impl<'a> Vm<'a> {
         }
 
         let call = PreparedInterpreterCall::new(callee);
-        if !compiler_overrides_active && func_val.as_symbol_id().is_some() {
+        if !compiler_overrides_active && func_val.as_bare_symbol_id().is_some() {
             self.recent_interpreter_call
                 .replace(func_val, nargs, function_epoch, call);
         }
@@ -9068,7 +9071,9 @@ impl<'a> Vm<'a> {
             FlowKind::ThreadBlocked(_) | FlowKind::Shutdown(_) => Err(Flow::from_kind(flow)),
             FlowKind::Throw(thrown) => {
                 let (tag, value) = (thrown.tag, thrown.value);
-                let selected_resume = self.ctx.matching_catch_resume(&tag);
+                let selected_resume = self
+                    .ctx
+                    .matching_catch_resume_with_symbols(&tag, thrown.symbol_mode());
                 if let Some(ResumeTarget::VmCatch {
                     target,
                     stack_len,
@@ -9422,7 +9427,7 @@ impl<'a> Vm<'a> {
             }
             "%%defvar" => {
                 if args.len() >= 2 {
-                    let sym_name = args[1].as_symbol_name().unwrap_or("nil").to_string();
+                    let sym_name = args[1].as_bare_symbol_name().unwrap_or("nil").to_string();
                     if !self.ctx.obarray.boundp(&sym_name) {
                         self.ctx.obarray.set_symbol_value(&sym_name, args[0]);
                     }
@@ -9434,7 +9439,7 @@ impl<'a> Vm<'a> {
             "%%defconst" => {
                 if args.len() >= 2 {
                     let sym = args[1];
-                    let sym_id = sym.as_symbol_id().unwrap_or_else(|| intern("nil"));
+                    let sym_id = sym.as_bare_symbol_id().unwrap_or_else(|| intern("nil"));
                     crate::emacs_core::data::set_default_internal(
                         &mut *self.ctx,
                         Value::from_sym_id(sym_id),
@@ -9492,6 +9497,7 @@ impl<'a> Vm<'a> {
                     args,
                     interactive_form,
                     command_identity,
+                    vm.ctx.symbol_mode(),
                 )?;
             for value in plan.gc_roots() {
                 vm.push_dynamic_vm_root(value);
@@ -9600,6 +9606,9 @@ impl<'a> Vm<'a> {
 }
 
 impl<'a> crate::emacs_core::builtins::symbols::MacroexpandRuntime for Vm<'a> {
+    fn symbol_mode(&self) -> crate::tagged::SymbolMode {
+        self.ctx.symbol_mode()
+    }
     fn symbol_function_by_id(&self, symbol: SymId) -> Option<Value> {
         crate::emacs_core::builtins::symbols::symbol_function_cell_in_obarray(
             &self.ctx.obarray,
@@ -9799,7 +9808,7 @@ fn resolve_switch_target(func: &ByteCodeFunction, raw_addr: i64) -> Result<usize
 /// `Op::VarRef` / `Op::VarSet` / `Op::VarBind` all reference variables
 /// by index into the function's constants table.  Each constant is
 /// already a `Value::Symbol(SymId)`, so we can extract the SymId via a
-/// pure tag inspection.  Going through `as_symbol_name() -> &str ->
+/// pure tag inspection.  Going through `as_bare_symbol_name() -> &str ->
 /// intern() -> SymId` instead would acquire the global interner
 /// `RwLock` twice per opcode, which dominated debug-build runtime when
 /// the byte-compiler iterated over hot loops.
@@ -9810,9 +9819,9 @@ fn sym_id_at(constants: &[Value], idx: u16) -> SymId {
     constants
         .get(idx as usize)
         .and_then(|v| {
-            v.as_symbol_id().or_else(|| {
+            v.as_bare_symbol_id().or_else(|| {
                 v.as_symbol_with_pos_sym()
-                    .and_then(|sym| sym.as_symbol_id())
+                    .and_then(|sym| sym.as_bare_symbol_id())
             })
         })
         .unwrap_or_else(|| intern("nil"))

@@ -3457,7 +3457,7 @@ pub(crate) fn builtin_format_message_slice(
             return Ok(result);
         }
         let quoting_style = crate::emacs_core::coding::builtin_text_quoting_style(ctx, vec![])?;
-        let quoting_style = TextQuotingStyle::from_symbol_value(quoting_style)
+        let quoting_style = TextQuotingStyle::from_symbol_value(quoting_style, ctx.symbol_mode())
             .map(FormatMessageQuotingStyle::from_text_quoting_style)
             .expect("text-quoting-style builtin returns a GNU quoting style symbol");
         let (bytes, spans, source_spans, force_multibyte_result, new_result) = do_format(

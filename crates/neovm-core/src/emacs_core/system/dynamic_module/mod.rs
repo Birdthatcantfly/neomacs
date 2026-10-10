@@ -640,7 +640,7 @@ fn module_signal_or_throw(priv_: &emacs_env_private) -> Result<(), Flow> {
         emacs_funcall_exit::Signal => {
             let sym_id = priv_
                 .non_local_exit_symbol
-                .as_symbol_id()
+                .as_bare_symbol_id()
                 .unwrap_or_else(|| intern("error"));
             let sym_name = resolve_sym(sym_id);
             let raw_data = priv_.non_local_exit_data;

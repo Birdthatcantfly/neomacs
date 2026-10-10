@@ -2153,7 +2153,7 @@ fn display_image_or_slice_spec_p(spec: Value) -> bool {
         return false;
     }
     let car = spec.cons_car();
-    car.is_symbol_named("image") || car.is_symbol_named("slice")
+    car.is_bare_symbol_named("image") || car.is_bare_symbol_named("slice")
 }
 
 /// If display table `dt` remaps character `code` to a glyph vector, return the
@@ -2810,6 +2810,7 @@ fn insert_inheriting_indentation(
         ),
     )?;
     super::editfns::signal_before_text_change(ctx, change)?;
+    let symbol_mode = ctx.symbol_mode();
     super::builtins::insert_string_value_in_current_buffer(
         &ctx.obarray,
         &[],
@@ -2817,6 +2818,7 @@ fn insert_inheriting_indentation(
         Value::string(indentation),
         super::builtins::InsertPieceMarkerPlacement::AfterMarkers,
         super::builtins::InsertPiecePropertyMode::InheritAdjoining,
+        symbol_mode,
     )?;
     super::editfns::signal_after_text_change(ctx, change)?;
     Ok(())

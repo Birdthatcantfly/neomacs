@@ -204,7 +204,7 @@ fn recipe_round_trips_string_symbol_cons() {
     );
     assert_eq!(
         crate::emacs_core::intern::resolve_sym(
-            rebuilt.cons_cdr().cons_car().as_symbol_id().unwrap()
+            rebuilt.cons_cdr().cons_car().as_bare_symbol_id().unwrap()
         ),
         "my-sym"
     );
@@ -502,7 +502,7 @@ fn aot_symbol_const_relocs_by_name_not_baked_sym_id() {
         .iter()
         .map(|v| {
             crate::emacs_core::intern::resolve_sym(
-                v.as_symbol_id().expect("reloc const is a symbol"),
+                v.as_bare_symbol_id().expect("reloc const is a symbol"),
             )
         })
         .collect();
@@ -521,12 +521,12 @@ fn aot_symbol_const_relocs_by_name_not_baked_sym_id() {
     // (consp '(1)) → 'yes ; (consp 5) → 'no.
     let cons_arg = Value::cons(Value::make_int(1), Value::NIL);
     assert_eq!(
-        call(cons_arg).as_symbol_id(),
+        call(cons_arg).as_bare_symbol_id(),
         Some(crate::emacs_core::intern::intern("aot-yes")),
         "consp arg → 'aot-yes (by current-session SymId)"
     );
     assert_eq!(
-        call(Value::make_int(5)).as_symbol_id(),
+        call(Value::make_int(5)).as_bare_symbol_id(),
         Some(crate::emacs_core::intern::intern("aot-no")),
         "non-consp arg → 'aot-no"
     );
@@ -546,7 +546,7 @@ fn aot_gensym_symbol_const_is_rejected_stays_jit() {
     // An uninterned (gensym) symbol — name not registered as canonical.
     let gensym = Value::symbol(crate::emacs_core::intern::intern_uninterned("g$decoy"));
     assert!(
-        !crate::emacs_core::intern::is_canonical_id(gensym.as_symbol_id().unwrap()),
+        !crate::emacs_core::intern::is_canonical_id(gensym.as_bare_symbol_id().unwrap()),
         "precondition: the gensym is non-canonical"
     );
     // write_value_recipe must REFUSE the gensym (the load-bearing guard).
