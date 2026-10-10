@@ -1484,7 +1484,11 @@ pub(crate) fn decode_declared_multibyte_char(bytes: &[u8]) -> (u32, usize) {
     if !(0xc0..=0xf8).contains(&first) {
         return (emacs_char::byte8_to_char(first), 1);
     }
-    let decoded = if bytes.len() >= emacs_char::MAX_MULTIBYTE_LENGTH {
+    // A complete short tail can be decoded directly. Only a truncated
+    // character needs the bounded zero-padding policy above.
+    let decoded = if bytes.len() >= emacs_char::MAX_MULTIBYTE_LENGTH
+        || bytes.len() >= emacs_char::bytes_by_char_head(first)
+    {
         emacs_char::string_char_unchecked(bytes)
     } else {
         let mut tail = [0; emacs_char::MAX_MULTIBYTE_LENGTH];
