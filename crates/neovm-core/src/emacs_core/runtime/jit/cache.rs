@@ -3012,6 +3012,19 @@ pub(crate) fn resolve_spec_call_leaf(
             CacheEntry::Compiled(leaf)
                 if leaf.inline_deps().is_empty() || leaf.inline_epoch().is_none() =>
             {
+                // A pending Fast result can arrive after its heat crossing.
+                // Arming it now would bypass the strict re-tier branch forever:
+                // armed handlers step aside only on the crossing itself. Refuse
+                // this cold exposure and let the next actual strict call choose
+                // Full through the existing replacement protocol. Keep the
+                // same exemptions as that branch, including the T2 countdown.
+                if leaf.regalloc == RegallocChoice::Fast
+                    && !leaf.call_heavy
+                    && forced_regalloc().is_none()
+                    && super::retier_heat().is_some_and(|at| func.jit_runtime().heat() >= at)
+                {
+                    return None;
+                }
                 Some(SpecCallLeaf::Armable(Rc::as_ptr(leaf)))
             }
             CacheEntry::CompiledUpgrading(upgrade)
@@ -3425,6 +3438,10 @@ fn finish_native_run(
 #[cfg(test)]
 #[path = "cache/tests/cache_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cache/tests/late_pending_retier_test.rs"]
+mod late_pending_retier_tests;
 
 #[cfg(test)]
 #[path = "cache/tests/tier2_off_test.rs"]
