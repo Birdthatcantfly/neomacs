@@ -3845,6 +3845,18 @@ pub(crate) fn builtin_process_attributes(
     builtin_process_attributes_impl(args)
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn builtin_process_attributes_impl(args: Vec<Value>) -> EvalResult {
+    expect_args("process-attributes", &args, 1)?;
+    let pid = cons_to_os_pid(args[0])?;
+    darwin_attributes::attributes(pid)
+}
+
+#[cfg(target_os = "macos")]
+#[path = "darwin_attributes.rs"]
+mod darwin_attributes;
+
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn builtin_process_attributes_impl(args: Vec<Value>) -> EvalResult {
     expect_args("process-attributes", &args, 1)?;
     let pid = cons_to_os_pid(args[0])?;
