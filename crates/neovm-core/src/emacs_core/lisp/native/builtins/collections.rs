@@ -125,7 +125,12 @@ struct VmArraySymbolSource<'slot, 'context>(&'slot &'context mut super::eval::Co
 
 impl ArraySymbolPolicy for VmArraySymbolSource<'_, '_> {
     fn mode(self) -> SymbolMode {
-        self.0.symbol_mode()
+        // Keep the slot address in the VM-only monomorph's argument list.
+        // ThinLTO otherwise promotes its Context load into every array opcode.
+        // Consume the slot opaquely only after dispatch selects a char table;
+        // ordinary array paths perform neither this barrier nor the load.
+        let context_slot = std::hint::black_box(self.0);
+        context_slot.symbol_mode()
     }
 }
 
