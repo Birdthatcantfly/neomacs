@@ -7439,7 +7439,9 @@ impl<'a> Vm<'a> {
         let bc = if ptr.is_null() {
             let bc = callee.get_bytecode_data()?;
             let ctx_ptr = core::ptr::from_mut(&mut *ctx);
-            match crate::emacs_core::jit::cache::resolve_spec_call_leaf(ctx_ptr, bc)? {
+            // SAFETY: ctx_ptr comes from this live owner-thread Context. The
+            // mutable borrow stays dormant until cache resolution completes.
+            match unsafe { crate::emacs_core::jit::cache::resolve_spec_call_leaf(ctx_ptr, bc) }? {
                 crate::emacs_core::jit::cache::SpecCallLeaf::Armable(ready) => ptr = ready,
                 crate::emacs_core::jit::cache::SpecCallLeaf::RetainedUpgrade(leaf) => {
                     return Self::run_retained_upgrade_from_spec(

@@ -2949,14 +2949,22 @@ pub(crate) fn resolve_compiled_leaf_ptr(
     ctx: *mut Context,
     func: &ByteCodeFunction,
 ) -> Option<*const CompiledLeaf> {
-    match resolve_spec_call_leaf(ctx, func) {
+    // SAFETY: the existing raw resolver boundary requires a null or live,
+    // dormant owner-thread Context throughout cache compilation/installation.
+    match unsafe { resolve_spec_call_leaf(ctx, func) } {
         Some(SpecCallLeaf::Armable(ptr)) => Some(ptr),
         Some(SpecCallLeaf::RetainedUpgrade(_)) | None => None,
     }
 }
 
+/// Resolve a spec-call candidate without arming a retained pending upgrade.
+///
+/// # Safety
+/// `ctx` must be null or point to a live owner-thread Context that remains
+/// dormant for this call. Cache compilation and installation may inspect its
+/// roots and compilation environment; no competing access may mutate them.
 #[inline(never)]
-pub(crate) fn resolve_spec_call_leaf(
+pub(crate) unsafe fn resolve_spec_call_leaf(
     ctx: *mut Context,
     func: &ByteCodeFunction,
 ) -> Option<SpecCallLeaf> {
