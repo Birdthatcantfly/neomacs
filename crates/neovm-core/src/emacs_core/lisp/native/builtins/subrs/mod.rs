@@ -3908,7 +3908,8 @@ pub(crate) fn register_subrs(ctx: &mut crate::emacs_core::eval::Context) {
         NativeFn::ContextVec(|ctx, args| {
             ctx.coding_systems.invalidate_lookup_cache();
             let name = args.first().copied();
-            let defined = crate::emacs_core::charset::builtin_define_charset_internal(args)?;
+            let defined =
+                crate::emacs_core::charset::builtin_define_charset_internal_in_state(ctx, args)?;
             // GNU `Fdefine_charset_internal' ends by consing the name onto
             // `Vcharset_list' (charset.c), newest first. Ours never did, so
             // `charset-list' stayed nil while GNU's held 203 charsets --
@@ -3925,7 +3926,8 @@ pub(crate) fn register_subrs(ctx: &mut crate::emacs_core::eval::Context) {
         NativeFn::ContextVec(|ctx, args| {
             ctx.coding_systems.invalidate_lookup_cache();
             let alias = args.first().copied();
-            let defined = crate::emacs_core::charset::builtin_define_charset_alias(args)?;
+            let defined =
+                crate::emacs_core::charset::builtin_define_charset_alias_in_state(ctx, args)?;
             // An alias joins `charset-list' too, though not the priority list.
             if let Some(alias) = alias {
                 push_onto_charset_list(ctx, alias);
@@ -7574,9 +7576,7 @@ pub(crate) fn register_subrs(ctx: &mut crate::emacs_core::eval::Context) {
     ));
     ctx.register_subr(SubrSpec::new(
         "set-charset-priority",
-        NativeFn::ContextVec(|_ctx, args| {
-            crate::emacs_core::charset::builtin_set_charset_priority(args)
-        }),
+        NativeFn::ContextVec(crate::emacs_core::charset::builtin_set_charset_priority_in_state),
         SubrArity::new(1, None),
     ));
     ctx.register_subr(SubrSpec::new(
@@ -7586,16 +7586,12 @@ pub(crate) fn register_subrs(ctx: &mut crate::emacs_core::eval::Context) {
     ));
     ctx.register_subr(SubrSpec::new(
         "charset-id-internal",
-        NativeFn::ContextVec(|_ctx, args| {
-            crate::emacs_core::charset::builtin_charset_id_internal(args)
-        }),
+        NativeFn::ContextVec(crate::emacs_core::charset::builtin_charset_id_internal_in_state),
         SubrArity::new(0, Some(1)),
     ));
     ctx.register_subr(SubrSpec::new(
         "declare-equiv-charset",
-        NativeFn::ContextVec(|_ctx, args| {
-            crate::emacs_core::charset::builtin_declare_equiv_charset(args)
-        }),
+        NativeFn::ContextVec(crate::emacs_core::charset::builtin_declare_equiv_charset_in_state),
         SubrArity::new(4, Some(4)),
     ));
     ctx.register_subr(SubrSpec::new(

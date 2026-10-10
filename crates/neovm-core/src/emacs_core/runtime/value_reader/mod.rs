@@ -211,25 +211,6 @@ pub fn read_one_with_locate_syms_with_symbols(
 /// it does not copy the accessible region into a temporary string on each
 /// `(read (current-buffer))`.  Keep the same model here so repeated buffer
 /// reads, such as `unidata-gen.el`, advance through the original buffer.
-pub(crate) fn read_one_from_buffer_with_locate_syms(
-    buffer: &Buffer,
-    range: EmacsByteRange,
-    readchar_offset_origin: BufferReadcharOffsetOrigin,
-    locate_syms: bool,
-    obarray: &super::symbol::Obarray,
-    shorthands: Option<&ReadSymbolShorthands>,
-) -> Result<(Option<Value>, EmacsBytePos), ReadError> {
-    read_one_from_buffer_with_locate_syms_with_symbols(
-        buffer,
-        range,
-        readchar_offset_origin,
-        locate_syms,
-        obarray,
-        shorthands,
-        SymbolMode::Bare,
-    )
-}
-
 pub(crate) fn read_one_from_buffer_with_locate_syms_with_symbols(
     buffer: &Buffer,
     range: EmacsByteRange,
@@ -357,24 +338,6 @@ impl<'a> LispReadSource<'a> {
             obarray,
             None,
             mode,
-        )
-    }
-
-    pub(crate) fn read_one_range_with_locate_syms(
-        &self,
-        start: usize,
-        end: usize,
-        locate_syms: bool,
-        obarray: &super::symbol::Obarray,
-        shorthands: Option<&ReadSymbolShorthands>,
-    ) -> Result<Option<(Value, usize)>, ReadError> {
-        self.read_one_range_with_locate_syms_with_symbols(
-            start,
-            end,
-            locate_syms,
-            obarray,
-            shorthands,
-            SymbolMode::Bare,
         )
     }
 

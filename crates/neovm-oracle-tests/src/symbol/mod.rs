@@ -23,3 +23,5 @@ mod issue554_control;
 mod issue554_final_boundaries;
 
 mod issue554_elt;
+
+mod issue554_charset_dispatch;

@@ -51,6 +51,7 @@ pub(crate) struct LayoutBufferSnapshot {
 }
 
 impl LayoutBufferSnapshot {
+    #[cfg(test)]
     pub fn from_buffer(buffer: &Buffer) -> Self {
         Self::capture_buffer(buffer, None)
     }
@@ -103,6 +104,7 @@ impl LayoutBufferSnapshot {
     /// could possibly display, as `(first_char, char_budget)`. `None` keeps
     /// the whole-buffer scan, which is what a caller with no window in hand
     /// (a test, a display query) must use.
+    #[cfg(test)]
     pub fn from_buffer_for_window(
         buffer: &Buffer,
         obarray: &Obarray,

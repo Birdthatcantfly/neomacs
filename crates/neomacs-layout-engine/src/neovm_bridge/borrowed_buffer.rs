@@ -21,6 +21,7 @@ pub(crate) struct BorrowedLayoutBuffer<'a> {
 }
 
 impl<'a> BorrowedLayoutBuffer<'a> {
+    #[cfg(test)]
     pub(crate) fn for_window(
         buffer: &'a Buffer,
         obarray: &'a Obarray,

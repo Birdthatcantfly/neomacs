@@ -4148,10 +4148,6 @@ impl TaggedValue {
         self.to_equal_key_depth_swp(0, &mut seen, symbols_with_pos_enabled)
     }
 
-    fn to_equal_key_depth(self, depth: usize, seen: &mut Vec<usize>) -> HashKey {
-        self.to_equal_key_depth_swp(depth, seen, false)
-    }
-
     fn to_equal_key_depth_swp(
         self,
         depth: usize,

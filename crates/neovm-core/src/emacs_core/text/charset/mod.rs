@@ -1943,6 +1943,7 @@ fn parse_superset_spec(value: &Value, mode: SymbolMode) -> Option<Vec<(SymId, i6
 // ---------------------------------------------------------------------------
 
 /// `(charsetp OBJECT)` -- return t if OBJECT names a known charset.
+#[cfg(test)]
 pub(crate) fn builtin_charsetp(args: Vec<Value>) -> EvalResult {
     builtin_charsetp_with_symbols(args, SymbolMode::Bare)
 }
@@ -2009,6 +2010,7 @@ pub(crate) fn builtin_charset_priority_list(args: Vec<Value>) -> EvalResult {
 }
 
 /// `(set-charset-priority &rest CHARSETS)` -- set charset detection priority.
+#[cfg(test)]
 pub(crate) fn builtin_set_charset_priority(args: Vec<Value>) -> EvalResult {
     builtin_set_charset_priority_with_symbols(args, SymbolMode::Bare)
 }
@@ -2079,6 +2081,7 @@ pub(crate) fn char_charset_name(ch: i64) -> &'static str {
 /// charset or a `wrong-type-argument`/`charsetp` error is signalled, exactly
 /// as `CHECK_CHARSET_GET_CHARSET` does.  The literal list element is returned,
 /// not its alias target.
+#[cfg(test)]
 pub(crate) fn builtin_char_charset(args: Vec<Value>) -> EvalResult {
     builtin_char_charset_with_symbols(args, SymbolMode::Bare)
 }
@@ -2157,6 +2160,7 @@ pub(crate) fn builtin_split_char(args: Vec<Value>) -> EvalResult {
 }
 
 /// `(charset-plist CHARSET)` -- return property list for CHARSET.
+#[cfg(test)]
 pub(crate) fn builtin_charset_plist(args: Vec<Value>) -> EvalResult {
     builtin_charset_plist_with_symbols(args, SymbolMode::Bare)
 }
@@ -2190,6 +2194,7 @@ fn builtin_charset_plist_with_symbols(args: Vec<Value>, mode: SymbolMode) -> Eva
 }
 
 /// `(charset-id-internal &optional CHARSET)` -- return internal charset id.
+#[cfg(test)]
 pub(crate) fn builtin_charset_id_internal(args: Vec<Value>) -> EvalResult {
     builtin_charset_id_internal_with_symbols(args, SymbolMode::Bare)
 }
@@ -2414,6 +2419,7 @@ fn expect_make_char_code_byte(value: &Value) -> Result<i64, Flow> {
 
 /// `(make-char CHARSET &optional CODE1 CODE2 CODE3 CODE4)` -- return a
 /// character at the charset position codes.
+#[cfg(test)]
 pub(crate) fn builtin_make_char(args: Vec<Value>) -> EvalResult {
     builtin_make_char_with_symbols(args, SymbolMode::Bare)
 }
@@ -2458,6 +2464,7 @@ fn builtin_make_char_with_symbols(args: Vec<Value>, mode: SymbolMode) -> EvalRes
 ///
 /// Internal charset initializer — registers a charset in the registry.
 /// Accepts exactly 17 arguments matching the Emacs C function.
+#[cfg(test)]
 pub(crate) fn builtin_define_charset_internal(args: Vec<Value>) -> EvalResult {
     builtin_define_charset_internal_with_symbols(args, SymbolMode::Bare)
 }
@@ -2723,6 +2730,7 @@ pub(crate) fn builtin_get_unused_iso_final_char(args: Vec<Value>) -> EvalResult 
 
 /// `(declare-equiv-charset DIMENSION CHARS CH CHARSET)` -- declare an
 /// equivalent charset mapping tuple.
+#[cfg(test)]
 pub(crate) fn builtin_declare_equiv_charset(args: Vec<Value>) -> EvalResult {
     builtin_declare_equiv_charset_with_symbols(args, SymbolMode::Bare)
 }
@@ -2760,6 +2768,7 @@ fn builtin_declare_equiv_charset_with_symbols(args: Vec<Value>, mode: SymbolMode
 }
 
 /// `(define-charset-alias ALIAS CHARSET)` -- add ALIAS for CHARSET.
+#[cfg(test)]
 pub(crate) fn builtin_define_charset_alias(args: Vec<Value>) -> EvalResult {
     builtin_define_charset_alias_with_symbols(args, SymbolMode::Bare)
 }
@@ -2812,6 +2821,7 @@ pub(crate) fn builtin_find_charset_string(args: Vec<Value>) -> EvalResult {
 ///
 /// Uses the charset's registered method (Offset, Map, etc.) to convert
 /// a charset-specific code-point to an Emacs internal character code.
+#[cfg(test)]
 pub(crate) fn builtin_decode_char(args: Vec<Value>) -> EvalResult {
     builtin_decode_char_with_symbols(args, SymbolMode::Bare)
 }
@@ -2837,6 +2847,7 @@ fn builtin_decode_char_with_symbols(args: Vec<Value>, mode: SymbolMode) -> EvalR
 ///
 /// Uses the charset's registered method to convert an Emacs internal
 /// character code back to a charset-specific code-point.
+#[cfg(test)]
 pub(crate) fn builtin_encode_char(args: Vec<Value>) -> EvalResult {
     builtin_encode_char_with_symbols(args, SymbolMode::Bare)
 }
@@ -2860,6 +2871,7 @@ fn builtin_encode_char_with_symbols(args: Vec<Value>, mode: SymbolMode) -> EvalR
 
 /// `(unify-charset CHARSET &optional UNIFY-MAP DEUNIFY)` -- toggle Unicode
 /// unification for an offset charset.
+#[cfg(test)]
 pub(crate) fn builtin_unify_charset(args: Vec<Value>) -> EvalResult {
     builtin_unify_charset_with_symbols(args, SymbolMode::Bare)
 }
@@ -3027,3 +3039,7 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/gc_tls_ownership_test.rs"]
 mod gc_tls_ownership_tests;
+
+#[cfg(test)]
+#[path = "tests/positioned_dispatch_test.rs"]
+mod positioned_dispatch_tests;

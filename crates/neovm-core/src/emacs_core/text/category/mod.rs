@@ -232,10 +232,6 @@ fn category_set_with_member(
     intern_category_set(table, updated)
 }
 
-fn is_category_table_value(value: &Value) -> Result<bool, Flow> {
-    is_category_table_value_with_symbols(value, SymbolMode::Bare)
-}
-
 fn is_category_table_value_with_symbols(value: &Value, mode: SymbolMode) -> Result<bool, Flow> {
     let is_char_table = super::chartable::builtin_char_table_p(vec![*value])?;
     if !is_char_table.is_truthy() {
@@ -278,10 +274,6 @@ pub(crate) fn ensure_standard_category_table_object() -> EvalResult {
         });
         Ok(table)
     })
-}
-
-fn deep_copy_category_table(source: &Value) -> EvalResult {
-    deep_copy_category_table_with_symbols(source, SymbolMode::Bare)
 }
 
 fn deep_copy_category_table_with_symbols(source: &Value, mode: SymbolMode) -> EvalResult {
@@ -410,13 +402,6 @@ fn current_buffer_category_table_in_buffers(
     Ok(fallback)
 }
 
-fn check_category_table_in_buffers(
-    buffers: &mut crate::buffer::BufferManager,
-    table: Option<Value>,
-) -> Result<Value, Flow> {
-    check_category_table_in_buffers_with_symbols(buffers, table, SymbolMode::Bare)
-}
-
 fn check_category_table_in_buffers_with_symbols(
     buffers: &mut crate::buffer::BufferManager,
     table: Option<Value>,
@@ -476,15 +461,6 @@ fn category_set_contains(category_set: &Value, category: char) -> Result<bool, F
     Ok(index < view.len() && view.get(index))
 }
 
-pub(crate) fn char_has_category_in_table(
-    table: Value,
-    ch: char,
-    category: u8,
-) -> Result<bool, Flow> {
-    let category_set = super::chartable::ct_lookup(&table, ch as i64)?;
-    category_set_contains(&category_set, category as char)
-}
-
 pub(crate) fn active_category_table_for_buffer(
     buffer: Option<&crate::buffer::Buffer>,
 ) -> Result<Value, Flow> {
@@ -512,6 +488,7 @@ fn set_category_set_member(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn builtin_category_table_p(args: Vec<Value>) -> EvalResult {
     builtin_category_table_p_with_symbols(args, SymbolMode::Bare)
 }
@@ -531,6 +508,7 @@ pub(crate) fn builtin_make_category_table(args: Vec<Value>) -> EvalResult {
     make_category_table_object()
 }
 
+#[cfg(test)]
 pub(crate) fn builtin_copy_category_table(args: Vec<Value>) -> EvalResult {
     builtin_copy_category_table_with_symbols(args, SymbolMode::Bare)
 }
@@ -788,13 +766,6 @@ pub(crate) fn builtin_set_category_table(
 ) -> EvalResult {
     let mode = eval.symbol_mode();
     builtin_set_category_table_in_buffers_with_symbols(&mut eval.buffers, args, mode)
-}
-
-pub(crate) fn builtin_set_category_table_in_buffers(
-    buffers: &mut crate::buffer::BufferManager,
-    args: Vec<Value>,
-) -> EvalResult {
-    builtin_set_category_table_in_buffers_with_symbols(buffers, args, SymbolMode::Bare)
 }
 
 pub(crate) fn builtin_set_category_table_in_buffers_with_symbols(

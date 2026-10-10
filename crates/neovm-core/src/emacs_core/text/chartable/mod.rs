@@ -950,6 +950,7 @@ pub(crate) fn ct_lookup_with_symbols(table: &Value, ch: i64, mode: SymbolMode) -
 /// char-table, look up `c`; if the entry is a character, that's the
 /// translation. If `table` is a list, fold left through all tables.
 /// Returns `c` unchanged if no translation applies.
+#[cfg(test)]
 pub(crate) fn translate_char(table: &Value, c: i64) -> i64 {
     translate_char_with_symbols(table, c, SymbolMode::Bare)
 }
@@ -1190,10 +1191,6 @@ fn ct_local_atomic_runs(
 
 /// GNU `char-table-ref-and-range`-style helper used by subsystems that need
 /// the effective value together with the maximal contiguous run covering `ch`.
-pub(crate) fn char_table_ref_and_range(table: &Value, ch: i64) -> Result<(Value, i64, i64), Flow> {
-    char_table_ref_and_range_with_symbols(table, ch, SymbolMode::Bare)
-}
-
 pub(crate) fn char_table_ref_and_range_with_symbols(
     table: &Value,
     ch: i64,
@@ -1353,6 +1350,7 @@ pub(crate) fn builtin_set_char_table_parent(args: Vec<Value>) -> EvalResult {
 /// retains those keys, later internal mutations are observable.  Mirror that
 /// behavior instead of materializing fresh range objects.
 /// Returns nil.
+#[cfg(test)]
 pub(crate) fn for_each_char_table_mapping(
     table: &Value,
     f: impl FnMut(Value, Value) -> Result<(), Flow>,
@@ -1759,6 +1757,7 @@ fn ct_collect_raw_entries_for_table_in_range(
     out
 }
 
+#[cfg(test)]
 pub(crate) fn optimize_char_table(table: &Value, test: OptimizeCharTableTest) -> Result<(), Flow> {
     optimize_char_table_with_symbols(table, test, SymbolMode::Bare)
 }
@@ -2006,10 +2005,6 @@ pub(crate) fn builtin_set_char_table_extra_slot(args: Vec<Value>) -> EvalResult 
 /// `char-table-p` + subtype check against a symbol name, without the
 /// builtin arg plumbing (two Vec allocs) or the purpose symbol's
 /// name-string parse the old callers paid per call.
-pub(crate) fn char_table_has_subtype_named(value: &Value, name: &str) -> bool {
-    char_table_has_subtype_named_with_symbols(value, name, SymbolMode::Bare)
-}
-
 pub(crate) fn char_table_has_subtype_named_with_symbols(
     value: &Value,
     name: &str,
@@ -2150,6 +2145,7 @@ fn decode_unicode_property_map_value(table: Value, value: Value, mode: SymbolMod
 /// This mirrors GNU's C fast path for Unicode property tables: `CHAR-TABLE`
 /// must have purpose `char-code-property-table` and five extra slots; a fixnum
 /// decoder in extra slot 1 selects the built-in run-length decoder.
+#[cfg(test)]
 pub(crate) fn builtin_get_unicode_property_internal(args: Vec<Value>) -> EvalResult {
     builtin_get_unicode_property_internal_with_symbols(args, SymbolMode::Bare)
 }
@@ -2264,6 +2260,7 @@ fn encode_uniprop_value_numeric(
 /// Mirrors GNU's `Fput_unicode_property_internal` (chartab.c): validate and
 /// encode VALUE via the table's encoder (selected by extra slot 2), then store
 /// the encoded element with `CHAR_TABLE_SET`.  Returns nil.
+#[cfg(test)]
 pub(crate) fn builtin_put_unicode_property_internal(args: Vec<Value>) -> EvalResult {
     builtin_put_unicode_property_internal_with_symbols(args, SymbolMode::Bare)
 }

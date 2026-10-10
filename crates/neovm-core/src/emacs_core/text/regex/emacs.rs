@@ -493,7 +493,7 @@ pub(crate) struct LiteralPrefilter {
 #[derive(Clone, Debug)]
 pub struct CaseTranslation {
     /// Translations for codes 0..256, filled ON DEMAND when backed by a
-    /// char-table (see [`CaseTranslation::from_char_table`]).
+    /// char-table (see [`CaseTranslation::from_char_table_with_symbols`]).
     /// [`CASE_TRANSLATION_UNFILLED`] marks a slot not yet computed.
     byte: [std::cell::Cell<u32>; 256],
     table: Option<crate::emacs_core::value::Value>,
@@ -767,6 +767,7 @@ impl CaseTranslation {
     /// it cannot outlive the table the way an identity-keyed cache could.
     /// `standard()` above already applied the same lesson to the constant
     /// table; this path was simply missed.
+    #[cfg(test)]
     pub(crate) fn from_char_table(table: crate::emacs_core::value::Value) -> Self {
         Self::from_char_table_with_symbols(table, SymbolMode::Bare)
     }
@@ -3993,19 +3994,6 @@ impl Default for WordBoundaryLookup {
 }
 
 impl WordBoundaryLookup {
-    pub(crate) fn new(
-        char_script_table: Option<Value>,
-        word_combining_categories: Value,
-        word_separating_categories: Value,
-    ) -> Self {
-        Self::new_with_symbols(
-            char_script_table,
-            word_combining_categories,
-            word_separating_categories,
-            SymbolMode::Bare,
-        )
-    }
-
     pub(crate) fn new_with_symbols(
         char_script_table: Option<Value>,
         word_combining_categories: Value,

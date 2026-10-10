@@ -2417,21 +2417,6 @@ fn compile_lisp_pattern_with_posix_translation(
 /// a second time (~300 Ir per probe; `looking-at` did it twice per call).
 /// GNU's `Flooking_at` compiles once (`compile_pattern`) and matches with
 /// that.
-pub(crate) fn buffer_regexp_syntax_dependency_compiled(
-    buf: &Buffer,
-    pattern: &LispString,
-    case_fold: bool,
-    posix: bool,
-) -> Result<(BufferRegexpSyntaxDependency, Rc<CompiledPattern>), String> {
-    buffer_regexp_syntax_dependency_compiled_with_symbols(
-        buf,
-        pattern,
-        case_fold,
-        posix,
-        SymbolMode::Bare,
-    )
-}
-
 pub(crate) fn buffer_regexp_syntax_dependency_compiled_with_symbols(
     buf: &Buffer,
     pattern: &LispString,
@@ -2459,7 +2444,7 @@ pub(crate) fn buffer_regexp_syntax_dependency_compiled_with_symbols(
     Ok((dependency, compiled))
 }
 
-/// The [`buffer_regexp_syntax_dependency_compiled`] classification plus the
+/// The [`buffer_regexp_syntax_dependency_compiled_with_symbols`] classification plus the
 /// pattern's finite maximum per-attempt span in characters (`None` when
 /// unbounded), for callers that can propertize a bounded window instead of
 /// the whole tail.
@@ -3376,6 +3361,7 @@ pub(crate) fn search_forward(
     Ok(point.map(|point| BufferSearchSuccess::new(buf, point, regs.into_engine_match_data())))
 }
 
+#[cfg(test)]
 pub(crate) fn search_forward_into(
     buf: &mut Buffer,
     pattern: &crate::heap_types::LispString,
@@ -3473,6 +3459,7 @@ pub(crate) fn search_backward(
     Ok(point.map(|point| BufferSearchSuccess::new(buf, point, regs.into_engine_match_data())))
 }
 
+#[cfg(test)]
 pub(crate) fn search_backward_into(
     buf: &mut Buffer,
     pattern: &crate::heap_types::LispString,
@@ -3774,6 +3761,7 @@ pub(crate) fn re_search_backward_with_posix(
 /// case-canon table (GNU's search `trt`) when a custom `set-case-syntax-pair`
 /// table is installed, else `None` so the engine's fast hardwired folding is
 /// used. Mirrors GNU search.c installing `BVAR (current_buffer, case_canon_table)`.
+#[cfg(test)]
 fn buffer_search_translation(
     buf: &Buffer,
     case_fold: bool,

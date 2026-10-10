@@ -102,10 +102,6 @@ impl StickinessProperty {
     pub(crate) fn value(self) -> Value {
         Value::from_sym_id(self.symbol_id())
     }
-
-    pub(crate) fn is_value(self, value: Value) -> bool {
-        value.as_bare_symbol_id() == Some(self.symbol_id())
-    }
 }
 
 pub(crate) fn init_textprop_vars(

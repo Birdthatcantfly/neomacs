@@ -1,5 +1,4 @@
 use super::*;
-use crate::emacs_core::value::eq_value_swp;
 use crate::tagged::SymbolMode;
 mod redisplay_gnu;
 mod window_configuration_redisplay;

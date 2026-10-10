@@ -1279,14 +1279,6 @@ fn execute_compiled_ccl_with_state(
 /// outside this machine: a decoder consumes byte values and produces Emacs
 /// character codes, while an encoder consumes character codes and its caller
 /// truncates produced values to output octets.
-pub(crate) fn execute_compiled_ccl(
-    designator: Value,
-    input: &[i64],
-    last_block: bool,
-) -> Result<Vec<i64>, Flow> {
-    execute_compiled_ccl_with_symbols(designator, input, last_block, SymbolMode::Bare)
-}
-
 pub(crate) fn execute_compiled_ccl_with_symbols(
     designator: Value,
     input: &[i64],
@@ -1307,6 +1299,7 @@ pub(crate) fn execute_compiled_ccl_with_symbols(
 
 /// (ccl-program-p OBJECT) -> nil
 /// This accepts program objects that match the minimum CCL header shape used by Emacs.
+#[cfg(test)]
 pub(crate) fn builtin_ccl_program_p_impl(args: Vec<Value>) -> EvalResult {
     builtin_ccl_program_p_impl_with_symbols(args, SymbolMode::Bare)
 }
@@ -1325,6 +1318,7 @@ pub(crate) fn builtin_ccl_program_p_impl_with_symbols(
 ///
 /// Runs a program that does not read or write. Register results are written
 /// back into the 8-element vector.
+#[cfg(test)]
 pub(crate) fn builtin_ccl_execute_impl(args: Vec<Value>) -> EvalResult {
     builtin_ccl_execute_impl_with_symbols(args, SymbolMode::Bare)
 }
@@ -1424,6 +1418,7 @@ fn ccl_output_string(output: Vec<i64>, unibyte: bool) -> Value {
 }
 
 /// (ccl-execute-on-string CCL-PROGRAM STATUS STRING &optional CONTINUE UNIBYTE-P) -> STRING
+#[cfg(test)]
 pub(crate) fn builtin_ccl_execute_on_string_impl(args: Vec<Value>) -> EvalResult {
     builtin_ccl_execute_on_string_impl_with_symbols(args, SymbolMode::Bare)
 }
@@ -1503,6 +1498,7 @@ pub(crate) fn builtin_ccl_execute_on_string_impl_with_symbols(
 
 /// (register-ccl-program NAME CCL-PROG) -> nil
 /// Stub: accepts and discards the CCL program registration.
+#[cfg(test)]
 pub(crate) fn builtin_register_ccl_program_impl(args: Vec<Value>) -> EvalResult {
     builtin_register_ccl_program_impl_with_symbols(args, SymbolMode::Bare)
 }
@@ -1544,6 +1540,7 @@ pub(crate) fn builtin_register_ccl_program_impl_with_symbols(
 
 /// (register-code-conversion-map SYMBOL MAP) -> nil
 /// Stub: accepts and discards the code conversion map.
+#[cfg(test)]
 pub(crate) fn builtin_register_code_conversion_map_impl(args: Vec<Value>) -> EvalResult {
     builtin_register_code_conversion_map_impl_with_symbols(args, SymbolMode::Bare)
 }

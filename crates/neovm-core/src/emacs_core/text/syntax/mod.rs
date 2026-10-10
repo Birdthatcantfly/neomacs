@@ -3121,6 +3121,7 @@ fn ensure_standard_syntax_table_object() -> EvalResult {
     })
 }
 
+#[cfg(test)]
 fn current_buffer_syntax_table_object_in_buffers(
     buffers: &mut BufferManager,
 ) -> Result<Value, Flow> {
@@ -4649,13 +4650,6 @@ pub(crate) fn builtin_syntax_table_0(eval: &mut super::eval::Context) -> EvalRes
     builtin_syntax_table_in_buffers_with_symbols(&mut eval.buffers, &args, mode)
 }
 
-pub(crate) fn builtin_syntax_table_in_buffers(
-    buffers: &mut BufferManager,
-    args: &[Value],
-) -> EvalResult {
-    builtin_syntax_table_in_buffers_with_symbols(buffers, args, crate::tagged::SymbolMode::Bare)
-}
-
 /// `(set-syntax-table TABLE)` — install TABLE for current buffer and return it.
 ///
 /// NeoVM currently stores syntax behavior on `Buffer.syntax_table` internals;
@@ -4681,13 +4675,6 @@ pub(crate) fn builtin_set_syntax_table_1(
     builtin_set_syntax_table_in_buffers_with_symbols(&mut eval.buffers, &args, mode)
 }
 
-pub(crate) fn builtin_set_syntax_table_in_buffers(
-    buffers: &mut BufferManager,
-    args: &[Value],
-) -> EvalResult {
-    builtin_set_syntax_table_in_buffers_with_symbols(buffers, args, crate::tagged::SymbolMode::Bare)
-}
-
 // ===========================================================================
 // Builtin functions (evaluator-dependent — operate on current buffer)
 // ===========================================================================
@@ -4699,13 +4686,6 @@ pub(crate) fn builtin_modify_syntax_entry(
 ) -> EvalResult {
     let mode = eval.symbol_mode();
     modify_syntax_entry_in_buffers_with_symbols(&mut eval.buffers, &args, mode)
-}
-
-pub(crate) fn modify_syntax_entry_in_buffers(
-    buffers: &mut BufferManager,
-    args: &[Value],
-) -> EvalResult {
-    modify_syntax_entry_in_buffers_with_symbols(buffers, args, crate::tagged::SymbolMode::Bare)
 }
 
 /// `(char-syntax CHAR)` — return the syntax class designator char.

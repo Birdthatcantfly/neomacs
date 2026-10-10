@@ -369,21 +369,6 @@ pub(crate) fn builtin_search_forward_4(
     )
 }
 
-pub(crate) fn builtin_search_forward_with_state(
-    case_fold: bool,
-    buffers: &mut crate::buffer::BufferManager,
-    mut match_data: Option<&mut Option<super::regex::MatchData>>,
-    args: &[Value],
-) -> EvalResult {
-    builtin_search_forward_with_state_with_symbols(
-        case_fold,
-        buffers,
-        match_data,
-        args,
-        SymbolMode::Bare,
-    )
-}
-
 pub(crate) fn builtin_search_forward_with_state_with_symbols(
     case_fold: bool,
     buffers: &mut crate::buffer::BufferManager,
@@ -1176,21 +1161,6 @@ pub(crate) fn builtin_search_backward(
         match_data,
         &args,
         mode,
-    )
-}
-
-pub(crate) fn builtin_search_backward_with_state(
-    case_fold: bool,
-    buffers: &mut crate::buffer::BufferManager,
-    mut match_data: Option<&mut Option<super::regex::MatchData>>,
-    args: &[Value],
-) -> EvalResult {
-    builtin_search_backward_with_state_with_symbols(
-        case_fold,
-        buffers,
-        match_data,
-        args,
-        SymbolMode::Bare,
     )
 }
 

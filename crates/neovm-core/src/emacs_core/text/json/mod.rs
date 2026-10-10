@@ -1426,6 +1426,7 @@ impl<'a> JsonParser<'a> {
 /// ARGS are keyword arguments:
 /// - `:null-object VALUE` — Lisp value to serialize as JSON null (default: :null)
 /// - `:false-object VALUE` — Lisp value to serialize as JSON false (default: :false)
+#[cfg(test)]
 pub(crate) fn builtin_json_serialize(args: Vec<Value>) -> EvalResult {
     json_serialize_with_symbols(args, SymbolMode::Bare)
 }
@@ -1458,6 +1459,7 @@ fn json_serialize_with_symbols(args: Vec<Value>, mode: SymbolMode) -> EvalResult
 /// - `:array-type SYMBOL` — `array` (default, yields vector) or `list`
 /// - `:null-object VALUE` — Lisp value for JSON null (default: :null)
 /// - `:false-object VALUE` — Lisp value for JSON false (default: :false)
+#[cfg(test)]
 pub(crate) fn builtin_json_parse_string(args: Vec<Value>) -> EvalResult {
     json_parse_string_with_symbols(args, SymbolMode::Bare)
 }

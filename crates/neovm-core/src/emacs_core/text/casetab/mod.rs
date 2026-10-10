@@ -215,6 +215,7 @@ fn expect_char(value: &Value) -> Result<char, Flow> {
 ///
 /// A case table is a char-table with `case-table` sub-type and 3 extra slots
 /// (upcase, canonicalize, equivalences).
+#[cfg(test)]
 pub(crate) fn builtin_case_table_p(args: Vec<Value>) -> EvalResult {
     builtin_case_table_p_with_symbols(args, SymbolMode::Bare)
 }
@@ -446,10 +447,6 @@ fn current_case_table_for_context(
     }
 }
 
-fn ensure_standard_case_table_object_in_state(obarray: &mut super::symbol::Obarray) -> EvalResult {
-    ensure_standard_case_table_object_in_state_with_symbols(obarray, SymbolMode::Bare)
-}
-
 fn ensure_standard_case_table_object_in_state_with_symbols(
     obarray: &mut super::symbol::Obarray,
     mode: SymbolMode,
@@ -462,13 +459,6 @@ fn ensure_standard_case_table_object_in_state_with_symbols(
     let table = make_standard_case_table_value();
     obarray.set_symbol_value_id(standard_case_table_object_symbol_id(), table);
     Ok(table)
-}
-
-fn current_case_table_for_buffer_in_state(
-    obarray: &mut super::symbol::Obarray,
-    buffers: &mut crate::buffer::BufferManager,
-) -> Result<Value, Flow> {
-    current_case_table_for_buffer_in_state_with_symbols(obarray, buffers, SymbolMode::Bare)
 }
 
 fn current_case_table_for_buffer_in_state_with_symbols(
@@ -643,10 +633,6 @@ impl CaseTableOverride {
     /// override straight from a buffer's installed case table (subsidiary tables
     /// already exist once `set-case-table` ran). Used where only an immutable
     /// buffer is in scope (replace-match case analysis).
-    pub(crate) fn for_buffer_readonly(buf: &crate::buffer::Buffer) -> Self {
-        Self::for_buffer_readonly_with_symbols(buf, SymbolMode::Bare)
-    }
-
     pub(crate) fn for_buffer_readonly_with_symbols(
         buf: &crate::buffer::Buffer,
         mode: SymbolMode,
@@ -820,17 +806,6 @@ fn set_canon(case_table: Value, key: Value, elt: Value, mode: SymbolMode) -> Res
     };
     let canonical = super::chartable::ct_lookup_with_symbols(&case_table, up_elt, mode)?;
     set_char_table_range_value(canon, key, canonical)
-}
-
-fn map_case_table(
-    table: Value,
-    f: impl FnMut(Value, Value) -> Result<(), Flow>,
-) -> Result<(), Flow> {
-    super::chartable::for_each_char_table_mapping(&table, f)
-}
-
-fn ensure_case_table_derived_slots(table: Value) -> Result<(), Flow> {
-    ensure_case_table_derived_slots_with_symbols(table, SymbolMode::Bare)
 }
 
 fn ensure_case_table_derived_slots_with_symbols(

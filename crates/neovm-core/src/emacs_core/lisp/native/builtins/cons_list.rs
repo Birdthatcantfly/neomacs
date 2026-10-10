@@ -787,11 +787,6 @@ pub(crate) fn builtin_length_gt(args: Vec<Value>) -> EvalResult {
     )?))
 }
 
-pub(crate) fn builtin_nth(args: Vec<Value>) -> EvalResult {
-    expect_args("nth", &args, 2)?;
-    builtin_nth_values(args[0], args[1])
-}
-
 pub(crate) fn builtin_nth_2(
     _eval: &mut super::eval::Context,
     n_value: Value,
@@ -2149,15 +2144,6 @@ pub(crate) fn builtin_delq_values(
     }
 }
 
-pub(crate) fn builtin_elt(args: Vec<Value>) -> EvalResult {
-    expect_args("elt", &args, 2)?;
-    builtin_elt_values(
-        args[0],
-        args[1],
-        super::collections::ArraySymbolSource::Bare,
-    )
-}
-
 pub(crate) fn builtin_elt_in_state(
     eval: &mut super::eval::Context,
     args: Vec<Value>,
@@ -2167,7 +2153,7 @@ pub(crate) fn builtin_elt_in_state(
 }
 
 /// The byte-code `elt` (`Op::Elt`): [`bytecode_elt_values`]. (The Lisp
-/// function `elt` is [`builtin_elt`], `Felt`.)
+/// function `elt` is [`builtin_elt_in_state`], `Felt`.)
 #[inline(always)]
 pub(crate) fn builtin_elt_2(
     eval: &mut super::eval::Context,

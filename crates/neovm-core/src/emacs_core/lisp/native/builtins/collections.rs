@@ -78,6 +78,13 @@ fn allocate_vector_elements(
 /// Ordinary array access carries one pointer-sized source without reading it.
 #[derive(Clone, Copy)]
 pub(crate) enum ArraySymbolSource<'a> {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "The bare variant preserves the array-source shape and supports canonical test adapters."
+        )
+    )]
     Bare,
     Context(&'a super::eval::Context),
 }
@@ -129,6 +136,7 @@ pub(crate) fn builtin_vector_slice(_eval: &mut super::eval::Context, args: &[Val
     Ok(Value::vector(args.to_vec()))
 }
 
+#[cfg(test)]
 pub(crate) fn builtin_aref(args: Vec<Value>) -> EvalResult {
     expect_args("aref", &args, 2)?;
     builtin_aref_values(args[0], args[1], ArraySymbolSource::Bare)
