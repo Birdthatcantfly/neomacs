@@ -4442,9 +4442,10 @@ impl Context {
     /// - `bc_buf` + the root side stacks: owned by Rust frames the panic
     ///   destroyed; nothing else would ever pop them (safe-direction leak,
     ///   but unbounded over repeated contained panics).
-    /// - `backtrace_args_stack`: safe to truncate WITHOUT the specpdl unwind
-    ///   because release is index-based — the later unwind of surviving
-    ///   Backtrace entries above the boundary degrades to a no-op.
+    /// - surviving backtraces first retain arguments whose `bc_buf` or
+    ///   `backtrace_args_stack` storage will be retired. The later cleanup
+    ///   can collect and walk these frames, so their original values must
+    ///   remain rooted until the deferred specpdl unwind releases them.
     /// - `depth` / `macro_expansion_scope_depth`: managed relatively
     ///   (`+= 1` / `-= 1`); skipped decrements would drift them permanently.
     /// - `lexenv` (+ cache clears): the boundary value is authoritative for
@@ -4461,9 +4462,9 @@ impl Context {
         cond_floor: usize,
     ) {
         self.condition_stack.truncate(cond_floor);
+        self.retain_backtrace_args_for_recovery(snap.bc_buf_len, snap.backtrace_args_len);
         self.bc_frames.truncate(snap.bc_frames_len);
         self.bc_buf.truncate(snap.bc_buf_len);
-        self.backtrace_args_stack.truncate(snap.backtrace_args_len);
         self.eval_temp_roots.truncate(snap.eval_temp_roots_len);
         self.eval_call_roots.truncate(snap.eval_call_roots_len);
         self.sequence_temp_root_frames

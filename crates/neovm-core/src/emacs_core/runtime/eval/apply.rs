@@ -516,6 +516,75 @@ impl Context {
         }
     }
 
+    /// Keep deferred-cleanup backtraces independent of the argument stores
+    /// a contained-panic recovery is about to retire. GNU's backtrace walk
+    /// reports the original evaluated values (eval.c:4026-4031), not whatever
+    /// later calls happen to write into the same indexed slots.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn retain_backtrace_args_for_recovery(
+        &mut self,
+        retained_bc_len: usize,
+        retained_args_len: usize,
+    ) {
+        struct RetainedFrame {
+            index: usize,
+            function: Value,
+            args: LispArgVec,
+            debug_on_exit: bool,
+        }
+        let mut retained = Vec::new();
+        for (index, entry) in self.specpdl.iter().enumerate() {
+            let SpecBinding::Backtrace {
+                function,
+                args,
+                debug_on_exit,
+            } = entry
+            else {
+                continue;
+            };
+            let loses_storage = match args.view() {
+                BacktraceArgsView::Unevalled(_) | BacktraceArgsView::Evaluated0 => false,
+                BacktraceArgsView::Evaluated(index) => index >= retained_args_len,
+                BacktraceArgsView::EvaluatedBcStack(span) => {
+                    span.start().saturating_add(span.len()) > retained_bc_len
+                }
+            };
+            if loses_storage {
+                retained.push(RetainedFrame {
+                    index,
+                    function: *function,
+                    args: self.backtrace_args_values(args),
+                    debug_on_exit: *debug_on_exit,
+                });
+            }
+        }
+        // Only Rust allocation occurs while these temporary copies are not
+        // traced: no Lisp allocation, collection or safepoint is permitted.
+        // Read every old descriptor before truncation, then republish in
+        // specpdl order so owned vectors still unwind in LIFO order.
+        self.backtrace_args_stack.truncate(retained_args_len);
+        for frame in retained {
+            self.specpdl[frame.index] = match frame.args.as_slice() {
+                [arg] => SpecBinding::Backtrace1 {
+                    function: frame.function,
+                    arg: *arg,
+                    debug_on_exit: frame.debug_on_exit,
+                },
+                [arg0, arg1] if !frame.debug_on_exit => SpecBinding::Backtrace2 {
+                    function: frame.function,
+                    arg0: *arg0,
+                    arg1: *arg1,
+                },
+                _ => SpecBinding::Backtrace {
+                    function: frame.function,
+                    args: self.backtrace_args_from_owned(frame.args),
+                    debug_on_exit: frame.debug_on_exit,
+                },
+            };
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn evaluated_backtrace_from_slice(
         &mut self,
@@ -553,11 +622,9 @@ impl Context {
     #[inline(never)]
     pub(super) fn release_owned_backtrace_args(&mut self, index: usize) {
         if index >= self.backtrace_args_stack.len() {
-            // Healed residue: a panic contained at a JIT-shim/module boundary
-            // truncated `backtrace_args_stack` while the panicked extent's
-            // Backtrace specpdl entries survive for the deferred depth-based
-            // unwind (`restore_jit_shim_boundary` doc). Their slots are
-            // already gone; releasing degrades to a no-op by design.
+            // A boundary may already have retired this slot. JIT recovery
+            // normally retains surviving frames' values in new owned slots
+            // before retiring the old argument stores.
             return;
         }
         debug_assert_eq!(
@@ -573,7 +640,7 @@ impl Context {
     }
 
     /// Test-only: observed depth of the backtrace args stack (containment
-    /// regression tests assert healed residue leaves it at base).
+    /// regression tests assert deferred unwind returns it to its base).
     #[cfg(test)]
     pub(crate) fn backtrace_args_stack_len_for_test(&self) -> usize {
         self.backtrace_args_stack.len()

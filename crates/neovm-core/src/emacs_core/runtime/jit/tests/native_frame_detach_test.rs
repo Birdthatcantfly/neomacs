@@ -11,6 +11,10 @@ use crate::emacs_core::eval::{Context, SpecBinding};
 use crate::emacs_core::intern::intern;
 use crate::emacs_core::value::LambdaParams;
 
+#[cfg(test)]
+#[path = "native_frame_detach_pending_test.rs"]
+mod pending_tests;
+
 fn function(nargs: usize, ops: Vec<Op>, constants: Vec<Value>) -> ByteCodeFunction {
     let mut f = ByteCodeFunction::new(LambdaParams {
         required: (1..=nargs).map(|i| SymId(i as u32)).collect(),
