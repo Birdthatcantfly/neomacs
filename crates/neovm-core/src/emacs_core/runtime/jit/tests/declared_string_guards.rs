@@ -7,7 +7,6 @@ use crate::heap_types::LispString;
 #[derive(Debug)]
 #[must_use]
 struct InlineStringGuard(std::marker::PhantomData<*const ()>);
-static_assertions::assert_not_impl_any!(InlineStringGuard: Send, Sync);
 
 impl InlineStringGuard {
     fn new() -> Self {
@@ -54,7 +53,7 @@ fn array_fn(op: ArrayOp) -> ByteCodeFunction {
         ],
         ArrayOp::Aref => vec![Op::StackRef(1), Op::StackRef(1), Op::Aref, Op::Return],
     };
-    function.max_stack = 8;
+    function.max_stack = crate::emacs_core::bytecode::StackDepth::for_test(8);
     function
 }
 

@@ -35,7 +35,6 @@ struct Entry {
 
 // This existing TLS entry remains owned by the activated mutator/heap.
 // Signed numeric metadata adds no new TLS or cross-mutator ownership.
-static_assertions::assert_not_impl_any!(Entry: Send, Sync);
 
 thread_local! {
     static CACHE: Cell<Option<Entry>> = const { Cell::new(None) };

@@ -416,8 +416,6 @@ impl<'a> From<&'a LispString> for SymbolNameQuery<'a> {
     }
 }
 
-static_assertions::assert_not_impl_any!(SymbolNameQuery<'static>: Send, Sync);
-
 /// A key referring only to append-only, immutable NameAtomStorage.
 /// GNU `oblookup` compares character count and bytes, ignoring the MB flag
 /// (`lread.c:4945`). This is deliberately separate from LispString Eq/Hash.

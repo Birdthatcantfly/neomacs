@@ -223,6 +223,17 @@ fn symbols_gnu_shorthand_declared_replacement_variants() {
     );
 }
 
+/// Declared counts still apply GNU's live CHARACTER_WIDTH and glyph policy
+/// to each consumed code (character.c:350,425-440), after mixed-domain rewriting.
+#[test]
+fn symbols_gnu_shorthand_declared_live_width_policy() {
+    assert_gnu(
+        "live_width_policy",
+        include_str!("shorthand_declared/live_width_policy.el"),
+        include_str!("shorthand_declared/live_width_policy.expect"),
+    );
+}
+
 #[test]
 fn symbols_gnu_shorthand_declared_full_code_boundary_syntax() {
     assert_gnu(

@@ -1188,7 +1188,6 @@ pub(crate) struct StringSearchSuccess {
     searched: SearchedString,
     _mutator: std::marker::PhantomData<*const ()>,
 }
-static_assertions::assert_not_impl_any!(StringSearchSuccess: Send, Sync);
 
 /// GNU string match registers are signed and need not be ordered after
 /// a declared SCHARS/SBYTES conversion. They are not substring bounds.

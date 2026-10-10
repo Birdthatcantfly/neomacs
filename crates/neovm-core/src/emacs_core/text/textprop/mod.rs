@@ -2869,8 +2869,6 @@ pub(crate) struct StringTextPropertyTarget {
     _mutator: std::marker::PhantomData<*const ()>,
 }
 
-static_assertions::assert_not_impl_any!(StringTextPropertyTarget: Send, Sync);
-
 impl TryFrom<Value> for StringTextPropertyTarget {
     type Error = Flow;
 

@@ -3999,18 +3999,11 @@ pub(crate) fn builtin_string_width(ctx: &mut super::eval::Context, args: Vec<Val
             if step > data.len().saturating_sub(byte) && byte < data.len() {
                 return Err(bounds_error());
             }
-            let ordinary_width =
-                if decode_multibyte && crate::emacs_core::emacs_char::char_byte8_p(code) {
-                    4
-                } else if decode_multibyte || code < 0x80 {
-                    char::from_u32(code)
-                        .map(crate::encoding::char_width)
-                        .unwrap_or(1)
-                } else {
-                    1
-                };
+            // GNU character.c:350,425-440 decodes according to SCHARS/SBYTES
+            // then applies live CHARACTER_WIDTH/display-table policy, including
+            // raw byte codes when the supplied count suppresses decoding.
             width = width
-                .checked_add(unit_width(code, ordinary_width))
+                .checked_add(policy.width(code))
                 .filter(|sum| *sum <= isize::MAX as usize)
                 .ok_or_else(|| {
                     signal(

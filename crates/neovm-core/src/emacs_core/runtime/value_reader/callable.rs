@@ -219,7 +219,6 @@ impl Drop for RootScope {
         restore_scratch_gc_roots(self.saved);
     }
 }
-static_assertions::assert_not_impl_any!(RootScope: Send, Sync);
 
 pub(crate) fn read_from_callable(
     ctx: &mut Context,

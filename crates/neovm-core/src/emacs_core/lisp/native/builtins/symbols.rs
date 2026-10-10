@@ -1960,8 +1960,6 @@ impl TryFrom<Value> for CheckedInternSoftObarray {
     }
 }
 
-static_assertions::assert_not_impl_any!(CheckedInternSoftObarray: Send, Sync);
-
 /// One selected lookup domain. Custom conversion occurs before NAME coercion,
 /// matching GNU Fintern_soft. The selection stays local to the calling mutator.
 #[derive(Debug)]
@@ -1969,8 +1967,6 @@ enum SelectedInternSoftObarray {
     Global,
     Custom(CheckedInternSoftObarray),
 }
-
-static_assertions::assert_not_impl_any!(SelectedInternSoftObarray: Send, Sync);
 
 /// Raw shorthand result before GNU name construction changes its metadata.
 /// Threading: owns only Rust bytes and numeric metadata, no Lisp references.

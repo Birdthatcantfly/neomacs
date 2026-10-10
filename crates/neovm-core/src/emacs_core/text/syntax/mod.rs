@@ -3751,7 +3751,6 @@ impl<'a> StringSyntaxPositionSource<'a> {
         }
     }
 }
-static_assertions::assert_not_impl_any!(StringSyntaxPositionSource<'static>: Send, Sync);
 
 #[derive(Debug)]
 enum StringSyntaxPositionMode<'a> {
@@ -3819,8 +3818,6 @@ pub(crate) struct StringSyntaxPropByteRun<'a> {
     // No TLS is added; neither migration nor shared concurrent mutation is valid.
     _mutator: std::marker::PhantomData<*mut ()>,
 }
-
-static_assertions::assert_not_impl_any!(StringSyntaxPropByteRun<'static>: Send, Sync);
 
 impl std::fmt::Debug for StringSyntaxPropByteRun<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

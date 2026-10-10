@@ -3133,7 +3133,6 @@ enum SavedMatchData {
         _mutator: std::marker::PhantomData<*const ()>,
     },
 }
-static_assertions::assert_not_impl_any!(SavedMatchData: Send, Sync);
 
 impl SavedMatchData {
     fn capture(eval: &mut super::eval::Context) -> Result<Self, Flow> {

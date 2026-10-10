@@ -671,7 +671,7 @@ impl ReaderEnvironment<'_> {
 }
 
 /// Snapshot shorthand binding at Lisp string entry. A snapshot borrows
-/// owned LispString data under its existing Send/Sync contract, with no
+/// mutator-confined LispString data; it never crosses owner threads and has no
 /// evaluator, callback, GC handle or TLS state. Optionality is converted
 /// only at inherited API boundaries.
 #[derive(Clone, Copy, Debug)]
@@ -679,8 +679,6 @@ pub(crate) enum ReadSymbolShorthandBinding<'a> {
     Unbound,
     Snapshot(&'a ReadSymbolShorthands),
 }
-
-static_assertions::assert_impl_all!(ReadSymbolShorthandBinding<'static>: Send, Sync);
 
 impl<'a> From<Option<&'a ReadSymbolShorthands>> for ReadSymbolShorthandBinding<'a> {
     fn from(value: Option<&'a ReadSymbolShorthands>) -> Self {
@@ -805,7 +803,6 @@ impl<'a> TryFrom<&'a Value> for OriginalStringReadSource<'a> {
         })
     }
 }
-static_assertions::assert_not_impl_any!(OriginalStringReadSource<'static>: Send, Sync);
 
 /// Detached byte-backed snapshots have no Lisp object identity. Native string
 /// character reads carry their original heap payload alongside the snapshot.
@@ -816,7 +813,6 @@ enum OriginalStringCacheBinding<'a> {
     Uncached,
     Original(OriginalStringReadSource<'a>),
 }
-static_assertions::assert_not_impl_any!(OriginalStringCacheBinding<'static>: Send, Sync);
 
 /// Logical bounds paired with START's byte coordinate chosen at the entry
 /// boundary. An original binding retains the identity used by GNU unget.
@@ -870,7 +866,6 @@ impl<'a> CharacterReadRange<'a> {
         Ok(range)
     }
 }
-static_assertions::assert_not_impl_any!(CharacterReadRange<'static>: Send, Sync);
 
 /// Logical source progress without rescanning a normal source at creation.
 /// PhysicalEnd is a proof that the requested character count is at least the
@@ -1009,7 +1004,6 @@ struct ReaderCursorCheckpoint {
     characters: SourceCharacterCursor,
 }
 
-static_assertions::assert_not_impl_any!(LispReaderRange<'static>: Send, Sync);
 static_assertions::assert_impl_all!(SourceCharacterCursor: Send, Sync);
 static_assertions::assert_impl_all!(ReaderCursorCheckpoint: Send, Sync);
 

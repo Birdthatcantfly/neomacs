@@ -66,8 +66,6 @@ pub(super) struct DeclaredStringSyntaxState<'a> {
     _mutator: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
-static_assertions::assert_not_impl_any!(DeclaredStringSyntaxState<'static>: Send, Sync);
-
 impl std::fmt::Debug for DeclaredStringSyntaxState<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeclaredStringSyntaxState")

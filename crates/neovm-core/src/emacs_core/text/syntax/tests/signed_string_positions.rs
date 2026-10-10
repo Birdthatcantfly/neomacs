@@ -20,7 +20,7 @@ fn signed_property_coordinate_is_retained_as_a_typed_diagnostic() {
     );
     with_intervals(&mut string, 1);
     let props = SyntaxProperties::for_scan(true, &context.obarray, &context.buffers);
-    let run = StringSyntaxPropByteRun::new(props, &string, Some(string.intervals()));
+    let run = StringSyntaxPropByteRun::new(props, &string, string.intervals().as_table());
     assert_eq!(run.position_error(), None);
     assert_eq!(run.syntax_table_prop_at_string_byte(3), None);
     assert_eq!(
@@ -53,7 +53,7 @@ fn positive_property_coordinate_beyond_declared_bounds_is_also_rejected() {
     let run = StringSyntaxPropByteRun::new(
         SyntaxProperties::for_scan(true, &context.obarray, &context.buffers),
         &string,
-        Some(string.intervals()),
+        string.intervals().as_table(),
     );
     run.syntax_table_prop_at_string_byte(2);
     assert_eq!(
@@ -74,14 +74,17 @@ fn ordinary_property_and_ignore_controls_have_no_coordinate_diagnostic() {
     let honoring = StringSyntaxPropByteRun::new(
         SyntaxProperties::for_scan(true, &context.obarray, &context.buffers),
         &string,
-        Some(string.intervals()),
+        string.intervals().as_table(),
     );
     for byte in [0, 1, 2, 4, 5] {
         honoring.property_free_until(byte);
         assert_eq!(honoring.position_error(), None);
     }
-    let ignoring =
-        StringSyntaxPropByteRun::new(SyntaxProperties::Ignore, &string, Some(string.intervals()));
+    let ignoring = StringSyntaxPropByteRun::new(
+        SyntaxProperties::Ignore,
+        &string,
+        string.intervals().as_table(),
+    );
     assert_eq!(ignoring.property_free_until(usize::MAX - 1), usize::MAX);
     assert_eq!(ignoring.position_error(), None);
 }
