@@ -2915,34 +2915,45 @@ fn call_process_program_resolution_errors_match_gnu_report_file_error() {
             .expect("chmod 0644");
     }
 
-    let results = eval_all(&format!(
-        r#"(condition-case e (call-process "/nonexistent/program/xyzzy" nil nil nil) (error e))
-           (condition-case e (call-process "{dir}") (error e))
-           (condition-case e (call-process "") (error e))
-           (let ((exec-path (list "{noexec_dir}")))
-             (condition-case e (call-process "noexecprog") (error e)))"#,
-    ));
-
-    // ENOENT: missing program — file-missing with the strerror middle element.
-    assert_eq!(
-        results[0],
-        r#"OK (file-missing "Searching for program" "No such file or directory" "/nonexistent/program/xyzzy")"#
-    );
-    // EISDIR: an absolute directory is not runnable — file-error "Is a directory".
-    assert_eq!(
-        results[1],
-        format!(r#"OK (file-error "Searching for program" "Is a directory" "{dir}")"#)
-    );
-    // Empty program name expands to default-directory (a directory) -> EISDIR.
-    assert_eq!(
-        results[2],
-        r#"OK (file-error "Searching for program" "Is a directory" "")"#
-    );
-    // EACCES: a found-but-unrunnable file -> permission-denied "Permission denied".
-    assert_eq!(
-        results[3],
-        r#"OK (permission-denied "Searching for program" "Permission denied" "noexecprog")"#
-    );
+    // Keep every lookup local: ambient exec-path entries and root-level
+    // nonexistent names can traverse network mounts on Darwin. GNU openp
+    // (lread.c) only needs these four filesystem outcomes, not startup Lisp.
+    let missing = format!("{dir}/missing-program");
+    let mut eval = Context::new();
+    eval.set_variable("default-directory", Value::string(format!("{dir}/")));
+    eval.set_variable("exec-path", Value::list(vec![Value::string(&noexec_dir)]));
+    eval.set_variable("exec-suffixes", Value::NIL);
+    let cases = [
+        (
+            "missing program",
+            format!(r#"(call-process "{missing}" nil nil nil)"#),
+            format!(
+                r#"OK (file-missing "Searching for program" "No such file or directory" "{missing}")"#
+            ),
+        ),
+        (
+            "directory program",
+            format!(r#"(call-process "{dir}")"#),
+            format!(r#"OK (file-error "Searching for program" "Is a directory" "{dir}")"#),
+        ),
+        (
+            "empty program",
+            r#"(call-process "")"#.to_owned(),
+            r#"OK (file-error "Searching for program" "Is a directory" "")"#.to_owned(),
+        ),
+        (
+            "non-executable program",
+            r#"(call-process "noexecprog")"#.to_owned(),
+            r#"OK (permission-denied "Searching for program" "Permission denied" "noexecprog")"#
+                .to_owned(),
+        ),
+    ];
+    for (case, form, expected) in cases {
+        tracing::info!(case, "checking call-process executable lookup error");
+        let result =
+            eval_one_in_context(&mut eval, &format!("(condition-case e {form} (error e))"));
+        assert_eq!(result, expected, "{case}");
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&noexec_dir);
