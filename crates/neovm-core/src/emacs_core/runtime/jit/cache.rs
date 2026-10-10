@@ -586,11 +586,16 @@ fn compile_osr_leaf(
     name_hint: Option<SymId>,
 ) -> Option<OsrEntry> {
     record_compiled_obarray(Some(obarray));
+    let diagnostic = stats::front_diag::begin(id, stats::CompileOrigin::Osr, None);
     let clock = stats::CompileClock::start(stats::CompileOrigin::Osr);
+    let diagnostic_start = diagnostic.as_ref().map(|_| clock.started());
     let entry = compile_osr_leaf_timed(obarray, func, osr_pc, id, name_hint);
     let elapsed = clock.finish(entry.is_some());
     if let Some(entry) = &entry {
         entry.leaf.obs.note_compile_time(elapsed);
+    }
+    if let (Some(diagnostic), Some(start)) = (diagnostic, diagnostic_start) {
+        diagnostic.finish(start, elapsed, entry.is_some());
     }
     entry
 }
