@@ -135,3 +135,66 @@ fn issue554_oracle_compiled_funcall_uses_active_symbol_policy() {
         &neo,
     );
 }
+
+#[test]
+fn issue554_oracle_positioned_resolution_preserves_original_error_operands() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    let (oracle, neo) = eval_oracle_and_neovm(
+        r#"(let ((symbols-with-pos-enabled t))
+  (fmakunbound 'issue554-positioned-void)
+  (fset 'issue554-positioned-invalid 42)
+  (unwind-protect
+      (list
+       (let ((target (position-symbol 'issue554-positioned-void 1)))
+         (condition-case err (funcall target)
+           (error (list (car err)
+                        (let ((symbols-with-pos-enabled nil))
+                          (eq (car (cdr err)) target))))))
+       (let ((target (position-symbol 'issue554-positioned-invalid 2)))
+         (condition-case err (funcall target)
+           (error (list (car err)
+                        (let ((symbols-with-pos-enabled nil))
+                          (eq (car (cdr err)) target))))))
+       (mapcar
+        (lambda (condition)
+          (fset 'issue554-positioned-user-signal
+                (list 'lambda nil
+                      '(fset 'issue554-positioned-user-signal 42)
+                      (list 'signal (list 'quote condition) '(quote (payload)))))
+          (condition-case err
+              (funcall (position-symbol 'issue554-positioned-user-signal 3))
+            (error err)))
+        '(invalid-function void-function)))
+    (fmakunbound 'issue554-positioned-invalid)
+    (fmakunbound 'issue554-positioned-user-signal)))"#,
+    );
+    assert_ok_eq(
+        "((void-function t) (invalid-function t) ((invalid-function payload) (void-function payload)))",
+        &oracle,
+        &neo,
+    );
+}
+
+#[test]
+fn issue554_oracle_positioned_true_function_preserves_original_error_operands() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    let (oracle, neo) = eval_oracle_and_neovm(
+        r#"(let ((symbols-with-pos-enabled t)
+      (original (and (fboundp t) (symbol-function t))))
+  (unwind-protect
+      (mapcar
+       (lambda (condition)
+         (fset t (list 'lambda nil
+                       '(fset t 42)
+                       (list 'signal (list 'quote condition) '(quote (payload)))))
+         (condition-case err (funcall (position-symbol t 4))
+           (error err)))
+       '(invalid-function void-function))
+    (fset t original)))"#,
+    );
+    assert_ok_eq(
+        "((invalid-function payload) (void-function payload))",
+        &oracle,
+        &neo,
+    );
+}

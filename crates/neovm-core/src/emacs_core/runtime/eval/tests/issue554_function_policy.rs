@@ -127,3 +127,104 @@ fn issue554_positioned_handler_uses_active_symbol_policy() {
         "((error nil) (caught t) (error nil))",
     );
 }
+
+#[test]
+fn issue554_positioned_resolution_preserves_original_error_operands() {
+    check(
+        r#"(let ((symbols-with-pos-enabled t))
+  (fmakunbound 'issue554-positioned-void)
+  (fset 'issue554-positioned-invalid 42)
+  (unwind-protect
+      (list
+       (let ((target (position-symbol 'issue554-positioned-void 1)))
+         (condition-case err (funcall target)
+           (error (list (car err)
+                        (let ((symbols-with-pos-enabled nil))
+                          (eq (car (cdr err)) target))))))
+       (let ((target (position-symbol 'issue554-positioned-invalid 2)))
+         (condition-case err (funcall target)
+           (error (list (car err)
+                        (let ((symbols-with-pos-enabled nil))
+                          (eq (car (cdr err)) target))))))
+       (mapcar
+        (lambda (condition)
+          (fset 'issue554-positioned-user-signal
+                (list 'lambda nil
+                      '(fset 'issue554-positioned-user-signal 42)
+                      (list 'signal (list 'quote condition) '(quote (payload)))))
+          (condition-case err
+              (funcall (position-symbol 'issue554-positioned-user-signal 3))
+            (error err)))
+        '(invalid-function void-function)))
+    (fmakunbound 'issue554-positioned-invalid)
+    (fmakunbound 'issue554-positioned-user-signal)))"#,
+        "((void-function t) (invalid-function t) ((invalid-function payload) (void-function payload)))",
+    );
+}
+
+#[test]
+fn issue554_positioned_true_function_preserves_original_error_operands() {
+    check(
+        r#"(let ((symbols-with-pos-enabled t)
+      (original (and (fboundp t) (symbol-function t))))
+  (unwind-protect
+      (mapcar
+       (lambda (condition)
+         (fset t (list 'lambda nil
+                       '(fset t 42)
+                       (list 'signal (list 'quote condition) '(quote (payload)))))
+         (condition-case err (funcall (position-symbol t 4))
+           (error err)))
+       '(invalid-function void-function))
+    (fset t original)))"#,
+        "((invalid-function payload) (void-function payload))",
+    );
+}
+
+#[test]
+fn issue554_positioned_untraced_function_survives_gc_and_releases_its_root() {
+    use crate::emacs_core::error::EvalResult;
+    use crate::emacs_core::subr::SubrSpec;
+
+    fn collect(context: &mut Context) -> EvalResult {
+        context.gc_collect_exact();
+        context
+            .eval_str("(hash-table-count issue554-positioned-function-weak)")
+            .map_err(crate::emacs_core::error::flow_from_eval_error)
+    }
+
+    let mut context = Context::new();
+    context.register_subr(SubrSpec::fixed0("issue554-positioned-gc-callee", collect));
+    context.set_variable("symbols-with-pos-enabled", Value::NIL);
+    let weak = context
+        .eval_str(
+            "(setq issue554-positioned-function-weak
+               (make-hash-table :test 'eq :weakness 'key))",
+        )
+        .expect("weak-key witness");
+    let function = context.tagged_heap.alloc_symbol_with_pos(
+        Value::symbol("issue554-positioned-gc-callee"),
+        Value::fixnum(17),
+    );
+    context
+        .apply(Value::symbol("puthash"), vec![function, Value::T, weak])
+        .expect("weak witness insertion");
+    context.set_variable("symbols-with-pos-enabled", Value::T);
+    let specpdl_depth = context.specpdl.len();
+    // This entry intentionally has no outer backtrace, argument, lexical or
+    // obarray root for the wrapper: the weak hash key cannot keep it alive.
+    let count = context
+        .funcall_general_untraced(function, Vec::<Value>::new())
+        .expect("untraced collecting positioned call");
+    assert_eq!(count, Value::fixnum(1));
+    assert_eq!(context.specpdl.len(), specpdl_depth);
+    context.gc_collect_exact();
+    // No dereference of FUNCTION after its owning scope ends. Its weak key
+    // disappears, proving the temporary root was also released.
+    assert_eq!(
+        context
+            .eval_str("(hash-table-count issue554-positioned-function-weak)")
+            .expect("released weak witness"),
+        Value::fixnum(0)
+    );
+}

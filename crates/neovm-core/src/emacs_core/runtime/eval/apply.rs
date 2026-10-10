@@ -3026,7 +3026,45 @@ impl Context {
                 let Some(symbol) = function.as_symbol_id(self.symbol_mode()) else {
                     return Err(signal(LispCondition::InvalidFunction, vec![function]));
                 };
-                self.funcall_general_untraced(Value::from_sym_id(symbol), args)
+                // A named function cell can stop owning this wrapper during
+                // autoload or Lisp execution. Retain original_fun until any
+                // replacement signal has pinned its payload.
+                let root_scope = self.save_specpdl_roots();
+                self.push_specpdl_root(function);
+                let canonical = Value::from_sym_id(symbol);
+                // Resolution failures name GNU original_fun. Snapshot before
+                // execution: a valid callee can redefine its own cell and then
+                // deliberately signal either of these conditions.
+                let callable_before = if canonical.is_t() {
+                    // The shared classifier treats T as a constant, although
+                    // its function cell can hold a valid callable in GNU.
+                    Some(
+                        self.obarray
+                            .symbol_function_id(symbol)
+                            .is_some_and(|cell| self.function_value_is_callable(&cell)),
+                    )
+                } else {
+                    self.callable_before_call_snapshot(&canonical)
+                };
+                let result = self.funcall_general_untraced(canonical, args);
+                let result = match result.kinded_ref() {
+                    Err(FlowRef::Signal(sig))
+                        if (sig.symbol == invalid_function_symbol()
+                            || sig.symbol == intern("void-function"))
+                            && !callable_before
+                                .unwrap_or_else(|| self.function_value_is_callable(&canonical)) =>
+                    {
+                        let condition = if sig.symbol == invalid_function_symbol() {
+                            LispCondition::InvalidFunction
+                        } else {
+                            LispCondition::VoidFunction
+                        };
+                        Err(signal(condition, vec![function]))
+                    }
+                    _ => result,
+                };
+                self.restore_specpdl_roots(root_scope);
+                result
             }
             ValueKind::Cons => {
                 if super::super::autoload::is_autoload_value(&function, self.symbol_mode()) {
