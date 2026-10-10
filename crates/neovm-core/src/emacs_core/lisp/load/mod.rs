@@ -330,7 +330,11 @@ fn should_log_load_form_error(eval: &super::eval::Context, err: &EvalError) -> b
         EvalError::Signal { .. } => true,
         // A shutdown is the normal end of a dump run, not a load failure.
         EvalError::Shutdown(_) => false,
-        EvalError::UncaughtThrow { tag, .. } => !eval.has_active_catch(tag),
+        EvalError::UncaughtThrow {
+            tag, symbol_mode, ..
+        } => eval
+            .matching_catch_resume_with_symbols(tag, *symbol_mode)
+            .is_none(),
     }
 }
 

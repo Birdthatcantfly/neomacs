@@ -46,6 +46,8 @@ pub enum EvalError {
     UncaughtThrow {
         tag: Value,
         value: Value,
+        /// GNU's selected catch equality survives loader/public boundaries.
+        symbol_mode: crate::tagged::SymbolMode,
         /// Not constructible outside `error.rs`; see the type docs.
         pin: InFlightRoots,
     },
@@ -99,10 +101,23 @@ impl EvalError {
 
     /// The only way to build an uncaught-throw error; pins tag and value.
     pub fn uncaught_throw(tag: Value, value: Value) -> Self {
+        Self::from_throw(ThrowData::new(tag, value))
+    }
+
+    /// Transfer the selected catch equality and owning roots together.
+    /// GNU eval.c:1477 selects the catch before eval.c:1449 unbinds.
+    fn from_throw(thrown: ThrowData) -> Self {
+        let ThrowData {
+            tag,
+            value,
+            symbol_mode,
+            pin,
+        } = thrown;
         Self::UncaughtThrow {
             tag,
             value,
-            pin: InFlightRoots::pin([tag, value]),
+            symbol_mode,
+            pin,
         }
     }
 }
@@ -166,7 +181,17 @@ pub(crate) fn flow_from_eval_error(err: EvalError) -> Flow {
                 pin: roots,
             }))
         }
-        EvalError::UncaughtThrow { tag, value, .. } => Flow::throw(tag, value),
+        EvalError::UncaughtThrow {
+            tag,
+            value,
+            symbol_mode,
+            pin,
+        } => Flow::from_kind(FlowKind::Throw(Box::new(ThrowData {
+            tag,
+            value,
+            symbol_mode,
+            pin,
+        }))),
         EvalError::Shutdown(request) => Flow::shutdown(request),
     }
 }
@@ -1157,7 +1182,7 @@ pub(crate) fn signal_with_data_id(symbol: SymId, data: Value) -> Flow {
 pub fn map_flow(flow: Flow) -> EvalError {
     match flow.into_kind() {
         FlowKind::Signal(sig) => EvalError::from_signal(*sig),
-        FlowKind::Throw(thrown) => EvalError::uncaught_throw(thrown.tag, thrown.value),
+        FlowKind::Throw(thrown) => EvalError::from_throw(*thrown),
         FlowKind::Shutdown(request) => EvalError::Shutdown(request),
         FlowKind::ThreadBlocked(blocked) => EvalError::signal(
             intern("error"),
@@ -2560,3 +2585,7 @@ mod flow_word_gc_tests;
 #[cfg(test)]
 #[path = "tests/memory_signal_policy_test.rs"]
 mod memory_signal_policy_tests;
+
+#[cfg(test)]
+#[path = "tests/issue554_throw_roundtrip.rs"]
+mod issue554_throw_roundtrip_tests;

@@ -1057,7 +1057,7 @@ impl Context {
                 ));
             }
             let head = handler.cons_car();
-            if !(head.is_symbol(symbol_mode) || head.is_symbol_with_pos() || head.is_cons()) {
+            if !(head.is_symbol(symbol_mode) || head.is_cons()) {
                 return Err(signal(
                     "error",
                     vec![Value::string(format!(

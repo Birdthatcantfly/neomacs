@@ -3021,9 +3021,12 @@ impl Context {
                 vec![Value::symbol("nil")],
             )),
             _ if function.is_symbol_with_pos() => {
-                // Transparently unwrap symbol-with-pos → bare symbol for funcall dispatch.
-                let bare = function.as_symbol_with_pos_sym().unwrap();
-                self.funcall_general_untraced(bare, args)
+                // GNU eval.c:3153 projects symbols only under live SYMBOLP policy.
+                // Preserve the original function operand when the wrapper is disabled.
+                let Some(symbol) = function.as_symbol_id(self.symbol_mode()) else {
+                    return Err(signal(LispCondition::InvalidFunction, vec![function]));
+                };
+                self.funcall_general_untraced(Value::from_sym_id(symbol), args)
             }
             ValueKind::Cons => {
                 if super::super::autoload::is_autoload_value(&function, self.symbol_mode()) {
