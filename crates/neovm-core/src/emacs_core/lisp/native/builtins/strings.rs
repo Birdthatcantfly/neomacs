@@ -576,7 +576,7 @@ pub(crate) fn builtin_concat_slice(args: &[Value]) -> EvalResult {
         ) -> Result<crate::heap_types::LispString, Flow> {
             Ok(match kind {
                 crate::heap_types::StringCharacterCountKind::Computed => {
-                    crate::heap_types::LispString::from_emacs_bytes(bytes)
+                    crate::heap_types::LispString::from_emacs_bytes_with_chars(bytes, chars)
                 }
                 crate::heap_types::StringCharacterCountKind::Supplied => {
                     crate::heap_types::LispString::from_emacs_bytes_with_declared_chars(
