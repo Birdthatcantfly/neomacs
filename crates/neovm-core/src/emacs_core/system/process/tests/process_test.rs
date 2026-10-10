@@ -2792,13 +2792,16 @@ fn start_process_missing_absolute_program_defers_exit_127() {
 fn start_process_buffer_name_program_and_arg_contracts_match_oracle() {
     crate::test_utils::init_test_tracing();
     let cat = find_bin("cat");
+    // GNU process.c:7045-7056 checks an active descriptor and may return t
+    // when terminal control cannot be queried. Probe the live child before
+    // EOF can close its tty or retire its buffer association.
     let results = eval_all(&format!(
         r#"(with-temp-buffer
              (let ((p (start-process "neo-sp-contract-buffer" (current-buffer) "{cat}")))
                (unwind-protect
                    (list (processp p)
-                         (null (condition-case err (process-send-eof nil) (error err)))
-                         (null (condition-case err (process-running-child-p nil) (error err))))
+                         (null (condition-case err (process-running-child-p nil) (error err)))
+                         (null (condition-case err (process-send-eof nil) (error err))))
                  (ignore-errors (delete-process p)))))
            (condition-case err (start-process 'neo-sp-contract-name nil "{cat}") (error err))
            (condition-case err (start-process t nil "{cat}") (error err))
