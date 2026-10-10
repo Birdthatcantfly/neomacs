@@ -91,6 +91,33 @@ fn raw_path_value(path: &std::path::Path) -> Value {
     ))
 }
 
+#[cfg(unix)]
+enum RawFilenameFixture {
+    Created,
+    Unsupported,
+}
+
+#[cfg(unix)]
+fn raw_filename_fixture(result: io::Result<()>) -> RawFilenameFixture {
+    match result {
+        Ok(()) => RawFilenameFixture::Created,
+        Err(error) => {
+            // APFS rejects invalid UTF-8 filename bytes with EILSEQ. GNU also
+            // passes unibyte names unchanged (coding.c:encode_file_name_1) to
+            // native unlink/rmdir/open (fileio.c), so these success fixtures
+            // cannot exist there. Probe the actual filesystem, not just the OS.
+            if cfg!(target_os = "macos") && error.raw_os_error() == Some(libc::EILSEQ) {
+                tracing::info!(
+                    %error,
+                    "skipping raw filename fixture: filesystem rejects invalid UTF-8"
+                );
+                return RawFilenameFixture::Unsupported;
+            }
+            panic!("creating raw filename fixture: {error}");
+        }
+    }
+}
+
 #[test]
 fn temporary_file_directory_for_eval_accepts_raw_unibyte_string() {
     crate::test_utils::init_test_tracing();
@@ -782,7 +809,9 @@ fn builtin_delete_file_internal_handles_raw_unibyte_paths() {
     crate::test_utils::init_test_tracing();
     let path = raw_temp_path(b"neovm-delete-file-\xFF");
     let _ = fs::remove_file(&path);
-    fs::write(&path, b"x").unwrap();
+    let RawFilenameFixture::Created = raw_filename_fixture(fs::write(&path, b"x")) else {
+        return;
+    };
     let value = Value::heap_string(crate::heap_types::LispString::from_unibyte(
         path.as_os_str().as_bytes().to_vec(),
     ));
@@ -858,7 +887,9 @@ fn builtin_delete_directory_internal_handles_raw_unibyte_paths() {
     crate::test_utils::init_test_tracing();
     let path = raw_temp_path(b"neovm-delete-dir-\xFF");
     let _ = fs::remove_dir_all(&path);
-    fs::create_dir_all(&path).unwrap();
+    let RawFilenameFixture::Created = raw_filename_fixture(fs::create_dir_all(&path)) else {
+        return;
+    };
     let value = Value::heap_string(crate::heap_types::LispString::from_unibyte(
         path.as_os_str().as_bytes().to_vec(),
     ));
@@ -4851,10 +4882,15 @@ fn builtin_insert_file_contents_handles_raw_unibyte_filename() {
 
     let dir = raw_temp_path(b"neovm-insert-file-\xFF");
     let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
+    let RawFilenameFixture::Created = raw_filename_fixture(fs::create_dir_all(&dir)) else {
+        return;
+    };
 
     let path = dir.join(std::ffi::OsStr::from_bytes(b"visit-\xFE"));
-    fs::write(&path, b"raw file").unwrap();
+    let RawFilenameFixture::Created = raw_filename_fixture(fs::write(&path, b"raw file")) else {
+        fs::remove_dir_all(&dir).expect("remove raw filename fixture directory");
+        return;
+    };
 
     let mut eval = Context::new();
     let result = builtin_insert_file_contents(&mut eval, vec![raw_path_value(&path), Value::T])
