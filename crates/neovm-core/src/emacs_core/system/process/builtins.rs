@@ -1526,6 +1526,7 @@ pub(super) fn connect_network_process_at_explicit_address(
                         &path,
                         server_backlog.unwrap_or(5),
                         &socket_options,
+                        contact,
                     )?;
                     contact = process_contact_plist_put(
                         contact,
@@ -1580,7 +1581,7 @@ pub(super) fn connect_network_process_at_explicit_address(
                     return Ok(Value::make_process(id));
                 }
 
-                let socket = connect_unix_seqpacket_socket(&path, &socket_options)?;
+                let socket = connect_unix_seqpacket_socket(&path, &socket_options, contact)?;
                 contact = process_contact_plist_put(
                     contact,
                     ProcessKeyword::Remote.value(),
@@ -2200,6 +2201,7 @@ pub(super) fn connect_local_socket_process(
                     &service_path,
                     server_backlog.unwrap_or(5),
                     &socket_options,
+                    contact,
                 )?;
                 contact = process_contact_plist_put(
                     contact,
@@ -2253,7 +2255,7 @@ pub(super) fn connect_local_socket_process(
                 return Ok(Value::make_process(id));
             }
 
-            let socket = connect_unix_seqpacket_socket(&service_path, &socket_options)?;
+            let socket = connect_unix_seqpacket_socket(&service_path, &socket_options, contact)?;
             contact = process_contact_plist_put(
                 contact,
                 ProcessKeyword::Remote.value(),

@@ -5194,9 +5194,19 @@ pub(super) fn bind_unix_seqpacket_listener_socket(
     path: &Path,
     backlog: i32,
     options: &[NetworkSocketOptionSpec],
+    contact: Value,
 ) -> Result<Socket, Flow> {
-    let socket = Socket::new(Domain::UNIX, Type::SEQPACKET, None)
-        .map_err(|err| network_socket_io_error("Cannot create server socket", err))?;
+    let socket = Socket::new(Domain::UNIX, Type::SEQPACKET, None).map_err(|err| {
+        #[cfg(target_os = "macos")]
+        {
+            network_socket_io_error_with_name("make server process failed", contact, err)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = contact;
+            network_socket_io_error("Cannot create server socket", err)
+        }
+    })?;
     apply_network_socket_options(&socket, options)?;
     let sock_addr = SockAddr::unix(path)
         .map_err(|err| network_socket_io_error("Cannot bind server socket", err))?;
@@ -5216,9 +5226,19 @@ pub(super) fn bind_unix_seqpacket_listener_socket(
 pub(super) fn connect_unix_seqpacket_socket(
     path: &Path,
     options: &[NetworkSocketOptionSpec],
+    contact: Value,
 ) -> Result<Socket, Flow> {
-    let socket = Socket::new(Domain::UNIX, Type::SEQPACKET, None)
-        .map_err(|err| network_socket_io_error("Cannot create client socket", err))?;
+    let socket = Socket::new(Domain::UNIX, Type::SEQPACKET, None).map_err(|err| {
+        #[cfg(target_os = "macos")]
+        {
+            network_socket_io_error_with_name("make client process failed", contact, err)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = contact;
+            network_socket_io_error("Cannot create client socket", err)
+        }
+    })?;
     apply_network_socket_options(&socket, options)?;
     let sock_addr = SockAddr::unix(path)
         .map_err(|err| network_socket_io_error("make client process failed", err))?;
