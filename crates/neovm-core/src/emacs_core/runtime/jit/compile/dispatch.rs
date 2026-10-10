@@ -2915,7 +2915,7 @@ fn cbsym_read_contained(ctx: *mut u8, which: u8, args_ptr: *const i64, out: *mut
     })
 }
 
-/// `Op::Throw`: stash `Flow::Throw{tag, value}` for the signal-exit path.
+/// Legacy bare-policy C shim; generated `Op::Throw` uses the Context shim below.
 /// Compiled bodies have no local handlers (handler opcodes bail), so a throw
 /// always propagates out — exactly the interpreter's `resume_nonlocal` once no
 /// local handler matches. Context-free.
@@ -2926,6 +2926,23 @@ pub extern "C" fn neovm_jit_throw(tag: i64, value: i64) {
         stash_pending_flow(Flow::throw(
             Value::from_bits(tag as usize),
             Value::from_bits(value as usize),
+        ));
+    })
+}
+
+/// Generated `Op::Throw`: capture the active policy before any unbinding.
+/// SAFETY: `ctx` is the dormant Context supplied by the generated leaf.
+#[allow(clippy::not_unsafe_ptr_arg_deref)] // C-ABI shim: generated leaf vmctx contract.
+#[unsafe(no_mangle)]
+pub extern "C" fn neovm_jit_throw_with_symbols(ctx: *mut u8, tag: i64, value: i64) {
+    jit_shim_contain!(ctx, (), {
+        // SAFETY: this read cannot collect or call Lisp while the generated
+        // leaf's operand slots are unrooted.
+        let symbol_mode = unsafe { &*(ctx as *const Context) }.symbol_mode();
+        stash_pending_flow(Flow::throw_with_symbols(
+            Value::from_bits(tag as usize),
+            Value::from_bits(value as usize),
+            symbol_mode,
         ));
     })
 }
@@ -3209,7 +3226,8 @@ pub extern "C" fn neovm_jit_match_handler(ctx: *mut u8, ours: i64, out: *mut i64
                     }
                     // The selected catch belongs to an outer frame: ours are all
                     // popped; rethrow for the frame unwind + outer handlers.
-                    stash_pending_flow(Flow::throw(tag, value));
+                    // The outer catch was selected under the original throwing policy.
+                    stash_pending_flow(Flow::from_kind(FlowKind::Throw(thrown)));
                     return -1;
                 }
                 FlowKind::Signal(sig) => {

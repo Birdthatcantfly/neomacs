@@ -6363,7 +6363,7 @@ impl<'a> Vm<'a> {
                         let val = stk!().pop().unwrap_or(Value::NIL);
                         let tag = stk!().pop().unwrap_or(Value::NIL);
                         publish_phase!();
-                        resume_flow!(Flow::throw(tag, val))
+                        resume_flow!(Flow::throw_with_symbols(tag, val, self.ctx.symbol_mode()))
                     }
 
                     // -- Closure --
@@ -9102,7 +9102,8 @@ impl<'a> Vm<'a> {
                 }
 
                 if selected_resume.is_some() {
-                    return Err(Flow::throw(tag, value));
+                    // Preserve the already selected equality policy and its owned roots.
+                    return Err(Flow::from_kind(FlowKind::Throw(thrown)));
                 }
                 tracing::debug!(
                     target: "neomacs::throw_on_input",

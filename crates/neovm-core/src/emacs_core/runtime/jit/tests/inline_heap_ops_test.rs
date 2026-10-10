@@ -173,6 +173,7 @@ fn cons_store_clif(
     );
     let config = module.target_config();
     let groups = ShimGroups {
+        throw_flow: crate::emacs_core::jit::compile::shim_refs::ThrowShimSelection::Unavailable,
         subr_spec: false,
         cbsym_spec: false,
         tier2_profile: false,

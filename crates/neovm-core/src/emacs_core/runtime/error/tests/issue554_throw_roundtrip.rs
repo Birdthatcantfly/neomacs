@@ -86,3 +86,55 @@ fn issue554_cloned_owned_throw_roundtrip_preserves_policy_and_roots() {
         assert!(roots.iter().all(|root| root.bits() != payload.bits()));
     }
 }
+
+#[test]
+fn issue554_throw_policy_survives_bytecode_loader_frame() {
+    use crate::emacs_core::bytecode::{ByteCodeFunction, Op, StackDepth};
+    use crate::emacs_core::intern::intern;
+    use crate::emacs_core::value::LambdaParams;
+
+    // A real image invokes load-with-code-conversion in bytecode; minimal
+    // Context loading lacks that intervening frame. Model the same boundary
+    // with a compiled shim calling an interpreted loaded-form evaluator.
+    crate::emacs_core::jit::force_jit_off_for_test(true);
+    for (body, catch_tag, expected) in [
+        (
+            "(let ((symbols-with-pos-enabled t)) (throw (position-symbol 'issue554-loader-tag 0) 7))",
+            "'issue554-loader-tag",
+            "(7 nil)",
+        ),
+        (
+            "(let ((symbols-with-pos-enabled t)) (throw 'issue554-loader-tag 8))",
+            "(position-symbol 'issue554-loader-tag 9)",
+            "(8 nil)",
+        ),
+        (
+            "(let ((symbols-with-pos-enabled nil)) (throw (position-symbol 'issue554-loader-tag 0) 7))",
+            "'issue554-loader-tag",
+            "(no-catch nil)",
+        ),
+    ] {
+        let mut ctx = Context::new();
+        ctx.eval_str(&format!("(fset 'issue554-loaded-form '(lambda () {body}))"))
+            .expect("interpreted loaded form");
+        let mut shim = ByteCodeFunction::new(LambdaParams::simple(vec![]));
+        shim.ops = vec![Op::Constant(0), Op::Call(0), Op::Return];
+        shim.constants = vec![Value::symbol("issue554-loaded-form")].into();
+        shim.max_stack = StackDepth::for_test(4);
+        shim.seal_hand_assembled_ops_for_test();
+        ctx.obarray.set_symbol_function_id(
+            intern("issue554-compiled-loader"),
+            Value::make_bytecode(shim),
+        );
+        let value = ctx
+            .eval_str(&format!(
+                "(let ((symbols-with-pos-enabled nil))
+               (list (condition-case err
+                         (catch {catch_tag} (issue554-compiled-loader) 'fell-through)
+                       (no-catch (car err)))
+                     symbols-with-pos-enabled))"
+            ))
+            .expect("throw through compiled loader frame");
+        assert_eq!(print_value(&value), expected, "{body}");
+    }
+}

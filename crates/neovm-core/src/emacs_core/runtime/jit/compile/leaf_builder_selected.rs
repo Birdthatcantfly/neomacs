@@ -126,6 +126,11 @@ pub(super) fn build_selected_leaf_fn<S: LeafSink>(
             let cbsym_spec = spec_sites.values().any(|site| site.kind.is_cbsym());
             let shapes = jit_direct_shapes();
             let groups = ShimGroups {
+                throw_flow: if !aot && ops.iter().any(|op| matches!(op, Op::Throw)) {
+                    crate::emacs_core::jit::compile::shim_refs::ThrowShimSelection::Contextual
+                } else {
+                    crate::emacs_core::jit::compile::shim_refs::ThrowShimSelection::Unavailable
+                },
                 subr_spec,
                 cbsym_spec,
                 tier2_profile: emit.t2.is_some(),
@@ -770,6 +775,12 @@ pub(super) fn build_selected_leaf_fn<S: LeafSink>(
                             break;
                         }
                         Op::Throw => {
+                            // ABI45's frozen AOT import prefix has no Context
+                            // throw shim. Production AOT excludes this opcode;
+                            // direct baseline emission must fail closed too.
+                            if aot {
+                                return Err(CompileError::UnsupportedOp("aot-throw-symbol-policy"));
+                            }
                             // Stash Flow::Throw{tag, value} and exit via the signal
                             // path; inside a protected extent that path is the
                             // handler dispatch (a same-function `catch` is caught
@@ -777,8 +788,12 @@ pub(super) fn build_selected_leaf_fn<S: LeafSink>(
                             let value = stack.pop().ok_or(CompileError::StackUnderflow)?;
                             let tag = stack.pop().ok_or(CompileError::StackUnderflow)?;
                             let rt = rt.as_ref().ok_or(CompileError::UnsupportedOp("throw"))?;
-                            let throw_flow = rt.refs.get(fb.func, Shim::ThrowFlow);
-                            fb.ins().call(throw_flow, &[tag, value]);
+                            let throw_flow =
+                                rt.refs
+                                    .try_get(fb.func, Shim::ThrowFlowWithSymbols)
+                                    .ok_or(CompileError::UnsupportedOp("throw-context-shim"))?;
+                            let vmctx = fb.use_var(rt.vmctx_var);
+                            fb.ins().call(throw_flow, &[vmctx, tag, value]);
                             let se = signal_target_for_site(
                                 &mut fb,
                                 &mut signal_exit,

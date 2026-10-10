@@ -46,6 +46,7 @@ pub(crate) fn pure_entry_refs<S: sink::LeafSink>(
     ptr_ty: Type,
 ) -> Result<RtRefs, CompileError> {
     let groups = ShimGroups {
+        throw_flow: crate::emacs_core::jit::compile::shim_refs::ThrowShimSelection::Unavailable,
         subr_spec: false,
         cbsym_spec: false,
         tier2_profile: true,

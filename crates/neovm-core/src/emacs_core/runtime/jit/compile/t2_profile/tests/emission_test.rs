@@ -95,6 +95,7 @@ fn tier2_loop_credit_tests_crossing_zero() {
 #[test]
 fn tier2_profile_shims_are_optional_for_a_leaf() {
     let groups = ShimGroups {
+        throw_flow: crate::emacs_core::jit::compile::shim_refs::ThrowShimSelection::Unavailable,
         subr_spec: true,
         cbsym_spec: true,
         tier2_profile: false,

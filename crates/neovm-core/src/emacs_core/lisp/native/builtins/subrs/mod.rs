@@ -5947,9 +5947,7 @@ pub(crate) fn register_subrs(ctx: &mut crate::emacs_core::eval::Context) {
     ctx.register_subr(
         SubrSpec::new(
             "top-level",
-            NativeFn::ContextVec(|_ctx, args| {
-                crate::emacs_core::minibuffer::builtin_top_level(args)
-            }),
+            NativeFn::ContextVec(crate::emacs_core::minibuffer::builtin_top_level),
             SubrArity::new(0, Some(0)),
         )
         .interactive(crate::emacs_core::interactive::BuiltinInteractiveSpec::String("")),

@@ -1960,3 +1960,37 @@ fn aot_switch_bodies_stay_jit_only() {
         (1, 0, 1)
     );
 }
+
+#[test]
+fn issue554_throw_stays_jit_only_under_frozen_aot_imports() {
+    let ordinary_ops = [Op::Constant(0), Op::Constant(1), Op::Cons, Op::Return];
+    let (object, _) = build_baseline_object_for_leaf(
+        &ordinary_ops,
+        &[Value::fixnum(1), Value::fixnum(2)],
+        0,
+        None,
+    )
+    .expect("ordinary AOT emission")
+    .expect("supported ordinary AOT body");
+    let file = object::File::parse(&*object).expect("AOT object");
+    assert!(
+        !file.symbols().any(|symbol| {
+            symbol.is_undefined() && symbol.name() == Ok("neovm_jit_throw_with_symbols")
+        }),
+        "unused Context throw shim must not be declared into AOT"
+    );
+    let ops = [Op::Constant(0), Op::Constant(1), Op::Throw, Op::Return];
+    let constants = [Value::symbol("issue554-aot-throw"), Value::fixnum(9)];
+    // The producer's existing allowlist returns an ordinary JIT fallback.
+    assert!(
+        compile_leaf_to_object(&ops, &constants, 0, None)
+            .expect("production AOT gate")
+            .is_none()
+    );
+    // Even a caller bypassing that allowlist cannot import an unsalted shim
+    // or quietly use the legacy bare-policy ABI45 throw helper.
+    assert!(matches!(
+        build_baseline_object_for_leaf(&ops, &constants, 0, None),
+        Err(CompileError::UnsupportedOp("aot-throw-symbol-policy"))
+    ));
+}

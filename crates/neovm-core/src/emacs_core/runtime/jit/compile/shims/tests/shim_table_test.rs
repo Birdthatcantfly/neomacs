@@ -90,4 +90,6 @@ fn aot_import_prefix_preserves_main_names_without_the_journal_shim() {
     assert!(!MIR_SHIM_NAMES.contains(&"neovm_jit_t2_record_array_use"));
     assert!(!MIR_SHIM_NAMES.contains(&"neovm_jit_sqrt_binding_valid"));
     assert!(JIT_SHIM_NAMES.contains(&"neovm_jit_string_collection_write"));
+    assert!(!MIR_SHIM_NAMES.contains(&"neovm_jit_throw_with_symbols"));
+    assert!(JIT_SHIM_NAMES.contains(&"neovm_jit_throw_with_symbols"));
 }

@@ -1310,7 +1310,8 @@ fn builtin_recursive_edit_rejects_args() {
 #[test]
 fn builtin_top_level_throws_top_level_tag() {
     crate::test_utils::init_test_tracing();
-    let result = builtin_top_level(vec![]);
+    let mut eval = super::super::eval::Context::new();
+    let result = builtin_top_level(&mut eval, vec![]);
     // top-level now throws 'top-level to exit all recursive edits
     // (mirrors GNU Emacs keyboard.c:1187 Ftop_level).
     assert!(matches!(
@@ -1323,7 +1324,8 @@ fn builtin_top_level_throws_top_level_tag() {
 #[test]
 fn builtin_top_level_rejects_args() {
     crate::test_utils::init_test_tracing();
-    let result = builtin_top_level(vec![Value::NIL]);
+    let mut eval = super::super::eval::Context::new();
+    let result = builtin_top_level(&mut eval, vec![Value::NIL]);
     assert!(if matches!(
         result.kinded_ref(),
         Err(FlowRef::Signal(sig)) if sig.symbol_name() == "wrong-number-of-arguments"
@@ -1446,7 +1448,8 @@ fn builtin_minibuffer_contents_no_properties_rejects_args() {
 #[test]
 fn builtin_exit_minibuffer_throws_exit_tag() {
     crate::test_utils::init_test_tracing();
-    let result = builtin_exit_minibuffer(vec![]);
+    let mut eval = super::super::eval::Context::new();
+    let result = builtin_exit_minibuffer(&mut eval, vec![]);
     assert!(matches!(
         result.kinded_ref(),
         Err(FlowRef::Throw(ref thrown))

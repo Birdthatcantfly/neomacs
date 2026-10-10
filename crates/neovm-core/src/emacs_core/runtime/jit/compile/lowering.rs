@@ -3256,6 +3256,8 @@ pub(crate) fn build_mir_leaf_fn<S: LeafSink>(
             // emitter. AOT plans have no ordinary call slots yet.
             let shapes = jit_direct_shapes();
             let groups = super::ShimGroups {
+                throw_flow:
+                    crate::emacs_core::jit::compile::shim_refs::ThrowShimSelection::Unavailable,
                 subr_spec: plan.spec_sites.values().any(|s| s.kind.is_round1_subr()),
                 cbsym_spec: plan.has_named_builtin,
                 tier2_profile: emit.t2.is_some(),

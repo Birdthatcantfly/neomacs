@@ -1951,20 +1951,49 @@ fn compiles_trivial_natives_carsafe_maxmin_throw_numpreds() {
     assert_eq!(run1(Op::Numberp, Value::make_float(1.5), ctx_ptr), t);
     assert_eq!(run1(Op::Numberp, Value::NIL, ctx_ptr), nil);
 
-    // throw: stashes Flow::Throw and exits via the signal path.
-    let tag = Value::symbol("jit-throw-tag");
-    let thrown = lower_nullary_leaf(
-        &[Op::Constant(0), Op::Constant(1), Op::Throw],
-        &[tag, Value::make_int(42)],
-    )
-    .unwrap();
-    assert_eq!(thrown.call(ctx_ptr, &[]), NativeRun::Signal);
-    match take_pending_flow().expect("throw Flow stashed").into_kind() {
-        FlowKind::Throw(thrown) => {
+    // Both opcode engines capture the live policy before their outer catch
+    // resumes; the native shim's generated signature must carry Context too.
+    let bare_tag = Value::symbol("jit-throw-tag");
+    let tag = ev
+        .tagged_heap
+        .alloc_symbol_with_pos(bare_tag, Value::fixnum(0));
+    let ops = [Op::Constant(0), Op::Constant(1), Op::Throw];
+    let constants = [tag, Value::make_int(42)];
+    let native = lower_nullary_leaf(&ops, &constants).unwrap();
+    for policy in [
+        crate::tagged::SymbolMode::Bare,
+        crate::tagged::SymbolMode::Positioned,
+    ] {
+        ev.set_variable(
+            "symbols-with-pos-enabled",
+            Value::bool_val(policy == crate::tagged::SymbolMode::Positioned),
+        );
+        ev.push_condition_frame(crate::emacs_core::eval::ConditionFrame::Catch {
+            tag,
+            resume: crate::emacs_core::eval::ResumeTarget::InterpreterCatch,
+        });
+        let mut code = nullary();
+        code.ops = ops.to_vec();
+        code.constants = constants.to_vec().into();
+        code.max_stack = crate::emacs_core::bytecode::StackDepth::for_test(4);
+        code.seal_hand_assembled_ops_for_test();
+        let interpreted = crate::emacs_core::bytecode::Vm::from_context(&mut ev)
+            .execute(&code, vec![])
+            .expect_err("throw leaves opcode frame");
+        assert_eq!(native.call(ctx_ptr, &[]), NativeRun::Signal);
+        let compiled = take_pending_flow().expect("throw Flow stashed");
+        ev.set_variable("symbols-with-pos-enabled", Value::NIL);
+        for flow in [interpreted, compiled] {
+            let thrown = flow.as_throw().expect("opcode keeps a throw");
+            assert_eq!(thrown.symbol_mode(), policy);
             assert_eq!(thrown.tag, tag);
             assert_eq!(thrown.value, Value::make_int(42));
+            assert_eq!(
+                thrown.matches_tag(bare_tag),
+                policy == crate::tagged::SymbolMode::Positioned
+            );
         }
-        other => panic!("expected Flow::Throw, got {other:?}"),
+        ev.pop_condition_frame();
     }
 }
 

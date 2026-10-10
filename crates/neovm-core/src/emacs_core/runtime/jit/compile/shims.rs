@@ -808,7 +808,7 @@ pub(crate) struct ShimAddr(*const ());
 unsafe impl Sync for ShimAddr {}
 
 #[used]
-pub(crate) static JIT_SHIM_TABLE: [(&str, ShimAddr); 74] = [
+pub(crate) static JIT_SHIM_TABLE: &[(&str, ShimAddr)] = &[
     (
         "neovm_jit_unobserved_collection_owner",
         ShimAddr(crate::tagged::gc::neovm_jit_unobserved_collection_owner as *const ()),
@@ -993,6 +993,10 @@ pub(crate) static JIT_SHIM_TABLE: [(&str, ShimAddr); 74] = [
         ShimAddr(neovm_jit_symbolp_slow as *const ()),
     ),
     ("neovm_jit_throw", ShimAddr(neovm_jit_throw as *const ())),
+    (
+        "neovm_jit_throw_with_symbols",
+        ShimAddr(neovm_jit_throw_with_symbols as *const ()),
+    ),
     ("neovm_jit_unbind", ShimAddr(neovm_jit_unbind as *const ())),
     (
         "neovm_jit_unwind_protect",
@@ -1066,7 +1070,7 @@ pub(crate) static JIT_SHIM_TABLE: [(&str, ShimAddr); 74] = [
 /// tiers' builders call this, so a shim that exists is a shim the JIT can
 /// resolve — in the production binary and in a test binary alike.
 pub(crate) fn register_shims(builder: &mut cranelift_jit::JITBuilder) {
-    for (name, addr) in &JIT_SHIM_TABLE {
+    for (name, addr) in JIT_SHIM_TABLE {
         builder.symbol(*name, addr.0 as *const u8);
     }
 }

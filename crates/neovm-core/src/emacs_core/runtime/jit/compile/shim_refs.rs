@@ -61,6 +61,8 @@ pub(crate) enum ShimGroup {
     CollectionJournal,
     /// Cold GEN0 observed-window refinement; declared only in Observed JIT.
     CollectionObservationGate,
+    /// Context-bearing throw, excluded from the frozen AOT import set.
+    ContextThrow,
 }
 
 /// Every runtime shim generated code calls, in declaration order.
@@ -164,6 +166,8 @@ pub(crate) enum Shim {
     StringCollectionWrite,
     /// Cold exact-owner eligibility and empty-gap publication; no safe point.
     UnobservedCollectionOwner,
+    /// Appended JIT-only throw; the original ThrowFlow identity stays bare.
+    ThrowFlowWithSymbols,
 }
 
 /// The parameter shapes of the shim signatures.
@@ -198,6 +202,7 @@ impl Shim {
             Shim::SaveRestriction => "neovm_jit_save_restriction",
             Shim::UnwindProtect => "neovm_jit_unwind_protect",
             Shim::ThrowFlow => "neovm_jit_throw",
+            Shim::ThrowFlowWithSymbols => "neovm_jit_throw_with_symbols",
             Shim::IntegerpSlow => "neovm_jit_integerp_slow",
             Shim::NumberpSlow => "neovm_jit_numberp_slow",
             Shim::Builtin1 => "neovm_jit_builtin1",
@@ -254,6 +259,7 @@ impl Shim {
     /// The declaration group (see [`ShimGroup`]).
     pub(crate) fn group(self) -> ShimGroup {
         match self {
+            Shim::ThrowFlowWithSymbols => ShimGroup::ContextThrow,
             Shim::SqrtBindingValid => ShimGroup::OptSink,
             Shim::T2RecordArrayUse => ShimGroup::Tier2ArrayProfile,
             Shim::StringCollectionWrite => ShimGroup::CollectionJournal,
@@ -386,8 +392,10 @@ impl Shim {
             | Shim::PopHandler => (&[Ptr], false),
             // (vmctx, forms) -> ()
             Shim::UnwindProtect => (&[Ptr, I64], false),
-            // (tag, value) -> ()
+            // Legacy ABI45: (tag, value) -> ()
             Shim::ThrowFlow => (&[I64, I64], false),
+            // JIT-only: (vmctx, tag, value) -> ()
+            Shim::ThrowFlowWithSymbols => (&[Ptr, I64, I64], false),
             // (v) -> t/nil bits
             Shim::IntegerpSlow | Shim::NumberpSlow => (&[I64], true),
             // (vmctx, idx, a[, b[, c]], out_ptr) -> status
@@ -455,14 +463,24 @@ impl Shim {
     }
 }
 
+/// Compile-local availability of the additive Context-bearing throw shim.
+/// AOT retains its frozen import set and rejects Throw opcode bodies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThrowShimSelection {
+    Unavailable,
+    Contextual,
+}
+
 /// The groups a leaf declares: the base set always, speculation groups
 /// when the body has their sites, and JIT-only shapes/census groups only
 /// under their knobs. The frontend keeps optional groups off even when the
 /// persistent backend declared them, preserving eager-import CLIF identity.
 /// Threading: these immutable compile facts belong to one leaf build; the
 /// table stores no Lisp state and each mutator owns its compilation module.
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ShimGroups {
+    pub(crate) throw_flow: ThrowShimSelection,
     pub(crate) subr_spec: bool,
     pub(crate) cbsym_spec: bool,
     pub(crate) tier2_profile: bool,
@@ -485,6 +503,7 @@ pub(crate) fn collection_observation_gate_enabled() -> bool {
 impl ShimGroups {
     pub(crate) fn contains(self, group: ShimGroup) -> bool {
         match group {
+            ShimGroup::ContextThrow => self.throw_flow == ThrowShimSelection::Contextual,
             ShimGroup::OptSink => false,
             ShimGroup::Tier2ArrayProfile => false,
             ShimGroup::Base => true,

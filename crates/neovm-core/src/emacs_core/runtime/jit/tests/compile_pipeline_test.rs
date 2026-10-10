@@ -424,6 +424,7 @@ fn jit_pipeline_optional_shim_groups_follow_the_leaf_not_the_module() {
         cranelift_jit::JITModule::new(builder)
     };
     let every = ShimGroups {
+        throw_flow: crate::emacs_core::jit::compile::shim_refs::ThrowShimSelection::Contextual,
         subr_spec: true,
         cbsym_spec: true,
         tier2_profile: true,
@@ -445,6 +446,7 @@ fn jit_pipeline_optional_shim_groups_follow_the_leaf_not_the_module() {
     let mut func =
         Function::with_name_signature(UserFuncName::user(0, 0), Signature::new(CallConv::SystemV));
     let base_only = ShimGroups {
+        throw_flow: crate::emacs_core::jit::compile::shim_refs::ThrowShimSelection::Unavailable,
         subr_spec: false,
         cbsym_spec: false,
         tier2_profile: false,

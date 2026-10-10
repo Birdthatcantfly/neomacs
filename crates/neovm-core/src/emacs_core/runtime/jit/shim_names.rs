@@ -118,6 +118,8 @@ const NEOVM_JIT_SHIM_NAMES: &[&str] = &[
     "neovm_jit_string_collection_write",
     // Cold GEN0 observation refinement, never an AOT import.
     "neovm_jit_unobserved_collection_owner",
+    // Live symbol policy for JIT Throw; preserve the frozen AOT prefix.
+    "neovm_jit_throw_with_symbols",
 ];
 
 // ABI26's existing shim prefix remains the complete AOT import/salt set.
