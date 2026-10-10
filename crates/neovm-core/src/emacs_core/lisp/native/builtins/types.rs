@@ -217,12 +217,19 @@ pub(crate) fn builtin_hash_table_p(args: Vec<Value>) -> EvalResult {
     Ok(Value::bool_val(args[0].is_hash_table()))
 }
 
-pub(crate) fn builtin_type_of(args: &[Value]) -> EvalResult {
+pub(crate) fn builtin_type_of(args: &[Value], symbols: crate::tagged::SymbolMode) -> EvalResult {
     expect_args("type-of", args, 1)?;
     // GNU Emacs `type-of` handles symbol, integer, subr directly,
     // then delegates to `cl-type-of` for everything else.
     match args[0].kind() {
         ValueKind::Nil | ValueKind::T | ValueKind::Symbol(_) => Ok(Value::symbol("symbol")),
+        // GNU data.c:196-199 uses SYMBOLP here; cl-type-of retains the
+        // physical symbol-with-pos type (data.c:212-236). Classify once.
+        ValueKind::Veclike(VecLikeType::SymbolWithPos)
+            if symbols == crate::tagged::SymbolMode::Positioned =>
+        {
+            Ok(Value::symbol("symbol"))
+        }
         // GNU `type-of` returns `integer` for both fixnums and bignums; only
         // `cl-type-of` distinguishes `bignum`.
         ValueKind::Fixnum(_) | ValueKind::Veclike(VecLikeType::Bignum) => {
@@ -235,19 +242,13 @@ pub(crate) fn builtin_type_of(args: &[Value]) -> EvalResult {
 
 /// `type-of` as registered: fixed arity 1, called straight off the bytecode
 /// stack like GNU `funcall_subr`'s `a1` case (absent optionals arrive as nil).
-/// Rust callers use [`builtin_type_of`] directly.
+/// Rust callers pass an explicit symbol policy to [`builtin_type_of`].
 pub(crate) fn builtin_type_of_with_ctx_1(
     ctx: &mut super::super::eval::Context,
     object: Value,
 ) -> EvalResult {
     let args: [Value; 1] = [object];
-    // Stale tagged pointer detection is not applicable with tagged pointers —
-    // the old generation-based check relied on tagged pointer indirection which
-    // no longer exists.  Just delegate directly.
-    if object.is_symbol(ctx.symbol_mode()) {
-        return Ok(Value::symbol("symbol"));
-    }
-    builtin_type_of(&args)
+    builtin_type_of(&args, ctx.symbol_mode())
 }
 
 /// `type-of` and `cl-type-of` of a record, `None` for any other value: the

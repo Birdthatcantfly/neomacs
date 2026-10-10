@@ -8925,7 +8925,10 @@ fn a_record_type_of_site_answers_inline() {
         };
         for &item in &items {
             let want = if name == "type-of" {
-                crate::emacs_core::builtins::types::builtin_type_of(&[item])
+                crate::emacs_core::builtins::types::builtin_type_of(
+                    &[item],
+                    crate::tagged::SymbolMode::Bare,
+                )
             } else {
                 crate::emacs_core::builtins::types::builtin_cl_type_of(&[item])
             }
@@ -9383,7 +9386,10 @@ fn type_of_call_sites_answer_as_the_builtin_on_the_fast_path() {
         let fast0 = SUBR_SPEC_FAST_COUNT.load(Ordering::Relaxed);
         for item in &items {
             let want = if name == "type-of" {
-                crate::emacs_core::builtins::types::builtin_type_of(&[*item])
+                crate::emacs_core::builtins::types::builtin_type_of(
+                    &[*item],
+                    crate::tagged::SymbolMode::Bare,
+                )
             } else {
                 crate::emacs_core::builtins::types::builtin_cl_type_of(&[*item])
             }
