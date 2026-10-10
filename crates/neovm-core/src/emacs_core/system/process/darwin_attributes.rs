@@ -2,6 +2,7 @@
 //! nanoseconds and start times are epoch microseconds, not Linux clock ticks.
 use super::*;
 
+#[cfg(target_os = "macos")]
 pub(super) fn attributes(pid: i64) -> EvalResult {
     let Some(snapshot) = sys::darwin_process_snapshot(pid) else {
         return Ok(Value::NIL);
@@ -47,10 +48,8 @@ pub(super) fn attributes(pid: i64) -> EvalResult {
         i64::from(snapshot.start.microseconds),
     );
     add("start", time_list_from_secs_usecs(start.0, start.1));
-    let elapsed = now_epoch_secs_usecs()
-        .map(|now| nonnegative_time_diff(now, start))
-        .unwrap_or((0, 0));
-    add("etime", time_list_from_secs_usecs(elapsed.0, elapsed.1));
+    let elapsed = elapsed_time(now_epoch_secs_usecs().unwrap_or(start), start);
+    add("etime", elapsed);
     if let Some(memory) = snapshot.memory {
         add("vsize", Value::fixnum(memory.virtual_kilobytes as i64));
         add("rss", Value::fixnum(memory.resident_kilobytes as i64));
@@ -63,3 +62,21 @@ pub(super) fn attributes(pid: i64) -> EvalResult {
     attrs.reverse();
     Ok(Value::list(attrs))
 }
+
+// GNU sysdep.c:4403-4406 subtracts wall-clock times without clamping. i128
+// contains the full difference of two i64 epoch seconds in microseconds.
+fn elapsed_time(now: (i64, i64), start: (i64, i64)) -> Value {
+    let micros = (i128::from(now.0) - i128::from(start.0)) * 1_000_000 + i128::from(now.1)
+        - i128::from(start.1);
+    let seconds = micros.div_euclid(1_000_000);
+    Value::list(vec![
+        Value::fixnum((seconds >> 16) as i64),
+        Value::fixnum((seconds & 0xffff) as i64),
+        Value::fixnum(micros.rem_euclid(1_000_000) as i64),
+        Value::fixnum(0),
+    ])
+}
+
+#[cfg(test)]
+#[path = "tests/darwin_attributes_test.rs"]
+mod tests;
