@@ -12,7 +12,7 @@ fn pair_form(call: &str, name: &str, positioned: bool, nonsymbol: bool) -> Strin
         format!("'{name}")
     };
     format!(
-        "(mapcar (lambda (enabled)\n           (let* ((symbols-with-pos-enabled t) (arg {argument}))\n             (let ((symbols-with-pos-enabled enabled))\n               (condition-case err {call}\n                 (wrong-type-argument (cadr err)))))) '(nil t))"
+        "(mapcar (lambda (enabled)\n           (let* ((symbols-with-pos-enabled t) (arg {argument}))\n             (let ((symbols-with-pos-enabled enabled))\n               (condition-case err {call}\n                 (wrong-type-argument (car (cdr err))))))) '(nil t))"
     )
 }
 
