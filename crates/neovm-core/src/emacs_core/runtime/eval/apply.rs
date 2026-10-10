@@ -3035,9 +3035,9 @@ impl Context {
                 // Resolution failures name GNU original_fun. Snapshot before
                 // execution: a valid callee can redefine its own cell and then
                 // deliberately signal either of these conditions.
-                let callable_before = if canonical.is_t() {
-                    // The shared classifier treats T as a constant, although
-                    // its function cell can hold a valid callable in GNU.
+                let callable_before = if canonical.is_t() || canonical.is_nil() {
+                    // The shared classifier treats these as constants, while
+                    // enabled nonnil wrappers enter GNU's function-cell lookup.
                     Some(
                         self.obarray
                             .symbol_function_id(symbol)
@@ -3046,11 +3046,14 @@ impl Context {
                 } else {
                     self.callable_before_call_snapshot(&canonical)
                 };
-                let result = self.funcall_general_untraced(canonical, args);
+                // This wrapper is physically nonnil even when XSYMBOL is nil.
+                // Keep the bare Nil arm's void-function behavior separate.
+                let result = self.apply_symbol_callable_untraced(symbol, args, true);
                 let result = match result.kinded_ref() {
                     Err(FlowRef::Signal(sig))
                         if (sig.symbol == invalid_function_symbol()
                             || sig.symbol == intern("void-function"))
+                            && !sig.data.first().is_some_and(|operand| operand.is_subr())
                             && !callable_before
                                 .unwrap_or_else(|| self.function_value_is_callable(&canonical)) =>
                     {

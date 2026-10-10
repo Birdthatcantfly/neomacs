@@ -166,6 +166,11 @@ pub(crate) fn builtin_functionp(eval: &mut super::eval::Context, args: Vec<Value
 }
 
 pub(crate) fn value_is_function(eval: &super::eval::Context, arg: Value) -> bool {
+    // GNU FUNCTIONP delegates to indirect_function, whose initial NILP is
+    // physical even when nil's function cell contains a callable.
+    if arg.is_nil() {
+        return false;
+    }
     let object = eval.unwrap_symbol(arg);
     if let Some(symbol) = match object.kind() {
         ValueKind::Nil => Some(intern("nil")),
@@ -173,8 +178,12 @@ pub(crate) fn value_is_function(eval: &super::eval::Context, arg: Value) -> bool
         ValueKind::Symbol(id) => Some(id),
         _ => None,
     } {
-        if let Some(function) =
-            resolve_indirect_symbol_by_id_in_obarray(&eval.obarray, symbol).map(|(_, value)| value)
+        if let Some(function) = super::symbols::resolve_indirect_symbol_by_id_in_obarray_checked(
+            &eval.obarray,
+            symbol,
+            eval.symbols_with_pos_enabled,
+        )
+        .map(|(_, value)| value)
         {
             if super::autoload::is_autoload_value(&function, eval.symbol_mode()) {
                 // GNU FUNCTIONP accepts autoloads only with a raw nil TYPE.

@@ -746,7 +746,7 @@ pub(crate) fn builtin_fset_2(
 ) -> EvalResult {
     let mode = eval.symbol_mode();
     let symbol = SymId::from_value(eval, symbol_value)?;
-    if symbol == intern("nil") && !def.is_nil() {
+    if symbol_value.is_nil() && !def.is_nil() {
         return Err(signal(
             LispCondition::SettingConstant,
             vec![Value::symbol("nil")],
@@ -795,8 +795,12 @@ pub(crate) fn would_create_function_alias_cycle_in_obarray(
     def: &Value,
     mode: SymbolMode,
 ) -> bool {
+    // GNU Ffset stops only at physical nil; an enabled positioned nil
+    // remains a symbol link and can close a cycle through nil's cell.
+    if def.is_nil() {
+        return false;
+    }
     let mut current = match symbol_id(def, mode) {
-        Some(id) if id == intern("nil") => return false,
         Some(id) => id,
         None => return false,
     };
@@ -811,10 +815,15 @@ pub(crate) fn would_create_function_alias_cycle_in_obarray(
         }
 
         let next = match obarray.symbol_function_id(current) {
-            Some(function) => match symbol_id(&function, mode) {
-                Some(id) => id,
-                None => return false,
-            },
+            Some(function) => {
+                if function.is_nil() {
+                    return false;
+                }
+                match symbol_id(&function, mode) {
+                    Some(id) => id,
+                    None => return false,
+                }
+            }
             None => return false,
         };
         current = next;
@@ -892,7 +901,7 @@ pub(crate) fn builtin_defconst_1(eval: &mut super::eval::Context, args: Vec<Valu
 pub(crate) fn builtin_fmakunbound(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {
     expect_args("fmakunbound", &args, 1)?;
     let symbol = SymId::from_value(eval, args[0])?;
-    if symbol == intern("nil") || symbol == intern("t") {
+    if args[0].is_nil() || symbol == intern("t") {
         return Err(signal(LispCondition::SettingConstant, vec![args[0]]));
     }
     eval.note_macro_expansion_mutation();
@@ -1423,6 +1432,10 @@ pub(crate) fn indirect_function_impl_checked(
     expect_min_args("indirect-function", args, 1)?;
     expect_max_args("indirect-function", args, 2)?;
 
+    // GNU indirect_function's !NILP tests the original Value, not XSYMBOL.
+    if args[0].is_nil() {
+        return Ok(args[0]);
+    }
     if let Some(symbol) = symbol_id_checked(&args[0], symbols_with_pos_enabled) {
         if let Some(function) = resolve_indirect_symbol_by_id_in_obarray_checked(
             obarray,
@@ -1461,10 +1474,10 @@ pub(crate) fn resolve_indirect_symbol_by_id_in_obarray_checked(
     let mut current = symbol;
     loop {
         let function = symbol_function_cell_in_obarray(obarray, current)?;
+        if function.is_nil() {
+            return Some((NIL_SYM_ID, function));
+        }
         if let Some(next) = symbol_id_checked(&function, symbols_with_pos_enabled) {
-            if next == NIL_SYM_ID {
-                return Some((next, Value::NIL));
-            }
             current = next;
             continue;
         }
@@ -1476,7 +1489,11 @@ pub(crate) fn resolve_indirect_symbol_by_id(
     eval: &super::eval::Context,
     symbol: SymId,
 ) -> Option<(SymId, Value)> {
-    resolve_indirect_symbol_by_id_in_obarray(eval.obarray(), symbol)
+    resolve_indirect_symbol_by_id_in_obarray_checked(
+        eval.obarray(),
+        symbol,
+        eval.symbols_with_pos_enabled,
+    )
 }
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up

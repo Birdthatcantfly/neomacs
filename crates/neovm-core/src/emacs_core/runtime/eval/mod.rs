@@ -6336,6 +6336,7 @@ impl Context {
         match result.kinded_ref() {
             Err(FlowRef::Signal(sig))
                 if sig.symbol == invalid_function_symbol()
+                    && !sig.data.first().is_some_and(|operand| operand.is_subr())
                     && !callable_before
                         .unwrap_or_else(|| self.function_value_is_callable(&function)) =>
             {
@@ -6392,6 +6393,7 @@ impl Context {
         match result.kinded_ref() {
             Err(FlowRef::Signal(sig))
                 if sig.symbol == invalid_function_symbol()
+                    && !sig.data.first().is_some_and(|operand| operand.is_subr())
                     && !callable_before
                         .unwrap_or_else(|| self.function_value_is_callable(&function)) =>
             {
@@ -6425,6 +6427,7 @@ impl Context {
                 match result.kinded_ref() {
                     Err(FlowRef::Signal(sig))
                         if sig.symbol == invalid_function_symbol()
+                            && !sig.data.first().is_some_and(|operand| operand.is_subr())
                             && !callable_before
                                 .unwrap_or_else(|| self.function_value_is_callable(&func)) =>
                     {
@@ -6493,6 +6496,17 @@ impl Context {
             }
             ValueKind::Symbol(id) => {
                 super::builtins::symbols::resolve_indirect_symbol_by_id(self, id)
+                    .is_some_and(|(_, resolved)| self.function_value_is_callable(&resolved))
+            }
+            ValueKind::Nil | ValueKind::T if function.is_symbol_with_pos() => {
+                // Enabled nonnil wrappers still follow these function cells.
+                // Snapshot the callable before its body can replace the cell;
+                // bare nil/t retain the classifier's existing constant path.
+                function
+                    .as_symbol_id(self.symbol_mode())
+                    .and_then(|id| {
+                        super::builtins::symbols::resolve_indirect_symbol_by_id(self, id)
+                    })
                     .is_some_and(|(_, resolved)| self.function_value_is_callable(&resolved))
             }
             _ => false,

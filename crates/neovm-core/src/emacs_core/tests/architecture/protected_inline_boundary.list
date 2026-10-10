@@ -455,3 +455,6 @@ exempt	emacs_core/runtime/bytecode/vm.rs	PublishedSolePhase::finish	run_loop,inl
 
 exempt	emacs_core/lisp/native/builtins/collections.rs	builtin_aref_values_in_state	builtin_aref_2	# GNU policy-bearing accessor introduced by issue554; retain no inline attribute outside the verified protected-neutral subset
 exempt	emacs_core/lisp/native/builtins/cons_list.rs	bytecode_elt_values_in_state	builtin_elt_2	# GNU policy-bearing adapter introduced by issue554; retain no inline attribute pending the protected pre-LTO census
+exempt	emacs_core/runtime/eval/apply.rs	Context::save_specpdl_roots	funcall_general_untraced	# existing root helper reached only by the new positioned-function cold arm; retain existing attributes pending protected codegen census
+exempt	emacs_core/runtime/eval/apply.rs	Context::push_specpdl_root	funcall_general_untraced	# existing root helper reached only by the new positioned-function cold arm; retain existing attributes pending protected codegen census
+exempt	emacs_core/runtime/eval/apply.rs	Context::restore_specpdl_roots	funcall_general_untraced	# existing root helper reached only by the new positioned-function cold arm; retain existing attributes pending protected codegen census
