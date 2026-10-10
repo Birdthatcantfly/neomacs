@@ -9,7 +9,7 @@ fn compressed_table(context: &mut Context) -> Value {
         .alloc_symbol_with_pos(Value::symbol("char-code-property-table"), Value::fixnum(0));
     let table =
         crate::emacs_core::chartable::make_char_table_with_extra_slots(purpose, Value::NIL, 5);
-    let compressed = Value::heap_string(LispString::from_unibyte(vec![2, 2, 0xC0, 0x83, 1]));
+    let compressed = Value::heap_string(LispString::from_unibyte(vec![2, 2, 0xC2, 0x83, 1]));
     let mut depth2_contents = vec![Value::NIL; 32];
     depth2_contents[2] = compressed;
     let depth2 = Value::make_sub_char_table(2, 0, depth2_contents);

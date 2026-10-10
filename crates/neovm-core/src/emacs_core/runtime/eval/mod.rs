@@ -4177,17 +4177,8 @@ fn bind_lexical_value_rooted_in_specpdl(
     }
 }
 
-fn bare_lambda_arg_symbol_id(value: Value) -> Option<SymId> {
-    let value = if value.is_symbol_with_pos() {
-        value.as_symbol_with_pos_sym().unwrap()
-    } else {
-        value
-    };
-    if value.is_nil() {
-        Some(intern("nil"))
-    } else {
-        value.as_bare_symbol_id()
-    }
+fn lambda_arg_symbol_id(value: Value, symbol_mode: crate::tagged::SymbolMode) -> Option<SymId> {
+    value.as_symbol_id(symbol_mode)
 }
 
 /// Panic-safe scope for [`Context::gc_inhibit_depth`]: construction increments

@@ -3,36 +3,27 @@ use crate::common::{
     assert_ok_eq, eval_oracle_and_neovm, return_if_neovm_enable_oracle_proptest_not_set,
 };
 
-fn compressed_literal() -> String {
-    let mut depth2 = vec!["nil".to_owned(); 32];
-    depth2[2] = r#""\002\002\300\203\001""#.to_owned();
-    let mut depth1 = vec!["nil".to_owned(); 16];
-    depth1[0] = format!("#^^[2 0 {}]", depth2.join(" "));
-    let mut contents = vec!["nil".to_owned(); 64];
-    contents[0] = format!("#^^[1 0 {}]", depth1.join(" "));
-    format!(
-        "#^[nil nil char-code-property-table nil {} nil nil nil nil nil]",
-        contents.join(" ")
-    )
-}
-
 fn policy_form(compiled: bool) -> String {
     let function = if compiled {
         "(progn (require 'bytecomp) (byte-compile '(lambda (table) (elt table 256))))"
     } else {
         "(lambda (table) (elt table 256))"
     };
+    // GNU lread.c suppresses positioned symbols inside char-table reader syntax.
+    // Public construction retains the positioned purpose. Count131 must use
+    // Unicode U+0083 (bytes C2 83), not raw-byte character bytes C0 83.
     format!(
-        r#"(let ((function {function}) (source {source:?}))
+        r#"(let ((function {function}))
         (mapcar
           (lambda (enabled)
             (let* ((symbols-with-pos-enabled t)
-                   (table (read-positioning-symbols source)))
-              (let ((symbols-with-pos-enabled enabled))
-                (let ((value (funcall function table)))
-                  (if (stringp value) 'compressed value)))))
-          '(nil t)))"#,
-        source = compressed_literal()
+                   (table (make-char-table
+                           (position-symbol 'char-code-property-table 0) nil)))
+              (set-char-table-range table '(256 . 383) "\002\002\u0083\001")
+              (let* ((symbols-with-pos-enabled enabled)
+                     (value (funcall function table)))
+                (if (stringp value) 'compressed value))))
+          '(nil t)))"#
     )
 }
 

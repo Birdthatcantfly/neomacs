@@ -3931,7 +3931,11 @@ impl Context {
         arglist: Value,
         args: &[Value],
     ) -> Result<(), Flow> {
-        walk_lambda_formals(fun, arglist, args, |sym, arg| self.try_specbind(sym, arg))
+        walk_lambda_formals(fun, arglist, args, self.symbol_mode(), |sym, arg| {
+            self.try_specbind(sym, arg)?;
+            // A formal can bind the flag itself, or a watcher can change it.
+            Ok(self.symbol_mode())
+        })
     }
 
     #[inline(never)]
@@ -3962,10 +3966,11 @@ impl Context {
         // installed with one `LexicalEnv` entry (GNU's one `specbind` of
         // `internal-interpreter-environment`) and retired inline.
         if !raw_cons_lambda && let Some(env) = env {
-            let new_env = match bind_lexical_formals(env, func_value, arglist, &args) {
-                Ok(new_env) => new_env,
-                Err(flow) => return self.unbind_to_with_result(root_count, Err(flow)),
-            };
+            let new_env =
+                match bind_lexical_formals(env, func_value, arglist, &args, self.symbol_mode()) {
+                    Ok(new_env) => new_env,
+                    Err(flow) => return self.unbind_to_with_result(root_count, Err(flow)),
+                };
             let result = if self.tier_i.engaged() {
                 self.tier_i_run_lexical_body(arglist, new_env, body)
             } else {
@@ -4032,6 +4037,7 @@ impl Context {
             func,
             arglist,
             &self.bc_buf[first_arg..first_arg + nargs],
+            self.symbol_mode(),
         )?;
         if self.tier_i.engaged() {
             return self.tier_i_run_lexical_body(arglist, new_env, body);
@@ -4096,7 +4102,8 @@ fn walk_lambda_formals(
     fun: Value,
     arglist: Value,
     args: &[Value],
-    mut bind: impl FnMut(SymId, Value) -> Result<(), Flow>,
+    mut symbol_mode: crate::tagged::SymbolMode,
+    mut bind: impl FnMut(SymId, Value) -> Result<crate::tagged::SymbolMode, Flow>,
 ) -> Result<(), Flow> {
     // Two string interns per interpreted lambda application: 423,456 of
     // them on one rust-lsp-typing capture, for two symbols whose ids are
@@ -4113,7 +4120,7 @@ fn walk_lambda_formals(
     while syms_left.is_cons() {
         let next = syms_left.cons_car();
         syms_left = syms_left.cons_cdr();
-        let Some(next_id) = bare_lambda_arg_symbol_id(next) else {
+        let Some(next_id) = lambda_arg_symbol_id(next, symbol_mode) else {
             return Err(signal(LispCondition::InvalidFunction, vec![fun]));
         };
 
@@ -4145,7 +4152,7 @@ fn walk_lambda_formals(
             } else {
                 Value::NIL
             };
-            bind(next_id, arg)?;
+            symbol_mode = bind(next_id, arg)?;
             previous_rest = false;
         }
     }
@@ -4175,14 +4182,15 @@ fn bind_lexical_formals(
     fun: Value,
     arglist: Value,
     args: &[Value],
+    symbol_mode: crate::tagged::SymbolMode,
 ) -> Result<Value, Flow> {
     let mut lexenv = env;
-    walk_lambda_formals(fun, arglist, args, |sym, arg| {
+    walk_lambda_formals(fun, arglist, args, symbol_mode, |sym, arg| {
         lexenv = Value::make_cons(
             Value::make_cons(lexenv_binding_symbol_value(sym), arg),
             lexenv,
         );
-        Ok(())
+        Ok(symbol_mode)
     })?;
     Ok(lexenv)
 }

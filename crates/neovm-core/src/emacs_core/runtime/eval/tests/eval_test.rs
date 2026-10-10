@@ -28279,3 +28279,75 @@ fn unbind_watcher_panic_restores_quit_and_vm_roots() {
 #[cfg(test)]
 #[path = "issue554_binding_policy.rs"]
 mod issue554_binding_policy;
+
+#[test]
+fn issue554_interpreted_closure_formals_follow_live_symbol_policy() {
+    assert_eq!(
+        bootstrap_eval_one(
+            r#"(let* ((symbols-with-pos-enabled t)
+                   (fn (make-interpreted-closure
+                        (list (position-symbol 'arg 0)) '(arg) nil)))
+              (list (func-arity fn)
+                    (condition-case err
+                        (let ((symbols-with-pos-enabled nil)) (func-arity fn))
+                      (error (car err)))
+                    (condition-case err
+                        (let ((symbols-with-pos-enabled nil)) (funcall fn 7))
+                      (error (car err)))))"#
+        ),
+        "OK ((1 . 1) invalid-function invalid-function)"
+    );
+}
+
+#[test]
+fn issue554_dynamic_formals_update_symbol_policy_after_each_binding() {
+    assert_eq!(
+        bootstrap_eval_one(
+            r#"(let* ((symbols-with-pos-enabled t)
+                   (fn (list 'lambda
+                             (list 'symbols-with-pos-enabled (position-symbol 'n 0))
+                             'n)))
+              (list (condition-case err (funcall fn nil 7) (error (car err)))
+                    (condition-case err (funcall fn t 7) (error (car err)))))"#
+        ),
+        "OK (invalid-function 7)"
+    );
+}
+
+#[test]
+fn issue554_closure_equal_and_hash_keys_follow_symbol_policy() {
+    assert_eq!(
+        bootstrap_eval_one(
+            r#"(let* ((arg (position-symbol 'n 0))
+                   (a (make-interpreted-closure (list arg) '(n) nil))
+                   (b (make-interpreted-closure '(n) '(n) nil)))
+              (mapcar (lambda (enabled)
+                        (let ((symbols-with-pos-enabled enabled)
+                              (table (make-hash-table :test 'equal)))
+                          (puthash a 1 table)
+                          (puthash b 2 table)
+                          (list (equal a b) (hash-table-count table)
+                                (gethash a table) (gethash b table)))) '(nil t)))"#
+        ),
+        "OK ((nil 2 1 2) (t 1 2 2))"
+    );
+}
+
+#[test]
+fn issue554_watcher_membership_follow_symbol_policy() {
+    assert_eq!(
+        bootstrap_eval_one(
+            r#"(let* ((a (make-interpreted-closure (list (position-symbol 'n 0)) '(n) nil))
+                   (b (make-interpreted-closure '(n) '(n) nil)))
+              (mapcar (lambda (enabled)
+                        (let ((symbols-with-pos-enabled enabled)
+                              (variable (make-symbol "issue554-watcher")))
+                          (add-variable-watcher variable a)
+                          (add-variable-watcher variable b)
+                          (let ((added (length (get-variable-watchers variable))))
+                            (remove-variable-watcher variable b)
+                            (list added (length (get-variable-watchers variable)))))) '(nil t)))"#
+        ),
+        "OK ((2 1) (1 0))"
+    );
+}

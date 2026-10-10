@@ -31,7 +31,7 @@ fn positioned_char_table_purpose_controls_compressed_lookup() {
     // GNU's run-length compressed leaf: index 2 for three characters, then 1.
     // Keep it outside the ASCII cache so lookup must classify the stored purpose.
     let compressed = Value::heap_string(crate::heap_types::LispString::from_unibyte(vec![
-        2, 2, 0xC0, 0x83, 1,
+        2, 2, 0xC2, 0x83, 1,
     ]));
     let mut depth2_contents = vec![Value::NIL; 32];
     depth2_contents[2] = compressed;

@@ -289,10 +289,12 @@ pub(crate) fn builtin_func_arity_ctx(
     }
     match function.kind() {
         ValueKind::Veclike(VecLikeType::Lambda) => {
-            let params = function.closure_params().unwrap();
-            let min = params.min_arity();
-            let max = params.max_arity();
-            Ok(arity_cons(min, max))
+            // GNU lambda_arity reads the live formal list under SYMBOLP/EQ.
+            // The cached LambdaParams projection is independent of that policy.
+            let arglist = function
+                .closure_slot(crate::tagged::header::CLOSURE_ARGLIST)
+                .unwrap_or(Value::NIL);
+            lambda_arity_from_arglist(function, arglist, symbol_mode)
         }
         ValueKind::Veclike(VecLikeType::ByteCode) => {
             let bc = function.get_bytecode_data().unwrap();
@@ -320,10 +322,12 @@ pub(crate) fn builtin_func_arity_ctx(
             Ok(subr_arity_from_registry(ctx, id))
         }
         ValueKind::Veclike(VecLikeType::Macro) => {
-            let params = function.closure_params().unwrap();
-            let min = params.min_arity();
-            let max = params.max_arity();
-            Ok(arity_cons(min, max))
+            // GNU lambda_arity reads the live formal list under SYMBOLP/EQ.
+            // The cached LambdaParams projection is independent of that policy.
+            let arglist = function
+                .closure_slot(crate::tagged::header::CLOSURE_ARGLIST)
+                .unwrap_or(Value::NIL);
+            lambda_arity_from_arglist(function, arglist, symbol_mode)
         }
         ValueKind::Cons
             if function.cons_car().as_symbol_id(symbol_mode) == Some(intern("lambda")) =>
