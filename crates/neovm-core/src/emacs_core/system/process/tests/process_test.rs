@@ -2949,7 +2949,7 @@ fn call_process_program_resolution_errors_match_gnu_report_file_error() {
         ),
     ];
     for (case, form, expected) in cases {
-        tracing::info!(case, "checking call-process executable lookup error");
+        tracing::warn!(case, "checking call-process executable lookup error");
         let result =
             eval_one_in_context(&mut eval, &format!("(condition-case e {form} (error e))"));
         assert_eq!(result, expected, "{case}");
@@ -4983,9 +4983,10 @@ fn make_serial_process_gnu_keywords_update_observable_state() {
 #[test]
 fn serial_configuration_keywords_update_contact_state() {
     crate::test_utils::init_test_tracing();
-    let result = eval_one(
+    let pty = SerialTestPty::open();
+    let result = eval_one(&format!(
         r#"(let ((p (make-serial-process
-                    :port "/dev/ptmx"
+                    :port "{port}"
                     :speed 9600
                     :bytesize nil
                     :parity 'even
@@ -5013,10 +5014,12 @@ fn serial_configuration_keywords_update_contact_state() {
                                (process-contact p :summary))
                          (process-contact p)))
                (ignore-errors (delete-process p))))"#,
-    );
+        port = pty.slave_path,
+    ));
     assert_eq!(
         result,
-        "OK ((9600 8 even 2 hw \"8E2\") (9600 7 odd 1 sw \"7O1\") (\"/dev/ptmx\" 9600))"
+        "OK ((9600 8 even 2 hw \"8E2\") (9600 7 odd 1 sw \"7O1\") (\"{PORT}\" 9600))"
+            .replace("{PORT}", &pty.slave_path)
     );
 }
 
@@ -5024,9 +5027,10 @@ fn serial_configuration_keywords_update_contact_state() {
 #[test]
 fn serial_configuration_validates_option_domains() {
     crate::test_utils::init_test_tracing();
-    let result = eval_one(
+    let pty = SerialTestPty::open();
+    let result = eval_one(&format!(
         r#"(let ((p (make-serial-process
-                    :port "/dev/ptmx"
+                    :port "{port}"
                     :speed 9600)))
              (unwind-protect
                  (list
@@ -5049,7 +5053,8 @@ fn serial_configuration_validates_option_domains() {
                       (serial-process-configure :process p :speed "fast")
                     (error err)))
                (ignore-errors (delete-process p))))"#,
-    );
+        port = pty.slave_path,
+    ));
     assert_eq!(
         result,
         "OK ((error \":bytesize must be nil (8), 7, or 8\") (error \":parity must be nil (no parity), `even', or `odd'\") (error \":stopbits must be nil (1 stopbit), 1, or 2\") (error \":flowcontrol must be nil (no flowcontrol), `hw', or `sw'\") (wrong-type-argument fixnump nil) (wrong-type-argument fixnump \"fast\"))"
@@ -5060,19 +5065,21 @@ fn serial_configuration_validates_option_domains() {
 #[test]
 fn serial_process_configure_resolves_buffer_and_port_designators() {
     crate::test_utils::init_test_tracing();
-    let result = eval_one(
+    let by_port = SerialTestPty::open();
+    let by_buffer = SerialTestPty::open();
+    let result = eval_one(&format!(
         r#"(let ((by-port (make-serial-process
-                           :port "/dev/ptmx"
+                           :port "{by_port}"
                            :speed 9600))
                  (by-buffer (make-serial-process
-                             :port "/dev/ptmx"
+                             :port "{by_buffer}"
                              :name "neo-serial-by-buffer-process"
                              :buffer "neo-serial-by-buffer"
                              :speed 9600)))
              (unwind-protect
                  (progn
                    (serial-process-configure
-                    :port "/dev/ptmx"
+                    :port "{by_port}"
                     :bytesize 7)
                    (serial-process-configure
                     :buffer "neo-serial-by-buffer"
@@ -5081,7 +5088,9 @@ fn serial_process_configure_resolves_buffer_and_port_designators() {
                          (process-contact by-buffer :parity)))
                (ignore-errors (delete-process by-port))
                (ignore-errors (delete-process by-buffer))))"#,
-    );
+        by_port = by_port.slave_path,
+        by_buffer = by_buffer.slave_path,
+    ));
     assert_eq!(result, "OK (7 even)");
 }
 
@@ -5405,8 +5414,7 @@ fn process_stale_control_matrix_matches_oracle() {
 #[test]
 fn process_attributes_runtime_shape_matches_oracle() {
     crate::test_utils::init_test_tracing();
-    let result = eval_one(
-        r#"(let ((attrs (process-attributes (emacs-pid))))
+    let source = r#"(let ((attrs (process-attributes (emacs-pid))))
              (list
               (listp attrs)
               (null (assq 'pid attrs))
@@ -5459,12 +5467,24 @@ fn process_attributes_runtime_shape_matches_oracle() {
               (condition-case err (process-attributes 1.5) (error err))
               (condition-case err (process-attributes #x80000000) (error err))
               (condition-case err (process-attributes #x100000000000000000000) (error err))
-              (process-attributes 999999999)))"#,
-    );
-    assert_eq!(
-        result,
+              (process-attributes 999999999)))"#;
+    let source = if cfg!(target_os = "macos") {
+        // GNU only emits ttname when a controlling terminal exists.
+        source.replace(
+            "(and (consp pair) (stringp (cdr pair))))\n              (process-attributes -1)",
+            "(or (null pair) (stringp (cdr pair))))\n              (process-attributes -1)",
+        )
+    } else {
+        source.to_owned()
+    };
+    let result = eval_one(&source);
+    // GNU sysdep.c:4273-4459 omits Linux-only counters and absent tty names.
+    let expected = if cfg!(target_os = "macos") {
+        "OK (t t t t t t t t t t nil t nil t nil nil nil t t t t t nil nil nil t (wrong-type-argument numberp x) (error \"Not an in-range integer, integral float, or cons of integers\") (error \"Not an in-range integer, integral float, or cons of integers\") (error \"Not an in-range integer, integral float, or cons of integers\") nil)"
+    } else {
         "OK (t t t t t t t t t t t t t t t t t t t t t t nil nil nil t (wrong-type-argument numberp x) (error \"Not an in-range integer, integral float, or cons of integers\") (error \"Not an in-range integer, integral float, or cons of integers\") (error \"Not an in-range integer, integral float, or cons of integers\") nil)"
-    );
+    };
+    assert_eq!(result, expected);
 }
 
 #[test]
@@ -5478,8 +5498,7 @@ fn process_attributes_pipe_child_args_ttname_and_running_child_match_oracle() {
     // racing it; the bracketed form is the precise, self-limiting signal that
     // it has not. (Lengthening the child's sleep does NOT fix this, which is
     // why it now sleeps only long enough to outlive the polling window.)
-    let result = eval_one(
-        r#"(let ((proc (make-process
+    let source = r#"(let ((proc (make-process
                         :name "neo-attrs-pipe-child"
                         :command '("/bin/sh" "-c" "sleep 300")
                         :connection-type 'pipe)))
@@ -5502,8 +5521,20 @@ fn process_attributes_pipe_child_args_ttname_and_running_child_match_oracle() {
                             (equal args "sleep 300"))
                         (equal ttname "")))
                (when (process-live-p proc)
-                 (delete-process proc))))"#,
-    );
+                 (delete-process proc))))"#;
+    // GNU sysdep.c:4420-4456 joins Darwin argv without Linux backslash
+    // quoting and omits ttname when the process has no controlling terminal.
+    let source = if cfg!(target_os = "macos") {
+        source
+            .replace(
+                r#"(equal args "/bin/sh -c sleep\\ 300")"#,
+                r#"(equal args "/bin/sh -c sleep 300")"#,
+            )
+            .replace(r#"(equal ttname "")"#, "(null ttname)")
+    } else {
+        source.to_owned()
+    };
+    let result = eval_one(&source);
     assert_eq!(result, "OK t");
 }
 
@@ -5537,7 +5568,13 @@ fn process_attributes_timing_memory_shape_matches_oracle() {
                 (and (consp pair) (stringp (cdr pair))))
               (null (assq 'pid attrs))))"#,
     );
-    assert_eq!(result, "OK (t t t t t t t t t t t t)");
+    // GNU's Darwin backend has no child CPU times or Linux percentages.
+    let expected = if cfg!(target_os = "macos") {
+        "OK (t t t nil nil nil t t nil nil t t)"
+    } else {
+        "OK (t t t t t t t t t t t t)"
+    };
+    assert_eq!(result, expected);
 }
 
 #[test]
@@ -8177,7 +8214,8 @@ fn process_keyword_arg_lists_match_gnu_malformed_pair_handling() {
 #[test]
 fn process_constructors_duplicate_keywords_use_first_value_like_gnu() {
     crate::test_utils::init_test_tracing();
-    let result = eval_one(
+    let pty = SerialTestPty::open();
+    let result = eval_one(&format!(
         r#"(list
             (let ((p (make-process
                       :name "neo-dup-make"
@@ -8218,7 +8256,7 @@ fn process_constructors_duplicate_keywords_use_first_value_like_gnu() {
                         (process-plist p))
                 (ignore-errors (delete-process p))))
             (let ((p (make-serial-process
-                      :port "/dev/ptmx"
+                      :port "{port}"
                       :port 1
                       :speed 9600
                       :speed "bad"
@@ -8274,12 +8312,13 @@ fn process_constructors_duplicate_keywords_use_first_value_like_gnu() {
               (error (car err)))
             (condition-case err
                 (make-serial-process
-                 :port 1 :port "/dev/ptmx" :speed 9600)
+                 :port 1 :port "{port}" :speed 9600)
               (error (car err))))"#,
-    );
+        port = pty.slave_path,
+    ));
     assert_eq!(
         result,
-        "OK ((\"neo-dup-make\" nil nil nil) (\"neo-dup-pipe\" nil nil stop ignore (:a 1)) ((\"/dev/ptmx\" 9600) 7 even 2 hw \"7E2\") (\"neo-dup-network\" nil stop t t ignore (:n 1)) error error error wrong-type-argument)"
+        "OK ((\"neo-dup-make\" nil nil nil) (\"neo-dup-pipe\" nil nil stop ignore (:a 1)) ((\"{PORT}\" 9600) 7 even 2 hw \"7E2\") (\"neo-dup-network\" nil stop t t ignore (:n 1)) error error error wrong-type-argument)".replace("{PORT}", &pty.slave_path)
     );
 }
 
@@ -8485,9 +8524,35 @@ fn set_network_process_option_rejects_bad_values_like_gnu() {
     );
 }
 
+/// GNU advertises HAVE_SEQPACKET when local/datagram sockets exist
+/// (process.c:250-251); the actual socket call can still reject it.
+#[cfg(unix)]
+fn local_seqpacket_creation_error() -> Option<i32> {
+    match socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::SEQPACKET, None) {
+        Ok(_) => None,
+        Err(error) => {
+            let errno = error.raw_os_error().expect("native socket errno");
+            assert!(
+                [
+                    libc::EPROTONOSUPPORT,
+                    libc::ESOCKTNOSUPPORT,
+                    libc::EOPNOTSUPP
+                ]
+                .contains(&errno),
+                "unexpected seqpacket fixture error: {error}"
+            );
+            Some(errno)
+        }
+    }
+}
+
 #[test]
 fn make_network_process_validates_gnu_keyword_domains() {
     crate::test_utils::init_test_tracing();
+    let seqpacket_error = cfg_select! {
+        unix => { local_seqpacket_creation_error() }
+        _ => { None::<i32> }
+    };
     let results = eval_all(
         r#"(condition-case err
               (make-network-process :name "np-nowait" :server t :nowait t :service 0)
@@ -8513,7 +8578,14 @@ fn make_network_process_validates_gnu_keyword_domains() {
                       (process-status p))
                   (when p (delete-process p))
                   (ignore-errors (delete-file path))))
-             (error err))
+             (error
+              (let ((contact (nthcdr 3 err)))
+                (list (car err) (cadr err) (caddr err)
+                      (equal (plist-get contact :name) "np-seqpacket")
+                      (eq (plist-get contact :server) t)
+                      (stringp (plist-get contact :service))
+                      (eq (plist-get contact :type) 'seqpacket)
+                      (eq (plist-get contact :family) 'local)))))
            (condition-case err
               (let* ((srv (make-network-process
                            :name "np-nowait-srv" :server t :service 0 :host 'local))
@@ -8536,7 +8608,19 @@ fn make_network_process_validates_gnu_keyword_domains() {
     );
     assert_eq!(results[1], "OK (error \"Unsupported connection type\")");
     assert_eq!(results[2], "OK open");
-    assert_eq!(results[3], "OK listen");
+    match seqpacket_error {
+        None => assert_eq!(results[3], "OK listen"),
+        #[cfg(unix)]
+        Some(errno) => assert_eq!(
+            results[3],
+            format!(
+                "OK (file-error \"make server process failed\" \"{}\" t t t t t)",
+                native_errno_message(errno)
+            )
+        ),
+        #[cfg(not(unix))]
+        Some(_) => unreachable!(),
+    }
     assert_eq!(results[4], "OK connect");
     assert_eq!(results[5], "OK (error \"Unknown address family\")");
 }
@@ -8571,7 +8655,12 @@ fn make_network_process_numeric_family_constants_match_gnu() {
 
     assert_eq!(
         result,
-        "OK ((listen t t t t) wrong-type-argument (error \"127.0.0.1/0 ai_family not supported\"))"
+        format!(
+            "OK ((listen t t t t) wrong-type-argument (error \"127.0.0.1/0 {}\"))",
+            // SAFETY: gai_strerror returns a static NUL-terminated error message.
+            unsafe { std::ffi::CStr::from_ptr(libc::gai_strerror(libc::EAI_FAMILY)) }
+                .to_string_lossy()
+        )
     );
 }
 
@@ -9254,6 +9343,41 @@ fn make_network_process_local_datagram_loopback_like_gnu() {
 #[test]
 fn make_network_process_local_seqpacket_loopback_like_gnu() {
     crate::test_utils::init_test_tracing();
+    if let Some(errno) = local_seqpacket_creation_error() {
+        // GNU connect_network_socket records socket's errno, then reports the
+        // server/client message and original contact (process.c:3474-3478,
+        // 3694-3712). Verify both roles without assuming a working protocol.
+        let result = eval_one(
+            r#"(let ((before (length (process-list))))
+                 (list
+                  (condition-case err
+                      (make-network-process :name "unsupported-seq-server"
+                       :type 'seqpacket :family 'local :server t
+                       :service "/nonexistent/neomacs-seqpacket")
+                    (error err))
+                  (condition-case err
+                      (make-network-process :name "unsupported-seq-client"
+                       :type 'seqpacket :family 'local
+                       :service "/nonexistent/neomacs-seqpacket")
+                    (error err))
+                  (= before (length (process-list)))))"#,
+        );
+        assert_eq!(
+            result,
+            format!(
+                concat!(
+                    "OK ((file-error \"make server process failed\" \"{message}\" ",
+                    ":name \"unsupported-seq-server\" :type seqpacket :family local :server t ",
+                    ":service \"/nonexistent/neomacs-seqpacket\") ",
+                    "(file-error \"make client process failed\" \"{message}\" ",
+                    ":name \"unsupported-seq-client\" :type seqpacket :family local ",
+                    ":service \"/nonexistent/neomacs-seqpacket\") t)"
+                ),
+                message = native_errno_message(errno)
+            )
+        );
+        return;
+    }
     let results = eval_all(
         r#"(let ((path (make-temp-file "neomacs-local-seqpacket-"))
                  (srv nil) (cli nil) (recv nil) (events nil))
@@ -11099,21 +11223,26 @@ fn make_pipe_process_stderr_bytes_go_through_the_pipes_own_chain() {
 /// `default-process-coding-system` (there is no arm that reads it), and its
 /// unibyte-buffer short circuit cannot change an answer that is already nil.
 ///
-/// `/dev/ptmx` is the port because it is a real character device that
-/// `serial_open` + `tcgetattr` accept on any Linux, which is what GNU needs to
-/// get as far as the coding chain: `/dev/null` fails `tcgetattr` and a
-/// nonexistent path signals `file-missing`.  Every expected value below was
-/// measured on that port under GNU Emacs 31.0.90.
+/// Allocated pty slaves provide real tty devices on every Unix. Each row
+/// owns a fresh device because GNU serial_open requests exclusive access
+/// (src/sysdep.c:2985-2987). The masters stay open through evaluation.
 #[cfg(unix)]
 #[test]
 fn make_serial_process_coding_is_the_overrides_and_nothing_else() {
     crate::test_utils::init_test_tracing();
-    let result = eval_one(
+    let ptys: Vec<_> = (0..11).map(|_| SerialTestPty::open()).collect();
+    let ports = ptys
+        .iter()
+        .map(|pty| format!("\"{}\"", pty.slave_path))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let result = eval_one(&format!(
         r#"(progn
              (defvar pw137-n 0)
+             (setq pw137-ports (list {ports}))
              (defun pw137-serial-cs (&rest args)
                (setq pw137-n (1+ pw137-n))
-               (let ((p (apply #'make-serial-process :port "/dev/ptmx" :speed 9600
+               (let ((p (apply #'make-serial-process :port (pop pw137-ports) :speed 9600
                                :name (format "pw137s-%d" pw137-n) :noquery t
                                :sentinel #'ignore args)))
                  (prog1 (process-coding-system p) (delete-process p))))
@@ -11150,7 +11279,7 @@ fn make_serial_process_coding_is_the_overrides_and_nothing_else() {
               ;; error here, because a serial process never looks at it.
               (let ((default-process-coding-system '(no-such-xyz . no-such-xyz)))
                 (pw137-serial-cs :buffer (generate-new-buffer " *mb*")))))"#,
-    );
+    ));
 
     assert_eq!(
         result,
@@ -11935,6 +12064,16 @@ fn inhibit_eol_conversion_is_read_when_process_output_arrives_not_when_it_is_res
 /// quirk DIVERGENCES.md entry 139 found.  The master stays open for the whole
 /// test and is closed by `Drop`.
 #[cfg(unix)]
+fn native_errno_message(errno: i32) -> String {
+    // GNU report_file_error uses the platform's strerror text.
+    // SAFETY: strerror returns a NUL-terminated string for every errno below;
+    // copy it immediately, without modifying its storage.
+    unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(unix)]
 struct SerialTestPty {
     master: std::os::fd::OwnedFd,
     slave_path: String,
@@ -11945,7 +12084,7 @@ impl SerialTestPty {
     fn open() -> Self {
         use std::os::fd::FromRawFd;
         // SAFETY: each call takes only the descriptor it was handed, and
-        // `ptsname`'s result is copied out before any other libc call runs.
+        // `ptsname`'s static result is copied while its fixture lock is held.
         unsafe {
             let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
             assert!(
@@ -11955,12 +12094,20 @@ impl SerialTestPty {
             );
             assert_eq!(libc::grantpt(master), 0, "grantpt");
             assert_eq!(libc::unlockpt(master), 0, "unlockpt");
-            let name = libc::ptsname(master);
-            assert!(!name.is_null(), "ptsname");
-            let slave_path = std::ffi::CStr::from_ptr(name)
-                .to_str()
-                .expect("pty slave path is ASCII")
-                .to_owned();
+            let slave_path = {
+                // ptsname may use shared static storage. These tests allocate
+                // devices concurrently, so serialize the call and owned copy.
+                static PTY_NAME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+                let _guard = PTY_NAME_LOCK
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let name = libc::ptsname(master);
+                assert!(!name.is_null(), "ptsname");
+                std::ffi::CStr::from_ptr(name)
+                    .to_str()
+                    .expect("pty slave path is ASCII")
+                    .to_owned()
+            };
             // Raw BEFORE the first write: the line discipline processes input
             // as it is written to the master, so `ICRNL` would turn this
             // fixture's CR LF into LF LF before any coding system sees it.
@@ -12037,7 +12184,20 @@ impl SerialTestPty {
 #[test]
 fn make_serial_process_open_failures_beat_everything_downstream() {
     crate::test_utils::init_test_tracing();
-    let result = eval_one(
+    use std::os::unix::fs::PermissionsExt;
+    let pty = SerialTestPty::open();
+    let directory = tempfile::tempdir().expect("denied serial fixture directory");
+    let denied = directory.path().join("denied-port");
+    std::fs::write(&denied, b"").expect("create denied serial fixture");
+    std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0))
+        .expect("deny access to serial fixture");
+    let denied_error = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&denied)
+        .expect_err("fixture must deny the serial open");
+    assert_eq!(denied_error.raw_os_error(), Some(libc::EACCES));
+    let result = eval_one(&format!(
         r#"(progn
              (defun pw147-try (thunk) (condition-case err (funcall thunk) (error err)))
              (list
@@ -12048,7 +12208,7 @@ fn make_serial_process_open_failures_beat_everything_downstream() {
                                                    :speed 9600 :name "a" :noquery t)))
               (pw147-try (lambda () (make-serial-process :port "/dev" :speed 9600
                                                    :name "b" :noquery t)))
-              (pw147-try (lambda () (make-serial-process :port "/proc/1/mem" :speed 9600
+              (pw147-try (lambda () (make-serial-process :port "{denied}" :speed 9600
                                                    :name "c" :noquery t)))
               ;; `:speed nil' means "do not configure", so an open that succeeds
               ;; on a device that is not a tty succeeds -- and the same port with
@@ -12077,7 +12237,7 @@ fn make_serial_process_open_failures_beat_everything_downstream() {
                                             :buffer (generate-new-buffer " *h*")))))
               (pw147-try (lambda ()
                      (let ((coding-system-for-read 'pw147-no-such))
-                       (make-serial-process :port "/dev/ptmx" :speed 9600 :bytesize 5
+                       (make-serial-process :port "{port}" :speed 9600 :bytesize 5
                                             :name "i" :noquery t
                                             :buffer (generate-new-buffer " *i*")))))
               ;; `tcgetattr' beats every keyword domain check, because GNU reads
@@ -12095,27 +12255,34 @@ fn make_serial_process_open_failures_beat_everything_downstream() {
                                                   :name "m" :noquery t)))
               (pw147-try (lambda () (make-serial-process :port "/nonexistent/pw147-tty"
                                                    :speed "x" :name "n" :noquery t)))))"#,
-    );
+        denied = denied.display(),
+        port = pty.slave_path,
+    ));
 
     assert_eq!(
         result,
         concat!(
             "OK (",
-            "(file-missing \"Opening serial port\" \"No such file or directory\" \"/nonexistent/pw147-tty\") ",
-            "(file-error \"Opening serial port\" \"Is a directory\" \"/dev\") ",
-            "(permission-denied \"Opening serial port\" \"Permission denied\" \"/proc/1/mem\") ",
-            "(file-error \"Failed tcgetattr\" \"Inappropriate ioctl for device\") ",
+            "(file-missing \"Opening serial port\" \"{ENOENT}\" \"/nonexistent/pw147-tty\") ",
+            "(file-error \"Opening serial port\" \"{EISDIR}\" \"/dev\") ",
+            "(permission-denied \"Opening serial port\" \"{EACCES}\" \"{denied}\") ",
+            "(file-error \"Failed tcgetattr\" \"{ENOTTY}\") ",
             "(open (:port \"/dev/null\" :speed nil :name \"e\" :noquery t)) ",
-            "(file-missing \"Opening serial port\" \"No such file or directory\" \"/nonexistent/pw147-tty\") ",
-            "(file-missing \"Opening serial port\" \"No such file or directory\" \"/nonexistent/pw147-tty\") ",
+            "(file-missing \"Opening serial port\" \"{ENOENT}\" \"/nonexistent/pw147-tty\") ",
+            "(file-missing \"Opening serial port\" \"{ENOENT}\" \"/nonexistent/pw147-tty\") ",
             "(coding-system-error pw147-no-such) ",
             "(coding-system-error pw147-no-such) ",
-            "(file-error \"Failed tcgetattr\" \"Inappropriate ioctl for device\") ",
-            "(file-error \"Failed tcgetattr\" \"Inappropriate ioctl for device\") ",
+            "(file-error \"Failed tcgetattr\" \"{ENOTTY}\") ",
+            "(file-error \"Failed tcgetattr\" \"{ENOTTY}\") ",
             "(error \"No port specified\") ",
             "(wrong-type-argument stringp 1) ",
             "(wrong-type-argument fixnump \"x\"))",
         )
+        .replace("{denied}", &denied.to_string_lossy())
+        .replace("{ENOENT}", &native_errno_message(libc::ENOENT))
+        .replace("{EISDIR}", &native_errno_message(libc::EISDIR))
+        .replace("{EACCES}", &native_errno_message(libc::EACCES))
+        .replace("{ENOTTY}", &native_errno_message(libc::ENOTTY))
     );
 }
 
@@ -12131,7 +12298,9 @@ fn make_serial_process_open_failures_beat_everything_downstream() {
 #[test]
 fn a_failed_make_serial_process_leaks_nothing_but_its_buffer() {
     crate::test_utils::init_test_tracing();
-    let result = eval_one(
+    let configure_pty = SerialTestPty::open();
+    let coding_pty = SerialTestPty::open();
+    let result = eval_one(&format!(
         r#"(progn
              (defun pw147-aftermath (tag thunk)
                (let ((before (length (process-list))))
@@ -12145,13 +12314,13 @@ fn a_failed_make_serial_process_leaks_nothing_but_its_buffer() {
                                                          :speed 9600 :name "pw147a"
                                                          :noquery t)))
               (pw147-aftermath "pw147b"
-                         (lambda () (make-serial-process :port "/dev/ptmx" :speed 9600
+                         (lambda () (make-serial-process :port "{configure_port}" :speed 9600
                                                          :bytesize 5 :name "pw147b"
                                                          :noquery t)))
               (pw147-aftermath "pw147c"
                          (lambda ()
                            (let ((coding-system-for-read 'pw147-no-such))
-                             (make-serial-process :port "/dev/ptmx" :speed 9600
+                             (make-serial-process :port "{coding_port}" :speed 9600
                                                   :name "pw147c" :noquery t))))
               (pw147-aftermath "pw147d"
                          (lambda () (make-serial-process :port "/dev/null" :speed 9600
@@ -12162,7 +12331,9 @@ fn a_failed_make_serial_process_leaks_nothing_but_its_buffer() {
                        (make-serial-process :port "/nonexistent/pw147-tty" :speed 9600
                                             :name "pw147e" :buffer "pw147-buf" :noquery t))
                      (and (get-buffer "pw147-buf") t))))"#,
-    );
+        configure_port = configure_pty.slave_path,
+        coding_port = coding_pty.slave_path,
+    ));
 
     assert_eq!(
         result,
@@ -13336,12 +13507,17 @@ fn delete_process_sentinel_sees_its_process_removed_by_default_like_gnu() {
              seen)"#
     ));
 
+    // GNU process.c:780-811 uses native strsignal and lowercases its first
+    // character. Darwin libc includes the signal number in that description.
+    #[cfg(target_os = "macos")]
+    let event = "killed: 9";
+    #[cfg(not(target_os = "macos"))]
+    let event = "killed";
     assert_eq!(
         result,
-        concat!(
-            "OK (:event \"killed\" :get-buffer-process nil :get-process nil ",
-            ":in-process-list nil :process-status signal)",
-        )
+        format!(
+            "OK (:event \"{event}\" :get-buffer-process nil :get-process nil :in-process-list nil :process-status signal)"
+        ),
     );
 }
 
@@ -14573,11 +14749,11 @@ fn a_reaped_child_leaves_no_pid_for_the_kill_path_like_gnu() {
     // Wait for the kernel, not the clock: a zombie is exited-and-unreaped,
     // so the reap below is this port's FIRST and the state is unambiguous.
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while std::time::Instant::now() < deadline && !pw187_is_zombie(os_pid) {
+    while std::time::Instant::now() < deadline && !pw187_is_zombie(os_pid, 7) {
         std::thread::sleep(Duration::from_millis(1));
     }
     assert!(
-        pw187_is_zombie(os_pid),
+        pw187_is_zombie(os_pid, 7),
         "the child must be exited and unreaped before anything reaps it"
     );
 
@@ -14587,7 +14763,7 @@ fn a_reaped_child_leaves_no_pid_for_the_kill_path_like_gnu() {
         crate::emacs_core::wait::WaitStatusNotifySite::for_a_unit_test_of_the_walk_itself(),
     );
     assert!(
-        !pw187_is_zombie(os_pid),
+        !pw187_is_zombie(os_pid, 7),
         "record_child_status_changes must have reaped the child"
     );
 
@@ -14684,7 +14860,7 @@ fn deleting_a_reaped_child_does_not_kill_its_process_group_like_gnu() {
     // this fix and in one without it.  A run whose child had not been reaped
     // would agree with itself.
     assert!(
-        !pw187_is_zombie(os_pid),
+        !pw187_is_zombie(os_pid, 0),
         "the child must be REAPED before the delete path runs, or this pin \
          proves nothing"
     );
@@ -14721,18 +14897,64 @@ fn pw187_kill_path_pid(
         .and_then(|proc| proc.live_io.child.pid_if_unreaped())
 }
 
+/// Observe only a child created by the calling test, without consuming the
+/// wait status GNU's child_status_changed must later collect.
+#[cfg(target_os = "macos")]
+fn owned_child_has_unreaped_exit(pid: u32, expected_exit: i32) -> bool {
+    loop {
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: every caller passes its own child pid. info is writable;
+        // WNOWAIT leaves an exited child's status available for the first reap.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::ECHILD) => return false,
+                _ => panic!("waitid for owned child {pid}: {error}"),
+            }
+        }
+        // SAFETY: siginfo_t admits zero values, and a successful waitid writes
+        // its report into the zeroed storage (si_pid remains zero if running).
+        let info = unsafe { info.assume_init() };
+        if info.si_pid != pid as libc::pid_t {
+            return false;
+        }
+        assert_eq!(
+            info.si_code,
+            libc::CLD_EXITED,
+            "owned child must exit normally"
+        );
+        assert_eq!(info.si_status, expected_exit, "owned child exit status");
+        return true;
+    }
+}
+
 #[cfg(unix)]
-fn pw187_is_zombie(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|stat| {
-            let after_comm = stat.rfind(')').map(|i| i + 1)?;
-            stat[after_comm..]
-                .split_whitespace()
-                .next()
-                .map(str::to_string)
-        })
-        .is_some_and(|state| state == "Z")
+fn pw187_is_zombie(pid: u32, expected_exit: i32) -> bool {
+    cfg_select! {
+        target_os = "macos" => { owned_child_has_unreaped_exit(pid, expected_exit) }
+        _ => {
+            let _ = expected_exit;
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| {
+                    let after_comm = stat.rfind(')').map(|i| i + 1)?;
+                    stat[after_comm..]
+                        .split_whitespace()
+                        .next()
+                        .map(str::to_string)
+                })
+                .is_some_and(|state| state == "Z")
+        }
+    }
 }
 
 /// GNU's `update_status` call sites, enumerated, and how each one gets its
@@ -15010,7 +15232,7 @@ fn process_send_eof_rejects_a_finished_process_like_gnu() {
 /// first half perfectly.
 ///
 /// **The control is asked of the KERNEL and not of this port** (ledger 187's
-/// rule): the child must be a `/proc` ZOMBIE -- exited and unreaped -- before
+/// rule): the child must be exited and unreaped before
 /// the spin begins, so a run in which the child had not actually exited fails
 /// on the control rather than agreeing with itself.
 #[cfg(unix)]
@@ -15039,18 +15261,7 @@ fn the_child_status_record_is_the_waits_work_and_maybe_quit_never_does_it() {
         .and_then(|proc| proc.os_pid)
         .expect("a spawned child has an OS pid");
 
-    let is_zombie = |pid: u32| {
-        std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .ok()
-            .and_then(|stat| {
-                let after_comm = stat.rfind(')').map(|i| i + 1)?;
-                stat[after_comm..]
-                    .split_whitespace()
-                    .next()
-                    .map(str::to_string)
-            })
-            .is_some_and(|state| state == "Z")
-    };
+    let is_zombie = |pid: u32| pw187_is_zombie(pid, 7);
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     while std::time::Instant::now() < deadline && !is_zombie(os_pid) {
         std::thread::sleep(Duration::from_millis(1));
