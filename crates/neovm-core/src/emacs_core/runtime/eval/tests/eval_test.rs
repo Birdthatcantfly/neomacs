@@ -7186,8 +7186,11 @@ fn eval_keyword_checks_explicit_lexenv_before_self_value() {
 }
 
 #[test]
-fn intern_canonicalizes_ascii_multibyte_names_to_existing_symbol() {
+fn intern_reuses_ascii_name_without_changing_its_source_encoding() {
     crate::test_utils::init_test_tracing();
+    // GNU 31.1 reads the quoted ASCII name as multibyte, then reuses it:
+    // lread.c:4246-4253 preserves source encoding on creation, 4773-4836
+    // returns an existing name unchanged. Observed result: (t t t).
     assert_eq!(
         eval_one(
             r#"(let ((m (string-to-multibyte "foo")))
@@ -7195,7 +7198,7 @@ fn intern_canonicalizes_ascii_multibyte_names_to_existing_symbol() {
                        (eq (intern m) 'foo)
                        (multibyte-string-p (symbol-name (intern m)))))"#
         ),
-        "OK (t t nil)"
+        "OK (t t t)"
     );
 }
 
