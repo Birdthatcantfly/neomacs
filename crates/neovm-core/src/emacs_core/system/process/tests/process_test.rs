@@ -12091,7 +12091,7 @@ struct SerialTestPty {
 #[cfg(unix)]
 impl SerialTestPty {
     fn open() -> Self {
-        use std::os::fd::FromRawFd;
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
         // SAFETY: each call takes only the descriptor it was handed, and
         // `ptsname`'s static result is copied while its fixture lock is held.
         unsafe {
@@ -12101,8 +12101,10 @@ impl SerialTestPty {
                 "posix_openpt: {}",
                 std::io::Error::last_os_error()
             );
-            assert_eq!(libc::grantpt(master), 0, "grantpt");
-            assert_eq!(libc::unlockpt(master), 0, "unlockpt");
+            // Own the descriptor immediately so fixture failures also close it.
+            let master = OwnedFd::from_raw_fd(master);
+            assert_eq!(libc::grantpt(master.as_raw_fd()), 0, "grantpt");
+            assert_eq!(libc::unlockpt(master.as_raw_fd()), 0, "unlockpt");
             let slave_path = {
                 // ptsname may use shared static storage. These tests allocate
                 // devices concurrently, so serialize the call and owned copy.
@@ -12110,33 +12112,43 @@ impl SerialTestPty {
                 let _guard = PTY_NAME_LOCK
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
-                let name = libc::ptsname(master);
+                let name = libc::ptsname(master.as_raw_fd());
                 assert!(!name.is_null(), "ptsname");
                 std::ffi::CStr::from_ptr(name)
                     .to_str()
                     .expect("pty slave path is ASCII")
                     .to_owned()
             };
+            // Darwin initializes the tty only when its slave is first opened;
+            // tcgetattr on the master before that reports ENOTTY. GNU also
+            // opens the slave with O_NOCTTY (process.c:2187) before configuring
+            // its tty. Keep this temporary slave open throughout setup.
+            let slave_name =
+                std::ffi::CString::new(slave_path.as_bytes()).expect("pty slave path has no NUL");
+            let slave = libc::open(slave_name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+            assert!(
+                slave >= 0,
+                "open pty slave: {}",
+                std::io::Error::last_os_error()
+            );
+            let _slave = OwnedFd::from_raw_fd(slave);
             // Raw BEFORE the first write: the line discipline processes input
             // as it is written to the master, so `ICRNL` would turn this
             // fixture's CR LF into LF LF before any coding system sees it.
             let mut attributes = std::mem::MaybeUninit::<libc::termios>::uninit();
             assert_eq!(
-                libc::tcgetattr(master, attributes.as_mut_ptr()),
+                libc::tcgetattr(master.as_raw_fd(), attributes.as_mut_ptr()),
                 0,
                 "tcgetattr"
             );
             let mut attributes = attributes.assume_init();
             libc::cfmakeraw(&raw mut attributes);
             assert_eq!(
-                libc::tcsetattr(master, libc::TCSANOW, &raw const attributes),
+                libc::tcsetattr(master.as_raw_fd(), libc::TCSANOW, &raw const attributes),
                 0,
                 "tcsetattr"
             );
-            Self {
-                master: std::os::fd::OwnedFd::from_raw_fd(master),
-                slave_path,
-            }
+            Self { master, slave_path }
         }
     }
 
