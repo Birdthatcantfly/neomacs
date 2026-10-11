@@ -16392,7 +16392,10 @@ fn application_send_from_a_handshake_timer_returns_without_waiting_for_tls() {
 #[test]
 fn nested_tls_waits_preserve_suspension_and_deliver_queued_data() {
     use crate::emacs_core::tls_test::loopback;
-    let peer = loopback::TlsPeer::spawn(1, Duration::from_millis(100), true);
+    // The assertion concerns suspension and verified application delivery,
+    // not an abrupt peer close racing the final transport write.
+    let peer =
+        loopback::FramedEchoPeer::spawn(b"queued encrypted data\n", Duration::from_millis(100));
     let ca = loopback::resources().join("ca.pem");
     let result = eval_one(&format!(
         r#"
@@ -16423,7 +16426,10 @@ fn nested_tls_waits_preserve_suspension_and_deliver_queued_data() {
         (progn
           (with-timeout (2 (error "TLS completion watchdog"))
             (while (not outcome) (accept-process-output nil 0.05)))
-          (accept-process-output client 0.5)
+          (with-timeout (2 (error "queued TLS echo watchdog"))
+            (while (with-current-buffer (process-buffer client)
+                     (not (string-prefix-p "queued encrypted data\n" (buffer-string))))
+              (accept-process-output client 0.05)))
           (list outcome nested slept-efficiently
                 (with-current-buffer (process-buffer client) (string-prefix-p "queued encrypted data\n" (buffer-string)))))
       (delete-process client)
@@ -16432,6 +16438,8 @@ fn nested_tls_waits_preserve_suspension_and_deliver_queued_data() {
         peer.port,
         ca.display()
     ));
+    peer.finish()
+        .expect("framed TLS peer received and echoed the complete message");
     assert_eq!(result, "OK (\"rooted sentinel\" t t t)");
 }
 
@@ -16524,7 +16532,7 @@ fn application_filter_suspension_does_not_suspend_tls_verification() {
 #[test]
 fn nowait_tls_queues_early_application_data_until_verification() {
     use crate::emacs_core::tls_test::loopback;
-    let peer = loopback::TlsPeer::spawn(1, Duration::ZERO, true);
+    let peer = loopback::FramedEchoPeer::spawn(b"encrypted from the start\n", Duration::ZERO);
     let result = eval_one(&format!(
         r#"
 (require 'timer)
@@ -16544,6 +16552,8 @@ fn nowait_tls_queues_early_application_data_until_verification() {
         peer.port,
         loopback::resources().join("ca.pem").display()
     ));
+    peer.finish()
+        .expect("framed TLS peer received and echoed the complete message");
     assert_eq!(result, "OK t");
 }
 
