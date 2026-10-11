@@ -10646,107 +10646,110 @@ fn an_interactive_filter_error_is_reported_without_exiting_like_gnu() {
     assert_eq!(eval.shutdown_request(), None);
 }
 
-/// Ledger entry 54: the implicit `:stderr` pipe is `closed`, and still
-/// attached, when the owner's sentinel runs.
-///
-/// GNU splits this across two phases. The fd-scan loop retires a pipe
-/// connection the moment its read returns 0 -- `tick++`, `deactivate_process`,
-/// and status `(exit 0)` if it was still running (src/process.c:6072-6080),
-/// which `process-status` reports as `closed` for a pipe
-/// (src/process.c:1193) -- while the SENTINEL runs later, from `status_notify`
-/// (src/process.c:7873), which the fd loop calls only after it finishes.
-/// `status_notify` walks the process alist newest-first, so the owner, created
-/// after its stderr pipe, is notified first and sees the pipe closed but not
-/// yet removed.
-///
-/// The consequence is Lisp-visible: `process-kill-buffer-query-function`
-/// (lisp/subr.el:3542) prompts only for a process whose status is one of
-/// `run stop open listen`, so a sentinel that kills the stderr buffer -- what
-/// Magit's blame sentinel does -- prompts on `open` and is silent on `closed`.
-/// In batch that prompt reads EOF from stdin and kills the session.
-///
-/// Twelve iterations, both empty and non-empty stderr payloads, because the
-/// divergence was timing-dependent: GNU answers `closed` 12/12; before this
-/// fix neomacs answered `GONE` 10/12 (the pipe reaped out of the alist ahead
-/// of the owner's sentinel) and `open` 2/12 (EOF discarded entirely).
-///
-/// GNU's tie-break holds only when the pipe's EOF and the owner's exit are
-/// pending TOGETHER. The kernel closes a dying child's descriptors before it
-/// signals the parent, so a parent that polls inside that window sees the EOF
-/// alone and correctly retires the pipe first: pinned to a CPU shared with 12
-/// busy loops, GNU 31 answered `(closed GONE)` in 1 of 3 runs of this exact
-/// form, and the gate (which runs alongside a build) failed on it the same way.
-/// So each iteration lets the child finish exiting before the first poll.
+/// Prove that both the owned child's exit and its stderr EOF are pending before
+/// the evaluator services either event. GNU process.c:7873-7943 only promises
+/// newest-first sentinel order within one status_notify pass, not across wakes.
+#[cfg(unix)]
+fn wait_for_stderr_fixture_exit(eval: &Context, owner: Value) {
+    let id = owner.as_process_id().expect("fixture owner is a process");
+    let pid = eval
+        .processes
+        .get(id)
+        .and_then(|process| process.live_io.child.pid_if_unreaped())
+        .expect("fixture owns a live child pid");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !pw187_is_zombie(pid, 0) {
+        assert!(
+            Instant::now() < deadline,
+            "owned stderr fixture child must exit before polling"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// When EOF and child exit are pending together, GNU's fd scan closes the
+/// stderr pipe before status_notify calls the newer owner's sentinel. The
+/// older pipe remains attached until its own notification (process.c:6072-6080,
+/// 7885-7943). An elapsed-time delay cannot establish this precondition on a
+/// busy host; observe this fixture's child without consuming its wait status.
+#[cfg(unix)]
 #[test]
 fn the_stderr_pipe_is_closed_and_attached_when_the_owner_sentinel_runs() {
     crate::test_utils::init_test_tracing();
     let sh = find_bin("sh");
-    let result = eval_one(&format!(
-        r#"(let ((seen nil))
-             (dolist (payload '("" "boom"))
-               (dotimes (_ 6)
-                 (let* ((out (generate-new-buffer " *p14-out*"))
-                        (err (generate-new-buffer " *p14-err*"))
-                        (done nil))
-                   (let ((p (make-process
-                             :name "p14"
-                             :buffer out
-                             :stderr err
-                             :command (list "{sh}" "-c"
-                                            (format "printf '%%s' '%%s' 1>&2; printf 'x'"
-                                                    payload)))))
+    let mut eval = crate::test_utils::runtime_startup_context();
+    eval.set_variable("f3-stderr-seen", Value::NIL);
+    for payload in ["", "boom"] {
+        for _ in 0..6 {
+            let owner = eval
+                .eval_str(&format!(
+                    r#"(let* ((out (generate-new-buffer " *p14-out*"))
+                          (err (generate-new-buffer " *p14-err*"))
+                          (p (make-process
+                              :name "p14" :buffer out :stderr err
+                              :command (list "{sh}" "-c" "printf '{payload}' >&2; printf 'x'"))))
+                     (setq f3-stderr-done nil f3-stderr-buffer err)
                      (set-process-sentinel
                       p (lambda (pr _e)
                           (when (memq (process-status pr) '(exit signal))
-                            (let ((sp (get-buffer-process err)))
-                              (push (if sp (process-status sp) 'GONE) seen))
-                            (setq done t))))
-                     ;; No polling until the child has exited: its EOF and
-                     ;; its exit are then pending together.
-                     (let ((end (+ (float-time) 0.2)))
-                       (while (< (float-time) end)))
-                     (while (not done) (accept-process-output nil 0.05))))))
-             (delete-dups (nreverse seen)))"#
-    ));
-
-    assert_eq!(result, "OK (closed)");
+                            (let ((sp (get-buffer-process f3-stderr-buffer)))
+                              (push (if sp (process-status sp) 'GONE) f3-stderr-seen))
+                            (setq f3-stderr-done t))))
+                     p)"#
+                ))
+                .expect("create owned stderr fixture");
+            wait_for_stderr_fixture_exit(&eval, owner);
+            let delivered = eval_one_in_context(
+                &mut eval,
+                r#"(let ((deadline (+ (float-time) 5)))
+                     (while (and (not f3-stderr-done) (< (float-time) deadline))
+                       (accept-process-output nil 0.05))
+                     f3-stderr-done)"#,
+            );
+            assert_eq!(delivered, "OK t", "owner sentinel must run");
+        }
+    }
+    assert_eq!(
+        eval_one_in_context(&mut eval, "(delete-dups (nreverse f3-stderr-seen))"),
+        "OK (closed)"
+    );
 }
 
-/// The deferred half of the same split: the pipe's own sentinel still runs,
-/// after the owner's. GNU's `status_notify` reaches the older stderr pipe on
-/// the same pass, so retiring it early in the fd loop must not cost it its
-/// notification. The order is only defined when the child's EOF and its exit
-/// are pending together, so -- as in the row above -- nothing polls until the
-/// child has surely exited (a busy machine could otherwise deliver the EOF a
-/// pass earlier, running the pipe's sentinel first, as GNU would too).
+/// The older pipe's sentinel follows the owner's in the same GNU status pass.
+/// Confirm the child has exited before the first poll instead of depending on
+/// a fixed sleep or on the host's readiness-event order.
+#[cfg(unix)]
 #[test]
 fn the_stderr_pipe_sentinel_still_runs_after_the_owners() {
     crate::test_utils::init_test_tracing();
     let sh = find_bin("sh");
-    let result = eval_one(&format!(
-        r#"(let* ((order nil)
-                  (out (generate-new-buffer " *p14b-out*"))
+    let mut eval = crate::test_utils::runtime_startup_context();
+    let owner = eval
+        .eval_str(&format!(
+            r#"(let* ((out (generate-new-buffer " *p14b-out*"))
                   (err (generate-new-buffer " *p14b-err*"))
-                  (done nil)
-                  (p (make-process
-                      :name "p14b"
-                      :buffer out
-                      :stderr err
-                      :command (list "{sh}" "-c" "printf 'e' 1>&2; printf 'x'"))))
+                  (p (make-process :name "p14b" :buffer out :stderr err
+                                   :command (list "{sh}" "-c" "printf 'e' 1>&2; printf 'x'"))))
+             (setq f3-stderr-order nil f3-stderr-done nil)
              (set-process-sentinel (get-buffer-process err)
-                                   (lambda (&rest _) (push 'stderr order)))
+                                   (lambda (&rest _) (push 'stderr f3-stderr-order)))
              (set-process-sentinel
               p (lambda (pr _e)
                   (when (memq (process-status pr) '(exit signal))
-                    (push 'owner order)
-                    (setq done t))))
-             (let ((end (+ (float-time) 0.5)))
-               (while (< (float-time) end)))
-             (while (not done) (accept-process-output nil 0.05))
+                    (push 'owner f3-stderr-order)
+                    (setq f3-stderr-done t))))
+             p)"#
+        ))
+        .expect("create owned stderr fixture");
+    wait_for_stderr_fixture_exit(&eval, owner);
+    let result = eval_one_in_context(
+        &mut eval,
+        r#"(let ((deadline (+ (float-time) 5)))
+             (while (and (not f3-stderr-done) (< (float-time) deadline))
+               (accept-process-output nil 0.05))
              (dotimes (_ 4) (accept-process-output nil 0.05))
-             (nreverse order))"#
-    ));
-
+             (nreverse f3-stderr-order))"#,
+    );
     assert_eq!(result, "OK (owner stderr)");
 }
 
