@@ -3953,17 +3953,13 @@ fn the_baked_position_offsets_address_the_fields_the_accessors_read() {
     );
 }
 
-/// JIT-generated code reaches the current buffer by walking
-/// `Context` -> `BufferManager` -> `LiveBuffers::slots` -> `Box<Buffer>` with
-/// baked offsets and two probed layouts, instead of calling a shim to do it.
-/// A wrong offset there is not a compile error -- it is a wild read -- so the
-/// walk is exercised here against the accessor it must agree with.
+/// The canonical World-storage slab walk is an independent oracle for the
+/// current-buffer projection read by generated code. Its offsets and probed
+/// layouts must agree with the manager accessor on this host.
 ///
-/// The `swap_buffer_text` row is why the walk exists at all. Caching the
-/// current buffer's ADDRESS would be faster still, but swapping text removes
-/// and re-inserts the current buffer under the same id, moving a LIVE current
-/// buffer to a new address; a cache would have to be invalidated there and at
-/// every kill. Walking has no such surface, and costs a handful of loads.
+/// `swap_buffer_text` removes and reinserts a live Box under the same id;
+/// the private direct designator must be retired and rederived there, and
+/// retired before killing a selected allocation.
 #[test]
 fn the_jit_buffer_walk_finds_what_current_buffer_finds() {
     use crate::buffer::buffer::jit_layout;

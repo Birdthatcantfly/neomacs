@@ -286,7 +286,13 @@ fn add_minibuffer_history_after_unwind(
     } else {
         // Interactive reads cannot normally precede subr.el, but retain a
         // bootstrap-safe fallback for deliberately minimal test contexts.
-        add_to_minibuffer_history_variable(&mut eval.obarray, history_name, entry);
+        // SAFETY: the bootstrap helper only reads/stores the history value;
+        // it does not call Lisp, alter dispatch metadata, or replace storage.
+        unsafe {
+            eval.obarray.with_legacy_value_write(|obarray| {
+                add_to_minibuffer_history_variable(obarray, history_name, entry);
+            });
+        }
     }
 
     if !entry.as_bytes().is_empty() {
@@ -2802,14 +2808,24 @@ pub(crate) fn builtin_discard_input(
     args: Vec<Value>,
 ) -> EvalResult {
     expect_args("discard-input", &args, 0)?;
-    super::eval::set_runtime_binding(
-        &mut ctx.obarray,
-        &mut ctx.buffers,
-        &ctx.custom,
-        ctx.specpdl.as_slice(),
-        intern("unread-command-events"),
-        Value::NIL,
-    )?;
+    let buffers = &mut ctx.buffers;
+    let custom = &ctx.custom;
+    let specpdl = ctx.specpdl.as_slice();
+    // SAFETY: this storage helper only clears a runtime variable through the
+    // value/forwarder path. It never calls watchers/Lisp or writes either
+    // canonical dispatch word, and returns no manager/interior reference.
+    unsafe {
+        ctx.obarray.with_legacy_value_write(|obarray| {
+            super::eval::set_runtime_binding(
+                obarray,
+                buffers,
+                custom,
+                specpdl,
+                intern("unread-command-events"),
+                Value::NIL,
+            )
+        })
+    }?;
     Ok(Value::NIL)
 }
 

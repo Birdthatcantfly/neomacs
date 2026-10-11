@@ -1596,14 +1596,25 @@ fn call_interactively_state_resolution_handles_default_and_noarg_cases() {
     let mut builtin_plan =
         plan_call_interactively_for_test(&mut ev, &[Value::symbol("forward-char")])
             .expect("plan builtin default interactive command");
-    let (_, builtin_args) = resolve_call_interactively_target_and_args_in_state(
-        &mut ev.obarray,
-        &mut Vec::new(),
-        &mut ev.buffers,
-        &ev.custom,
-        ev.specpdl.as_slice(),
-        &mut builtin_plan,
-    )
+    let (_, builtin_args) = unsafe {
+        let buffers = &mut ev.buffers;
+        let custom = &ev.custom;
+        let specpdl = ev.specpdl.as_slice();
+        // SAFETY: this split-state resolver handles only native string-code/
+        // no-argument cases; Lisp/prompting cases are deferred. Its writes are
+        // buffer/runtime Values, not function or canonical descriptor metadata.
+        // No collection, replacement or manager/interior borrow can escape.
+        ev.obarray.with_legacy_value_write(|obarray| {
+            resolve_call_interactively_target_and_args_in_state(
+                obarray,
+                &mut Vec::new(),
+                buffers,
+                custom,
+                specpdl,
+                &mut builtin_plan,
+            )
+        })
+    }
     .expect("resolve builtin default args")
     .expect("shared-state builtin default path");
     assert_eq!(builtin_args, vec![Value::fixnum(4)]);
@@ -1613,14 +1624,25 @@ fn call_interactively_state_resolution_handles_default_and_noarg_cases() {
         .expect("eval lambda");
     let mut lambda_plan =
         plan_call_interactively_for_test(&mut ev, &[lambda]).expect("plan interactive lambda");
-    let (_, lambda_args) = resolve_call_interactively_target_and_args_in_state(
-        &mut ev.obarray,
-        &mut Vec::new(),
-        &mut ev.buffers,
-        &ev.custom,
-        ev.specpdl.as_slice(),
-        &mut lambda_plan,
-    )
+    let (_, lambda_args) = unsafe {
+        let buffers = &mut ev.buffers;
+        let custom = &ev.custom;
+        let specpdl = ev.specpdl.as_slice();
+        // SAFETY: this split-state resolver handles only native string-code/
+        // no-argument cases; Lisp/prompting cases are deferred. Its writes are
+        // buffer/runtime Values, not function or canonical descriptor metadata.
+        // No collection, replacement or manager/interior borrow can escape.
+        ev.obarray.with_legacy_value_write(|obarray| {
+            resolve_call_interactively_target_and_args_in_state(
+                obarray,
+                &mut Vec::new(),
+                buffers,
+                custom,
+                specpdl,
+                &mut lambda_plan,
+            )
+        })
+    }
     .expect("resolve lambda args")
     .expect("shared-state no-arg lambda path");
     assert!(lambda_args.is_empty());
@@ -1635,14 +1657,25 @@ fn call_interactively_state_resolution_defers_prompting_specs_to_eval() {
         .expect("eval prompting lambda");
     let mut plan =
         plan_call_interactively_for_test(&mut ev, &[lambda]).expect("plan prompting lambda");
-    let resolved = resolve_call_interactively_target_and_args_in_state(
-        &mut ev.obarray,
-        &mut Vec::new(),
-        &mut ev.buffers,
-        &ev.custom,
-        ev.specpdl.as_slice(),
-        &mut plan,
-    )
+    let resolved = unsafe {
+        let buffers = &mut ev.buffers;
+        let custom = &ev.custom;
+        let specpdl = ev.specpdl.as_slice();
+        // SAFETY: this split-state resolver handles only native string-code/
+        // no-argument cases; Lisp/prompting cases are deferred. Its writes are
+        // buffer/runtime Values, not function or canonical descriptor metadata.
+        // No collection, replacement or manager/interior borrow can escape.
+        ev.obarray.with_legacy_value_write(|obarray| {
+            resolve_call_interactively_target_and_args_in_state(
+                obarray,
+                &mut Vec::new(),
+                buffers,
+                custom,
+                specpdl,
+                &mut plan,
+            )
+        })
+    }
     .expect("resolve prompting lambda");
     assert!(resolved.is_none());
 }
@@ -1677,14 +1710,25 @@ fn call_interactively_state_resolution_handles_simple_string_codes_without_eval(
         &[lambda, Value::NIL, Value::vector(vec![event])],
     )
     .expect("plan simple string-code lambda");
-    let (_, args) = resolve_call_interactively_target_and_args_in_state(
-        &mut ev.obarray,
-        &mut Vec::new(),
-        &mut ev.buffers,
-        &ev.custom,
-        ev.specpdl.as_slice(),
-        &mut plan,
-    )
+    let (_, args) = unsafe {
+        let buffers = &mut ev.buffers;
+        let custom = &ev.custom;
+        let specpdl = ev.specpdl.as_slice();
+        // SAFETY: this split-state resolver handles only native string-code/
+        // no-argument cases; Lisp/prompting cases are deferred. Its writes are
+        // buffer/runtime Values, not function or canonical descriptor metadata.
+        // No collection, replacement or manager/interior borrow can escape.
+        ev.obarray.with_legacy_value_write(|obarray| {
+            resolve_call_interactively_target_and_args_in_state(
+                obarray,
+                &mut Vec::new(),
+                buffers,
+                custom,
+                specpdl,
+                &mut plan,
+            )
+        })
+    }
     .expect("resolve simple string-code args")
     .expect("shared-state simple string-code path");
     assert_eq!(
@@ -1721,14 +1765,25 @@ fn call_interactively_state_resolution_applies_shift_selection_prefix_in_state()
         .expect("eval lambda");
     let mut plan =
         plan_call_interactively_for_test(&mut ev, &[lambda]).expect("plan shift-selection lambda");
-    let (_, args) = resolve_call_interactively_target_and_args_in_state(
-        &mut ev.obarray,
-        &mut Vec::new(),
-        &mut ev.buffers,
-        &ev.custom,
-        ev.specpdl.as_slice(),
-        &mut plan,
-    )
+    let (_, args) = unsafe {
+        let buffers = &mut ev.buffers;
+        let custom = &ev.custom;
+        let specpdl = ev.specpdl.as_slice();
+        // SAFETY: this split-state resolver handles only native string-code/
+        // no-argument cases; Lisp/prompting cases are deferred. Its writes are
+        // buffer/runtime Values, not function or canonical descriptor metadata.
+        // No collection, replacement or manager/interior borrow can escape.
+        ev.obarray.with_legacy_value_write(|obarray| {
+            resolve_call_interactively_target_and_args_in_state(
+                obarray,
+                &mut Vec::new(),
+                buffers,
+                custom,
+                specpdl,
+                &mut plan,
+            )
+        })
+    }
     .expect("resolve shift-selection args")
     .expect("shared-state shift-selection path");
     assert_eq!(args, vec![Value::fixnum(3)]);
@@ -1747,14 +1802,25 @@ fn call_interactively_state_resolution_handles_optional_coding_without_prefix() 
         .expect("eval lambda");
     let mut plan =
         plan_call_interactively_for_test(&mut ev, &[lambda]).expect("plan optional coding lambda");
-    let (_, args) = resolve_call_interactively_target_and_args_in_state(
-        &mut ev.obarray,
-        &mut Vec::new(),
-        &mut ev.buffers,
-        &ev.custom,
-        ev.specpdl.as_slice(),
-        &mut plan,
-    )
+    let (_, args) = unsafe {
+        let buffers = &mut ev.buffers;
+        let custom = &ev.custom;
+        let specpdl = ev.specpdl.as_slice();
+        // SAFETY: this split-state resolver handles only native string-code/
+        // no-argument cases; Lisp/prompting cases are deferred. Its writes are
+        // buffer/runtime Values, not function or canonical descriptor metadata.
+        // No collection, replacement or manager/interior borrow can escape.
+        ev.obarray.with_legacy_value_write(|obarray| {
+            resolve_call_interactively_target_and_args_in_state(
+                obarray,
+                &mut Vec::new(),
+                buffers,
+                custom,
+                specpdl,
+                &mut plan,
+            )
+        })
+    }
     .expect("resolve optional coding args")
     .expect("shared-state optional coding path");
     assert_eq!(args, vec![Value::NIL]);

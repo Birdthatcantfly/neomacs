@@ -750,10 +750,7 @@ pub(crate) fn builtin_fset_2(
             vec![Value::symbol("nil")],
         ));
     }
-    let would_cycle = {
-        let obarray = eval.obarray_mut();
-        would_create_function_alias_cycle_in_obarray(obarray, symbol, &def)
-    };
+    let would_cycle = would_create_function_alias_cycle_in_obarray(eval.obarray(), symbol, &def);
     if would_cycle {
         return Err(signal(
             LispCondition::CyclicFunctionIndirection,
@@ -926,9 +923,8 @@ pub(crate) fn symbol_property_get(
     // alias/redirect resolution on every `get`. `symbol_value_id_or_nil` still
     // follows defvaralias and reads the slot `specbind` writes, so a let-bound
     // override is honored.
-    let overrides = eval
-        .obarray()
-        .symbol_value_id_or_nil(overriding_plist_environment_symbol());
+    let obarray = eval.obarray();
+    let overrides = obarray.symbol_value_id_or_nil(overriding_plist_environment_symbol());
     if overrides.is_cons()
         && let Some(plist) = assq_cdr_swp(&symbol_value, overrides, symbols_with_pos_enabled)
         && let Some(propval) =
@@ -938,7 +934,7 @@ pub(crate) fn symbol_property_get(
         return Ok((sym, Some(propval)));
     }
 
-    let property = match eval.obarray().symbol_plist_snapshot_id(sym) {
+    let property = match obarray.symbol_plist_snapshot_id(sym) {
         SymbolPlistSnapshot::NoEntries => None,
         SymbolPlistSnapshot::Entries(plist) => {
             crate::emacs_core::plist::plist_get_swp(plist, &prop, symbols_with_pos_enabled)
@@ -952,7 +948,14 @@ pub(crate) fn builtin_put(
     args: Vec<Value>,
 ) -> EvalResult {
     ctx.note_macro_expansion_mutation();
-    put_in_obarray(&mut ctx.obarray, args, ctx.symbols_with_pos_enabled)
+    let symbols_with_pos_enabled = ctx.symbols_with_pos_enabled;
+    // SAFETY: plist validation/update is noncalling and changes only property
+    // Values. Neither canonical dispatch word nor storage identity can change.
+    unsafe {
+        ctx.obarray.with_legacy_value_write(|obarray| {
+            put_in_obarray(obarray, args, symbols_with_pos_enabled)
+        })
+    }
 }
 
 #[inline(always)]
@@ -963,13 +966,14 @@ pub(crate) fn builtin_put_3(
     value: Value,
 ) -> EvalResult {
     ctx.note_macro_expansion_mutation();
-    put_in_obarray_values(
-        &mut ctx.obarray,
-        symbol_value,
-        prop,
-        value,
-        ctx.symbols_with_pos_enabled,
-    )
+    let symbols_with_pos_enabled = ctx.symbols_with_pos_enabled;
+    // SAFETY: this storage-level property helper runs no Lisp and publishes
+    // only plist Values; no canonical function/debugger metadata is modified.
+    unsafe {
+        ctx.obarray.with_legacy_value_write(|obarray| {
+            put_in_obarray_values(obarray, symbol_value, prop, value, symbols_with_pos_enabled)
+        })
+    }
 }
 
 pub(crate) fn put_in_obarray(
@@ -1038,19 +1042,24 @@ pub(super) fn builtin_register_code_conversion_map(
         crate::emacs_core::plist::plist_check(plist)?;
     }
 
-    let obarray = eval.obarray_mut();
     let map_id = super::ccl::builtin_register_code_conversion_map_impl(args.clone())?;
 
-    let _ = put_in_obarray(
-        obarray,
-        vec![args[0], Value::symbol("code-conversion-map"), args[1]],
-        symbols_with_pos_enabled,
-    )?;
-    let _ = put_in_obarray(
-        obarray,
-        vec![args[0], Value::symbol("code-conversion-map-id"), map_id],
-        symbols_with_pos_enabled,
-    )?;
+    // SAFETY: registration is complete; this noncalling phase only publishes
+    // its two property Values and leaves no raw manager/interior authority.
+    unsafe {
+        eval.obarray.with_legacy_value_write(|obarray| {
+            let _ = put_in_obarray(
+                obarray,
+                vec![args[0], Value::symbol("code-conversion-map"), args[1]],
+                symbols_with_pos_enabled,
+            )?;
+            put_in_obarray(
+                obarray,
+                vec![args[0], Value::symbol("code-conversion-map-id"), map_id],
+                symbols_with_pos_enabled,
+            )
+        })
+    }?;
 
     Ok(map_id)
 }
@@ -1128,7 +1137,6 @@ pub(super) fn builtin_register_ccl_program(
     args: Vec<Value>,
 ) -> EvalResult {
     let symbols_with_pos_enabled = eval.symbols_with_pos_enabled;
-    let obarray = eval.obarray_mut();
     let was_registered = args
         .first()
         .and_then(|v| v.as_symbol_id())
@@ -1139,11 +1147,17 @@ pub(super) fn builtin_register_ccl_program(
         return Ok(program_id);
     }
 
-    let publish = put_in_obarray(
-        obarray,
-        vec![args[0], Value::symbol("ccl-program-idx"), program_id],
-        symbols_with_pos_enabled,
-    );
+    // SAFETY: CCL registration/validation finished first; property publication
+    // is noncalling and never changes canonical function/debugger metadata.
+    let publish = unsafe {
+        eval.obarray.with_legacy_value_write(|obarray| {
+            put_in_obarray(
+                obarray,
+                vec![args[0], Value::symbol("ccl-program-idx"), program_id],
+                symbols_with_pos_enabled,
+            )
+        })
+    };
     if let Err(err) = publish {
         if let Some(name) = args[0].as_symbol_id() {
             super::ccl::unregister_registered_ccl_program(name);
@@ -4778,7 +4792,13 @@ pub(crate) fn builtin_internal_event_symbol_parse_modifiers(
 ) -> EvalResult {
     expect_args("internal-event-symbol-parse-modifiers", &args, 1)?;
     let symbol = SymId::from_value(eval, args[0])?;
-    cache_event_symbol_properties_in_obarray(eval.obarray_mut(), symbol)?;
+    // SAFETY: event parsing/cache population only writes properties and returns
+    // a detached result; it never calls Lisp or a canonical dispatch writer.
+    unsafe {
+        eval.obarray.with_legacy_value_write(|obarray| {
+            cache_event_symbol_properties_in_obarray(obarray, symbol)
+        })
+    }?;
     Ok(eval
         .obarray()
         .get_property_id(symbol, intern("event-symbol-elements"))
@@ -5168,7 +5188,7 @@ pub(crate) fn builtin_internal_make_var_non_special(
     args: Vec<Value>,
 ) -> EvalResult {
     expect_args("internal-make-var-non-special", &args, 1)?;
-    let obarray = eval.obarray_mut();
+    let mut obarray = eval.obarray_mut();
     let symbol = expect_symbol_id(&args[0])?;
     obarray.make_non_special_id(symbol);
     Ok(Value::NIL)

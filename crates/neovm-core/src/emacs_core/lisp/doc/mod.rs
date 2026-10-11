@@ -182,7 +182,13 @@ fn perform_doc_reread(eval: &mut super::eval::Context, reread: DocReread) -> Res
             // `insert-file-contents-literally' on a file that does not exist),
             // and naming a file that is not on disk in order to reach a scan
             // that never opens one would be a spelling, not a source.
-            snarf_variable_documentation(&mut eval.obarray);
+            // SAFETY: DOC adoption only writes variable documentation
+            // properties, never dispatch metadata or Lisp callbacks.
+            unsafe {
+                eval.obarray.with_legacy_value_write(|obarray| {
+                    snarf_variable_documentation(obarray);
+                });
+            }
         }
     }
     Ok(())
@@ -919,7 +925,13 @@ pub(crate) fn builtin_snarf_documentation(
     };
 
     if filename == "DOC" {
-        snarf_variable_documentation(&mut eval.obarray);
+        // SAFETY: the DOC property scan is noncalling and does not change
+        // canonical function/debugger metadata or return an interior borrow.
+        unsafe {
+            eval.obarray.with_legacy_value_write(|obarray| {
+                snarf_variable_documentation(obarray);
+            });
+        }
         return Ok(Value::NIL);
     }
 

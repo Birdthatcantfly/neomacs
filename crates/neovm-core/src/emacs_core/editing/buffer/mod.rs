@@ -683,11 +683,17 @@ pub(crate) fn builtin_kill_buffer(eval: &mut super::eval::Context, args: Vec<Val
         .ok_or_else(|| signal("error", vec![Value::string("Buffer does not exist")]))?;
     {
         let buffers = &mut eval.buffers;
-        let obarray = &mut eval.obarray;
-        for killed_id in &killed_ids_to_reset {
-            if let Some(buffer) = buffers.get_mut(*killed_id) {
-                buffer.kill_all_local_variables(obarray, true, &buffer_defaults);
-            }
+        // SAFETY: killed-buffer retirement only resets buffer/BLV value
+        // caches and reads properties. All process/Lisp callbacks finished
+        // above; no function or canonical descriptor writer runs in this phase.
+        unsafe {
+            eval.obarray.with_legacy_value_write(|obarray| {
+                for killed_id in &killed_ids_to_reset {
+                    if let Some(buffer) = buffers.get_mut(*killed_id) {
+                        buffer.kill_all_local_variables(obarray, true, &buffer_defaults);
+                    }
+                }
+            });
         }
     }
 
@@ -1565,9 +1571,14 @@ pub(crate) fn builtin_kill_all_local_variables(
     // - resets only a small fixed reset-on-kill-all subset
     // - clears conditional slot locals unless they are permanent-local
     // - walks local_var_alist for LOCALIZED entries (Phase 10E)
-    let _ =
-        eval.buffers
-            .clear_buffer_local_properties(current_id, &mut eval.obarray, kill_permanent);
+    let buffers = &mut eval.buffers;
+    // SAFETY: the major-mode hook has returned. This local-value/cache reset
+    // invokes no Lisp and preserves canonical dispatch metadata and storage.
+    let _ = unsafe {
+        eval.obarray.with_legacy_value_write(|obarray| {
+            buffers.clear_buffer_local_properties(current_id, obarray, kill_permanent)
+        })
+    };
     // GNU performs this after the hook and local reset. `bset_update_mode_line`
     // raises global `update_mode_lines` even for an offscreen buffer, ensuring
     // the menu and mode line are rebuilt if this major-mode transition is

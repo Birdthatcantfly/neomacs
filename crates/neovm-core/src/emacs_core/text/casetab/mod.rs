@@ -353,7 +353,7 @@ pub(crate) fn builtin_current_case_table(
     args: Vec<Value>,
 ) -> EvalResult {
     expect_args("current-case-table", &args, 0)?;
-    current_case_table_for_buffer_in_state(&mut ctx.obarray, &mut ctx.buffers)
+    current_case_table_for_context(ctx)
 }
 
 /// `(standard-case-table)` -- evaluator-backed standard case table object.
@@ -362,7 +362,7 @@ pub(crate) fn builtin_standard_case_table(
     args: Vec<Value>,
 ) -> EvalResult {
     expect_args("standard-case-table", &args, 0)?;
-    ensure_standard_case_table_object_in_state(&mut ctx.obarray)
+    ensure_standard_case_table_for_context(ctx)
 }
 
 /// `(set-case-table TABLE)` -- evaluator-backed current buffer case table set.
@@ -378,7 +378,7 @@ pub(crate) fn builtin_set_case_table(
         ));
     }
     let table = args[0];
-    let _ = ensure_standard_case_table_object_in_state(&mut ctx.obarray)?;
+    let _ = ensure_standard_case_table_for_context(ctx)?;
     ensure_case_table_derived_slots(table)?;
     set_current_case_table_for_buffer_in_state(&mut ctx.buffers, table)?;
     Ok(table)
@@ -406,6 +406,32 @@ pub(crate) fn builtin_set_standard_case_table(
     ctx.obarray
         .set_symbol_value_id(standard_case_table_object_symbol_id(), table);
     Ok(table)
+}
+
+#[inline(always)]
+fn ensure_standard_case_table_for_context(
+    ctx: &mut crate::emacs_core::eval::Context,
+) -> EvalResult {
+    // SAFETY: lazy standard-table creation only reads/stores a variable value;
+    // it cannot call Lisp or publish canonical dispatch metadata or raw storage.
+    unsafe {
+        ctx.obarray
+            .with_legacy_value_write(ensure_standard_case_table_object_in_state)
+    }
+}
+
+#[inline(always)]
+fn current_case_table_for_context(
+    ctx: &mut crate::emacs_core::eval::Context,
+) -> Result<Value, Flow> {
+    let buffers = &mut ctx.buffers;
+    // SAFETY: this noncalling phase selects/seeds case-table Values and buffer
+    // slots, without changing function/debugger metadata or escaping a loan.
+    unsafe {
+        ctx.obarray.with_legacy_value_write(|obarray| {
+            current_case_table_for_buffer_in_state(obarray, buffers)
+        })
+    }
 }
 
 fn ensure_standard_case_table_object_in_state(obarray: &mut super::symbol::Obarray) -> EvalResult {
@@ -449,14 +475,14 @@ fn current_case_table_for_buffer_in_state(
 pub(crate) fn sync_current_buffer_case_table_state(
     ctx: &mut crate::emacs_core::eval::Context,
 ) -> Result<(), Flow> {
-    let _ = current_case_table_for_buffer_in_state(&mut ctx.obarray, &mut ctx.buffers)?;
+    let _ = current_case_table_for_context(ctx)?;
     Ok(())
 }
 
 pub(crate) fn current_case_canon_table(
     ctx: &mut crate::emacs_core::eval::Context,
 ) -> Result<Value, Flow> {
-    let table = current_case_table_for_buffer_in_state(&mut ctx.obarray, &mut ctx.buffers)?;
+    let table = current_case_table_for_context(ctx)?;
     ensure_case_table_derived_slots(table)?;
     Ok(case_table_extra(table, 1))
 }
@@ -467,7 +493,7 @@ pub(crate) fn current_case_canon_table(
 pub(crate) fn current_case_upcase_table(
     ctx: &mut crate::emacs_core::eval::Context,
 ) -> Result<Value, Flow> {
-    let table = current_case_table_for_buffer_in_state(&mut ctx.obarray, &mut ctx.buffers)?;
+    let table = current_case_table_for_context(ctx)?;
     // GNU prepare_casing_context only rebuilds a modified table when the
     // canonicalize slot is nil, so ordinary comparisons do not write tables.
     if case_table_extra(table, 1).is_nil() {
@@ -544,8 +570,8 @@ impl CaseTableOverride {
         if ctx.buffers.current_buffer_id().is_none() {
             return Ok(Self::none());
         }
-        let standard = ensure_standard_case_table_object_in_state(&mut ctx.obarray)?;
-        let table = current_case_table_for_buffer_in_state(&mut ctx.obarray, &mut ctx.buffers)?;
+        let standard = ensure_standard_case_table_for_context(ctx)?;
+        let table = current_case_table_for_context(ctx)?;
         // The standard table's explicit entries already match the hardwired
         // ASCII path; skip the override entirely so we stay byte-identical.
         if table.bits() == standard.bits() {

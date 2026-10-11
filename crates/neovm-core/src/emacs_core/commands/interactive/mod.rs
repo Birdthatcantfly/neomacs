@@ -2125,13 +2125,22 @@ fn interactive_require_writable_current_buffer_in_state(
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
 fn interactive_apply_shift_selection_prefix(eval: &mut Context) {
-    interactive_apply_shift_selection_prefix_in_state(
-        &mut eval.obarray,
-        &mut [],
-        &mut eval.buffers,
-        &eval.custom,
-        eval.specpdl.as_slice(),
-    );
+    let buffers = &mut eval.buffers;
+    let custom = &eval.custom;
+    let specpdl = eval.specpdl.as_slice();
+    // SAFETY: shift-selection updates only runtime values/buffer state;
+    // no Lisp watcher, canonical writer or retained manager reference exists.
+    unsafe {
+        eval.obarray.with_legacy_value_write(|obarray| {
+            interactive_apply_shift_selection_prefix_in_state(
+                obarray,
+                &mut [],
+                buffers,
+                custom,
+                specpdl,
+            );
+        });
+    }
 }
 
 fn interactive_apply_shift_selection_prefix_in_state(
@@ -2264,13 +2273,24 @@ fn interactive_apply_prefix_flags(
                 &eval.buffers,
             )?,
             '@' => interactive_select_window_from_prefix_context(eval, context)?,
-            '^' => interactive_apply_shift_selection_prefix_in_state(
-                &mut eval.obarray,
-                &mut [],
-                &mut eval.buffers,
-                &eval.custom,
-                eval.specpdl.as_slice(),
-            ),
+            '^' => {
+                let buffers = &mut eval.buffers;
+                let custom = &eval.custom;
+                let specpdl = eval.specpdl.as_slice();
+                // SAFETY: the shift-selection storage helper changes only
+                // values/buffer state and does not invoke Lisp or dispatch writers.
+                unsafe {
+                    eval.obarray.with_legacy_value_write(|obarray| {
+                        interactive_apply_shift_selection_prefix_in_state(
+                            obarray,
+                            &mut [],
+                            buffers,
+                            custom,
+                            specpdl,
+                        );
+                    });
+                }
+            }
             _ => {}
         }
     }

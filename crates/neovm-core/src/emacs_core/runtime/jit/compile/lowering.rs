@@ -1347,8 +1347,8 @@ pub(crate) static STRING_ASET_INLINE_EMITTED: std::sync::atomic::AtomicUsize =
 /// and for any layout probe that could not prove what it found.
 ///
 /// Everything that is not a plain field read bounces to the generic path: no
-/// current buffer, an id outside the slot vector, a freed slot, or the symbol
-/// no longer being a plain builtin.
+/// current buffer or the symbol no longer being a plain builtin. Selection
+/// writers validate the direct Buffer designator and clear it before removal.
 ///
 /// SOUNDNESS: the loads are `MemFlagsData::trusted()`, which is `notrap` and
 /// `aligned` and deliberately NOT `readonly`. `dispatch.rs`'s ANTI-REQUIREMENT
@@ -1400,18 +1400,8 @@ fn emit_inline_cbsym_read(
     else {
         return None;
     };
-    let Some((tag_off, payload_off, none_tag)) = jit_layout::current_option_layout() else {
-        return None;
-    };
-    let Some((ptr_off, len_off)) = jit_layout::slots_vec_offsets() else {
-        return None;
-    };
-
     let flags = MemFlagsData::trusted();
-    let manager = CONTEXT_BUFFERS_OFFSET;
-    let current = manager + jit_layout::BUFFER_MANAGER_CURRENT_OFFSET;
-    let slots =
-        manager + jit_layout::BUFFER_MANAGER_BUFFERS_OFFSET + jit_layout::LIVE_BUFFERS_SLOTS_OFFSET;
+    let current = CONTEXT_BUFFERS_OFFSET + jit_layout::BUFFER_MANAGER_CURRENT_PTR_OFFSET;
 
     let miss = fb.create_block();
     let done = fb.create_block();
@@ -1430,36 +1420,9 @@ fn emit_inline_cbsym_read(
     fb.switch_to_block(has_buffer);
     fb.seal_block(has_buffer);
     let vmctx = fb.use_var(rt.vmctx_var);
-    let tag = fb
-        .ins()
-        .load(types::I64, flags, vmctx, (current + tag_off) as i32);
-    let present = icmp_imm_p(fb, IntCC::NotEqual, tag, none_tag as i64);
-    let in_range = fb.create_block();
-    fb.ins().brif(present, in_range, &[], miss, &[]);
-
-    // Its id must index the slot vector. `LiveBuffers::len` is the live COUNT,
-    // not the vector's length, so the bound has to come from the probed word.
-    fb.switch_to_block(in_range);
-    fb.seal_block(in_range);
-    let id = fb
-        .ins()
-        .load(types::I64, flags, vmctx, (current + payload_off) as i32);
-    let len = fb
-        .ins()
-        .load(types::I64, flags, vmctx, (slots + len_off) as i32);
-    let within = fb.ins().icmp(IntCC::UnsignedLessThan, id, len);
-    let live = fb.create_block();
-    fb.ins().brif(within, live, &[], miss, &[]);
-
-    // Each slot is one niche-optimised pointer word, so a freed slot is null.
-    fb.switch_to_block(live);
-    fb.seal_block(live);
-    let base = fb
-        .ins()
-        .load(rt.ptr_ty, flags, vmctx, (slots + ptr_off) as i32);
-    let byte_index = fb.ins().imul_imm(id, 8);
-    let slot_addr = fb.ins().iadd(base, byte_index);
-    let buffer = fb.ins().load(rt.ptr_ty, flags, slot_addr, 0);
+    // This private pointer changes on buffer switches. Unlike immutable World
+    // allocation bases, it must be reloaded after every callback.
+    let buffer = fb.ins().load(rt.ptr_ty, flags, vmctx, current as i32);
     let read = fb.create_block();
     let occupied = icmp_imm_p(fb, IntCC::NotEqual, buffer, 0);
     fb.ins().brif(occupied, read, &[], miss, &[]);
@@ -1509,14 +1472,13 @@ fn emit_inline_record_type_of(
     arg: ClifValue,
 ) -> Option<(Block, Variable)> {
     use super::jit_layout::CONTEXT_ATTENTION_OFFSET;
-    use super::jit_layout::{OBARRAY_DEBUG_ON_NEXT_CALL_FWD_OFFSET, OBARRAY_FUNCTION_EPOCH_OFFSET};
+    use super::jit_layout::{DISPATCH_DEBUG_FWD_OFFSET, DISPATCH_FUNCTION_EPOCH_OFFSET};
     use crate::emacs_core::forward::LISP_BOOL_FWD_VALUE_OFFSET;
     use crate::tagged::header::{VecLikeHeader, VecLikeType, VectorObj};
     let (ptr_off, len_off) = super::jit_layout::heap::value_vec_slice_offsets()?;
     const_assert_vector_record_share_layout();
     let data_off = core::mem::offset_of!(VectorObj, data);
     let type_off = core::mem::offset_of!(VecLikeHeader, type_tag);
-    let ob = super::jit_layout::CONTEXT_OBARRAY_OFFSET;
     let slot_epoch_off = super::spec_slot::SPEC_SLOT_EPOCH_OFFSET;
     let flags = MemFlagsData::trusted();
     debug_assert_eq!(Value::NIL.bits(), 0, "the clear test ORs nil words");
@@ -1540,11 +1502,12 @@ fn emit_inline_record_type_of(
     fb.switch_to_block(stage2);
     fb.seal_block(stage2);
     let vmctx = fb.use_var(rt.vmctx_var);
+    let dispatch = super::jit_layout::emit_dispatch_cells_base(fb, vmctx);
     let epoch = fb.ins().load(
         types::I64,
         flags,
-        vmctx,
-        (ob + OBARRAY_FUNCTION_EPOCH_OFFSET) as i32,
+        dispatch,
+        DISPATCH_FUNCTION_EPOCH_OFFSET as i32,
     );
     let armed_epoch = fb
         .ins()
@@ -1570,12 +1533,9 @@ fn emit_inline_record_type_of(
     let async_word = fb.ins().uload32(flags, async_addr, 0);
     // The `debug-on-next-call` cell: never null (an unresolved cell names a
     // stand-in that reads armed).
-    let cell = fb.ins().load(
-        rt.ptr_ty,
-        flags,
-        vmctx,
-        (ob + OBARRAY_DEBUG_ON_NEXT_CALL_FWD_OFFSET) as i32,
-    );
+    let cell = fb
+        .ins()
+        .load(rt.ptr_ty, flags, dispatch, DISPATCH_DEBUG_FWD_OFFSET as i32);
     let debug = super::atomic_forward::load_bool(fb, cell, LISP_BOOL_FWD_VALUE_OFFSET);
     let object = band_imm_p(fb, arg, !(TAG_MASK as i64));
     let type_tag = fb.ins().uload8(types::I64, flags, object, type_off as i32);
@@ -2204,16 +2164,16 @@ pub(crate) fn emit_mir_inline_entry_guard(
     deopt: Block,
 ) -> Result<(), CompileError> {
     use super::jit_layout::CONTEXT_ATTENTION_OFFSET;
-    use super::jit_layout::{OBARRAY_DEBUG_ON_NEXT_CALL_FWD_OFFSET, OBARRAY_FUNCTION_EPOCH_OFFSET};
+    use super::jit_layout::{DISPATCH_DEBUG_FWD_OFFSET, DISPATCH_FUNCTION_EPOCH_OFFSET};
     use crate::emacs_core::forward::LISP_BOOL_FWD_VALUE_OFFSET;
-    let ob = super::jit_layout::CONTEXT_OBARRAY_OFFSET;
     let flags = MemFlagsData::trusted();
     let vmctx = fb.use_var(rt.vmctx_var);
+    let dispatch = super::jit_layout::emit_dispatch_cells_base(fb, vmctx);
     let current = fb.ins().load(
         types::I64,
         flags,
-        vmctx,
-        (ob + OBARRAY_FUNCTION_EPOCH_OFFSET) as i32,
+        dispatch,
+        DISPATCH_FUNCTION_EPOCH_OFFSET as i32,
     );
     let epoch_ok = icmp_imm_p(fb, IntCC::Equal, current, epoch as i64);
     // `quit-flag`, a bound `throw-on-input` and active compiler overrides.
@@ -2233,12 +2193,9 @@ pub(crate) fn emit_mir_inline_entry_guard(
     );
     let async_word = fb.ins().uload32(flags, async_addr, 0);
     // Never null; an unresolved cell names a stand-in that reads armed.
-    let cell = fb.ins().load(
-        rt.ptr_ty,
-        flags,
-        vmctx,
-        (ob + OBARRAY_DEBUG_ON_NEXT_CALL_FWD_OFFSET) as i32,
-    );
+    let cell = fb
+        .ins()
+        .load(rt.ptr_ty, flags, dispatch, DISPATCH_DEBUG_FWD_OFFSET as i32);
     let debug = super::atomic_forward::load_bool(fb, cell, LISP_BOOL_FWD_VALUE_OFFSET);
     let depth = fb.ins().load(
         rt.ptr_ty,

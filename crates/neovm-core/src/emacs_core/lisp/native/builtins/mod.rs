@@ -822,13 +822,27 @@ fn define_coding_system_internal(eval: &mut super::eval::Context, args: Vec<Valu
         &mut eval.coding_systems,
         args.clone(),
     )?;
-    super::coding::record_lisp_define_coding_system_internal(&mut eval.obarray, &args);
+    // SAFETY: the completed coding-system registration is recorded only in
+    // symbol value/property cells. This helper is noncalling and preserves
+    // canonical dispatch metadata and manager storage identity.
+    unsafe {
+        eval.obarray.with_legacy_value_write(|obarray| {
+            super::coding::record_lisp_define_coding_system_internal(obarray, &args);
+        });
+    }
     Ok(result)
 }
 fn define_coding_system_alias(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {
     let result =
         super::coding::builtin_define_coding_system_alias(&mut eval.coding_systems, args.clone())?;
-    super::coding::record_lisp_define_coding_system_alias(&mut eval.obarray, &args);
+    // SAFETY: the completed coding-system registration is recorded only in
+    // symbol value/property cells. This helper is noncalling and preserves
+    // canonical dispatch metadata and manager storage identity.
+    unsafe {
+        eval.obarray.with_legacy_value_write(|obarray| {
+            super::coding::record_lisp_define_coding_system_alias(obarray, &args);
+        });
+    }
     Ok(result)
 }
 fn set_coding_system_priority(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {

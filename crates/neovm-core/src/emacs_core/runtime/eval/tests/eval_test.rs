@@ -447,7 +447,12 @@ fn symbol_with_pos_property_keys_follow_gnu_eq_rules() {
 fn skip_debugger_matches_raw_unibyte_ignored_error_regex() {
     crate::test_utils::init_test_tracing();
     let mut ev = Context::new();
-    crate::emacs_core::errors::init_standard_errors(&mut ev.obarray);
+    // SAFETY: the native standard-error fixture writes only properties,
+    // with no Lisp/collection, canonical dispatch changes or escaping loan.
+    unsafe {
+        ev.obarray
+            .with_legacy_value_write(crate::emacs_core::errors::init_standard_errors);
+    }
     let raw = Value::heap_string(crate::heap_types::LispString::from_unibyte(vec![0xFF]));
     ev.obarray
         .set_symbol_value("debug-ignored-errors", Value::list(vec![raw]));
@@ -473,7 +478,12 @@ fn skip_debugger_matches_raw_unibyte_ignored_error_regex() {
 fn command_error_severity_follows_gnus_debug_ignored_errors() {
     crate::test_utils::init_test_tracing();
     let mut ev = Context::new();
-    crate::emacs_core::errors::init_standard_errors(&mut ev.obarray);
+    // SAFETY: the native standard-error fixture writes only properties,
+    // with no Lisp/collection, canonical dispatch changes or escaping loan.
+    unsafe {
+        ev.obarray
+            .with_legacy_value_write(crate::emacs_core::errors::init_standard_errors);
+    }
     let signal_of =
         |name: &str, data: Vec<Value>| match crate::emacs_core::error::signal(name, data)
             .into_kind()
@@ -555,7 +565,12 @@ fn command_error_severity_follows_gnus_debug_ignored_errors() {
 fn command_error_severity_never_signals_on_a_bad_ignore_list() {
     crate::test_utils::init_test_tracing();
     let mut ev = Context::new();
-    crate::emacs_core::errors::init_standard_errors(&mut ev.obarray);
+    // SAFETY: the native standard-error fixture writes only properties,
+    // with no Lisp/collection, canonical dispatch changes or escaping loan.
+    unsafe {
+        ev.obarray
+            .with_legacy_value_write(crate::emacs_core::errors::init_standard_errors);
+    }
     ev.eval_str(r#"(setq debug-ignored-errors '("[" end-of-buffer))"#)
         .expect("install a broken regexp entry");
     let sig = match crate::emacs_core::error::signal("end-of-buffer", vec![]).into_kind() {

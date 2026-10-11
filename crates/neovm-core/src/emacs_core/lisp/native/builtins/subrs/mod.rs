@@ -97,7 +97,12 @@ impl EvaluatorCompatibility<NeedsEventProperties> {
         self,
         ctx: &mut crate::emacs_core::eval::Context,
     ) -> EvaluatorCompatibility<NeedsPublicEval> {
-        symbols::init_event_symbol_properties(&mut ctx.obarray);
+        // SAFETY: compatibility setup only initializes event symbol properties;
+        // it does not call Lisp or mutate canonical function/debugger metadata.
+        unsafe {
+            ctx.obarray
+                .with_legacy_value_write(symbols::init_event_symbol_properties);
+        }
         EvaluatorCompatibility(std::marker::PhantomData)
     }
 }

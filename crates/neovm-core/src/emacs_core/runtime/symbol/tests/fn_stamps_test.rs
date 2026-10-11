@@ -23,7 +23,7 @@ impl<'a> FunctionStampReader<'a> {
         let index = Obarray::slot_index(symbol);
         Self {
             side: &owner.symbols.sides[index >> 12],
-            clock: &owner.function_epoch,
+            clock: &owner.dispatch_cells.function_epoch,
             slot: index & (super::OBARRAY_CHUNK - 1),
         }
     }

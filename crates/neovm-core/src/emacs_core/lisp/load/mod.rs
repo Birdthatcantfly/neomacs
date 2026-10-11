@@ -4046,7 +4046,7 @@ fn ensure_startup_compat_variables(eval: &mut super::eval::Context, project_root
         eval.obarray.make_special(name);
     }
     {
-        let obarray = eval.obarray_mut();
+        let mut obarray = eval.obarray_mut();
         // GNU data.c installs these with DEFVAR_LISP, then assigns the
         // fixnum limit and calls make_symbol_constant.  Reassert this here so
         // cached bootstrap dumps from older builds regain the C bootstrap
@@ -5517,7 +5517,7 @@ fn finalize_cached_bootstrap_eval(
         use crate::buffer::buffer::BUFFER_SLOT_INFO;
         use crate::emacs_core::forward::alloc_buffer_objfwd;
         use crate::emacs_core::intern::intern;
-        let obarray = eval.obarray_mut();
+        let mut obarray = eval.obarray_mut();
         for info in BUFFER_SLOT_INFO {
             // Phase 10D holdouts 3/4/5: skip internal-only slots
             // (syntax-table / category-table / case-table) — they
@@ -5621,7 +5621,13 @@ fn finalize_cached_bootstrap_eval(
     // adoption at the runtime boundary so late-bound variables receive both
     // their forwarding storage and their declared-special flag. The pass is
     // idempotent for symbols restored intact from a pdump.
-    super::defvar_object::adopt(eval.obarray_mut());
+    // SAFETY: late DEFVAR adoption is noncalling and may reattach the canonical
+    // debugger descriptor through installation hooks. The admitted manager is
+    // not replaced, and all raw loans end before subsequent Lisp admissions.
+    unsafe {
+        eval.obarray
+            .with_legacy_storage_write(super::defvar_object::adopt);
+    }
     eval.clear_top_level_eval_state();
 
     Ok(())

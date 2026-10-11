@@ -55,7 +55,12 @@ pub(crate) fn ensure_startup_compat_variables(eval: &mut crate::emacs_core::eval
     // that every defface has run and all faces are known. This is the startup
     // sync point that fixes `face-id` for bootstrap faces (see
     // stamp_face_id_properties).
-    stamp_face_id_properties(eval.obarray_mut());
+    // SAFETY: stamping registry IDs writes only symbol properties; the helper
+    // neither calls Lisp nor changes canonical function/debugger metadata.
+    unsafe {
+        eval.obarray
+            .with_legacy_value_write(stamp_face_id_properties);
+    }
 
     let defaults = [
         ("face-filters-always-match", Value::NIL),

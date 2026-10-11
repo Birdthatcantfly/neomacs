@@ -132,10 +132,17 @@ fn cache_key_event_symbol_properties(
     eval: &mut super::eval::Context,
     events: &[Value],
 ) -> EvalResult {
-    for event in events {
-        cache_event_symbol_value_properties_in_obarray(eval.obarray_mut(), *event)?;
+    // SAFETY: this loop only parses event designators and writes their cached
+    // properties. It invokes no Lisp or canonical dispatch producer and leaves
+    // no manager/interior reference outside its single cohesive phase.
+    unsafe {
+        eval.obarray.with_legacy_value_write(|obarray| {
+            for event in events {
+                cache_event_symbol_value_properties_in_obarray(obarray, *event)?;
+            }
+            Ok(Value::NIL)
+        })
     }
-    Ok(Value::NIL)
 }
 
 fn lucid_event_type_list_p(value: &Value) -> bool {

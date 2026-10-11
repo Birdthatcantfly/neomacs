@@ -2286,7 +2286,7 @@ fn request_upgrade(
     rt.disarm_leaf_slot();
     unlink_spec_slots_in(cache, Rc::as_ptr(&old));
     // SAFETY: the dormant Context provided by the native dispatch seam.
-    let obarray = (!ctx.is_null()).then(|| unsafe { &(*ctx).obarray });
+    let obarray = (!ctx.is_null()).then(|| unsafe { &*(*ctx).obarray });
     let name_hint = stats::naming_enabled()
         .then(|| callee_name_hint(ctx, id))
         .flatten();
@@ -2606,7 +2606,7 @@ pub fn try_run_compiled(
         // dispatch (see neovm_jit_call's contract); a shared read of its obarray
         // for compile-time speculation. A null ctx (shim-free test bodies) just
         // disables speculation.
-        let obarray = (!ctx.is_null()).then(|| unsafe { &(*ctx).obarray });
+        let obarray = (!ctx.is_null()).then(|| unsafe { &*(*ctx).obarray });
         // A countdown upgrade keeps its T1 live until the replacement
         // really installs. The legacy heat-driven re-tier below is unchanged.
         if super::compile::jit_tier_upgrade_enabled()
@@ -2944,7 +2944,7 @@ pub(crate) fn resolve_compiled_leaf_ptr(
         }
         match cache.get_or_insert_with(id, || {
             // SAFETY: same dormant-Context contract as try_run_compiled.
-            let obarray = (!ctx.is_null()).then(|| unsafe { &(*ctx).obarray });
+            let obarray = (!ctx.is_null()).then(|| unsafe { &*(*ctx).obarray });
             let name_hint = stats::naming_enabled()
                 .then(|| callee_name_hint(ctx, id))
                 .flatten();

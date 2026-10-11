@@ -2375,7 +2375,7 @@ impl Context {
         };
         let (_, entry) = subr_entry_from_value(subr)?;
         (entry.dispatch_kind == SubrDispatchKind::Builtin)
-            .then(|| (subr, self.obarray.function_epoch()))
+            .then(|| (subr, self.dispatch_projection().function_epoch()))
     }
 
     /// `apply1` of DESIGNATOR, a symbol [`Self::resolve_mapped_subr_callee`]
@@ -2410,7 +2410,7 @@ impl Context {
                 Err(flow) => Err(flow),
                 Ok(()) => self.maybe_grow_eval_stack(|ctx| {
                     let args = [arg0];
-                    if ctx.obarray.function_epoch() != epoch
+                    if ctx.dispatch_projection().function_epoch() != epoch
                         || ctx.compiler_function_overrides_active()
                     {
                         return ctx
@@ -2458,7 +2458,7 @@ impl Context {
                     // `LispArgVec` was copied 16 bytes wide over these two
                     // 8-byte stores (a store-forward block per call).
                     let args = [arg0, arg1];
-                    if ctx.obarray.function_epoch() != epoch
+                    if ctx.dispatch_projection().function_epoch() != epoch
                         || ctx.compiler_function_overrides_active()
                     {
                         return ctx
@@ -3504,7 +3504,7 @@ impl Context {
     #[inline]
     pub(super) fn resolve_named_call_target_by_id(&mut self, sym_id: SymId) -> NamedCallTarget {
         let compiler_overrides_active = self.compiler_function_overrides_active();
-        let function_epoch = self.obarray.function_epoch();
+        let function_epoch = self.dispatch_projection().function_epoch();
         if !compiler_overrides_active {
             // Fast path: a HashMap lookup that returns the cached target
             // when the function epoch hasn't moved.  An epoch mismatch
@@ -3570,7 +3570,7 @@ impl Context {
     #[inline]
     #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
     pub(super) fn store_named_call_cache(&mut self, symbol: SymId, target: NamedCallTarget) {
-        let function_epoch = self.obarray.function_epoch();
+        let function_epoch = self.dispatch_projection().function_epoch();
         if self.named_call_cache.len() < NAMED_CALL_CACHE_CAPACITY {
             self.named_call_cache.insert(
                 symbol,

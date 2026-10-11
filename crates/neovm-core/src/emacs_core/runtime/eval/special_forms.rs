@@ -1473,7 +1473,15 @@ impl Context {
         subfeatures: Option<Value>,
     ) -> EvalResult {
         self.note_macro_expansion_mutation();
-        provide_value_in_state(&mut self.obarray, &mut self.features, feature, subfeatures)?;
+        let features = &mut self.features;
+        // SAFETY: provide_value_in_state only publishes feature values and
+        // properties. Its Lisp after-load hooks run below, after this loan;
+        // no canonical function/debugger metadata or storage identity changes.
+        unsafe {
+            self.obarray.with_legacy_value_write(|obarray| {
+                provide_value_in_state(obarray, features, feature, subfeatures)
+            })
+        }?;
         self.record_load_history_entry(LoadHistoryEntry::ProvidedFeature(feature));
         // GNU Emacs Fprovide (fns.c): after adding the feature, run any
         // load-hooks registered in `after-load-alist`.

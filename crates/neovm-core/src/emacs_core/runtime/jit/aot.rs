@@ -130,7 +130,9 @@ pub(crate) const ABI_TAG: u32 = compute_abi_tag();
 // value-shim contract and no NamedBuiltin variant-2 fallback or epoch guard.
 // v45: typed bytecode parameters and full-width stack depth change the
 // ByteCodeFunction layout, moving the baked `runtime` and `constants` offsets.
-const ABI_TAG_VERSION: u32 = 45;
+// v47: stable World storage views replace inline Obarray/buffer storage;
+// canonical dispatch-cell and selected-buffer pointers have separate offsets.
+const ABI_TAG_VERSION: u32 = 47;
 
 /// Format version of the AOT descriptor spec-section + the runtime spec ABI
 /// (`SpecSlot`/`spec_expected` sidecar bases, the loader re-classify+arm protocol).
@@ -183,13 +185,31 @@ const fn compute_abi_tag() -> u32 {
         }};
     }
     mix_u64!(ABI_TAG_VERSION as u64);
-    // The inline `Op::VarRef` read bakes these layout facts into the code.
-    mix_u64!(core::mem::offset_of!(crate::emacs_core::eval::Context, obarray) as u64);
+    // The inline `Op::VarRef` reads a stable World manager pointer. The
+    // canonical pair is a second pointer in the same owned Obarray view, not
+    // an epoch/debugger value snapshot. Salt both address interpretations.
+    mix_u64!(super::compile::jit_layout::CONTEXT_OBARRAY_OFFSET as u64);
+    mix_u64!(super::compile::jit_layout::CONTEXT_DISPATCH_CELLS_OFFSET as u64);
+    mix_u64!(super::compile::jit_layout::DISPATCH_FUNCTION_EPOCH_OFFSET as u64);
+    mix_u64!(super::compile::jit_layout::DISPATCH_DEBUG_FWD_OFFSET as u64);
+    mix_u64!(crate::emacs_core::symbol::OBARRAY_FUNCTION_EPOCH_OFFSET as u64);
+    mix_u64!(crate::emacs_core::symbol::OBARRAY_DEBUG_ON_NEXT_CALL_FWD_OFFSET as u64);
     mix_u64!(crate::emacs_core::symbol::OBARRAY_JIT_SPINE_OFFSET as u64);
     mix_u64!(crate::emacs_core::symbol::OBARRAY_JIT_LEN_OFFSET as u64);
     mix_u64!(crate::emacs_core::symbol::LISP_SYMBOL_SIZE as u64);
     mix_u64!(crate::emacs_core::symbol::LISP_SYMBOL_FLAGS_OFFSET as u64);
     mix_u64!(crate::emacs_core::symbol::LISP_SYMBOL_VAL_OFFSET as u64);
+    // Buffer storage and selection have distinct owners. Inline pure reads
+    // use the private validated Buffer pointer; BLV guards retain the raw id.
+    mix_u64!(super::compile::jit_layout::CONTEXT_BUFFERS_OFFSET as u64);
+    mix_u64!(super::compile::jit_layout::CONTEXT_CURRENT_BUFFER_RAW_OFFSET as u64);
+    mix_u64!(crate::buffer::buffer::jit_layout::BUFFER_MANAGER_STORAGE_PTR_OFFSET as u64);
+    mix_u64!(crate::buffer::buffer::jit_layout::BUFFER_STORAGE_BUFFERS_OFFSET as u64);
+    mix_u64!(crate::buffer::buffer::jit_layout::BUFFER_MANAGER_CURRENT_PTR_OFFSET as u64);
+    mix_u64!(crate::buffer::buffer::jit_layout::BUFFER_MANAGER_CURRENT_OFFSET as u64);
+    mix_u64!(crate::buffer::buffer::jit_layout::BUFFER_MANAGER_CURRENT_RAW_OFFSET as u64);
+    // The stable heap projection keeps the original one-hop Box addressing.
+    mix_u64!(super::compile::jit_layout::CONTEXT_TAGGED_HEAP_OFFSET as u64);
     // The entry stack guard (v10) reads the limit and parks its entry
     // parameters in the scratch words.
     mix_u64!(core::mem::offset_of!(crate::emacs_core::eval::Context, jit_stack_limit) as u64);

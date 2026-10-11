@@ -678,6 +678,82 @@ pub(crate) struct StackCursor {
     len: usize,
 }
 
+/// Sole-owner interpreter phase, coupled to the existing operand cursor.
+///
+/// The witness contains no manager pointer. The closed World builder proves
+/// exactly one Context owns the views; Vm.ctx remains the actual owner borrow.
+/// Publication consumes both parts before synchronous callbacks/GC. Private
+/// driver code must rejoin the original VM; the ZST proves construction policy
+/// and phase consumption, not owner identity. This permits no second facade or yield.
+#[must_use = "publish this phase before an operation that can run Lisp or collect"]
+struct RunLoopCursor {
+    operands: StackCursor,
+    phase: crate::emacs_core::eval::world::SoleOwnerDriver,
+}
+
+/// Published operands have no usable cursor or manager projection.
+#[derive(Debug)]
+#[must_use = "consume this return capability when the original VM rejoins"]
+struct PublishedSolePhase {
+    phase: crate::emacs_core::eval::world::PublishedSoleOwnerDriver,
+}
+static_assertions::assert_not_impl_any!(RunLoopCursor: Send, Sync, Copy, Clone);
+static_assertions::assert_not_impl_any!(PublishedSolePhase: Send, Sync, Copy, Clone);
+static_assertions::assert_eq_size!(RunLoopCursor, StackCursor);
+static_assertions::const_assert_eq!(
+    std::mem::align_of::<RunLoopCursor>(),
+    std::mem::align_of::<StackCursor>()
+);
+static_assertions::const_assert_eq!(std::mem::size_of::<PublishedSolePhase>(), 0);
+
+impl std::fmt::Debug for RunLoopCursor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunLoopCursor")
+            .field("operand_base", &self.operands.base)
+            .field("operand_len", &self.operands.len)
+            .field("phase", &self.phase)
+            .finish()
+    }
+}
+
+impl RunLoopCursor {
+    #[inline(always)]
+    fn acquire(vm: &mut Vm<'_>, phase: crate::emacs_core::eval::world::SoleOwnerDriver) -> Self {
+        Self {
+            operands: StackCursor::acquire(vm.ctx),
+            phase,
+        }
+    }
+
+    /// The private driver keeps the existing two operand words in locals.
+    /// The affine policy witness must move back with them before every escape.
+    #[inline(always)]
+    fn into_parts(self) -> (StackCursor, crate::emacs_core::eval::world::SoleOwnerDriver) {
+        (self.operands, self.phase)
+    }
+
+    #[inline(always)]
+    fn publish(self, vm: &mut Vm<'_>) -> PublishedSolePhase {
+        self.operands.publish(vm.ctx);
+        PublishedSolePhase {
+            phase: self.phase.into_published(),
+        }
+    }
+}
+
+impl PublishedSolePhase {
+    /// Rejoin through the original VM receiver retained by the private driver.
+    /// No identity is encoded in the ZST; this receiver policy remains audited.
+    #[inline(always)]
+    fn rejoin(self, vm: &mut Vm<'_>) -> RunLoopCursor {
+        RunLoopCursor::acquire(vm, self.phase.into_running())
+    }
+
+    /// Retire a published activation on a normal or nonlocal final exit.
+    #[inline(always)]
+    fn finish(self) {}
+}
+
 #[cfg(debug_assertions)]
 thread_local! {
     static STACK_CURSOR_LIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1464,6 +1540,7 @@ struct InterpreterCallerStack {
 pub(crate) struct InterpreterStackPool {
     free: Vec<InterpreterStacks>,
 }
+static_assertions::assert_not_impl_any!(InterpreterStackPool: Send, Sync, Clone);
 
 #[derive(Default)]
 struct InterpreterStacks {
@@ -2125,6 +2202,8 @@ impl BytecodeDepthOverflow {
 /// Operates on a Context's obarray and dynamic binding stack.
 pub struct Vm<'a> {
     ctx: &'a mut crate::emacs_core::eval::Context,
+    /// Pointer-free policy fact; access remains bound by the original ctx borrow.
+    sole_owner: crate::emacs_core::eval::world::SoleOwnerVm,
     recent_interpreter_call: RecentInterpreterCall,
     #[cfg(feature = "jit")]
     bytecode_tier_policy: BytecodeTierPolicy,
@@ -2372,8 +2451,10 @@ impl<'a> Vm<'a> {
             },
             ..knobs
         };
+        let sole_owner = ctx.obarray.sole_owner_registration().into_vm();
         Self {
             ctx,
+            sole_owner,
             recent_interpreter_call: RecentInterpreterCall::EMPTY,
             #[cfg(feature = "jit")]
             bytecode_tier_policy: knobs.tier_policy,
@@ -2458,11 +2539,12 @@ impl<'a> Vm<'a> {
     #[inline(never)]
     fn finish_live_bytecode_depth_overflow(
         &mut self,
-        cursor: StackCursor,
+        cursor: RunLoopCursor,
         overflow: BytecodeDepthOverflow,
-    ) -> Flow {
-        cursor.publish(self.ctx);
-        self.ctx.finish_lisp_depth_overflow(overflow.into_flow())
+    ) -> (Flow, PublishedSolePhase) {
+        let published = cursor.publish(self);
+        let flow = self.ctx.finish_lisp_depth_overflow(overflow.into_flow());
+        (flow, published)
     }
 
     /// Enter a bytecode call whose caller has already published its operands.
@@ -4261,6 +4343,7 @@ impl<'a> Vm<'a> {
         aux_stack: &mut InterpreterFrameAuxStack,
         driver_quitcounter: &mut u8,
     ) -> EvalResult {
+        let phase = self.sole_owner.driver();
         // Capture guards are synchronous and private: callbacks finish their
         // nested scopes before this driver resumes. A reentrant driver checks
         // its own enclosing scope, so this local policy is valid for this call.
@@ -4270,7 +4353,22 @@ impl<'a> Vm<'a> {
         // top/pc in locals across setup_frame/Breturn, bytecode.c). Escapes
         // publish and reacquire; the iterative Bcall/Breturn transitions keep
         // the cursor live.
-        let mut cursor = StackCursor::acquire(self.ctx);
+        let (mut cursor, mut phase) = RunLoopCursor::acquire(self, phase).into_parts();
+        let mut published;
+        macro_rules! publish_phase {
+            () => {
+                published = RunLoopCursor {
+                    operands: cursor,
+                    phase,
+                }
+                .publish(self)
+            };
+        }
+        macro_rules! rejoin_phase {
+            () => {
+                (cursor, phase) = published.rejoin(self).into_parts()
+            };
+        }
         'frame: loop {
             // Unpack the ACTIVE frame into locals and let the borrow end: the
             // body pushes and pops `callers`, so nothing may hold a reference
@@ -4377,14 +4475,17 @@ impl<'a> Vm<'a> {
                         $flow,
                     ) {
                         ResumeFlowOutcome::ResumeOp => {
-                            cursor = StackCursor::acquire(&mut self.ctx);
+                            rejoin_phase!();
                             continue;
                         }
                         ResumeFlowOutcome::ResumeFrame => {
-                            cursor = StackCursor::acquire(self.ctx);
+                            rejoin_phase!();
                             continue 'frame;
                         }
-                        ResumeFlowOutcome::Exit(result) => return result,
+                        ResumeFlowOutcome::Exit(result) => {
+                            published.finish();
+                            return result;
+                        }
                     }
                 }};
             }
@@ -4415,24 +4516,28 @@ impl<'a> Vm<'a> {
                             callers
                                 .active_mut()
                                 .save_execution_state(pc_local, osr_tried);
-                            cursor.publish(self.ctx);
+                            publish_phase!();
+                            published.finish();
                             return Ok(value);
                         }
                         InterpreterValueCompletion::NeedsSlowCleanup(value) => {
                             callers
                                 .active_mut()
                                 .save_execution_state(pc_local, osr_tried);
-                            cursor.publish(self.ctx);
+                            publish_phase!();
                             match self.complete_interpreter_frame_chain(
                                 callers,
                                 aux_stack,
                                 Ok(value),
                             ) {
                                 InterpreterFrameCompletion::Resume => {
-                                    cursor = StackCursor::acquire(self.ctx);
+                                    rejoin_phase!();
                                     continue 'frame;
                                 }
-                                InterpreterFrameCompletion::Exit(result) => return result,
+                                InterpreterFrameCompletion::Exit(result) => {
+                                    published.finish();
+                                    return result;
+                                }
                             }
                         }
                     }
@@ -4455,7 +4560,7 @@ impl<'a> Vm<'a> {
                     if !VERIFIED && cursor.len >= frame_limit {
                         let invalid_pc = pc_local.saturating_sub(1);
                         let stack_len = cursor.len;
-                        cursor.publish(&mut self.ctx);
+                        publish_phase!();
                         trace_invalid_bytecode_site(
                             func,
                             "push-frame-limit",
@@ -4501,13 +4606,13 @@ impl<'a> Vm<'a> {
 
             macro_rules! vm_try {
                 ($expr:expr) => {{
-                    cursor.publish(&mut self.ctx);
+                    publish_phase!();
                     let result = $expr;
-                    cursor = StackCursor::acquire(&mut self.ctx);
+                    rejoin_phase!();
                     match result {
                         Ok(value) => value,
                         Err(flow) => {
-                            cursor.publish(&mut self.ctx);
+                            publish_phase!();
                             resume_flow!(flow)
                         }
                     }
@@ -4525,10 +4630,10 @@ impl<'a> Vm<'a> {
             macro_rules! poll_quit {
                 () => {{
                     if !self.ctx.maybe_quit_hot_ok() {
-                        cursor.publish(self.ctx);
+                        publish_phase!();
                         match self.ctx.maybe_quit() {
                             Ok(()) => {
-                                cursor = StackCursor::acquire(self.ctx);
+                                rejoin_phase!();
                             }
                             Err(flow) => resume_flow!(flow),
                         }
@@ -4541,7 +4646,7 @@ impl<'a> Vm<'a> {
                     match $expr {
                         Ok(value) => value,
                         Err(flow) => {
-                            cursor.publish(&mut self.ctx);
+                            publish_phase!();
                             resume_flow!(flow)
                         }
                     }
@@ -4584,7 +4689,7 @@ impl<'a> Vm<'a> {
                                 && crate::emacs_core::jit::jit_runtime_enabled()
                                 && func.jit_runtime().is_hot()
                             {
-                                cursor.publish(&mut self.ctx);
+                                publish_phase!();
                                 match self.osr_transfer(func, frame_base, target, aux_stack) {
                                     OsrOutcome::Interpret { pc, retry } => {
                                         // Not transferred, a plain deopt, or a precise
@@ -4592,14 +4697,14 @@ impl<'a> Vm<'a> {
                                         // is current. Interpret on from `pc`; retry
                                         // only after an invalidation.
                                         osr_tried = retry == OsrRetry::Latch;
-                                        cursor = StackCursor::acquire(&mut self.ctx);
+                                        rejoin_phase!();
                                         pc_local = pc;
                                     }
                                     OsrOutcome::Returned(value) => {
                                         // Cold OSR exit: the native run left the
                                         // context authoritative; rearm the cursor
                                         // for the shared completion path.
-                                        cursor = StackCursor::acquire(&mut self.ctx);
+                                        rejoin_phase!();
                                         complete_value!(value);
                                     }
                                     OsrOutcome::Exited => {
@@ -4619,7 +4724,7 @@ impl<'a> Vm<'a> {
                 ($reason:expr) => {{
                     let invalid_pc = pc_local.saturating_sub(1);
                     let stack_len = cursor.len;
-                    cursor.publish(&mut self.ctx);
+                    publish_phase!();
                     trace_invalid_bytecode_site(
                         func,
                         $reason,
@@ -4652,14 +4757,14 @@ impl<'a> Vm<'a> {
                 // driver's frames over and finish them as a resumed chain.
                 #[cfg(test)]
                 if resumed_chain_probe::armed() {
-                    cursor.publish(self.ctx);
+                    publish_phase!();
                     callers
                         .active_mut()
                         .save_execution_state(pc_local, osr_tried);
                     if let Some(result) = self.resumed_chain_probe(callers, aux_stack) {
                         return result;
                     }
-                    cursor = StackCursor::acquire(self.ctx);
+                    rejoin_phase!();
                 }
                 let op = unsafe { &*ops_ptr.add(pc_local) };
                 pc_local += 1;
@@ -5019,7 +5124,7 @@ impl<'a> Vm<'a> {
                         // anything (it is a bare `bool`); it only steers the
                         // call off the zero-copy fast paths onto the owned
                         // route below, which takes the arm properly.
-                        let debug_armed = self.ctx.debug_on_next_call_is_armed();
+                        let debug_armed = self.ctx.obarray.debug_on_next_call_armed_fast();
                         let target = self.resolve_interpreter_stack_call_target(func_val, n);
 
                         if !debug_armed
@@ -5034,8 +5139,14 @@ impl<'a> Vm<'a> {
                             self.ctx.depth += 1;
                             if self.ctx.depth > self.ctx.max_depth {
                                 if let Err(overflow) = self.check_live_bytecode_call_depth() {
-                                    let flow =
-                                        self.finish_live_bytecode_depth_overflow(cursor, overflow);
+                                    let (flow, retired) = self.finish_live_bytecode_depth_overflow(
+                                        RunLoopCursor {
+                                            operands: cursor,
+                                            phase,
+                                        },
+                                        overflow,
+                                    );
+                                    published = retired;
                                     resume_flow!(flow);
                                 }
                             }
@@ -5091,7 +5202,7 @@ impl<'a> Vm<'a> {
                                 vm.call_function_debugged(func_val, args)
                             }))
                         } else {
-                            cursor.publish(self.ctx);
+                            publish_phase!();
                             if let Err(flow) = self.enter_published_bytecode_call_depth() {
                                 resume_flow!(flow)
                             }
@@ -5110,7 +5221,7 @@ impl<'a> Vm<'a> {
                                     // was published for that escape, so rearm
                                     // it and take the same live-cursor
                                     // installation as the cached fast path.
-                                    cursor = StackCursor::acquire(self.ctx);
+                                    rejoin_phase!();
                                     callers
                                         .active_mut()
                                         .save_execution_state(pc_local, osr_tried);
@@ -5135,7 +5246,7 @@ impl<'a> Vm<'a> {
                                     self.leave_bytecode_call_depth();
                                     match result {
                                         Ok(value) => {
-                                            cursor = StackCursor::acquire(self.ctx);
+                                            rejoin_phase!();
                                             value
                                         }
                                         Err(flow) => resume_flow!(flow),
@@ -5245,7 +5356,7 @@ impl<'a> Vm<'a> {
                             jump_table.kind(),
                             ValueKind::Veclike(VecLikeType::HashTable)
                         ) {
-                            cursor.publish(self.ctx);
+                            publish_phase!();
                             resume_flow!(signal(
                                 LispCondition::WrongTypeArgument,
                                 vec![Value::symbol("hash-table-p"), jump_table],
@@ -5330,7 +5441,7 @@ impl<'a> Vm<'a> {
                         // the body.  Use the same typed native-unwind action as the
                         // minibuffer lifecycle, so a new Rust `?`/flow path cannot
                         // bypass restoration.
-                        cursor.publish(self.ctx);
+                        publish_phase!();
                         let root_scope = self.ctx.save_vm_roots();
                         self.push_dynamic_vm_root(progn_form);
                         let body_result = self.ctx.with_unwind_scope(|ctx| {
@@ -5343,14 +5454,14 @@ impl<'a> Vm<'a> {
                         ctx.eval_sub(progn_form)
                     });
                         self.ctx.restore_vm_roots(root_scope);
-                        cursor = StackCursor::acquire(self.ctx);
+                        rejoin_phase!();
 
                         match body_result {
                             Ok(result) => {
                                 stk_push!(result);
                             }
                             Err(flow) => {
-                                cursor.publish(self.ctx);
+                                publish_phase!();
                                 resume_flow!(flow)
                             }
                         }
@@ -6248,7 +6359,7 @@ impl<'a> Vm<'a> {
                     Op::Throw => {
                         let val = stk!().pop().unwrap_or(Value::NIL);
                         let tag = stk!().pop().unwrap_or(Value::NIL);
-                        cursor.publish(self.ctx);
+                        publish_phase!();
                         resume_flow!(Flow::throw(tag, val))
                     }
 
@@ -7491,10 +7602,15 @@ impl<'a> Vm<'a> {
     ) -> Option<crate::emacs_core::jit::cache::NativeCallOutcome> {
         use crate::emacs_core::jit::cache::NativeCallOutcome;
         debug_assert!(nargs >= 2);
-        if ctx.debug_on_next_call_is_armed() {
-            return None;
-        }
-        let epoch = ctx.obarray.function_epoch();
+        let epoch = {
+            // One canonical pair projection serves this pure admission phase;
+            // it ends before any callee or allocation-capable path is entered.
+            let projection = ctx.dispatch_projection();
+            if projection.debug_on_next_call_armed_fast() {
+                return None;
+            }
+            projection.function_epoch()
+        };
         if ctx.apply_fast_path_epoch.get() != epoch {
             if !named_builtin_fast_path_allowed_in(ctx, Self::apply_builtin_id()) {
                 return None;
@@ -8620,6 +8736,9 @@ impl<'a> Vm<'a> {
     /// Resolve one ordinary bytecode `Call` and, when possible, prove that it
     /// can enter the current interpreter driver without repeating tier or
     /// `setup_frame` classification in dispatch.
+    ///
+    /// Uses the current owner's main access path. The receiver remains the
+    /// original synchronous VM; no detached World projection is retained.
     #[inline(always)]
     fn resolve_interpreter_stack_call_target(
         &mut self,
@@ -9698,6 +9817,18 @@ mod stack_pool_tests;
 #[path = "tests/frame_bind_stack.rs"]
 mod frame_bind_stack_tests;
 
+#[cfg(test)]
+#[path = "tests/world_bases_test.rs"]
+mod world_bases_tests;
+
+#[cfg(test)]
+#[path = "tests/world_bases_admission_test.rs"]
+mod world_bases_admission_tests;
+
+#[cfg(test)]
+#[path = "tests/world_bases_call_reader_test.rs"]
+mod world_bases_call_reader_tests;
+
 impl ArithGenericKind {
     /// The builtin this kind's slow arm calls: the SAME cached symbol ids the
     /// interpreter always used (`Negate` is `-` with one operand).
@@ -9776,3 +9907,7 @@ impl crate::emacs_core::eval::Context {
 #[cfg(test)]
 #[path = "tests/manual_parameter_roots.rs"]
 mod manual_parameter_roots_tests;
+
+#[cfg(test)]
+#[path = "tests/sole_owner_cursor_test.rs"]
+mod sole_owner_cursor_tests;
