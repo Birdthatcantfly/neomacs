@@ -2128,7 +2128,18 @@ pub(crate) fn intern_soft_impl(eval: &super::eval::Context, args: &[Value]) -> E
         let name = eval.expect_lisp_string(args[0])?;
         let name = match intern_shorthand_name(eval, name) {
             Ok(Some(rewritten)) => InternSoftQuery::Rewritten(rewritten),
-            Ok(None) => InternSoftQuery::Spelling(name),
+            Ok(None) => match &selected {
+                SelectedInternSoftObarray::Global => {
+                    return Ok(eval
+                        .obarray()
+                        .intern_soft_name_query(crate::emacs_core::intern::SymbolNameQuery::from(
+                            name,
+                        ))
+                        .map(Value::from_sym_id)
+                        .unwrap_or(Value::NIL));
+                }
+                SelectedInternSoftObarray::Custom(_) => InternSoftQuery::Spelling(name),
+            },
             Err(crate::heap_types::GnuDeclaredCharacterCountError::Negative) => {
                 // GNU only calls oblookup for intern-soft (lread.c:4830):
                 // no allocated name has a negative count, so this misses.
