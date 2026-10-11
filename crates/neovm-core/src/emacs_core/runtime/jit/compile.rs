@@ -412,9 +412,9 @@ fn jit_profile_emit(
     let fingerprint: Vec<String> = f
         .constants
         .iter()
-        .filter(|v| v.as_bare_symbol_id().is_some())
+        .filter_map(|v| v.as_bare_symbol_id())
         .take(6)
-        .map(|v| crate::emacs_core::print::print_value(v).replace(',', ";"))
+        .map(|id| crate::emacs_core::print::diagnostic_symbol_string(id).replace(',', ";"))
         .collect();
     let fingerprint = fingerprint.join(" ");
     let ops = f.executable_ops();

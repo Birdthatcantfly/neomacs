@@ -970,6 +970,9 @@ mod graph_tail_units;
 #[path = "symbol_escape_units.rs"]
 mod symbol_escape_units;
 
+#[path = "diagnostic_symbols.rs"]
+mod diagnostic_symbols;
+
 #[cfg(test)]
 #[path = "settings_units.rs"]
 mod settings_units;

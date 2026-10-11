@@ -3120,6 +3120,24 @@ pub fn print_value(value: &Value) -> String {
     print_value_with_options(value, options)
 }
 
+/// Canonical spelling for the bare symbols in a JIT diagnostic fingerprint.
+/// A symbol cannot invoke the evaluator or traverse an object graph. Keep the
+/// usual encoding and numbering extent without entering the general printer.
+#[cfg(any(test, feature = "jit"))]
+pub(crate) fn diagnostic_symbol_string(id: SymId) -> String {
+    let options = PrintOptions {
+        print_escape_nonascii: true,
+        ..PrintOptions::default()
+    };
+    let _print_guard = enter_print_call(&options);
+    match id {
+        super::intern::NIL_SYM_ID => "nil".to_owned(),
+        super::intern::T_SYM_ID => "t".to_owned(),
+        super::intern::UNBOUND_SYM_ID => "#<unbound>".to_owned(),
+        _ => String::from_utf8_lossy(&symbol_bytes(id, options)).into_owned(),
+    }
+}
+
 pub fn print_value_with_options(value: &Value, options: PrintOptions) -> String {
     print_value_stateful(value, options)
 }
