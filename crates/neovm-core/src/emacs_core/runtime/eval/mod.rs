@@ -6478,6 +6478,24 @@ impl Context {
             .then(|| self.function_value_is_callable(function))
     }
 
+    // Only the callable classifier's symbol arms use this boundary.
+    // Keep resolution setup out of its physical callable-kind dispatch.
+    #[cold]
+    #[inline(never)]
+    fn resolve_callable_snapshot_symbol(&self, symbol: SymId) -> Option<Value> {
+        let resolved = if self.symbols_with_pos_enabled {
+            super::builtins::symbols::resolve_indirect_symbol_by_id(self, symbol)
+        } else {
+            // Delegate to the current checked resolver with constant Bare,
+            // including its physical NILP and capture behavior.
+            super::builtins::symbols::resolve_indirect_symbol_by_id_in_obarray(
+                self.obarray(),
+                symbol,
+            )
+        };
+        resolved.map(|(_, function)| function)
+    }
+
     pub(crate) fn function_value_is_callable(&self, function: &Value) -> bool {
         // This snapshot follows function cells without running Lisp or crossing
         // a collecting safe point. Keep the current original Value for the
@@ -6502,17 +6520,7 @@ impl Context {
                         );
                 }
                 ValueKind::Symbol(id) => {
-                    let resolved = if self.symbols_with_pos_enabled {
-                        super::builtins::symbols::resolve_indirect_symbol_by_id(self, id)
-                    } else {
-                        // This adapter delegates to the current checked resolver
-                        // with a constant Bare policy, including physical NILP.
-                        super::builtins::symbols::resolve_indirect_symbol_by_id_in_obarray(
-                            self.obarray(),
-                            id,
-                        )
-                    };
-                    let Some((_, resolved)) = resolved else {
+                    let Some(resolved) = self.resolve_callable_snapshot_symbol(id) else {
                         return false;
                     };
                     current = resolved;
@@ -6521,10 +6529,10 @@ impl Context {
                     // The typed accessor rejects wrappers when policy is Bare.
                     // Enabled wrappers, including nil/t, follow their function
                     // cells; physical nil/t retain the constant false path.
-                    let resolved = current.as_symbol_id(self.symbol_mode()).and_then(|id| {
-                        super::builtins::symbols::resolve_indirect_symbol_by_id(self, id)
-                    });
-                    let Some((_, resolved)) = resolved else {
+                    let resolved = current
+                        .as_symbol_id(self.symbol_mode())
+                        .and_then(|id| self.resolve_callable_snapshot_symbol(id));
+                    let Some(resolved) = resolved else {
                         return false;
                     };
                     current = resolved;

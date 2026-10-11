@@ -572,22 +572,12 @@ type SearchPatternCacheEntry = (
 
 /// Packed request identity keeps symbol policy in the existing target byte.
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-enum RegexTargetKey {
-    BareUnibyte,
-    BareMultibyte,
-    PositionedUnibyte,
-    PositionedMultibyte,
-}
+#[repr(transparent)]
+struct RegexTargetKey(u8);
 
 impl RegexTargetKey {
     fn new(multibyte: bool, mode: SymbolMode) -> Self {
-        match (mode, multibyte) {
-            (SymbolMode::Bare, false) => Self::BareUnibyte,
-            (SymbolMode::Bare, true) => Self::BareMultibyte,
-            (SymbolMode::Positioned, false) => Self::PositionedUnibyte,
-            (SymbolMode::Positioned, true) => Self::PositionedMultibyte,
-        }
+        Self((multibyte as u8) | (((mode == SymbolMode::Positioned) as u8) << 1))
     }
 }
 
