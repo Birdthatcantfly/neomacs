@@ -7851,9 +7851,14 @@ fn wait_until_respects_inhibit_quit() {
 #[test]
 fn process_mark_type_thread_send_and_running_child_runtime_surface() {
     crate::test_utils::init_test_tracing();
-    let cat = find_bin("cat");
+    let shell = find_bin("sh");
+    // GNU sends literal EOT to a PTY (process.c:7465-7466), so cat may
+    // exit before the next send. Keep the slave open independently of cat:
+    // this tests send semantics rather than the child-exit scheduling race.
+    // The existing unwind-protect kills the owned process group; sleep also
+    // bounds the post-EOF fixture lifetime to five seconds if cleanup fails.
     let results = eval_all(&format!(
-        r#"(let ((p (start-process "proc-mark-type-thread-send" nil "{cat}")))
+        r#"(let ((p (start-process "proc-mark-type-thread-send" nil "{shell}" "-c" "cat; exec sleep 5")))
              (unwind-protect
                  (list
                   (processp p)
