@@ -539,12 +539,14 @@ pub(crate) fn buffer_case_canon_table_with_symbols(
 ) -> Option<Value> {
     use crate::buffer::buffer::BUFFER_SLOT_CASE_TABLE;
     let table = buf.slots[BUFFER_SLOT_CASE_TABLE.index()];
-    if !is_case_table_with_symbols(&table, mode) {
-        return None;
-    }
     // Standard table (by object identity): fold via the hardwired path.
+    // Both invalid and valid standard tables return None, so their purpose
+    // and extras do not need validation or collection dependencies here.
     let standard = STANDARD_CASE_TABLE_OBJECT.with(|slot| *slot.borrow());
     if standard.is_some_and(|s| s.bits() == table.bits()) {
+        return None;
+    }
+    if !is_case_table_with_symbols(&table, mode) {
         return None;
     }
     // Custom table: the canon subsidiary lives in extras[1] (derived by
