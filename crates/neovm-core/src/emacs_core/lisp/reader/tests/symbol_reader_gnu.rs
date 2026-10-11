@@ -140,3 +140,12 @@ fn symbols_gnu_compiled_intern_soft_identity() {
         include_str!("symbol_reader_gnu/compiled_intern_soft_identity.expect"),
     );
 }
+
+#[test]
+fn symbols_gnu_empty_uninterned_name_identity() {
+    assert_gnu(
+        "empty_uninterned_name_identity",
+        r###"(let ((a (symbol-name (read "#:"))) (b (symbol-name (read "#:")))) (list (multibyte-string-p a) (eq a b) (eq a (make-string 0 0))))"###,
+        include_str!("symbol_reader_gnu/empty_uninterned_name_identity.expect"),
+    );
+}

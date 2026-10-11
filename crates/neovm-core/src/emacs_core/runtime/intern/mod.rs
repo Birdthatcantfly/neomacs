@@ -735,18 +735,22 @@ impl SymbolNameRootIndex {
 /// The name a freshly allocated symbol carries, stated at every construction
 /// site so "no Lisp name object" is a claim rather than a forgotten argument.
 ///
-/// GNU has only the second case: `intern_driver` and `Fmake_symbol` both store
+/// GNU always retains a Lisp string object: `intern_driver` and `Fmake_symbol` both store
 /// THE STRING OBJECT they were handed (lread.c:4705-4708), so `symbol-name`
 /// returns it with its text properties, its multibyteness and any later
 /// mutation intact. We additionally construct symbols from Rust text -- the
 /// reader, the dumper, bootstrap -- where no Lisp object exists to store; those
-/// sites say `AtomOnly`; the first Lisp-visible `symbol-name` read materializes
+/// sites use `AtomOnly` or an exact frozen `ReaderAtom`; the first Lisp-visible
+/// `symbol-name` read materializes
 /// one heap-local string from the atom and subsequent reads reuse it.
 #[derive(Clone, Copy, Debug)]
 enum NewSymbolName {
     /// No Lisp string object was involved; the interned name atom is the whole
     /// of the symbol's name.
     AtomOnly,
+    /// A reader-created, frozen spelling with a different representation from
+    /// the identity atom. No Lisp caller can already hold this name object.
+    ReaderAtom(NameAtomRef),
     /// GNU's case: this string object IS the symbol's name.
     LispObject(SymbolNameValue),
 }
@@ -760,6 +764,7 @@ enum NewSymbolName {
 #[repr(u8)]
 enum SymbolNameOrigin {
     AtomOnly,
+    ReaderAtom,
     LispObject,
 }
 
@@ -806,6 +811,7 @@ impl NewSymbolName {
     fn origin(self) -> SymbolNameOrigin {
         match self {
             Self::AtomOnly => SymbolNameOrigin::AtomOnly,
+            Self::ReaderAtom(_) => SymbolNameOrigin::ReaderAtom,
             Self::LispObject(_) => SymbolNameOrigin::LispObject,
         }
     }
@@ -852,6 +858,10 @@ struct SymbolRegistry {
     /// Keeping this rare case out of `SymbolSlot` makes every ordinary symbol
     /// substantially smaller.
     name_values: FxHashMap<SymId, SymbolNameValue>,
+    /// Reader spellings are immutable, property-free and not observable until
+    /// first materialization. Keep encoding separate from normalized identity.
+    reader_name_atoms: FxHashMap<SymId, NameAtomRef>,
+    reader_name_storage: NameAtomStorage,
     /// Per-heap Lisp objects lazily created for symbols whose name originated
     /// as a Rust/process-lifetime atom.  GNU always stores one Lisp string in
     /// every symbol; this cache supplies the equivalent object without making
@@ -869,6 +879,12 @@ impl Default for SymbolRegistry {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ReaderSymbolKind {
+    Canonical,
+    Uninterned,
+}
+
 impl SymbolRegistry {
     fn new() -> Self {
         let mut registry = Self {
@@ -876,6 +892,8 @@ impl SymbolRegistry {
             symbols: Vec::new(),
             canonical_by_name: FxHashMap::default(),
             name_values: FxHashMap::default(),
+            reader_name_atoms: FxHashMap::default(),
+            reader_name_storage: NameAtomStorage::new(),
             materialized_name_values: FxHashMap::default(),
             name_value_roots: SymbolNameRootIndex::default(),
         };
@@ -905,6 +923,9 @@ impl SymbolRegistry {
             let old = self.name_values.insert(id, name_value);
             debug_assert!(old.is_none(), "new symbol id already had a name value");
             self.name_value_roots.insert(name_value);
+        }
+        if let NewSymbolName::ReaderAtom(atom) = name_value {
+            self.reader_name_atoms.insert(id, atom);
         }
         if canonical {
             self.canonical_by_name.insert(name, id);
@@ -967,6 +988,66 @@ impl SymbolRegistry {
             .names
             .intern_lisp_string(name_value.as_lisp_string().expect("string name"));
         self.alloc_symbol(name, false, NewSymbolName::from_lisp_object(name_value))
+    }
+
+    /// A reader token has no pre-existing Lisp string identity to retain.
+    /// Freeze only a representation that the identity atom would normalize;
+    /// the existing per-heap materializer supplies its first observable object.
+    fn reader_name_origin(&mut self, name: LispString, identity: NameId) -> NewSymbolName {
+        assert!(
+            !name.has_intervals(),
+            "reader symbol names carry no properties"
+        );
+        let atom = self.names.resolve_lisp_string(identity);
+        if name.is_multibyte() == atom.is_multibyte()
+            && name.character_count_kind() == atom.character_count_kind()
+        {
+            NewSymbolName::AtomOnly
+        } else {
+            NewSymbolName::ReaderAtom(self.reader_name_storage.push(name))
+        }
+    }
+
+    fn restored_reader_name_origin(
+        &mut self,
+        exact: &LispString,
+        identity: NameId,
+    ) -> NewSymbolName {
+        let atom = self.names.resolve_lisp_string(identity);
+        if exact.is_multibyte() == atom.is_multibyte()
+            && exact.character_count_kind() == atom.character_count_kind()
+        {
+            NewSymbolName::AtomOnly
+        } else {
+            self.reader_name_origin(
+                exact.borrowed_alias().unwrap_or_else(|| exact.clone()),
+                identity,
+            )
+        }
+    }
+
+    fn intern_reader_name(&mut self, name: LispString, kind: ReaderSymbolKind) -> SymId {
+        let identity = self.names.intern_lisp_string(&name);
+        let canonical = match kind {
+            ReaderSymbolKind::Canonical => true,
+            ReaderSymbolKind::Uninterned => false,
+        };
+        if canonical && let Some(existing) = self.canonical_by_name.get(&identity) {
+            return *existing;
+        }
+        let origin = self.reader_name_origin(name, identity);
+        self.alloc_symbol(identity, canonical, origin)
+    }
+
+    fn resolve_name_template(&self, id: SymId) -> &'static LispString {
+        if self.slot(id).expect("valid symbol id").name_origin == SymbolNameOrigin::ReaderAtom {
+            self.reader_name_atoms
+                .get(&id)
+                .expect("reader name atom exists")
+                .0
+        } else {
+            self.resolve_lisp_string(id)
+        }
     }
 
     fn lookup(&self, s: &str) -> Option<SymId> {
@@ -1054,7 +1135,7 @@ impl SymbolRegistry {
         } else {
             LispVisibleSymbolName::Atom {
                 symbol: id,
-                string: self.resolve_lisp_string(id),
+                string: self.resolve_name_template(id),
             }
         }
     }
@@ -1078,11 +1159,19 @@ impl SymbolRegistry {
     }
 
     fn dump_symbol_table(&self) -> DumpedSymbolTable {
-        let names = self.names.strings.iter().map(LispString::clone).collect();
+        let mut names: Vec<_> = self.names.strings.iter().map(LispString::clone).collect();
         let mut symbol_names = Vec::with_capacity(self.symbols.len());
         let mut canonical = Vec::with_capacity(self.symbols.len());
-        for slot in &self.symbols {
-            symbol_names.push(slot.name.0);
+        for (index, slot) in self.symbols.iter().enumerate() {
+            let name_index = if slot.name_origin == SymbolNameOrigin::ReaderAtom {
+                let exact = self.reader_name_atoms[&SymId(index as u32)].0;
+                let index = u32::try_from(names.len()).expect("dump name index fits u32");
+                names.push(exact.clone());
+                index
+            } else {
+                slot.name.0
+            };
+            symbol_names.push(name_index);
             canonical.push(slot.canonical);
         }
         DumpedSymbolTable {
@@ -1102,7 +1191,13 @@ impl SymbolRegistry {
         self.symbols.reserve(symbol_names.len());
         let mut name_remap = Vec::with_capacity(names.len());
         for name in names {
-            name_remap.push(self.names.intern_dump_lisp_string(name));
+            name_remap.push(
+                if name.is_multibyte() && name.is_ascii() && name.schars() == name.sbytes() {
+                    self.names.intern_lisp_string(name)
+                } else {
+                    self.names.intern_dump_lisp_string(name)
+                },
+            );
         }
 
         let derived_flags;
@@ -1223,15 +1318,15 @@ impl SymbolRegistry {
                             .get(&runtime_name)
                             .copied()
                             .unwrap_or_else(|| {
-                                self.alloc_symbol(runtime_name, true, NewSymbolName::AtomOnly)
+                                let exact = &names[dump_name_id as usize];
+                                let origin = self.restored_reader_name_origin(exact, runtime_name);
+                                self.alloc_symbol(runtime_name, true, origin)
                             }),
                     )
                 } else {
-                    Ok::<SymId, String>(self.alloc_symbol(
-                        runtime_name,
-                        false,
-                        NewSymbolName::AtomOnly,
-                    ))
+                    let exact = &names[dump_name_id as usize];
+                    let origin = self.restored_reader_name_origin(exact, runtime_name);
+                    Ok::<SymId, String>(self.alloc_symbol(runtime_name, false, origin))
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1413,6 +1508,22 @@ pub fn intern_uninterned_lisp_string(s: &LispString) -> SymId {
 pub fn intern_lisp_value(name_value: TaggedValue) -> SymId {
     let mut registry = global_symbol_registry().write();
     registry.intern_lisp_value(name_value)
+}
+
+/// Intern a private, property-free reader spelling without eagerly allocating
+/// a tagged-heap name. GNU's first spelling/encoding remains observable through
+/// symbol-name; strings passed to Lisp intern/make-symbol use the object APIs.
+pub(crate) fn intern_reader_name(name: LispString) -> SymId {
+    global_symbol_registry()
+        .write()
+        .intern_reader_name(name, ReaderSymbolKind::Canonical)
+}
+
+/// The reader's #: token likewise has no caller-owned string to adopt.
+pub(crate) fn make_uninterned_reader_symbol(name: LispString) -> SymId {
+    global_symbol_registry()
+        .write()
+        .intern_reader_name(name, ReaderSymbolKind::Uninterned)
 }
 
 /// Create an uninterned symbol that stores NAME_VALUE as its exact name
@@ -1728,7 +1839,7 @@ pub(crate) fn materialize_symbol_name_value(id: SymId) -> TaggedValue {
         if let Some(value) = registry.resolve_name_value_in_heap(id, heap_id) {
             return value;
         }
-        registry.resolve_lisp_string(id)
+        registry.resolve_name_template(id)
     };
 
     let materialized = TaggedValue::heap_string(atom.clone());

@@ -2250,9 +2250,7 @@ impl<'a> Reader<'a> {
                     return self.intern_empty_symbol();
                 }
                 let name = token.to_lisp_string();
-                Ok(Value::from_sym_id(super::intern::intern_lisp_value(
-                    Value::heap_string(name),
-                )))
+                Ok(Value::from_sym_id(super::intern::intern_reader_name(name)))
             }
             x if x == b'(' as u32 => {
                 // GNU src/lread.c:3347-3368 applies each triple using
@@ -2382,13 +2380,11 @@ impl<'a> Reader<'a> {
                 self.bump();
                 let token = self.read_symbol_token()?;
                 Ok(Value::from_sym_id(
-                    super::intern::make_uninterned_symbol_with_name_value(
-                        if token.bytes.is_empty() {
-                            Value::string("")
-                        } else {
-                            Value::heap_string(token.to_lisp_string())
-                        },
-                    ),
+                    super::intern::make_uninterned_reader_symbol(if token.bytes.is_empty() {
+                        crate::heap_types::LispString::from_unibyte_slice(b"")
+                    } else {
+                        token.to_lisp_string()
+                    }),
                 ))
             }
             x if x == b'$' as u32 => {
@@ -2916,7 +2912,7 @@ impl<'a> Reader<'a> {
         // exact LispString encoding.
         let name = self.to_lisp_string_for_token(&token)?;
         let id = super::intern::lookup_interned_lisp_string(&name)
-            .unwrap_or_else(|| super::intern::intern_lisp_value(Value::heap_string(name)));
+            .unwrap_or_else(|| super::intern::intern_reader_name(name));
         Ok(Value::from_sym_id(id))
     }
 
@@ -2931,9 +2927,7 @@ impl<'a> Reader<'a> {
             .rewrite(&empty)
             .map_err(|error| self.ordinary_error(&error.to_string()))?;
         Ok(match rewritten {
-            Some(name) => {
-                Value::from_sym_id(super::intern::intern_lisp_value(Value::heap_string(name)))
-            }
+            Some(name) => Value::from_sym_id(super::intern::intern_reader_name(name)),
             None => Value::from_sym_id(intern("")),
         })
     }

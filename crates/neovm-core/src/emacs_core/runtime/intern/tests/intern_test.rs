@@ -935,3 +935,134 @@ fn symbol_diagnostics_use_the_lisp_visible_name_object() {
         "Xiagnostic-live-name-object-probe"
     );
 }
+
+/// Reader tokens have no caller-owned name object. Preserve GNU's source
+/// encoding without adding a permanently rooted heap string for every token.
+#[test]
+fn reader_name_templates_preserve_first_encoding_without_gc_roots() {
+    let mut registry = SymbolRegistry::new();
+    let mb = LispString::from_utf8("reader-frozen-first-mb");
+    let symbol = registry.intern_reader_name(mb, ReaderSymbolKind::Canonical);
+    assert!(registry.resolve_name_template(symbol).is_multibyte());
+    assert!(!registry.resolve_lisp_string(symbol).is_multibyte());
+    let ub = LispString::from_unibyte_slice(b"reader-frozen-first-mb");
+    assert_eq!(
+        registry.intern_reader_name(ub.clone(), ReaderSymbolKind::Canonical),
+        symbol
+    );
+    assert!(registry.resolve_name_template(symbol).is_multibyte());
+    let uninterned = registry.intern_reader_name(ub, ReaderSymbolKind::Uninterned);
+    assert_ne!(symbol, uninterned);
+    assert!(!registry.resolve_name_template(uninterned).is_multibyte());
+    let mut roots = Vec::new();
+    registry.collect_name_value_roots(&mut roots, 42);
+    assert!(roots.is_empty());
+    assert!(registry.name_values.is_empty());
+    assert!(registry.materialized_name_values.is_empty());
+}
+
+#[test]
+fn reader_name_templates_round_trip_dump_without_changing_identity() {
+    let mut registry = SymbolRegistry::new();
+    let mb = registry.intern_reader_name(
+        LispString::from_utf8("reader-dump-shared"),
+        ReaderSymbolKind::Canonical,
+    );
+    let ub = registry.intern_reader_name(
+        LispString::from_unibyte_slice(b"reader-dump-shared"),
+        ReaderSymbolKind::Uninterned,
+    );
+    let declared = LispString::from_emacs_bytes_with_declared_chars(
+        b"reader-dump-count".to_vec(),
+        crate::heap_types::GnuDeclaredCharacterCount::try_from(7i128).unwrap(),
+    );
+    let supplied = registry.intern_reader_name(declared.clone(), ReaderSymbolKind::Canonical);
+    let dump = registry.dump_symbol_table();
+    let mut restored = SymbolRegistry::new();
+    let remap = restored
+        .restore_dump_symbol_table(&dump.names, &dump.symbol_names, Some(&dump.canonical))
+        .unwrap();
+    let restored_mb = remap.symbols[mb.0 as usize];
+    let restored_ub = remap.symbols[ub.0 as usize];
+    assert!(restored.resolve_name_template(restored_mb).is_multibyte());
+    assert!(!restored.resolve_name_template(restored_ub).is_multibyte());
+    assert_eq!(restored.name_id(restored_mb), restored.name_id(restored_ub));
+    let restored_supplied = restored.resolve_name_template(remap.symbols[supplied.0 as usize]);
+    assert_eq!(restored_supplied.schars(), declared.schars());
+    assert_eq!(restored_supplied.as_bytes(), declared.as_bytes());
+    // Restoring a dump cannot replace an already-created canonical name.
+    let mut existing = SymbolRegistry::new();
+    let first = existing.intern("reader-dump-shared");
+    let existing_remap = existing
+        .restore_dump_symbol_table(&dump.names, &dump.symbol_names, Some(&dump.canonical))
+        .unwrap();
+    assert_eq!(existing_remap.symbols[mb.0 as usize], first);
+    assert!(!existing.resolve_name_template(first).is_multibyte());
+}
+
+#[test]
+fn reader_name_materialization_preserves_encoding_identity_mutation_and_heap_ownership() {
+    crate::test_utils::init_test_tracing();
+    let symbol = intern_reader_name(LispString::from_utf8("reader-lazy-name-heap-ownership"));
+    let mut first_heap = crate::tagged::gc::TaggedHeap::new();
+    crate::tagged::gc::set_tagged_heap(&mut first_heap);
+    let first_heap_id = crate::tagged::gc::current_tagged_heap_identity().unwrap();
+    let mut roots = Vec::new();
+    collect_symbol_name_gc_roots(&mut roots, first_heap_id);
+    assert!(roots.is_empty());
+    let first = materialize_symbol_name_value(symbol);
+    assert!(first.as_lisp_string().unwrap().is_multibyte());
+    assert_eq!(materialize_symbol_name_value(symbol).bits(), first.bits());
+    crate::emacs_core::builtins::collections::builtin_aset(vec![
+        first,
+        TaggedValue::fixnum(0),
+        TaggedValue::fixnum('X' as i64),
+    ])
+    .unwrap();
+    assert_eq!(
+        resolve_lisp_visible_symbol_name(symbol).text().as_bytes()[0],
+        b'X'
+    );
+    collect_symbol_name_gc_roots(&mut roots, first_heap_id);
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].bits(), first.bits());
+    let mut second_heap = crate::tagged::gc::TaggedHeap::new();
+    crate::tagged::gc::set_tagged_heap(&mut second_heap);
+    let second_heap_id = crate::tagged::gc::current_tagged_heap_identity().unwrap();
+    let second = materialize_symbol_name_value(symbol);
+    assert_ne!(first.bits(), second.bits());
+    assert!(second.as_lisp_string().unwrap().is_multibyte());
+    assert_eq!(second.as_lisp_string().unwrap().as_bytes()[0], b'r');
+    roots.clear();
+    collect_symbol_name_gc_roots(&mut roots, second_heap_id);
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].bits(), second.bits());
+}
+
+#[test]
+fn reader_name_templates_preserve_count_proof_independently_of_identity() {
+    for supplied_first in [false, true] {
+        let mut registry = SymbolRegistry::new();
+        let computed = LispString::from_utf8("reader-proof-λ");
+        let supplied = LispString::from_emacs_bytes_with_declared_chars(
+            computed.as_bytes().to_vec(),
+            crate::heap_types::GnuDeclaredCharacterCount::try_from(computed.schars() as i128)
+                .unwrap(),
+        );
+        let (first, second) = if supplied_first {
+            (supplied, computed)
+        } else {
+            (computed, supplied)
+        };
+        let expected_kind = second.character_count_kind();
+        let first = registry.intern_reader_name(first, ReaderSymbolKind::Uninterned);
+        let second = registry.intern_reader_name(second, ReaderSymbolKind::Uninterned);
+        assert_eq!(registry.name_id(first), registry.name_id(second));
+        assert_eq!(
+            registry
+                .resolve_name_template(second)
+                .character_count_kind(),
+            expected_kind
+        );
+    }
+}
