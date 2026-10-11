@@ -6482,9 +6482,11 @@ impl Context {
         // This snapshot follows function cells without running Lisp or crossing
         // a collecting safe point. Keep the current original Value for the
         // positioned nil/t rule while avoiding recursive classifier frames.
+        // Dispatch physical kinds once; only the positioned-symbol arm needs
+        // projection before following its function cell.
         let mut current = *function;
         loop {
-            match self.unwrap_symbol(current).kind() {
+            match current.kind() {
                 ValueKind::Veclike(VecLikeType::Lambda)
                 | ValueKind::Veclike(VecLikeType::ByteCode)
                 | ValueKind::Veclike(VecLikeType::Macro)
@@ -6515,10 +6517,10 @@ impl Context {
                     };
                     current = resolved;
                 }
-                ValueKind::Nil | ValueKind::T if current.is_symbol_with_pos() => {
-                    // Enabled nonnil wrappers still follow these function cells.
-                    // Snapshot the callable before its body can replace the cell;
-                    // bare nil/t retain the classifier's existing constant path.
+                ValueKind::Veclike(VecLikeType::SymbolWithPos) => {
+                    // The typed accessor rejects wrappers when policy is Bare.
+                    // Enabled wrappers, including nil/t, follow their function
+                    // cells; physical nil/t retain the constant false path.
                     let resolved = current.as_symbol_id(self.symbol_mode()).and_then(|id| {
                         super::builtins::symbols::resolve_indirect_symbol_by_id(self, id)
                     });
