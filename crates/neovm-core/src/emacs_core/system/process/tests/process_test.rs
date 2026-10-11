@@ -10646,25 +10646,173 @@ fn an_interactive_filter_error_is_reported_without_exiting_like_gnu() {
     assert_eq!(eval.shutdown_request(), None);
 }
 
-/// Prove that both the owned child's exit and its stderr EOF are pending before
-/// the evaluator services either event. GNU process.c:7873-7943 only promises
-/// newest-first sentinel order within one status_notify pass, not across wakes.
+/// Observe only this fixture's child, leaving its status for the runtime reaper.
+/// ECHILD is a failed precondition, not evidence that the child is still running.
 #[cfg(unix)]
-fn wait_for_stderr_fixture_exit(eval: &Context, owner: Value) {
+fn stderr_fixture_exit_status(pid: u32) -> std::io::Result<Option<i32>> {
+    #[cfg(target_os = "macos")]
+    loop {
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: pid belongs to this test; info is writable and WNOWAIT does
+        // not consume the status that the process runtime must collect.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            tracing::warn!(pid, waitid_result = result, errno = ?error.raw_os_error(),
+                           "stderr fixture waitid failed");
+            return Err(error);
+        }
+        // SAFETY: siginfo_t admits zero values and successful waitid fills it.
+        let info = unsafe { info.assume_init() };
+        if info.si_pid == 0 {
+            return Ok(None);
+        }
+        tracing::warn!(
+            pid,
+            waitid_result = result,
+            errno = 0,
+            reported_pid = info.si_pid,
+            si_code = info.si_code,
+            si_status = info.si_status,
+            "stderr fixture waitid exit"
+        );
+        if info.si_pid != pid as libc::pid_t || info.si_code != libc::CLD_EXITED {
+            return Err(std::io::Error::other("owned fixture did not exit normally"));
+        }
+        return Ok(Some(info.si_status));
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(pw187_is_zombie(pid, 0).then_some(0))
+}
+
+/// Prove exit before servicing either event. Pipe stdio makes this independent
+/// of PTY startup/line-discipline behaviour; the assertion concerns stderr EOF.
+#[cfg(unix)]
+fn wait_for_stderr_fixture_exit(eval: &mut Context, owner: Value) {
+    use std::io::Write;
     let id = owner.as_process_id().expect("fixture owner is a process");
-    let pid = eval
+    // Hold the child at read(0) until every sentinel/global is installed. A
+    // quick child can otherwise be reaped by a readiness wait during setup.
+    // Write through the owned stdin without entering any Lisp readiness wait.
+    eval.processes
+        .get_mut(id)
+        .expect("fixture process exists")
+        .live_io
+        .child
+        .stdin_mut()
+        .expect("fixture uses pipe stdin")
+        .write_all(b"ready\n")
+        .expect("release fixture child");
+    let child = &eval
         .processes
         .get(id)
-        .and_then(|process| process.live_io.child.pid_if_unreaped())
+        .expect("fixture process exists")
+        .live_io
+        .child;
+    let pid = child
+        .pid_if_unreaped()
         .expect("fixture owns a live child pid");
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !pw187_is_zombie(pid, 0) {
-        assert!(
-            Instant::now() < deadline,
-            "owned stderr fixture child must exit before polling"
-        );
-        std::thread::sleep(Duration::from_millis(1));
+    loop {
+        match stderr_fixture_exit_status(pid) {
+            Ok(Some(status)) => {
+                assert_eq!(status, 0, "owned stderr fixture exit status");
+                return;
+            }
+            Err(error) => panic!("stderr fixture child {pid} ({child:?}): {error}"),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    pid,
+                    waitid_result = 0,
+                    errno = 0,
+                    reported_pid = 0,
+                    ?child,
+                    "stderr fixture exit watchdog"
+                );
+                panic!("owned stderr fixture child must exit before polling");
+            }
+        }
     }
+}
+
+/// Run the fixture's assertions, then settle its owned child before either a
+/// successful return or resuming a panic. No blocking wait is used in cleanup.
+#[cfg(unix)]
+fn with_stderr_fixture_child<T>(
+    eval: &mut Context,
+    owner: Value,
+    body: impl FnOnce(&mut Context) -> T,
+) -> T {
+    let id = owner.as_process_id().expect("fixture owner is a process");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(eval)));
+    if let Some(process) = eval.processes.get_mut(id) {
+        let child = &mut process.live_io.child;
+        child.poll_status();
+        if child.pid_if_unreaped().is_some() {
+            child.kill_handle();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while child.pid_if_unreaped().is_some() && Instant::now() < deadline {
+                child.poll_status();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            if let Some(pid) = child.pid_if_unreaped() {
+                // Last-resort test-only containment: a defective OS/kill path
+                // must not enter the runtime's blocking teardown wait. Retain
+                // the unreaped handle rather than invoking another destructor.
+                tracing::error!(pid, "stderr fixture kill/reap exceeded its deadline");
+                std::mem::forget(std::mem::take(child));
+            }
+        }
+    }
+    match outcome {
+        Ok(value) => value,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn stderr_fixture_assertion_failure_kills_and_reaps_its_owned_child() {
+    let sh = find_bin("sh");
+    let mut eval = crate::test_utils::runtime_startup_context();
+    let owner = eval
+        .eval_str(&format!(
+            r#"(make-process :name "stderr-cleanup" :connection-type 'pipe :noquery t
+                         :command '("{sh}" "-c" "exec sleep 60"))"#,
+        ))
+        .expect("create cleanup fixture child");
+    let id = owner.as_process_id().expect("fixture owner is a process");
+    let started = Instant::now();
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        with_stderr_fixture_child(&mut eval, owner, |_| {
+            panic!("injected stderr fixture assertion failure");
+        });
+    }));
+    assert!(failure.is_err());
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(
+        eval.processes
+            .get(id)
+            .expect("fixture process exists")
+            .live_io
+            .child
+            .pid_if_unreaped()
+            .is_none(),
+        "fixture child must be reaped"
+    );
 }
 
 /// When EOF and child exit are pending together, GNU's fd scan closes the
@@ -10686,8 +10834,8 @@ fn the_stderr_pipe_is_closed_and_attached_when_the_owner_sentinel_runs() {
                     r#"(let* ((out (generate-new-buffer " *p14-out*"))
                           (err (generate-new-buffer " *p14-err*"))
                           (p (make-process
-                              :name "p14" :buffer out :stderr err
-                              :command (list "{sh}" "-c" "printf '{payload}' >&2; printf 'x'"))))
+                              :name "p14" :buffer out :stderr err :connection-type 'pipe
+                              :command (list "{sh}" "-c" "read -r ready; printf '{payload}' >&2; printf 'x'"))))
                      (setq f3-stderr-done nil f3-stderr-buffer err)
                      (set-process-sentinel
                       p (lambda (pr _e)
@@ -10698,15 +10846,17 @@ fn the_stderr_pipe_is_closed_and_attached_when_the_owner_sentinel_runs() {
                      p)"#
                 ))
                 .expect("create owned stderr fixture");
-            wait_for_stderr_fixture_exit(&eval, owner);
-            let delivered = eval_one_in_context(
-                &mut eval,
-                r#"(let ((deadline (+ (float-time) 5)))
-                     (while (and (not f3-stderr-done) (< (float-time) deadline))
-                       (accept-process-output nil 0.05))
-                     f3-stderr-done)"#,
-            );
-            assert_eq!(delivered, "OK t", "owner sentinel must run");
+            with_stderr_fixture_child(&mut eval, owner, |eval| {
+                wait_for_stderr_fixture_exit(eval, owner);
+                let delivered = eval_one_in_context(
+                    eval,
+                    r#"(let ((deadline (+ (float-time) 5)))
+                         (while (and (not f3-stderr-done) (< (float-time) deadline))
+                           (accept-process-output nil 0.05))
+                         f3-stderr-done)"#,
+                );
+                assert_eq!(delivered, "OK t", "owner sentinel must run");
+            });
         }
     }
     assert_eq!(
@@ -10728,8 +10878,8 @@ fn the_stderr_pipe_sentinel_still_runs_after_the_owners() {
         .eval_str(&format!(
             r#"(let* ((out (generate-new-buffer " *p14b-out*"))
                   (err (generate-new-buffer " *p14b-err*"))
-                  (p (make-process :name "p14b" :buffer out :stderr err
-                                   :command (list "{sh}" "-c" "printf 'e' 1>&2; printf 'x'"))))
+                  (p (make-process :name "p14b" :buffer out :stderr err :connection-type 'pipe
+                                   :command (list "{sh}" "-c" "read -r ready; printf 'e' 1>&2; printf 'x'"))))
              (setq f3-stderr-order nil f3-stderr-done nil)
              (set-process-sentinel (get-buffer-process err)
                                    (lambda (&rest _) (push 'stderr f3-stderr-order)))
@@ -10741,15 +10891,17 @@ fn the_stderr_pipe_sentinel_still_runs_after_the_owners() {
              p)"#
         ))
         .expect("create owned stderr fixture");
-    wait_for_stderr_fixture_exit(&eval, owner);
-    let result = eval_one_in_context(
-        &mut eval,
-        r#"(let ((deadline (+ (float-time) 5)))
-             (while (and (not f3-stderr-done) (< (float-time) deadline))
-               (accept-process-output nil 0.05))
-             (dotimes (_ 4) (accept-process-output nil 0.05))
-             (nreverse f3-stderr-order))"#,
-    );
+    let result = with_stderr_fixture_child(&mut eval, owner, |eval| {
+        wait_for_stderr_fixture_exit(eval, owner);
+        eval_one_in_context(
+            eval,
+            r#"(let ((deadline (+ (float-time) 5)))
+                 (while (and (not f3-stderr-done) (< (float-time) deadline))
+                   (accept-process-output nil 0.05))
+                 (dotimes (_ 4) (accept-process-output nil 0.05))
+                 (nreverse f3-stderr-order))"#,
+        )
+    });
     assert_eq!(result, "OK (owner stderr)");
 }
 
