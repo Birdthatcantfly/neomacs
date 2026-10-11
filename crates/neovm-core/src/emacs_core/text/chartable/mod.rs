@@ -632,6 +632,7 @@ fn copy_sub_char_table_direct(table: Value) -> Option<Value> {
     Some(Value::make_sub_char_table(depth as i32, min_char, contents))
 }
 
+#[cfg(test)]
 pub(crate) fn copy_char_table(table: Value) -> Option<Value> {
     copy_char_table_with_symbols(table, SymbolMode::Bare)
 }

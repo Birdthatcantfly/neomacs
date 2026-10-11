@@ -69,12 +69,15 @@ impl Context {
     /// 3. Cons → special form / macro / function call
     #[inline(never)]
     pub fn eval_sub(&mut self, form: Value) -> EvalResult {
-        let symbol_mode = self.symbol_mode();
         crate::emacs_core::subr::leaf::debug_assert_no_leaf_active!("eval");
         // 1. Symbol → variable lookup (GNU eval.c:2554-2562)
         // Also unwrap symbol-with-pos when symbols-with-pos-enabled is true.
         let form_unwrapped = self.unwrap_symbol(form);
-        if let Some(sym_id) = form_unwrapped.as_symbol_id(symbol_mode) {
+        // This value is already projected under the current policy, with no
+        // Lisp callback in between. Enabled wrappers are bare here; disabled
+        // wrappers remain non-symbol self-evaluating objects, as in GNU
+        // eval.c:2587-2598 / lisp.h:1076-1079,1120-1128.
+        if let Some(sym_id) = form_unwrapped.as_bare_symbol_id() {
             // Route the variable-lookup result through the signal dispatcher so a
             // void-variable enters the debugger (debug-on-error) at signal time,
             // while dynamic bindings are still active — symmetric with the cons

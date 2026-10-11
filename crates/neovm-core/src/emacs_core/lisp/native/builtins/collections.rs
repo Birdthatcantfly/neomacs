@@ -78,13 +78,6 @@ fn allocate_vector_elements(
 /// Ordinary array access carries one pointer-sized source without reading it.
 #[derive(Clone, Copy)]
 pub(crate) enum ArraySymbolSource<'a> {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "The bare variant preserves the array-source shape and supports canonical test adapters."
-        )
-    )]
     Bare,
     Context(&'a super::eval::Context),
 }
@@ -103,6 +96,21 @@ impl std::fmt::Debug for ArraySymbolSource<'_> {
 /// for vector, string, record or bool-vector operations.
 pub(crate) trait ArraySymbolPolicy {
     fn mode(self) -> SymbolMode;
+
+    /// The shared dispatch has already checked the index and selected String.
+    /// Ordinary callers retain the existing validating string-write boundary.
+    fn replace_string(
+        self,
+        array: &Value,
+        index: &Value,
+        new_element: &Value,
+        _checked_index: i64,
+    ) -> Result<Value, Flow>
+    where
+        Self: Sized,
+    {
+        aset_string_replacement(array, index, new_element)
+    }
 }
 
 impl ArraySymbolPolicy for ArraySymbolSource<'_> {
@@ -131,6 +139,19 @@ impl ArraySymbolPolicy for VmArraySymbolSource<'_, '_> {
         // ordinary array paths perform neither this barrier nor the load.
         let context_slot = std::hint::black_box(self.0);
         context_slot.symbol_mode()
+    }
+
+    // This specialization is reached only by run_loop's array source. Keep
+    // the string-write body visible there without changing global helpers.
+    #[inline(always)]
+    fn replace_string(
+        self,
+        array: &Value,
+        index: &Value,
+        new_element: &Value,
+        checked_index: i64,
+    ) -> Result<Value, Flow> {
+        aset_string_replacement_in_vm_string_arm(array, index, new_element, checked_index)
     }
 }
 
@@ -259,6 +280,72 @@ pub(crate) fn builtin_aref_values(
     }
 }
 
+// One source for the complete string-write behavior. The ordinary public
+// boundary validates its inputs; run_loop's String arm has those validations
+// already. Only the VM-only expansion receives a site-specific inline hint.
+macro_rules! aset_string_write_body {
+    ($array:ident, $index:ident, $new_element:ident, $idx_fixnum:ident) => {{
+        let string = $array.as_lisp_string().expect("string");
+        if $idx_fixnum < 0 || $idx_fixnum as usize >= string.schars() {
+            return Err(signal(
+                LispCondition::ArgsOutOfRange,
+                vec![*$array, *$index],
+            ));
+        }
+        let idx = $idx_fixnum as usize;
+
+        let replacement_code = insert_char_code_from_value($new_element)?;
+        if !(0..=0x3F_FFFF).contains(&replacement_code) {
+            return Err(signal(
+                LispCondition::WrongTypeArgument,
+                vec![Value::symbol("characterp"), *$new_element],
+            ));
+        }
+        let replacement_code = replacement_code as u32;
+        if !string.is_multibyte() && replacement_code > 0xff {
+            return Err(signal(
+                "error",
+                vec![Value::string(
+                    "Attempt to store non-byte value into unibyte string",
+                )],
+            ));
+        }
+        if string.is_multibyte() {
+            if replacement_code > 0x7f {
+                return Err(signal(
+                    "error",
+                    vec![Value::string(
+                        "Attempt to store non-ASCII char into multibyte string",
+                    )],
+                ));
+            }
+            // GNU `Faset` locates the byte with `string_char_to_byte' (src/fns.c),
+            // which returns the index unchanged when `SCHARS == SBYTES' and
+            // otherwise scans from whichever END is nearer. `LispString` already
+            // implements both; the bare-slice converter can implement neither,
+            // because a `&[u8]` does not know SCHARS -- so reaching for it made
+            // this O(index).
+            let byte_pos = string.char_to_byte_pos(idx);
+            if string.as_bytes()[byte_pos] > 0x7f {
+                return Err(signal(
+                    "error",
+                    vec![Value::string(
+                        "Attempt to replace non-ASCII char in multibyte string",
+                    )],
+                ));
+            }
+            $array.set_string_byte_same_char_count(byte_pos, replacement_code as u8);
+            return Ok(*$array);
+        }
+
+        // GNU's unibyte `Faset` is one bounds check plus `SSET`.  Rebuilding the
+        // complete string here made byte-at-a-time protocol transforms (for
+        // example WebSocket masking) quadratic in the frame size.
+        $array.set_string_byte_same_char_count(idx, replacement_code as u8);
+        Ok(*$array)
+    }};
+}
+
 pub(crate) fn aset_string_replacement(
     array: &Value,
     index: &Value,
@@ -272,61 +359,19 @@ pub(crate) fn aset_string_replacement(
     };
 
     let idx_fixnum = expect_fixnum(index)?;
-    let string = array.as_lisp_string().expect("string");
-    if idx_fixnum < 0 || idx_fixnum as usize >= string.schars() {
-        return Err(signal(LispCondition::ArgsOutOfRange, vec![*array, *index]));
-    }
-    let idx = idx_fixnum as usize;
+    aset_string_write_body!(array, index, new_element, idx_fixnum)
+}
 
-    let replacement_code = insert_char_code_from_value(new_element)?;
-    if !(0..=0x3F_FFFF).contains(&replacement_code) {
-        return Err(signal(
-            LispCondition::WrongTypeArgument,
-            vec![Value::symbol("characterp"), *new_element],
-        ));
-    }
-    let replacement_code = replacement_code as u32;
-    if !string.is_multibyte() && replacement_code > 0xff {
-        return Err(signal(
-            "error",
-            vec![Value::string(
-                "Attempt to store non-byte value into unibyte string",
-            )],
-        ));
-    }
-    if string.is_multibyte() {
-        if replacement_code > 0x7f {
-            return Err(signal(
-                "error",
-                vec![Value::string(
-                    "Attempt to store non-ASCII char into multibyte string",
-                )],
-            ));
-        }
-        // GNU `Faset` locates the byte with `string_char_to_byte' (src/fns.c),
-        // which returns the index unchanged when `SCHARS == SBYTES' and
-        // otherwise scans from whichever END is nearer. `LispString` already
-        // implements both; the bare-slice converter can implement neither,
-        // because a `&[u8]` does not know SCHARS -- so reaching for it made
-        // this O(index).
-        let byte_pos = string.char_to_byte_pos(idx);
-        if string.as_bytes()[byte_pos] > 0x7f {
-            return Err(signal(
-                "error",
-                vec![Value::string(
-                    "Attempt to replace non-ASCII char in multibyte string",
-                )],
-            ));
-        }
-        array.set_string_byte_same_char_count(byte_pos, replacement_code as u8);
-        return Ok(*array);
-    }
-
-    // GNU's unibyte `Faset` is one bounds check plus `SSET`.  Rebuilding the
-    // complete string here made byte-at-a-time protocol transforms (for
-    // example WebSocket masking) quadratic in the frame size.
-    array.set_string_byte_same_char_count(idx, replacement_code as u8);
-    Ok(*array)
+/// Used only by run_loop's String arm after CHECK_FIXNUM and array dispatch.
+/// The original index Value remains available for bounds-error payloads.
+#[inline(always)]
+fn aset_string_replacement_in_vm_string_arm(
+    array: &Value,
+    index: &Value,
+    new_element: &Value,
+    idx_fixnum: i64,
+) -> Result<Value, Flow> {
+    aset_string_write_body!(array, index, new_element, idx_fixnum)
 }
 
 /// `aset` for callers that own their argument vector (now only the unit
@@ -404,7 +449,7 @@ pub(crate) fn builtin_aset_args(symbols: impl ArraySymbolPolicy, args: &[Value])
             }
         }
         ValueKind::String => {
-            let _updated = aset_string_replacement(&args[0], &args[1], &args[2])?;
+            let _updated = symbols.replace_string(&args[0], &args[1], &args[2], idx_fixnum)?;
             Ok(args[2])
         }
         _ => Err(signal(

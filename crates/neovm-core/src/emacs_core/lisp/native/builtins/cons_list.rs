@@ -1,3 +1,4 @@
+use super::collections::{ArraySymbolPolicy, ArraySymbolSource};
 use super::*;
 use crate::emacs_core::error::{expect_args, expect_args_range, expect_fixnum};
 use crate::emacs_core::value::{ValueKind, VecLikeType, eq_value};
@@ -1826,19 +1827,15 @@ pub(crate) fn copy_sequence_value_in_state(
     eval: &mut super::eval::Context,
     arg: Value,
 ) -> EvalResult {
-    if arg.is_char_table() {
-        return crate::emacs_core::chartable::copy_char_table_with_symbols(arg, eval.symbol_mode())
-            .ok_or_else(|| {
-                signal(
-                    LispCondition::WrongTypeArgument,
-                    vec![Value::symbol("sequencep"), arg],
-                )
-            });
-    }
-    copy_sequence_value(arg)
+    copy_sequence_value_with_source(ArraySymbolSource::Context(eval), arg)
 }
 
 pub(crate) fn copy_sequence_value(arg: Value) -> EvalResult {
+    copy_sequence_value_with_source(ArraySymbolSource::Bare, arg)
+}
+
+/// One sequence dispatch; only char-table copying resolves symbol policy.
+fn copy_sequence_value_with_source(symbols: ArraySymbolSource<'_>, arg: Value) -> EvalResult {
     match arg.kind() {
         ValueKind::Nil => Ok(Value::NIL),
         ValueKind::Cons => {
@@ -1877,12 +1874,13 @@ pub(crate) fn copy_sequence_value(arg: Value) -> EvalResult {
             Ok(Value::vector(elems))
         }
         ValueKind::Veclike(VecLikeType::CharTable) => {
-            crate::emacs_core::chartable::copy_char_table(arg).ok_or_else(|| {
-                signal(
-                    LispCondition::WrongTypeArgument,
-                    vec![Value::symbol("sequencep"), arg],
-                )
-            })
+            crate::emacs_core::chartable::copy_char_table_with_symbols(arg, symbols.mode())
+                .ok_or_else(|| {
+                    signal(
+                        LispCondition::WrongTypeArgument,
+                        vec![Value::symbol("sequencep"), arg],
+                    )
+                })
         }
         ValueKind::Veclike(VecLikeType::Record) => {
             let items = arg.as_record_data().unwrap().clone();

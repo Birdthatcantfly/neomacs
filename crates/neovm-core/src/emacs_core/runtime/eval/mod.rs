@@ -6479,37 +6479,56 @@ impl Context {
     }
 
     pub(crate) fn function_value_is_callable(&self, function: &Value) -> bool {
-        match self.unwrap_symbol(*function).kind() {
-            ValueKind::Veclike(VecLikeType::Lambda)
-            | ValueKind::Veclike(VecLikeType::ByteCode)
-            | ValueKind::Veclike(VecLikeType::Macro)
-            | ValueKind::Veclike(VecLikeType::ModuleFunction) => true,
-            ValueKind::Subr(_) | ValueKind::Veclike(VecLikeType::Subr) => {
-                super::subr_info::subr_is_callable_function_value(function)
-            }
-            ValueKind::Cons => {
-                super::autoload::is_autoload_value(function, self.symbol_mode())
-                    || matches!(
-                        cons_head_symbol_id(function, self.symbol_mode()),
-                        Some(id) if id == lambda_symbol() || id == macro_symbol()
-                    )
-            }
-            ValueKind::Symbol(id) => {
-                super::builtins::symbols::resolve_indirect_symbol_by_id(self, id)
-                    .is_some_and(|(_, resolved)| self.function_value_is_callable(&resolved))
-            }
-            ValueKind::Nil | ValueKind::T if function.is_symbol_with_pos() => {
-                // Enabled nonnil wrappers still follow these function cells.
-                // Snapshot the callable before its body can replace the cell;
-                // bare nil/t retain the classifier's existing constant path.
-                function
-                    .as_symbol_id(self.symbol_mode())
-                    .and_then(|id| {
+        // This snapshot follows function cells without running Lisp or crossing
+        // a collecting safe point. Keep the current original Value for the
+        // positioned nil/t rule while avoiding recursive classifier frames.
+        let mut current = *function;
+        loop {
+            match self.unwrap_symbol(current).kind() {
+                ValueKind::Veclike(VecLikeType::Lambda)
+                | ValueKind::Veclike(VecLikeType::ByteCode)
+                | ValueKind::Veclike(VecLikeType::Macro)
+                | ValueKind::Veclike(VecLikeType::ModuleFunction) => return true,
+                ValueKind::Subr(_) | ValueKind::Veclike(VecLikeType::Subr) => {
+                    return super::subr_info::subr_is_callable_function_value(&current);
+                }
+                ValueKind::Cons => {
+                    return super::autoload::is_autoload_value(&current, self.symbol_mode())
+                        || matches!(
+                            cons_head_symbol_id(&current, self.symbol_mode()),
+                            Some(id) if id == lambda_symbol() || id == macro_symbol()
+                        );
+                }
+                ValueKind::Symbol(id) => {
+                    let resolved = if self.symbols_with_pos_enabled {
                         super::builtins::symbols::resolve_indirect_symbol_by_id(self, id)
-                    })
-                    .is_some_and(|(_, resolved)| self.function_value_is_callable(&resolved))
+                    } else {
+                        // This adapter delegates to the current checked resolver
+                        // with a constant Bare policy, including physical NILP.
+                        super::builtins::symbols::resolve_indirect_symbol_by_id_in_obarray(
+                            self.obarray(),
+                            id,
+                        )
+                    };
+                    let Some((_, resolved)) = resolved else {
+                        return false;
+                    };
+                    current = resolved;
+                }
+                ValueKind::Nil | ValueKind::T if current.is_symbol_with_pos() => {
+                    // Enabled nonnil wrappers still follow these function cells.
+                    // Snapshot the callable before its body can replace the cell;
+                    // bare nil/t retain the classifier's existing constant path.
+                    let resolved = current.as_symbol_id(self.symbol_mode()).and_then(|id| {
+                        super::builtins::symbols::resolve_indirect_symbol_by_id(self, id)
+                    });
+                    let Some((_, resolved)) = resolved else {
+                        return false;
+                    };
+                    current = resolved;
+                }
+                _ => return false,
             }
-            _ => false,
         }
     }
 }
@@ -7105,17 +7124,25 @@ impl Context {
             return declared_special;
         }
 
-        let declared_special = if self.symbols_with_pos_enabled {
-            lexical_symbols::declares_special(lexenv, sym_id)
-        } else {
-            lexenv_declares_special(lexenv, sym_id)
-        };
+        let declared_special = self.lexenv_declares_special_cache_miss(lexenv, sym_id);
         cache.push(LexenvSpecialCacheEntry {
             lexenv_bits,
             symbol: sym_id,
             declared_special,
         });
         declared_special
+    }
+
+    /// This private boundary is called only after a special-declaration cache
+    /// miss. Keep the two lexical scans out of the small cache probe so the
+    /// existing helper's callers can retain their ordinary compiler shape.
+    #[inline(never)]
+    fn lexenv_declares_special_cache_miss(&self, lexenv: Value, sym_id: SymId) -> bool {
+        if self.symbols_with_pos_enabled {
+            lexical_symbols::declares_special(lexenv, sym_id)
+        } else {
+            lexenv_declares_special(lexenv, sym_id)
+        }
     }
 
     pub(crate) fn lexbound_p_in_specpdl(&self, sym_id: SymId) -> bool {
