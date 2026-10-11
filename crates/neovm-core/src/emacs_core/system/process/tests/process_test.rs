@@ -12254,6 +12254,9 @@ fn native_errno_message(errno: i32) -> String {
 #[cfg(unix)]
 struct SerialTestPty {
     master: std::os::fd::OwnedFd,
+    // Darwin needs a live slave for master writes and for queued output to
+    // survive the serial process closing its own descriptor.
+    _slave: std::os::fd::OwnedFd,
     slave_path: String,
 }
 
@@ -12264,7 +12267,9 @@ impl SerialTestPty {
         // SAFETY: each call takes only the descriptor it was handed, and
         // `ptsname`'s static result is copied while its fixture lock is held.
         unsafe {
-            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            let master = libc::posix_openpt(
+                libc::O_RDWR | libc::O_NOCTTY | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            );
             assert!(
                 master >= 0,
                 "posix_openpt: {}",
@@ -12291,16 +12296,20 @@ impl SerialTestPty {
             // Darwin initializes the tty only when its slave is first opened;
             // tcgetattr on the master before that reports ENOTTY. GNU also
             // opens the slave with O_NOCTTY (process.c:2187) before configuring
-            // its tty. Keep this temporary slave open throughout setup.
+            // its tty. Retain this slave throughout the fixture lifetime;
+            // closing the last slave makes Darwin master I/O fail with EIO.
             let slave_name =
                 std::ffi::CString::new(slave_path.as_bytes()).expect("pty slave path has no NUL");
-            let slave = libc::open(slave_name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+            let slave = libc::open(
+                slave_name.as_ptr(),
+                libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+            );
             assert!(
                 slave >= 0,
                 "open pty slave: {}",
                 std::io::Error::last_os_error()
             );
-            let _slave = OwnedFd::from_raw_fd(slave);
+            let slave = OwnedFd::from_raw_fd(slave);
             // Raw BEFORE the first write: the line discipline processes input
             // as it is written to the master, so `ICRNL` would turn this
             // fixture's CR LF into LF LF before any coding system sees it.
@@ -12317,7 +12326,11 @@ impl SerialTestPty {
                 0,
                 "tcsetattr"
             );
-            Self { master, slave_path }
+            Self {
+                master,
+                _slave: slave,
+                slave_path,
+            }
         }
     }
 
