@@ -2923,8 +2923,10 @@ impl<'a> Reader<'a> {
         // Cold path: non-ASCII / escaped / shorthand-rewritten symbols keep the
         // exact LispString encoding.
         let name = self.to_lisp_string_for_token(&token)?;
-        let id = super::intern::lookup_interned_lisp_string(&name)
-            .unwrap_or_else(|| super::intern::intern_reader_name(name));
+        // The creator performs the name lookup under its write lock and
+        // preserves the first exact reader spelling on a miss. A preliminary
+        // read-lock lookup would hash every cold token a second time.
+        let id = super::intern::intern_reader_name(name);
         Ok(Value::from_sym_id(id))
     }
 
