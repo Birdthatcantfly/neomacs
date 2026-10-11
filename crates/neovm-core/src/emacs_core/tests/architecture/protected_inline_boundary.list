@@ -48,6 +48,7 @@ never	emacs_core/lisp/native/builtins/symbols.rs	symbol_property_get	run_loop
 never	emacs_core/lisp/native/builtins/types.rs	builtin_equal_2	run_loop
 never	emacs_core/runtime/bytecode/chunk.rs	<ByteCodeFunction as Clone>::clone	run_loop
 never	emacs_core/runtime/bytecode/chunk.rs	LazyGnuCode::decode	run_loop,apply1
+never	emacs_core/runtime/bytecode/vm.rs	<InterpreterFrameAuxStack as Drop>::drop	run_loop	# unique auxiliary-owner teardown; semantic unwind boundary, not an inferred protected-neutral tuning hint
 never	emacs_core/runtime/bytecode/vm.rs	Vm::assign_var_id	run_loop
 never	emacs_core/runtime/bytecode/vm.rs	Vm::bytecode_depth_exceeded	run_loop
 never	emacs_core/runtime/bytecode/vm.rs	Vm::call_arith_builtin_from_stack_args	run_loop

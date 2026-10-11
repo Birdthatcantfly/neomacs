@@ -1239,6 +1239,7 @@ struct InstalledCalleeFrame(InterpreterFrame);
 /// inline storage of two `SmallVec`s. The auxiliary state stays at a stable
 /// logical depth until that frame completes, like GNU's separate handler and
 /// specpdl stacks.
+#[derive(Debug)]
 struct InterpreterFrameAux {
     handlers: HandlerStack,
     bind_stack: BindStack,
@@ -1279,6 +1280,7 @@ impl InterpreterDriverDepth {
     }
 }
 
+#[derive(Debug)]
 struct SuspendedInterpreterFrameAux {
     depth: InterpreterDriverDepth,
     state: InterpreterFrameAux,
@@ -1291,16 +1293,64 @@ struct SuspendedInterpreterFrameAux {
 /// a sparse stack containing only suspended callers whose state is nonempty.
 /// The common Bcall/Breturn path changes only `current`'s empty state and never
 /// pushes the 96-byte pair of inline `SmallVec`s.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InterpreterFrameAuxOccupancy {
     KnownEmpty,
     MayContainState,
 }
 
+/// Its unique auxiliary allocations are retired out of line on unwinding.
+/// `ManuallyDrop` suppresses field drop glue after that one destructor call;
+/// the consuming pool-return path transfers both fields before retiring only
+/// the current state, as it did before the explicit drop boundary.
+#[derive(Debug)]
 struct InterpreterFrameAuxStack {
-    current: InterpreterFrameAux,
+    current: std::mem::ManuallyDrop<InterpreterFrameAux>,
     current_occupancy: InterpreterFrameAuxOccupancy,
-    suspended: Vec<SuspendedInterpreterFrameAux>,
+    suspended: std::mem::ManuallyDrop<Vec<SuspendedInterpreterFrameAux>>,
+    // The marks describe this executing thread's specpdl/handler frontiers.
+    // Moving their owner to another thread would not transfer those frontiers.
+    _owner: std::marker::PhantomData<*mut ()>,
+}
+
+static_assertions::assert_not_impl_any!(InterpreterFrameAuxStack: Send, Sync, Clone);
+// A future owned handler payload must revisit the destructor's no-user-Drop
+// premise instead of silently introducing a callback or panic during teardown.
+static_assertions::const_assert!(!std::mem::needs_drop::<Handler>());
+static_assertions::assert_eq_size!(
+    std::mem::ManuallyDrop<InterpreterFrameAux>,
+    InterpreterFrameAux
+);
+static_assertions::assert_eq_size!(
+    std::mem::ManuallyDrop<Vec<SuspendedInterpreterFrameAux>>,
+    Vec<SuspendedInterpreterFrameAux>
+);
+static_assertions::const_assert_eq!(
+    std::mem::align_of::<std::mem::ManuallyDrop<InterpreterFrameAux>>(),
+    std::mem::align_of::<InterpreterFrameAux>()
+);
+static_assertions::const_assert_eq!(
+    std::mem::align_of::<std::mem::ManuallyDrop<Vec<SuspendedInterpreterFrameAux>>>(),
+    std::mem::align_of::<Vec<SuspendedInterpreterFrameAux>>()
+);
+static_assertions::const_assert_eq!(std::mem::size_of::<std::marker::PhantomData<*mut ()>>(), 0);
+
+impl Drop for InterpreterFrameAuxStack {
+    // Keep both SmallVecs and the sparse Vec's destruction behind this one
+    // boundary even if run_loop becomes its only caller after fat LTO.
+    #[inline(never)]
+    fn drop(&mut self) {
+        // SAFETY: these private fields stay initialized until this destructor
+        // runs. Only into_suspended takes them, and it suppresses this Drop by
+        // consuming the entire owner through ManuallyDrop. Each field is thus
+        // destroyed exactly once. Their elements are handler markers/binding
+        // depths, with no user destructor, Lisp callback, panic or blocking
+        // teardown. The wrappers prevent a subsequent implicit field drop.
+        unsafe {
+            std::mem::ManuallyDrop::drop(&mut self.current);
+            std::mem::ManuallyDrop::drop(&mut self.suspended);
+        }
+    }
 }
 
 impl InterpreterFrameAuxStack {
@@ -1309,7 +1359,23 @@ impl InterpreterFrameAuxStack {
         Self::with_suspended(handlers, bind_stack, Vec::new())
     }
     fn into_suspended(self) -> Vec<SuspendedInterpreterFrameAux> {
-        self.suspended
+        let mut owner = std::mem::ManuallyDrop::new(self);
+        // SAFETY: consuming self provides sole ownership of both initialized
+        // fields. Take each once, without an intervening call or allocation;
+        // the outer ManuallyDrop prevents the retired owner's destructor from
+        // reading them again. The extracted current state is retired normally
+        // and the extracted Vec becomes the caller's pool-owned allocation.
+        let (current, suspended) = unsafe {
+            (
+                std::mem::ManuallyDrop::take(&mut owner.current),
+                std::mem::ManuallyDrop::take(&mut owner.suspended),
+            )
+        };
+        // run_loop has just called take_entry, which installed fresh empty
+        // current stacks. Keep that retirement visible to the optimizer rather
+        // than adding a routine out-of-line destructor call on pool return.
+        drop(current);
+        suspended
     }
     /// Like the test-only `new` with pooled (emptied) storage for the
     /// suspended frames.
@@ -1326,9 +1392,10 @@ impl InterpreterFrameAuxStack {
             InterpreterFrameAuxOccupancy::MayContainState
         };
         Self {
-            current,
+            current: std::mem::ManuallyDrop::new(current),
             current_occupancy,
-            suspended,
+            suspended: std::mem::ManuallyDrop::new(suspended),
+            _owner: std::marker::PhantomData,
         }
     }
 
@@ -1350,7 +1417,7 @@ impl InterpreterFrameAuxStack {
         }
         self.suspended.push(SuspendedInterpreterFrameAux {
             depth,
-            state: std::mem::replace(&mut self.current, InterpreterFrameAux::empty()),
+            state: std::mem::replace(&mut *self.current, InterpreterFrameAux::empty()),
         });
         self.current_occupancy = InterpreterFrameAuxOccupancy::KnownEmpty;
     }
@@ -1361,7 +1428,7 @@ impl InterpreterFrameAuxStack {
             .last()
             .is_some_and(|suspended| suspended.depth == depth)
         {
-            self.current = self
+            *self.current = self
                 .suspended
                 .pop()
                 .expect("matching sparse auxiliary frame must exist")
@@ -1381,7 +1448,7 @@ impl InterpreterFrameAuxStack {
             // handler or dynamic binding in the same driver frame.
             if self.current_occupancy == InterpreterFrameAuxOccupancy::MayContainState {
                 if !self.current.is_empty() {
-                    self.current = InterpreterFrameAux::empty();
+                    *self.current = InterpreterFrameAux::empty();
                 }
                 self.current_occupancy = InterpreterFrameAuxOccupancy::KnownEmpty;
             }
@@ -1390,7 +1457,7 @@ impl InterpreterFrameAuxStack {
 
     fn take_entry(&mut self) -> (HandlerStack, BindStack) {
         debug_assert!(self.suspended.is_empty());
-        let entry = std::mem::replace(&mut self.current, InterpreterFrameAux::empty());
+        let entry = std::mem::replace(&mut *self.current, InterpreterFrameAux::empty());
         self.current_occupancy = InterpreterFrameAuxOccupancy::KnownEmpty;
         (entry.handlers, entry.bind_stack)
     }
@@ -9962,3 +10029,7 @@ mod manual_parameter_roots_tests;
 #[cfg(test)]
 #[path = "tests/sole_owner_cursor_test.rs"]
 mod sole_owner_cursor_tests;
+
+#[cfg(test)]
+#[path = "tests/aux_stack_drop_test.rs"]
+mod aux_stack_drop_tests;
