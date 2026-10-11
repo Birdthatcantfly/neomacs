@@ -5340,12 +5340,15 @@ fn signal_process_observes_stop_continue_output_and_exit_like_gnu() {
                (kill-buffer buffer)))"#
     ));
 
-    assert_eq!(
-        result,
+    // GNU process.c:780-811 uses the host's strsignal text; both branches
+    // were observed with GNU 31.1 on their respective platforms.
+    let expected = if cfg!(target_os = "macos") {
+        "OK (t t exit \"resumed\n\" ((stop \"suspended (signal): 17\n\") (run \"run\") (exit \"finished\n\")))"
+    } else {
         "OK (t t exit \"resumed\n\" ((stop \"stopped (signal)\n\") (run \"run\") (exit \"finished\n\")))"
-    );
+    };
+    assert_eq!(result, expected);
 }
-
 #[test]
 fn connection_process_signal_controls_match_gnu_errors() {
     crate::test_utils::init_test_tracing();
@@ -7336,12 +7339,15 @@ fn kill_buffer_hangups_attached_real_process() {
         ),
     );
 
-    assert_eq!(
-        result,
+    // GNU process.c:780-811 lowercases the native strsignal message.
+    // GNU 31.1 Darwin reports "hangup: 1" for SIGHUP.
+    let expected = if cfg!(target_os = "macos") {
+        "OK (signal nil t nil nil ((\"hangup: 1\n\" signal nil)))"
+    } else {
         "OK (signal nil t nil nil ((\"hangup\n\" signal nil)))"
-    );
+    };
+    assert_eq!(result, expected);
 }
-
 #[test]
 fn accept_process_output_restores_current_buffer_and_match_data() {
     crate::test_utils::init_test_tracing();
