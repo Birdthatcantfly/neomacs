@@ -60,7 +60,7 @@ fn mir_call_retains_native_callee_slots_and_revalidates_redefinition() {
     let ctx = &mut ev as *mut Context as *mut u8;
     let callee = ev
         .obarray
-        .symbol_function_id(sym.as_symbol_id().unwrap())
+        .symbol_function_id(sym.as_bare_symbol_id().unwrap())
         .unwrap();
     assert!(
         crate::emacs_core::jit::test_support::resolve_leaf(

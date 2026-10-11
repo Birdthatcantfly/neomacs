@@ -103,7 +103,7 @@ pub(crate) fn eval_fixture_program_named(
     let mut ordered = Vec::new();
     for form in forms {
         if let Some(parts) = crate::emacs_core::value::list_to_vec(&form)
-            && parts.first().and_then(|head| head.as_symbol_name()) == Some("progn")
+            && parts.first().and_then(|head| head.as_bare_symbol_name()) == Some("progn")
         {
             ordered.extend(parts.into_iter().skip(1));
         } else {
