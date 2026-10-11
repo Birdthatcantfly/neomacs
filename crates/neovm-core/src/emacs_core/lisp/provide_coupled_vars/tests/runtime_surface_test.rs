@@ -69,9 +69,14 @@ fn the_features_the_table_is_conditioned_on_match_the_linked_adapters() {
 fn the_obarray_agrees_with_every_row() {
     crate::test_utils::init_test_tracing();
 
-    let names: Vec<&str> = PROVIDE_COUPLED_VARIABLES.iter().map(|v| v.name).collect();
+    // The ledger contains reader punctuation, including `comp--#$`. Pass
+    // these ASCII names as strings so the GNU reader cannot split a row.
+    let names: Vec<String> = PROVIDE_COUPLED_VARIABLES
+        .iter()
+        .map(|v| format!("{:?}", v.name))
+        .collect();
     let form = format!(
-        "(mapconcat (lambda (s) (if (boundp s) \"t\" \"-\")) '({}) \"\")",
+        "(mapconcat (lambda (name) (if (boundp (intern name)) \"t\" \"-\")) '({}) \"\")",
         names.join(" ")
     );
     let result = runtime_startup_eval_one(&form);
