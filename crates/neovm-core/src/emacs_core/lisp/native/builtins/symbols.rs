@@ -1916,6 +1916,7 @@ enum InternSoftQuery<'a> {
 }
 
 impl InternSoftQuery<'_> {
+    #[inline]
     fn name_query(&self) -> crate::emacs_core::intern::SymbolNameQuery<'_> {
         match self {
             Self::Spelling(name) => crate::emacs_core::intern::SymbolNameQuery::from(*name),
