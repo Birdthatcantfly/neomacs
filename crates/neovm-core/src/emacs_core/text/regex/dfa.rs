@@ -43,11 +43,12 @@
 //! | `NEOVM_REGEX_DFA_FIRST_STEP` | `on` (default), `off` | Reject cached prefixes of at most eight bytes inline; verify also checks the predicate against the matcher ([`first_step_enabled`]). |
 
 use super::{
-    CompiledPattern, LookupClassKey, MatchRegisters, MatchScratch, RegexOp, SyntaxAssertion,
-    SyntaxCacheKey, SyntaxLookup, evaluate_syntax_assertion, extract_number, extract_number_u16,
-    fail_stack_overflow_free_span, match_anychar_at, match_categoryspec_at, match_charset_at,
-    match_exactn_char_at, match_syntaxspec_at, match_syntaxspecset_at, matcher_overflow_pending,
-    opcode_len, posix_class_bits_read_syntax, re_match_candidate_in, re_text_char,
+    CompiledPattern, LookupClassKey, MatchRegisters, MatchScratch, MatchSyntax, RegexOp,
+    SyntaxAssertion, SyntaxCacheKey, SyntaxLookup, evaluate_syntax_assertion, extract_number,
+    extract_number_u16, fail_stack_overflow_free_span, match_anychar_at, match_categoryspec_at,
+    match_charset_at, match_exactn_char_at, match_syntaxspec_at, match_syntaxspecset_at,
+    matcher_overflow_pending, opcode_len, posix_class_bits_read_syntax, re_match_candidate_in,
+    re_text_char,
 };
 use crate::emacs_core::emacs_char;
 use crate::emacs_core::syntax::SyntaxClass;
@@ -543,7 +544,7 @@ pub(crate) struct Place<'a> {
     pub(crate) stop: usize,
     pub(crate) point: usize,
     pub(crate) target_multibyte: bool,
-    pub(crate) syntax: &'a dyn SyntaxLookup,
+    pub(crate) syntax: MatchSyntax<'a>,
 }
 
 impl Place<'_> {
@@ -564,7 +565,7 @@ impl Place<'_> {
                 d,
                 self.stop,
                 self.target_multibyte,
-                self.syntax,
+                &self.syntax,
             ),
         }
     }
@@ -1590,7 +1591,8 @@ impl ExistenceDfa {
         point: usize,
         syntax: &dyn SyntaxLookup,
     ) -> Exists {
-        self.anchored_exists_inner::<true>(pattern, text, p, stop, point, syntax)
+        let syntax = MatchSyntax::for_pattern(pattern, syntax);
+        self.anchored_exists_inner::<true>(pattern, text, p, stop, point, &syntax)
     }
 
     /// The candidate path after a caller's inline probe omits that probe
@@ -1604,7 +1606,7 @@ impl ExistenceDfa {
         p: usize,
         stop: usize,
         point: usize,
-        syntax: &dyn SyntaxLookup,
+        syntax: &MatchSyntax<'_>,
     ) -> Exists {
         if self.gave_up.is_some() {
             return Exists::Unknown;
@@ -1870,7 +1872,7 @@ impl ExistenceDfa {
         p: usize,
         stop: usize,
         point: usize,
-        syntax: &dyn SyntaxLookup,
+        syntax: &MatchSyntax<'_>,
     ) -> Exists {
         let stop = stop.min(text.len());
         if p > stop {
@@ -1887,7 +1889,7 @@ impl ExistenceDfa {
             self.counters.frontier_unknown += 1;
             return Exists::Unknown;
         }
-        let (mut row, plain_end) = self.start_at(text, p, pattern.target_multibyte, syntax);
+        let (mut row, plain_end) = self.start_at(text, p, pattern.target_multibyte, syntax.lookup);
         // `\=` holds at point only: that position's closure is never cached.
         let special = if self.has_at_dot && point >= p {
             point
@@ -1956,9 +1958,9 @@ impl ExistenceDfa {
         point: usize,
         mut special: usize,
         mut plain_end: usize,
-        syntax: &dyn SyntaxLookup,
+        syntax: &MatchSyntax<'_>,
     ) -> Exists {
-        let base = BaseTableView(syntax);
+        let base = BaseTableView(syntax.lookup);
         let target_multibyte = pattern.target_multibyte;
         let search = self.search;
         // Where `syntax-table` properties may apply, every syntax the DFA
@@ -1970,14 +1972,21 @@ impl ExistenceDfa {
         // function of (state, class): the assertions it evaluated read only
         // the facts both carry, and a class read at a position is interned
         // like any other.
-        let lookup: &dyn SyntaxLookup = if search.positional { syntax } else { &base };
+        // Preserve the existing projection: positional assertions retain the
+        // original invocation plan; the base table uses physical coordinates.
+        let base_syntax = MatchSyntax::physical(&base);
+        let boundary_syntax = if search.positional {
+            *syntax
+        } else {
+            base_syntax
+        };
         let place = |d: usize| Place {
             text,
             d,
             stop,
             point,
             target_multibyte,
-            syntax: lookup,
+            syntax: boundary_syntax,
         };
         let mut polled = d - p;
         loop {
@@ -2034,7 +2043,7 @@ impl ExistenceDfa {
             // inside a property run.
             let mut at_position = false;
             if d >= plain_end {
-                plain_end = self.plain_until(d, syntax);
+                plain_end = self.plain_until(d, syntax.lookup);
                 if plain_end > d {
                     continue;
                 }
@@ -2045,7 +2054,7 @@ impl ExistenceDfa {
             let classified = if at_position {
                 self.counters.positional_chars += 1;
                 self.classes
-                    .class_at_position(&self.nfa, pattern, text, d, &base, syntax)
+                    .class_at_position(&self.nfa, pattern, text, d, &base, syntax.lookup)
             } else {
                 self.classes.class_at(&self.nfa, pattern, text, d, &base)
             };
@@ -2561,7 +2570,7 @@ fn classic_candidate(
     text: &[u8],
     pos: usize,
     stop: usize,
-    syntax: &dyn SyntaxLookup,
+    syntax: &MatchSyntax<'_>,
     point: usize,
     regs: &mut MatchRegisters,
 ) -> Option<usize> {
@@ -2724,7 +2733,7 @@ impl<'p> DfaLease<'p> {
         text: &[u8],
         pos: usize,
         stop: usize,
-        syntax: &dyn SyntaxLookup,
+        syntax: &MatchSyntax<'_>,
         point: usize,
         regs: &mut MatchRegisters,
     ) -> Option<usize> {
@@ -2755,7 +2764,7 @@ impl<'p> DfaLease<'p> {
             if found.is_none() && !matcher_overflow_pending() {
                 *failed += 1;
                 if *failed >= COLD_THRESHOLD {
-                    self.build(pattern, syntax);
+                    self.build(pattern, syntax.lookup);
                 }
             }
             return found;
@@ -2775,7 +2784,7 @@ impl<'p> DfaLease<'p> {
         text: &[u8],
         pos: usize,
         stop: usize,
-        syntax: &dyn SyntaxLookup,
+        syntax: &MatchSyntax<'_>,
         point: usize,
         regs: &mut MatchRegisters,
     ) -> Option<usize> {
@@ -2807,7 +2816,7 @@ impl<'p> DfaLease<'p> {
         text: &[u8],
         pos: usize,
         stop: usize,
-        syntax: &dyn SyntaxLookup,
+        syntax: &MatchSyntax<'_>,
         point: usize,
         regs: &mut MatchRegisters,
     ) -> Option<usize> {
@@ -2821,7 +2830,7 @@ impl<'p> DfaLease<'p> {
                 if found.is_none() && !matcher_overflow_pending() {
                     *failed += 1;
                     if *failed >= COLD_THRESHOLD {
-                        self.build(pattern, syntax);
+                        self.build(pattern, syntax.lookup);
                     }
                 }
                 return found;
@@ -2830,7 +2839,7 @@ impl<'p> DfaLease<'p> {
         };
         let verdict = live
             .dfa
-            .anchored_exists(pattern, text, pos, stop, point, syntax);
+            .anchored_exists_inner::<true>(pattern, text, pos, stop, point, syntax);
         live.note(verdict);
         if let Some(why) = live.dfa.gave_up() {
             self.retire(why);

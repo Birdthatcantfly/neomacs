@@ -177,3 +177,114 @@ fn supplied_symbol_beginning_skips_invalid_previous_after_nonword_current() {
     assert_eq!(lookup.position_error(), None);
     crate::emacs_core::string_pos_cache::reset_string_pos_cache();
 }
+
+struct PlanReads {
+    mode: BoundarySyntaxMode,
+    selections: std::cell::Cell<usize>,
+    callbacks: std::cell::Cell<usize>,
+}
+
+impl PlanReads {
+    fn new(mode: BoundarySyntaxMode) -> Self {
+        Self {
+            mode,
+            selections: std::cell::Cell::new(0),
+            callbacks: std::cell::Cell::new(0),
+        }
+    }
+}
+
+impl SyntaxLookup for PlanReads {
+    fn boundary_syntax_mode(&self) -> BoundarySyntaxMode {
+        self.selections.set(self.selections.get() + 1);
+        self.mode
+    }
+
+    fn boundary_syntax_at(&self, request: BoundarySyntaxRequest) -> BoundarySyntaxClasses {
+        self.callbacks.set(self.callbacks.get() + 1);
+        request.physical_lookup(self)
+    }
+
+    fn char_syntax(&self, ch: char) -> SyntaxClass {
+        DefaultSyntaxLookup.char_syntax(ch)
+    }
+
+    fn char_has_category(&self, ch: char, category: u8) -> bool {
+        DefaultSyntaxLookup.char_has_category(ch, category)
+    }
+
+    fn cache_key(&self) -> SyntaxCacheKey {
+        SyntaxCacheKey::Standard
+    }
+
+    fn class_cache_key(&self) -> Option<LookupClassKey> {
+        Some(LookupClassKey::Standard)
+    }
+}
+
+#[test]
+fn invocation_boundary_plan_selects_once_across_search_candidates_and_engines() {
+    // The probe's callback has physical semantics, but a supplied-mode probe
+    // records that the selected route continues through the existing callback.
+    // Real supplied coordinates/cache/errors are protected by the tests above.
+    for mode in [BoundarySyntaxMode::Physical, BoundarySyntaxMode::Supplied] {
+        let pattern = regex_compile("\\_<\\w\\_>", false, false).unwrap();
+        let text = b"aa bb q";
+        for dfa_mode in [dfa::DfaMode::Off, dfa::DfaMode::Verify] {
+            let lookup = PlanReads::new(mode);
+            dfa::prime(&pattern, &lookup).unwrap();
+            let found = dfa::with_dfa_mode(dfa_mode, || {
+                re_search(&pattern, text, 0, text.len() as isize, &lookup, 0)
+            });
+            assert_eq!(found.map(|(start, _)| start), Some(6));
+            assert_eq!(lookup.selections.get(), 1, "{mode:?} {dfa_mode:?}");
+            match mode {
+                BoundarySyntaxMode::Physical => assert_eq!(lookup.callbacks.get(), 0),
+                BoundarySyntaxMode::Supplied => assert!(lookup.callbacks.get() > 1),
+            }
+        }
+        let lookup = PlanReads::new(mode);
+        assert!(pike_match(&pattern, text, 6, text.len(), &lookup, 0).is_some());
+        assert_eq!(lookup.selections.get(), 1);
+        match mode {
+            BoundarySyntaxMode::Physical => assert_eq!(lookup.callbacks.get(), 0),
+            BoundarySyntaxMode::Supplied => assert_eq!(lookup.callbacks.get(), 2),
+        }
+        let lookup = PlanReads::new(mode);
+        assert!(re_match(&pattern, text, 6, text.len(), &lookup, 0).is_some());
+        assert_eq!(lookup.selections.get(), 1);
+        match mode {
+            BoundarySyntaxMode::Physical => assert_eq!(lookup.callbacks.get(), 0),
+            BoundarySyntaxMode::Supplied => assert_eq!(lookup.callbacks.get(), 2),
+        }
+    }
+}
+
+#[test]
+fn syntax_free_patterns_do_not_query_boundary_coordinates() {
+    let pattern = regex_compile("q", false, false).unwrap();
+    assert!(!pattern.uses_syntax);
+    let lookup = PlanReads::new(BoundarySyntaxMode::Supplied);
+    assert!(re_search(&pattern, b"aaq", 0, 3, &lookup, 0).is_some());
+    assert!(re_match(&pattern, b"q", 0, 1, &lookup, 0).is_some());
+    assert!(pike_match(&pattern, b"q", 0, 1, &lookup, 0).is_some());
+    assert_eq!(lookup.selections.get(), 0);
+    assert_eq!(lookup.callbacks.get(), 0);
+}
+
+#[test]
+fn physical_match_plan_keeps_symbol_lookup_order_and_short_circuit() {
+    let lookup = PhysicalReads::default();
+    let plan = MatchSyntax::new(&lookup);
+    re_boundary_syntax(SyntaxAssertion::SymbolBeginning, b"c!", 1, true, &plan);
+    assert_eq!(*lookup.0.borrow(), [1]);
+    lookup.0.borrow_mut().clear();
+    re_boundary_syntax(SyntaxAssertion::SymbolBeginning, b"cd", 1, true, &plan);
+    assert_eq!(*lookup.0.borrow(), [1, 0]);
+    lookup.0.borrow_mut().clear();
+    re_boundary_syntax(SyntaxAssertion::SymbolEnd, b"!c", 1, true, &plan);
+    assert_eq!(*lookup.0.borrow(), [0]);
+    lookup.0.borrow_mut().clear();
+    re_boundary_syntax(SyntaxAssertion::SymbolEnd, b"_!", 1, true, &plan);
+    assert_eq!(*lookup.0.borrow(), [0, 1]);
+}

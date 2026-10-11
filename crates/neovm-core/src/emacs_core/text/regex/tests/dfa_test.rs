@@ -17,7 +17,7 @@ fn place<'a>(text: &'a [u8], d: usize) -> Place<'a> {
         stop: text.len(),
         point: 0,
         target_multibyte: true,
-        syntax: &DefaultSyntaxLookup,
+        syntax: MatchSyntax::new(&DefaultSyntaxLookup),
     }
 }
 
@@ -914,7 +914,7 @@ fn a_rejected_candidate_stays_within_the_overflow_bound() {
                 &text,
                 p,
                 text.len(),
-                &syntax,
+                &MatchSyntax::new(&syntax),
                 0,
                 true,
                 &mut registers,
@@ -1693,7 +1693,7 @@ fn inline_first_step_rejects_and_success_fallback_agree_with_verify() {
                 text,
                 7,
                 text.len(),
-                &syntax,
+                &MatchSyntax::new(&syntax),
                 0,
                 &mut registers,
             );

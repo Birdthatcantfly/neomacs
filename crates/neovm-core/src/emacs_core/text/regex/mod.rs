@@ -375,6 +375,10 @@ impl SyntaxLookup for StringRegexpSyntaxLookup<'_> {
         self.base.symbol_mode()
     }
 
+    fn boundary_syntax_mode(&self) -> regex_emacs::BoundarySyntaxMode {
+        self.property_lookup.boundary_syntax_mode()
+    }
+
     fn emacs_char_syntax(
         &self,
         c: crate::emacs_core::emacs_char::EmacsChar,

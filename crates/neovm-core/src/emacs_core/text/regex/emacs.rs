@@ -4201,6 +4201,7 @@ impl BoundarySyntaxCharacter {
     pub(crate) const fn character(self) -> emacs_char::EmacsChar {
         self.character
     }
+    #[inline]
     fn physical_syntax<T: SyntaxLookup + ?Sized>(
         self,
         lookup: &T,
@@ -4256,6 +4257,7 @@ impl BoundarySyntaxRequest {
 
     /// GNU opcode lookup order and short-circuiting, with no source conversion
     /// or capability query added to ordinary boundaries.
+    #[inline]
     pub(crate) fn physical_lookup<T: SyntaxLookup + ?Sized>(
         self,
         lookup: &T,
@@ -4337,9 +4339,69 @@ static_assertions::assert_impl_all!(BoundarySyntaxCharacter: Send, Sync, Copy);
 static_assertions::assert_impl_all!(BoundarySyntaxRequest: Send, Sync, Copy);
 static_assertions::assert_impl_all!(BoundarySyntaxClasses: Send, Sync, Copy);
 
+/// Boundary coordinates selected once for one match/search invocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BoundarySyntaxMode {
+    Physical,
+    Supplied,
+}
+
+/// Bind the lookup to its coordinate plan for one synchronous invocation.
+/// This borrowed pair never enters a persistent compiled-pattern cache.
+/// Threading: a mutator-local borrow of the original, thread-confined lookup.
+#[derive(Clone, Copy)]
+pub(crate) struct MatchSyntax<'a> {
+    lookup: &'a dyn SyntaxLookup,
+    boundary_mode: BoundarySyntaxMode,
+}
+
+impl std::fmt::Debug for MatchSyntax<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MatchSyntax")
+            .field("boundary_mode", &self.boundary_mode)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> MatchSyntax<'a> {
+    /// Sealed compilation's `uses_syntax` covers every boundary opcode.
+    /// Syntax-free compiled patterns need no capability query. Hand-built
+    /// unsealed buffers retain the callback even if their metadata is absent.
+    #[inline]
+    fn for_pattern(pattern: &CompiledPattern, lookup: &'a dyn SyntaxLookup) -> Self {
+        if pattern.uses_syntax || !pattern.buffer_sealed {
+            Self::new(lookup)
+        } else {
+            Self::physical(lookup)
+        }
+    }
+
+    #[inline]
+    pub(crate) fn new(lookup: &'a dyn SyntaxLookup) -> Self {
+        Self {
+            lookup,
+            boundary_mode: lookup.boundary_syntax_mode(),
+        }
+    }
+
+    #[inline]
+    fn physical(lookup: &'a dyn SyntaxLookup) -> Self {
+        Self {
+            lookup,
+            boundary_mode: BoundarySyntaxMode::Physical,
+        }
+    }
+}
+
 pub(crate) trait SyntaxLookup {
     fn symbol_mode(&self) -> SymbolMode {
         SymbolMode::Bare
+    }
+
+    /// Invocation-local selection, never queried by an assertion opcode.
+    fn boundary_syntax_mode(&self) -> BoundarySyntaxMode {
+        BoundarySyntaxMode::Physical
     }
 
     /// One opcode's previous/current syntax reads, allowing supplied string
@@ -5301,16 +5363,94 @@ fn match_categoryspec_at(
     if has != negate { Some(len) } else { None }
 }
 
-/// Gather initialized physical characters without performing syntax reads.
-/// Only the callback's query plan determines lookup order/short-circuiting.
+/// Decode physical neighbours only when GNU's opcode reads them.
+/// Symbol-current is raw for unibyte input; previous/word keys are promoted.
 #[inline]
-fn re_boundary_syntax(
+fn re_physical_boundary_syntax(
     kind: SyntaxAssertion,
     text: &[u8],
     d: usize,
     target_multibyte: bool,
     syntax: &dyn SyntaxLookup,
 ) -> BoundarySyntaxClasses {
+    #[derive(Debug)]
+    enum CharacterDomain {
+        Promoted,
+        SymbolCurrent,
+    }
+    let classify = |pos, domain| {
+        let code = match (domain, target_multibyte) {
+            (CharacterDomain::SymbolCurrent, false) => text.get(pos).map(|byte| u32::from(*byte)),
+            (CharacterDomain::Promoted, _) | (CharacterDomain::SymbolCurrent, true) => {
+                re_text_char(text, pos, target_multibyte).map(|(code, _)| code)
+            }
+        }?;
+        let character = emacs_char::EmacsChar::from_code_unchecked(code);
+        Some((character, syntax.emacs_char_syntax_at(character, pos)))
+    };
+    let previous = || {
+        re_prev_char_start(text, d, target_multibyte)
+            .and_then(|pos| classify(pos, CharacterDomain::Promoted))
+    };
+    let current = |domain| classify(d, domain);
+    match kind {
+        SyntaxAssertion::WordBoundary | SyntaxAssertion::NotWordBoundary => {
+            let previous = previous();
+            let current = current(CharacterDomain::Promoted);
+            BoundarySyntaxClasses { previous, current }
+        }
+        SyntaxAssertion::WordBeginning | SyntaxAssertion::SymbolBeginning => {
+            let symbol = kind == SyntaxAssertion::SymbolBeginning;
+            let current = current(if symbol {
+                CharacterDomain::SymbolCurrent
+            } else {
+                CharacterDomain::Promoted
+            });
+            let previous = if current.is_some_and(|(_, class)| {
+                class == SyntaxClass::Word || (symbol && class == SyntaxClass::Symbol)
+            }) {
+                previous()
+            } else {
+                None
+            };
+            BoundarySyntaxClasses { previous, current }
+        }
+        SyntaxAssertion::WordEnd | SyntaxAssertion::SymbolEnd => {
+            let symbol = kind == SyntaxAssertion::SymbolEnd;
+            let previous = previous();
+            let current = if previous.is_some_and(|(_, class)| {
+                class == SyntaxClass::Word || (symbol && class == SyntaxClass::Symbol)
+            }) {
+                current(if symbol {
+                    CharacterDomain::SymbolCurrent
+                } else {
+                    CharacterDomain::Promoted
+                })
+            } else {
+                None
+            };
+            BoundarySyntaxClasses { previous, current }
+        }
+    }
+}
+
+/// Supplied coordinates retain the initialized request and one current-offset
+/// conversion. Physical inputs call their opcode helper directly.
+#[inline]
+fn re_boundary_syntax(
+    kind: SyntaxAssertion,
+    text: &[u8],
+    d: usize,
+    target_multibyte: bool,
+    syntax: &MatchSyntax<'_>,
+) -> BoundarySyntaxClasses {
+    match syntax.boundary_mode {
+        BoundarySyntaxMode::Physical => {
+            return re_physical_boundary_syntax(kind, text, d, target_multibyte, syntax.lookup);
+        }
+        BoundarySyntaxMode::Supplied => {}
+    }
+
     let character = |pos| {
         re_text_char(text, pos, target_multibyte).map(|(ch, _)| BoundarySyntaxCharacter {
             character: emacs_char::EmacsChar::from_code_unchecked(ch),
@@ -5341,7 +5481,7 @@ fn re_boundary_syntax(
         previous: re_prev_char_start(text, d, target_multibyte).and_then(character),
         current,
     };
-    syntax.boundary_syntax_at(request)
+    syntax.lookup.boundary_syntax_at(request)
 }
 
 /// `\b` word boundary (mirrors GNU `regex-emacs.c` `case wordbound`).
@@ -5350,7 +5490,7 @@ fn assert_word_boundary(
     text: &[u8],
     d: usize,
     target_multibyte: bool,
-    syntax: &dyn SyntaxLookup,
+    syntax: &MatchSyntax<'_>,
 ) -> bool {
     // GNU Case 1 (regex-emacs.c:4972-4974): a position at the beginning or end
     // of the searched region is *unconditionally* a word boundary — `\b`
@@ -5375,7 +5515,7 @@ fn assert_word_boundary(
     let current = classes.current();
     match (previous, current) {
         (Some((c1, SyntaxClass::Word)), Some((c2, SyntaxClass::Word))) => {
-            syntax.emacs_word_boundary_between(c1, c2)
+            syntax.lookup.emacs_word_boundary_between(c1, c2)
         }
         (Some((_, previous)), Some((_, current))) => {
             (previous == SyntaxClass::Word) != (current == SyntaxClass::Word)
@@ -5390,7 +5530,7 @@ fn assert_word_beg(
     text: &[u8],
     d: usize,
     target_multibyte: bool,
-    syntax: &dyn SyntaxLookup,
+    syntax: &MatchSyntax<'_>,
 ) -> bool {
     let classes = re_boundary_syntax(
         SyntaxAssertion::WordBeginning,
@@ -5407,7 +5547,7 @@ fn assert_word_beg(
     };
     match previous {
         (_, class) if class != SyntaxClass::Word => true,
-        (c1, SyntaxClass::Word) => syntax.emacs_word_boundary_between(c1, c2),
+        (c1, SyntaxClass::Word) => syntax.lookup.emacs_word_boundary_between(c1, c2),
         _ => false,
     }
 }
@@ -5418,7 +5558,7 @@ fn assert_word_end(
     text: &[u8],
     d: usize,
     target_multibyte: bool,
-    syntax: &dyn SyntaxLookup,
+    syntax: &MatchSyntax<'_>,
 ) -> bool {
     let classes = re_boundary_syntax(SyntaxAssertion::WordEnd, text, d, target_multibyte, syntax);
     let Some(previous) = classes.previous() else {
@@ -5432,19 +5572,14 @@ fn assert_word_end(
     };
     match current {
         (_, class) if class != SyntaxClass::Word => true,
-        (c2, SyntaxClass::Word) => syntax.emacs_word_boundary_between(c1, c2),
+        (c2, SyntaxClass::Word) => syntax.lookup.emacs_word_boundary_between(c1, c2),
         _ => false,
     }
 }
 
 /// `\_<` symbol beginning.
 #[inline]
-fn assert_sym_beg(
-    text: &[u8],
-    d: usize,
-    target_multibyte: bool,
-    syntax: &dyn SyntaxLookup,
-) -> bool {
+fn assert_sym_beg(text: &[u8], d: usize, target_multibyte: bool, syntax: &MatchSyntax<'_>) -> bool {
     let classes = re_boundary_syntax(
         SyntaxAssertion::SymbolBeginning,
         text,
@@ -5462,12 +5597,7 @@ fn assert_sym_beg(
 
 /// `\_>` symbol end.
 #[inline]
-fn assert_sym_end(
-    text: &[u8],
-    d: usize,
-    target_multibyte: bool,
-    syntax: &dyn SyntaxLookup,
-) -> bool {
+fn assert_sym_end(text: &[u8], d: usize, target_multibyte: bool, syntax: &MatchSyntax<'_>) -> bool {
     let classes = re_boundary_syntax(
         SyntaxAssertion::SymbolEnd,
         text,
@@ -5521,7 +5651,7 @@ fn evaluate_syntax_assertion(
     d: usize,
     stop: usize,
     target_multibyte: bool,
-    syntax: &dyn SyntaxLookup,
+    syntax: &MatchSyntax<'_>,
 ) -> bool {
     match assertion {
         SyntaxAssertion::WordBoundary => assert_word_boundary(text, d, target_multibyte, syntax),
@@ -5671,6 +5801,8 @@ fn re_match_candidate(
     syntax: &dyn SyntaxLookup,
     point: usize,
 ) -> Option<(usize, MatchRegisters)> {
+    let match_syntax = MatchSyntax::for_pattern(pattern, syntax);
+    let syntax = &match_syntax;
     let mut regs = MatchRegisters::default();
     let end = MATCH_SCRATCH.with(|cell| match cell.try_borrow_mut() {
         Ok(mut scratch) => re_match_candidate_in(
@@ -5712,7 +5844,7 @@ fn re_match_candidate_in(
     text: &[u8],
     pos: usize,
     stop: usize,
-    syntax: &dyn SyntaxLookup,
+    syntax: &MatchSyntax<'_>,
     point: usize,
     regs: &mut MatchRegisters,
 ) -> Option<usize> {
@@ -5747,7 +5879,7 @@ fn pike_fallback_into(
     text: &[u8],
     pos: usize,
     stop: usize,
-    syntax: &dyn SyntaxLookup,
+    syntax: &MatchSyntax<'_>,
     point: usize,
     regs: &mut MatchRegisters,
 ) -> Option<usize> {
@@ -5840,11 +5972,11 @@ fn pike_match_into(
     text: &[u8],
     pos: usize,
     stop: usize,
-    syntax: &dyn SyntaxLookup,
+    syntax: &MatchSyntax<'_>,
     point: usize,
     regs: &mut MatchRegisters,
 ) -> Option<usize> {
-    let (end, found) = pike_match(pattern, text, pos, stop, syntax, point)?;
+    let (end, found) = pike_match_outcome(pattern, text, pos, stop, syntax, point).found?;
     *regs = found;
     Some(end)
 }
@@ -5856,7 +5988,7 @@ fn re_match_internal(
     text: &[u8],
     pos: usize,
     stop: usize,
-    syntax: &dyn SyntaxLookup,
+    syntax: &MatchSyntax<'_>,
     point: usize,
     enable_pike_fallback: bool,
     regs: &mut MatchRegisters,
@@ -5898,7 +6030,7 @@ fn re_match_loop<const SEALED: bool>(
     text: &[u8],
     pos: usize,
     stop: usize,
-    syntax: &dyn SyntaxLookup,
+    syntax: &MatchSyntax<'_>,
     point: usize,
     // When true, abort with `set_pike_fallback()` if backtracking exceeds a
     // linear budget — the caller then re-runs on the Pike VM.  Only set for
@@ -6590,7 +6722,7 @@ fn re_match_loop<const SEALED: bool>(
                     stop,
                     target_multibyte,
                     translate,
-                    syntax,
+                    syntax.lookup,
                 );
                 pc += bitmap_len;
                 match result {
@@ -6625,7 +6757,7 @@ fn re_match_loop<const SEALED: bool>(
                                     stop,
                                     target_multibyte,
                                     translate,
-                                    syntax,
+                                    syntax.lookup,
                                 ) {
                                     Some(ch_len) => d += ch_len,
                                     None => break,
@@ -6653,7 +6785,7 @@ fn re_match_loop<const SEALED: bool>(
                                     stop,
                                     target_multibyte,
                                     translate,
-                                    syntax,
+                                    syntax.lookup,
                                 ) {
                                     Some(ch_len) => d += ch_len,
                                     None => break,
@@ -6688,7 +6820,7 @@ fn re_match_loop<const SEALED: bool>(
                                     stop,
                                     target_multibyte,
                                     translate,
-                                    syntax,
+                                    syntax.lookup,
                                 ) {
                                     Some(ch_len) => d += ch_len,
                                     None => break,
@@ -6831,7 +6963,7 @@ fn re_match_loop<const SEALED: bool>(
                     d,
                     stop,
                     target_multibyte,
-                    syntax,
+                    syntax.lookup,
                 ) {
                     Some(len) => d += len,
                     None => {
@@ -6843,8 +6975,15 @@ fn re_match_loop<const SEALED: bool>(
             RegexOp::NotSyntaxSpec => {
                 let class_byte = bytecode[pc];
                 pc += 1;
-                match match_syntaxspec_at(class_byte, true, text, d, stop, target_multibyte, syntax)
-                {
+                match match_syntaxspec_at(
+                    class_byte,
+                    true,
+                    text,
+                    d,
+                    stop,
+                    target_multibyte,
+                    syntax.lookup,
+                ) {
                     Some(len) => d += len,
                     None => {
                         try_fail!('main_loop);
@@ -6860,7 +6999,7 @@ fn re_match_loop<const SEALED: bool>(
                 // `\sA\|\sB\|...` alternation.
                 let mask = extract_number_u16(bytecode, pc);
                 pc += 2;
-                match match_syntaxspecset_at(mask, text, d, stop, target_multibyte, syntax) {
+                match match_syntaxspecset_at(mask, text, d, stop, target_multibyte, syntax.lookup) {
                     Some(len) => d += len,
                     None => {
                         try_fail!('main_loop);
@@ -6871,7 +7010,15 @@ fn re_match_loop<const SEALED: bool>(
             RegexOp::CategorySpec => {
                 let cat = bytecode[pc];
                 pc += 1;
-                match match_categoryspec_at(cat, false, text, d, stop, target_multibyte, syntax) {
+                match match_categoryspec_at(
+                    cat,
+                    false,
+                    text,
+                    d,
+                    stop,
+                    target_multibyte,
+                    syntax.lookup,
+                ) {
                     Some(len) => d += len,
                     None => {
                         try_fail!('main_loop);
@@ -6882,7 +7029,15 @@ fn re_match_loop<const SEALED: bool>(
             RegexOp::NotCategorySpec => {
                 let cat = bytecode[pc];
                 pc += 1;
-                match match_categoryspec_at(cat, true, text, d, stop, target_multibyte, syntax) {
+                match match_categoryspec_at(
+                    cat,
+                    true,
+                    text,
+                    d,
+                    stop,
+                    target_multibyte,
+                    syntax.lookup,
+                ) {
                     Some(len) => d += len,
                     None => {
                         try_fail!('main_loop);
@@ -7148,7 +7303,7 @@ fn pike_add_thread(
     point: usize,
     target_multibyte: bool,
     num_regs: usize,
-    syntax: &dyn SyntaxLookup,
+    syntax: &MatchSyntax<'_>,
 ) {
     // Explicit DFS stack (avoids unbounded recursion on deeply nested
     // patterns).  Children are pushed in REVERSE priority so the highest
@@ -7340,6 +7495,8 @@ pub(crate) fn pike_match(
     syntax: &dyn SyntaxLookup,
     point: usize,
 ) -> Option<(usize, MatchRegisters)> {
+    let match_syntax = MatchSyntax::for_pattern(pattern, syntax);
+    let syntax = &match_syntax;
     pike_match_outcome(pattern, text, pos, stop, syntax, point).found
 }
 
@@ -7348,7 +7505,7 @@ fn pike_match_outcome(
     text: &[u8],
     pos: usize,
     stop: usize,
-    syntax: &dyn SyntaxLookup,
+    syntax: &MatchSyntax<'_>,
     point: usize,
 ) -> PikeOutcome {
     PIKE_SCRATCH.with(|cell| match cell.try_borrow_mut() {
@@ -7373,7 +7530,7 @@ fn pike_match_inner(
     text: &[u8],
     pos: usize,
     stop: usize,
-    syntax: &dyn SyntaxLookup,
+    syntax: &MatchSyntax<'_>,
     point: usize,
 ) -> PikeOutcome {
     debug_assert!(pattern.pike_eligible);
@@ -7535,7 +7692,7 @@ fn pike_match_inner(
                         stop,
                         target_multibyte,
                         translate,
-                        syntax,
+                        syntax.lookup,
                     ) {
                         let next_pc = pc + 2 + (bytecode[pc + 1] as usize & 0x7F);
                         next_d_close(&mut nlist, &mut seen, next_pc, d + len, caps);
@@ -7549,7 +7706,7 @@ fn pike_match_inner(
                         d,
                         stop,
                         target_multibyte,
-                        syntax,
+                        syntax.lookup,
                     ) {
                         next_d_close(&mut nlist, &mut seen, pc + 2, d + len, caps);
                     }
@@ -7562,7 +7719,7 @@ fn pike_match_inner(
                         d,
                         stop,
                         target_multibyte,
-                        syntax,
+                        syntax.lookup,
                     ) {
                         next_d_close(&mut nlist, &mut seen, pc + 2, d + len, caps);
                     }
@@ -7570,7 +7727,7 @@ fn pike_match_inner(
                 Some(RegexOp::SyntaxSpecSet) => {
                     let mask = extract_number_u16(bytecode, pc + 1);
                     if let Some(len) =
-                        match_syntaxspecset_at(mask, text, d, stop, target_multibyte, syntax)
+                        match_syntaxspecset_at(mask, text, d, stop, target_multibyte, syntax.lookup)
                     {
                         next_d_close(&mut nlist, &mut seen, pc + 3, d + len, caps);
                     }
@@ -7583,7 +7740,7 @@ fn pike_match_inner(
                         d,
                         stop,
                         target_multibyte,
-                        syntax,
+                        syntax.lookup,
                     ) {
                         next_d_close(&mut nlist, &mut seen, pc + 2, d + len, caps);
                     }
@@ -7596,7 +7753,7 @@ fn pike_match_inner(
                         d,
                         stop,
                         target_multibyte,
-                        syntax,
+                        syntax.lookup,
                     ) {
                         next_d_close(&mut nlist, &mut seen, pc + 2, d + len, caps);
                     }
@@ -9598,6 +9755,8 @@ pub(crate) fn re_search(
     syntax: &dyn SyntaxLookup,
     point: usize,
 ) -> Option<(usize, MatchRegisters)> {
+    let match_syntax = MatchSyntax::for_pattern(pattern, syntax);
+    let syntax = &match_syntax;
     let text_len = text.len();
     // GNU regex-emacs.c:3483: `if (fastmap && startpos < total_size &&
     // !bufp->can_be_null)` — the fastmap skip is gated ONLY on having an
@@ -9686,7 +9845,7 @@ pub(crate) fn re_search(
     let mut dfa_lease = if !dfa_enabled || dfa_cold_pending {
         None
     } else {
-        dfa::DfaLease::acquire(pattern, syntax, dfa_max_stop)
+        dfa::DfaLease::acquire(pattern, syntax.lookup, dfa_max_stop)
     };
     // Never-built successful searches have no lease under the cold path,
     // so they never read the first-step knob. A newly built lease renews
@@ -9742,7 +9901,7 @@ pub(crate) fn re_search(
                         if credit != 0 {
                             dfa_lease = dfa::DfaLease::after_cold_failure(
                                 pattern,
-                                syntax,
+                                syntax.lookup,
                                 dfa_max_stop,
                                 credit,
                             );
@@ -10226,7 +10385,7 @@ pub(crate) fn re_search(
     {
         drop(dfa::DfaLease::after_cold_failure(
             pattern,
-            syntax,
+            syntax.lookup,
             dfa_max_stop,
             1,
         ));

@@ -201,7 +201,7 @@ fn fail_stack_depth_stays_within_the_overflow_bound() {
                 &text,
                 pos,
                 text.len(),
-                &syntax,
+                &MatchSyntax::new(&syntax),
                 pos,
                 true,
                 &mut registers,

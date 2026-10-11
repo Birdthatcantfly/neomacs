@@ -3897,6 +3897,18 @@ impl<'a> StringSyntaxPropByteRun<'a> {
         }
     }
 
+    /// Select the boundary plan once at regexp invocation entry.
+    #[inline]
+    pub(crate) fn boundary_syntax_mode(
+        &self,
+    ) -> crate::emacs_core::regex_emacs::BoundarySyntaxMode {
+        use crate::emacs_core::regex_emacs::BoundarySyntaxMode;
+        match &self.position_mode {
+            StringSyntaxPositionMode::Computed => BoundarySyntaxMode::Physical,
+            StringSyntaxPositionMode::Supplied(_) => BoundarySyntaxMode::Supplied,
+        }
+    }
+
     /// Computed strings take their existing physical pair lookup directly;
     /// only a typed supplied state enters the cold logical-coordinate worker.
     #[inline]
