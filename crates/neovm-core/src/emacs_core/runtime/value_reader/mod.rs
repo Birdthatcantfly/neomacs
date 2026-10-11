@@ -2849,8 +2849,14 @@ impl<'a> Reader<'a> {
             return Ok(Value::from_sym_id(id));
         }
 
-        if token.quoting == SymbolQuoting::Plain
-            && let Some(token_text) = token.as_utf8()
+        // Validate a plain token once; both number parsing and the ordinary
+        // symbol path use the same immutable byte spelling.
+        let token_text = (token.quoting == SymbolQuoting::Plain)
+            .then(|| token.as_utf8())
+            .flatten();
+        // GNU lread.c:4189-4191 only considers these initial bytes for numbers.
+        if matches!(token.bytes.first(), Some(b'0'..=b'9' | b'.' | b'+' | b'-'))
+            && let Some(token_text) = token_text
         {
             // Try integer. Funnel through Value::make_integer so a value
             // that fits in i64 but not in fixnum (62-bit) is promoted to
@@ -2882,11 +2888,11 @@ impl<'a> Reader<'a> {
                     return Ok(Value::make_float(f));
                 }
             }
+        }
 
-            // Emacs reader shorthand: bare ## reads as the symbol with empty name.
-            if token_text == "##" && token.quoting == SymbolQuoting::Plain {
-                return self.intern_empty_symbol();
-            }
+        // Emacs reader shorthand: bare ## reads as the symbol with empty name.
+        if token.quoting == SymbolQuoting::Plain && token.bytes.as_slice() == b"##" {
+            return self.intern_empty_symbol();
         }
 
         // Fast path: a plain ASCII symbol with no shorthand rewrite and no
@@ -2897,7 +2903,7 @@ impl<'a> Reader<'a> {
         // for the overwhelming majority of symbols read while loading.
         if matches!(self.shorthands, ReaderShorthands::Unbound)
             && token.quoting == SymbolQuoting::Plain
-            && let Some(text) = token.as_utf8()
+            && let Some(text) = token_text
             && text.is_ascii()
         {
             if !token.source_semantics.is_multibyte() {
@@ -2906,6 +2912,12 @@ impl<'a> Reader<'a> {
             if let Some(id) = super::intern::lookup_interned(text) {
                 return Ok(Value::from_sym_id(id));
             }
+            // The miss has already ruled out an existing spelling. The
+            // creator checks again under its write lock and retains this
+            // source's multibyte name if it creates the canonical symbol.
+            return Ok(Value::from_sym_id(super::intern::intern_reader_name(
+                token.to_lisp_string(),
+            )));
         }
 
         // Cold path: non-ASCII / escaped / shorthand-rewritten symbols keep the

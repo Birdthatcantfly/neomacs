@@ -1019,9 +1019,16 @@ impl SymbolRegistry {
         {
             NewSymbolName::AtomOnly
         } else {
-            self.reader_name_origin(
-                exact.borrowed_alias().unwrap_or_else(|| exact.clone()),
-                identity,
+            // The comparison above already proves the exact representation
+            // differs from its identity atom; freeze it without repeating the
+            // atom lookup or count-kind/encoding checks.
+            assert!(
+                !exact.has_intervals(),
+                "reader symbol names carry no properties"
+            );
+            NewSymbolName::ReaderAtom(
+                self.reader_name_storage
+                    .push(exact.borrowed_alias().unwrap_or_else(|| exact.clone())),
             )
         }
     }
@@ -2032,7 +2039,9 @@ fn ensure_thread_local_cache_epoch_current() {
     });
 }
 
-#[inline]
+// Preserve the cache hit inside both ordinary intern and reader lookup;
+// outlining this small helper adds a call for every name probe.
+#[inline(always)]
 fn thread_local_interned_str(s: &str) -> Option<SymId> {
     INTERN_STR_CACHE.with(|cache| cache.borrow().get(s).copied())
 }
