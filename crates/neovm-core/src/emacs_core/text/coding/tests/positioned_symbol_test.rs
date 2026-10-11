@@ -206,7 +206,13 @@ fn positioned_coding_definition_resolves_nested_symbol_inputs() {
         info.properties.get(&intern(":issue-554-property")),
         Some(&Value::fixnum(7))
     );
-    record_lisp_define_coding_system_internal(&mut ctx.obarray, &args, SymbolMode::Positioned);
+    // SAFETY: registration is complete; this noncalling recorder only writes
+    // coding metadata values/properties, preserving canonical dispatch state.
+    unsafe {
+        ctx.obarray.with_legacy_value_write(|obarray| {
+            record_lisp_define_coding_system_internal(obarray, &args, SymbolMode::Positioned);
+        });
+    }
     let names = ctx
         .obarray
         .symbol_value_copied("coding-system-list")
