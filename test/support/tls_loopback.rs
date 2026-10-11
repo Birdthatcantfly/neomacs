@@ -44,7 +44,12 @@ impl TlsPeer {
                         return;
                     }
                     match listener.accept() {
-                        Ok((socket, _)) => break socket,
+                        Ok((socket, _)) => {
+                            // Darwin inherits O_NONBLOCK from the listener;
+                            // these workers require blocking I/O with timeouts.
+                            socket.set_nonblocking(false).unwrap();
+                            break socket;
+                        }
                         Err(error)
                             if error.kind() == std::io::ErrorKind::WouldBlock
                                 && Instant::now() < deadline =>
@@ -126,7 +131,12 @@ impl FramedEchoPeer {
                     return Err("TLS client cancelled before connecting".to_owned());
                 }
                 match listener.accept() {
-                    Ok((socket, _)) => break socket,
+                    Ok((socket, _)) => {
+                        socket
+                            .set_nonblocking(false)
+                            .map_err(|error| format!("set framed TLS socket blocking: {error}"))?;
+                        break socket;
+                    }
                     Err(error)
                         if error.kind() == std::io::ErrorKind::WouldBlock
                             && Instant::now() < deadline =>
@@ -211,6 +221,7 @@ impl StalledPeer {
                 }
                 match listener.accept() {
                     Ok((socket, _)) => {
+                        socket.set_nonblocking(false).unwrap();
                         // Bound the defective blocking path without adding a
                         // timeout to the production TLS implementation.
                         let _ = stopped.recv_timeout(Duration::from_secs(1));
