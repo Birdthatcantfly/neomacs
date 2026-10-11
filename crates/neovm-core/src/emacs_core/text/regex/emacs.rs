@@ -4254,8 +4254,8 @@ impl BoundarySyntaxRequest {
         }
     }
 
-    /// Existing computed/buffer lookup order, with no source conversion or
-    /// capability query added to ordinary boundaries.
+    /// GNU opcode lookup order and short-circuiting, with no source conversion
+    /// or capability query added to ordinary boundaries.
     pub(crate) fn physical_lookup<T: SyntaxLookup + ?Sized>(
         self,
         lookup: &T,
@@ -4264,12 +4264,35 @@ impl BoundarySyntaxRequest {
             character.map(|ch| ch.physical_syntax(lookup))
         };
         match self.kind {
-            SyntaxAssertion::WordBoundary
-            | SyntaxAssertion::NotWordBoundary
-            | SyntaxAssertion::SymbolBeginning
-            | SyntaxAssertion::SymbolEnd => {
+            SyntaxAssertion::WordBoundary | SyntaxAssertion::NotWordBoundary => {
                 let previous = classify(self.previous);
                 let current = classify(self.current);
+                BoundarySyntaxClasses { previous, current }
+            }
+            SyntaxAssertion::SymbolBeginning => {
+                // GNU regex-emacs.c:5111-5130: classify current first, and
+                // inspect previous only after current is a constituent.
+                let current = classify(self.current);
+                let previous = if current.is_some_and(|(_, class)| {
+                    matches!(class, SyntaxClass::Word | SyntaxClass::Symbol)
+                }) {
+                    classify(self.previous)
+                } else {
+                    None
+                };
+                BoundarySyntaxClasses { previous, current }
+            }
+            SyntaxAssertion::SymbolEnd => {
+                // GNU regex-emacs.c:5147-5170: classify previous first, and
+                // inspect current only after previous is a constituent.
+                let previous = classify(self.previous);
+                let current = if previous.is_some_and(|(_, class)| {
+                    matches!(class, SyntaxClass::Word | SyntaxClass::Symbol)
+                }) {
+                    classify(self.current)
+                } else {
+                    None
+                };
                 BoundarySyntaxClasses { previous, current }
             }
             SyntaxAssertion::WordBeginning => {

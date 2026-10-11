@@ -25,10 +25,10 @@ fn request(kind: SyntaxAssertion, before: char, after: char) -> BoundarySyntaxRe
 struct PhysicalReads(RefCell<Vec<usize>>);
 impl SyntaxLookup for PhysicalReads {
     fn char_syntax(&self, c: char) -> SyntaxClass {
-        if c == '!' {
-            SyntaxClass::Punctuation
-        } else {
-            SyntaxClass::Word
+        match c {
+            '!' => SyntaxClass::Punctuation,
+            '_' => SyntaxClass::Symbol,
+            _ => SyntaxClass::Word,
         }
     }
     fn char_syntax_at(&self, c: char, pos: usize) -> SyntaxClass {
@@ -68,6 +68,35 @@ fn ordinary_boundary_pair_keeps_physical_lookup_order_and_short_circuit() {
     lookup.0.borrow_mut().clear();
     lookup.boundary_syntax_at(request(SyntaxAssertion::WordEnd, '!', 'd'));
     assert_eq!(*lookup.0.borrow(), [2]);
+}
+
+#[test]
+fn ordinary_symbol_boundaries_follow_gnu_lookup_order_and_short_circuit() {
+    // GNU regex-emacs.c:5111-5130 reads current first for symbeg,
+    // while :5147-5170 reads previous first for symend. A non-symbol
+    // constituent fails before the other neighbour's syntax is read.
+    let lookup = PhysicalReads::default();
+    lookup.boundary_syntax_at(request(SyntaxAssertion::SymbolBeginning, 'c', '!'));
+    assert_eq!(*lookup.0.borrow(), [3]);
+    lookup.0.borrow_mut().clear();
+    lookup.boundary_syntax_at(request(SyntaxAssertion::SymbolBeginning, 'c', 'd'));
+    assert_eq!(*lookup.0.borrow(), [3, 2]);
+    lookup.0.borrow_mut().clear();
+    lookup.boundary_syntax_at(request(SyntaxAssertion::SymbolBeginning, '!', '_'));
+    assert_eq!(*lookup.0.borrow(), [3, 2]);
+    lookup.0.borrow_mut().clear();
+    lookup.boundary_syntax_at(request(SyntaxAssertion::SymbolEnd, '!', 'd'));
+    assert_eq!(*lookup.0.borrow(), [2]);
+    lookup.0.borrow_mut().clear();
+    lookup.boundary_syntax_at(request(SyntaxAssertion::SymbolEnd, '_', '!'));
+    assert_eq!(*lookup.0.borrow(), [2, 3]);
+    lookup.0.borrow_mut().clear();
+    let at_beginning = BoundarySyntaxRequest {
+        previous: None,
+        ..request(SyntaxAssertion::SymbolEnd, 'c', 'd')
+    };
+    lookup.boundary_syntax_at(at_beginning);
+    assert!(lookup.0.borrow().is_empty());
 }
 
 fn supplied(bytes: &[u8]) -> Value {
