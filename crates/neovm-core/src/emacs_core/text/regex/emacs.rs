@@ -5365,7 +5365,7 @@ fn match_categoryspec_at(
 
 /// Decode physical neighbours only when GNU's opcode reads them.
 /// Symbol-current is raw for unibyte input; previous/word keys are promoted.
-#[inline]
+#[inline(always)]
 fn re_physical_boundary_syntax(
     kind: SyntaxAssertion,
     text: &[u8],
@@ -5436,7 +5436,7 @@ fn re_physical_boundary_syntax(
 
 /// Supplied coordinates retain the initialized request and one current-offset
 /// conversion. Physical inputs call their opcode helper directly.
-#[inline]
+#[inline(always)]
 fn re_boundary_syntax(
     kind: SyntaxAssertion,
     text: &[u8],
