@@ -41,7 +41,7 @@ fn positioned_compiled_regex_reuses_its_policy_and_keeps_distinct_match_results(
     depth1_contents[0] = depth2;
     let depth1 = crate::emacs_core::value::Value::make_sub_char_table(1, 0, depth1_contents);
     table
-        .with_char_table_mut(|obj| obj.contents[0] = depth1)
+        .with_char_table_mut(|obj| obj.set_contents(0, depth1))
         .unwrap();
 
     let pattern = LispString::from_utf8("\u{100}");

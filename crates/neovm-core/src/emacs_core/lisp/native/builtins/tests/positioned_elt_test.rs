@@ -17,7 +17,7 @@ fn compressed_table(context: &mut Context) -> Value {
     depth1_contents[0] = depth2;
     let depth1 = Value::make_sub_char_table(1, 0, depth1_contents);
     table
-        .with_char_table_mut(|object| object.contents[0] = depth1)
+        .with_char_table_mut(|object| object.set_contents(0, depth1))
         .unwrap();
     table
 }
