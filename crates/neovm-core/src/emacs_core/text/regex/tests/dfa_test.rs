@@ -398,13 +398,17 @@ fn direct_accepts(
 }
 
 /// Exhaustive class equivalence: for every predicate of every class pattern,
-/// every character of the samples, 4 case settings and 2 syntax tables, in
+/// every character of the samples, 4 case settings and 3 syntax tables, in
 /// both representations, the class bit is the matcher's own test of that
 /// character inside a real text, and one character gets one class wherever
 /// it appears.
 #[test]
 fn classes_agree_with_the_matcher_tests_on_every_sample_character() {
-    let lookups: [&dyn SyntaxLookup; 2] = [&DefaultSyntaxLookup, &CustomTableLookup];
+    let lookups: [&dyn SyntaxLookup; 3] = [
+        &DefaultSyntaxLookup,
+        &CustomTableLookup,
+        &RawCurrentSymbolLookup,
+    ];
     let mut checked = 0usize;
     for source in CLASS_PATTERNS {
         for translate in case_settings() {
@@ -449,12 +453,26 @@ fn classes_agree_with_the_matcher_tests_on_every_sample_character() {
                             let class_syntax = syntax.emacs_char_syntax_at(ch, d);
                             let mask = nfa.fact_mask();
                             let word = class_syntax == SyntaxClass::Word;
+                            let symbol_current = if multibyte {
+                                ch
+                            } else {
+                                emacs_char::EmacsChar::from_code_unchecked(u32::from(text[d]))
+                            };
+                            let symbol_current_class =
+                                syntax.emacs_char_syntax_at(symbol_current, d);
                             let expected = [
                                 (Facts::NEWLINE, text[d] == b'\n'),
                                 (Facts::WORD, word),
                                 (
                                     Facts::WORD_OR_SYMBOL,
                                     word || class_syntax == SyntaxClass::Symbol,
+                                ),
+                                (
+                                    Facts::CURRENT_WORD_OR_SYMBOL,
+                                    matches!(
+                                        symbol_current_class,
+                                        SyntaxClass::Word | SyntaxClass::Symbol
+                                    ),
                                 ),
                                 (Facts::WIDE_WORD, word && ch.code() > 0xFF),
                             ];
@@ -1346,6 +1364,94 @@ fn dfa_verdicts_agree_with_the_matcher_inside_property_runs() {
     assert!(totals.0 > 1_000 && totals.1 > 10_000, "{totals:?}");
     assert_eq!(totals.2, 0, "no verdict is left undecided");
     assert!(positional_chars > 10_000, "{positional_chars}");
+}
+
+/// The same unibyte byte has two GNU syntax identities: symbol opcodes
+/// inspect the raw current byte, while every previous/word read promotes it
+/// to byte8 (regex-emacs.c:55-56,67-95,5111,5163).
+struct RawCurrentSymbolLookup;
+
+impl SyntaxLookup for RawCurrentSymbolLookup {
+    fn char_syntax(&self, c: char) -> SyntaxClass {
+        if c == '\u{a9}' {
+            SyntaxClass::Punctuation
+        } else {
+            DefaultSyntaxLookup.char_syntax(c)
+        }
+    }
+
+    fn char_has_category(&self, c: char, cat: u8) -> bool {
+        DefaultSyntaxLookup.char_has_category(c, cat)
+    }
+
+    fn cache_key(&self) -> SyntaxCacheKey {
+        SyntaxCacheKey::External {
+            id: usize::MAX - 1,
+            epoch: 0,
+        }
+    }
+
+    fn class_cache_key(&self) -> Option<LookupClassKey> {
+        Some(LookupClassKey::Tables {
+            syntax: usize::MAX - 1,
+            category: 0,
+        })
+    }
+
+    fn position_dependent(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn unibyte_current_symbol_facts_distinguish_warmed_plain_transitions() {
+    let text = b" \xa9 \xe9 a\xa9 a\xe9 ";
+    for source in ["\\_<", "\\_>", "$\\|\\_<", "\\b\\|\\_>"] {
+        for case_fold in [false, true] {
+            let mut compiled = regex_compile(source, false, case_fold).unwrap();
+            compiled.target_multibyte = false;
+            let mut dfa = ExistenceDfa::new(Nfa::build(&compiled).unwrap());
+            for _ in 0..3 {
+                let tally = check_dfa_against_matcher(
+                    &compiled,
+                    &mut dfa,
+                    text,
+                    &RawCurrentSymbolLookup,
+                    source,
+                );
+                assert_eq!(tally.2, 0);
+                assert!(tally.0 > 0 && tally.1 > 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn unibyte_current_symbol_facts_distinguish_warmed_property_transitions() {
+    let text = b" \xe9 \xe9 a\xe9 a\xe9 ";
+    for reports_runs in [false, true] {
+        let mut lookup = PropertyRunLookup::new(
+            &DefaultSyntaxLookup,
+            vec![
+                (3, 4, RunSyntax::Descriptor(SyntaxClass::Punctuation)),
+                (9, 10, RunSyntax::Descriptor(SyntaxClass::Punctuation)),
+            ],
+        );
+        lookup.reports_runs = reports_runs;
+        for source in ["\\_<", "\\_>", "$\\|\\_<", "\\b\\|\\_>"] {
+            for case_fold in [false, true] {
+                let mut compiled = regex_compile(source, false, case_fold).unwrap();
+                compiled.target_multibyte = false;
+                let mut dfa = ExistenceDfa::new(Nfa::build(&compiled).unwrap());
+                for _ in 0..3 {
+                    let tally =
+                        check_dfa_against_matcher(&compiled, &mut dfa, text, &lookup, source);
+                    assert_eq!(tally.2, 0);
+                    assert!(tally.0 > 0 && tally.1 > 0);
+                }
+            }
+        }
+    }
 }
 
 /// A pattern that reads no syntax ignores the property runs: its search is

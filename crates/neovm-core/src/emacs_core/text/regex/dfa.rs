@@ -634,6 +634,10 @@ impl Facts {
     pub(crate) const WORD: Self = Self(1 << 2);
     /// Word or symbol syntax (`\_< \_>`).
     pub(crate) const WORD_OR_SYMBOL: Self = Self(1 << 3);
+    /// The current character is word/symbol syntax for GNU symbol assertions.
+    /// Unibyte input uses its raw byte here, unlike the promoted previous fact.
+    /// This bit belongs to a class, never a predecessor state.
+    pub(crate) const CURRENT_WORD_OR_SYMBOL: Self = Self(1 << 5);
     /// A word constituent above U+00FF.  Between two word constituents GNU's
     /// `WORD_BOUNDARY_P` consults scripts and categories unless both are at
     /// or below U+00FF (`WordBoundaryLookup::boundary_between`), so such a
@@ -665,6 +669,7 @@ impl Facts {
     fn of_char(
         code: u32,
         first_byte: u8,
+        target_multibyte: bool,
         syntax: &dyn SyntaxLookup,
         at: usize,
         mask: Self,
@@ -684,6 +689,12 @@ impl Facts {
                 }
             } else if class == SyntaxClass::Symbol {
                 facts |= Self::WORD_OR_SYMBOL.0;
+            }
+            if mask.contains(Self::CURRENT_WORD_OR_SYMBOL)
+                && SymbolMembership::of_current(first_byte, target_multibyte, syntax, at, class)
+                    == SymbolMembership::Inside
+            {
+                facts |= Self::CURRENT_WORD_OR_SYMBOL.0;
             }
         }
         Self(facts).masked(mask)
@@ -711,7 +722,7 @@ impl Nfa {
             mask = mask | Facts::WORD | Facts::WIDE_WORD;
         }
         if self.assertions.intersects(Assertions::SYMBOL) {
-            mask = mask | Facts::WORD_OR_SYMBOL;
+            mask = mask | Facts::WORD_OR_SYMBOL | Facts::CURRENT_WORD_OR_SYMBOL;
         }
         mask
     }
@@ -869,7 +880,7 @@ impl Nfa {
         }
         ClassKey {
             accepts,
-            facts: Facts::of_char(code, text[d], syntax, d, mask),
+            facts: Facts::of_char(code, text[d], pattern.target_multibyte, syntax, d, mask),
         }
     }
 }
@@ -882,8 +893,16 @@ pub(crate) const MAX_CLASSES: usize = UNKNOWN_CLASS as usize;
 const WIDE_SLOTS: usize = 512;
 const WIDE_EMPTY: u32 = u32::MAX;
 const POSITIONAL_SLOTS: usize = 64;
+const POSITIONAL_EMPTY: (u32, PositionalSyntaxFacts, u8) = (
+    WIDE_EMPTY,
+    PositionalSyntaxFacts {
+        promoted: SyntaxClass::Whitespace,
+        current_symbol: SymbolMembership::Outside,
+    },
+    0,
+);
 /// `byte_facts` value of a byte whose facts are not known yet (facts use
-/// the low five bits).
+/// the low six bits).
 const NO_FACTS: u8 = 0xFF;
 
 /// What the character-to-class maps of one pattern are valid for.
@@ -933,6 +952,58 @@ impl ClassContext {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TooManyClasses;
 
+/// Whether a character supplies the word/symbol fact. This immutable value
+/// carries no Lisp identity and is safe to use in mutator-local memo keys.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SymbolMembership {
+    Outside,
+    Inside,
+}
+
+impl SymbolMembership {
+    #[inline]
+    fn of_class(class: SyntaxClass) -> Self {
+        if matches!(class, SyntaxClass::Word | SyntaxClass::Symbol) {
+            Self::Inside
+        } else {
+            Self::Outside
+        }
+    }
+
+    /// GNU symbol-current uses RE_STRING_CHAR, while previous and word
+    /// reads use GET_CHAR_* (regex-emacs.c:55-56,67-95,5111,5163).
+    #[inline]
+    fn of_current(
+        first_byte: u8,
+        target_multibyte: bool,
+        syntax: &dyn SyntaxLookup,
+        at: usize,
+        promoted: SyntaxClass,
+    ) -> Self {
+        let class = if !target_multibyte && first_byte >= 0x80 {
+            syntax.emacs_char_syntax_at(
+                emacs_char::EmacsChar::from_code_unchecked(u32::from(first_byte)),
+                at,
+            )
+        } else {
+            promoted
+        };
+        Self::of_class(class)
+    }
+}
+
+/// All syntax facts that can distinguish classes at a property position.
+/// Symbol-current identity is separate from the promoted predicate/previous
+/// identity; both are immutable invocation-local metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PositionalSyntaxFacts {
+    promoted: SyntaxClass,
+    current_symbol: SymbolMembership,
+}
+
+// The extra current-character distinction must not enlarge the property memo.
+static_assertions::assert_eq_size!((u32, PositionalSyntaxFacts, u8), (u32, u8, u8));
+
 /// The classes of one pattern and the character-to-class maps.
 ///
 /// Class ids name [`ClassKey`]s, which do not depend on the search context,
@@ -944,9 +1015,9 @@ pub(crate) struct CharClasses {
     pub(crate) byte_class: [u8; 256],
     /// Direct-mapped `(character code, class)` memo for the other characters.
     wide: Box<[(u32, u8)]>,
-    /// Direct-mapped `(character code, syntax class there, class)` memo for
+    /// Direct-mapped `(character code, syntax facts there, class)` memo for
     /// characters inside `syntax-table` property runs.
-    positional: Box<[(u32, u8, u8)]>,
+    positional: Box<[(u32, PositionalSyntaxFacts, u8)]>,
     /// The facts of each tabled byte's character ([`NO_FACTS`]: not known
     /// yet), for the character before a candidate, which the DFA need not
     /// have classified.
@@ -964,7 +1035,7 @@ impl CharClasses {
         Self {
             byte_class: [UNKNOWN_CLASS; 256],
             wide: vec![(WIDE_EMPTY, 0); WIDE_SLOTS].into_boxed_slice(),
-            positional: vec![(WIDE_EMPTY, 0, 0); POSITIONAL_SLOTS].into_boxed_slice(),
+            positional: vec![POSITIONAL_EMPTY; POSITIONAL_SLOTS].into_boxed_slice(),
             byte_facts: [NO_FACTS; 256],
             keys: Vec::new(),
             ids: FxHashMap::default(),
@@ -984,7 +1055,7 @@ impl CharClasses {
         }
         self.byte_class = [UNKNOWN_CLASS; 256];
         self.wide.fill((WIDE_EMPTY, 0));
-        self.positional.fill((WIDE_EMPTY, 0, 0));
+        self.positional.fill(POSITIONAL_EMPTY);
         self.byte_facts = [NO_FACTS; 256];
         self.context = Some(context);
     }
@@ -1056,11 +1127,10 @@ impl CharClasses {
     /// where a `syntax-table` property may apply: what the matcher's tests
     /// answer there through `syntax` at `d`.
     ///
-    /// Every syntax read a class makes is the syntax of this one character
-    /// at `d` (`match_syntaxspec_at`, `posix_class_matches`, the facts), so
-    /// the class is a function of the character and its syntax class there:
-    /// that pair keys the memo, and the base-table memo serves the pair
-    /// whenever the property leaves the table's answer unchanged.
+    /// Promoted syntax controls predicates and previous-character facts;
+    /// GNU symbol-current additionally reads the raw byte for unibyte input.
+    /// Both facts key the memo, and a base-table class is reusable only when
+    /// both answers agree with the base table.
     pub(crate) fn class_at_position(
         &mut self,
         nfa: &Nfa,
@@ -1073,19 +1143,36 @@ impl CharClasses {
         let (code, len) = re_text_char(text, d, pattern.target_multibyte)
             .expect("a class is asked for a character inside the text");
         let ch = emacs_char::EmacsChar::from_code_unchecked(code);
-        let here = syntax.emacs_char_syntax_at(ch, d);
-        let slot_index = (code as usize ^ ((here as usize) << 4)) % POSITIONAL_SLOTS;
+        let promoted = syntax.emacs_char_syntax_at(ch, d);
+        let current_symbol = if self.mask.contains(Facts::CURRENT_WORD_OR_SYMBOL) {
+            SymbolMembership::of_current(text[d], pattern.target_multibyte, syntax, d, promoted)
+        } else {
+            SymbolMembership::Outside
+        };
+        let here = PositionalSyntaxFacts {
+            promoted,
+            current_symbol,
+        };
+        let slot_index =
+            (code as usize ^ ((promoted as usize) << 4) ^ ((current_symbol as usize) << 3))
+                % POSITIONAL_SLOTS;
         let slot = self.positional[slot_index];
-        if slot.0 == code && slot.1 == here as u8 {
+        if slot.0 == code && slot.1 == here {
             return Ok((slot.2, len));
         }
-        let class = if here == base.emacs_char_syntax(ch) {
+        let base_promoted = base.emacs_char_syntax(ch);
+        let base_current = if self.mask.contains(Facts::CURRENT_WORD_OR_SYMBOL) {
+            SymbolMembership::of_current(text[d], pattern.target_multibyte, base, d, base_promoted)
+        } else {
+            SymbolMembership::Outside
+        };
+        let class = if promoted == base_promoted && current_symbol == base_current {
             self.class_at(nfa, pattern, text, d, base)?.0
         } else {
             let key = nfa.class_key_at(pattern, text, d, code, len, syntax, self.mask);
             self.intern(key)?
         };
-        self.positional[slot_index] = (code, here as u8, class);
+        self.positional[slot_index] = (code, here, class);
         Ok((class, len))
     }
 
@@ -1125,7 +1212,9 @@ impl CharClasses {
     ) -> Facts {
         let (code, _) =
             re_text_char(text, at, target_multibyte).expect("the previous character exists");
-        Facts::of_char(code, text[at], syntax, at, self.mask)
+        // These facts describe only the previous character of a candidate.
+        let mask = Facts(self.mask.bits() & !Facts::CURRENT_WORD_OR_SYMBOL.bits());
+        Facts::of_char(code, text[at], target_multibyte, syntax, at, mask)
     }
 }
 
@@ -1254,7 +1343,12 @@ impl ExistenceDfa {
         let reads_edge = nfa.assertions.intersects(
             Assertions::BEG_LINE | Assertions::BEG_BUF | Assertions::WORD | Assertions::SYMBOL,
         );
-        let prev_mask = if reads_edge { mask | Facts::EDGE } else { mask };
+        let previous = Facts(mask.bits() & !Facts::CURRENT_WORD_OR_SYMBOL.bits());
+        let prev_mask = if reads_edge {
+            previous | Facts::EDGE
+        } else {
+            previous
+        };
         let mut dfa = Self {
             classes: CharClasses::new(mask),
             nfa,
