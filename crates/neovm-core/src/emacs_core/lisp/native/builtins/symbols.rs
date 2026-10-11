@@ -2025,19 +2025,24 @@ fn intern_shorthand_name(
 pub(crate) fn read_symbol_shorthands_value(eval: &super::eval::Context) -> Value {
     static SHORTHANDS: std::sync::OnceLock<SymId> = std::sync::OnceLock::new();
     let id = *SHORTHANDS.get_or_init(|| intern("read-symbol-shorthands"));
-    use crate::emacs_core::symbol::SymbolRedirect;
-    let direct = match eval.obarray().get_by_id(id).map(|symbol| symbol.redirect()) {
-        // `symbol_value_id_copied` answers None for a buffer-slot forward,
-        // which only the general lookup can read.
-        Some(SymbolRedirect::Forwarded | SymbolRedirect::Plainval) => {
-            eval.obarray().symbol_value_id_copied(id)
-        }
-        Some(SymbolRedirect::Localized) => eval
+    use crate::emacs_core::symbol::ValueCell;
+    // Copy the tag and its payload from one symbol slot. Re-reading the slot
+    // through `symbol_value_id_copied` repeats its publication check; neither
+    // the live binding nor its redirect changes during this mutator read.
+    let direct = match eval
+        .obarray()
+        .get_by_id(id)
+        .map(|symbol| symbol.value_cell())
+    {
+        Some(ValueCell::Plain(value)) => (!value.is_unbound()).then_some(value),
+        // A buffer-slot forward needs the general current-buffer lookup.
+        Some(ValueCell::Forwarded(fwd)) => fwd.load(),
+        Some(ValueCell::Localized(_)) => eval
             .buffers
             .current_buffer()
             .and_then(|buffer| eval.obarray().read_localized_in_buffer(id, buffer))
             .filter(|value| !value.is_unbound()),
-        Some(SymbolRedirect::Varalias) | None => None,
+        Some(ValueCell::Alias(_)) | None => None,
     };
     direct
         .or_else(|| eval.visible_runtime_variable_value_by_id(id).ok().flatten())
