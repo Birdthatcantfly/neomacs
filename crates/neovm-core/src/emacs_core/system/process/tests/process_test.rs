@@ -12389,6 +12389,12 @@ fn make_serial_process_open_failures_beat_everything_downstream() {
     crate::test_utils::init_test_tracing();
     use std::os::unix::fs::PermissionsExt;
     let pty = SerialTestPty::open();
+    // GNU 31.1 Darwin reports ENODEV for tcgetattr(/dev/null), as observed
+    // natively; GNU serial_configure passes that errno through (sysdep.c:3164-3166).
+    #[cfg(target_os = "macos")]
+    let not_a_terminal = libc::ENODEV;
+    #[cfg(not(target_os = "macos"))]
+    let not_a_terminal = libc::ENOTTY;
     let directory = tempfile::tempdir().expect("denied serial fixture directory");
     let denied = directory.path().join("denied-port");
     std::fs::write(&denied, b"").expect("create denied serial fixture");
@@ -12485,7 +12491,7 @@ fn make_serial_process_open_failures_beat_everything_downstream() {
         .replace("{ENOENT}", &native_errno_message(libc::ENOENT))
         .replace("{EISDIR}", &native_errno_message(libc::EISDIR))
         .replace("{EACCES}", &native_errno_message(libc::EACCES))
-        .replace("{ENOTTY}", &native_errno_message(libc::ENOTTY))
+        .replace("{ENOTTY}", &native_errno_message(not_a_terminal))
     );
 }
 
