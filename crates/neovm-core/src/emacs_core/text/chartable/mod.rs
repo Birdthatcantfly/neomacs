@@ -909,6 +909,28 @@ pub(crate) fn builtin_char_table_range_with_symbols(
     }
 }
 
+// Keep the existing explicit Bare lookup policy zero-sized at the shared
+// lookup seam, so it needs no runtime policy argument. Semantic callers still
+// pass their captured SymbolMode through the same lookup body.
+trait CtLookupPolicy: Copy {
+    fn symbol_mode(self) -> SymbolMode;
+}
+
+impl CtLookupPolicy for SymbolMode {
+    fn symbol_mode(self) -> SymbolMode {
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BareCtLookup;
+
+impl CtLookupPolicy for BareCtLookup {
+    fn symbol_mode(self) -> SymbolMode {
+        SymbolMode::Bare
+    }
+}
+
 /// Recursive char-table lookup: check own entries, then default, then parent.
 ///
 /// This matches GNU Emacs semantics:
@@ -916,10 +938,14 @@ pub(crate) fn builtin_char_table_range_with_symbols(
 /// 2. If the local entry is nil or absent, use the char-table's default value
 /// 3. If default is nil, recursively check the parent char-table
 pub(crate) fn ct_lookup(table: &Value, ch: i64) -> EvalResult {
-    ct_lookup_with_symbols(table, ch, SymbolMode::Bare)
+    ct_lookup_impl(table, ch, BareCtLookup)
 }
 
 pub(crate) fn ct_lookup_with_symbols(table: &Value, ch: i64, mode: SymbolMode) -> EvalResult {
+    ct_lookup_impl(table, ch, mode)
+}
+
+fn ct_lookup_impl<P: CtLookupPolicy>(table: &Value, ch: i64, policy: P) -> EvalResult {
     let Some(obj) = table.as_char_table_obj() else {
         return Err(wrong_type("char-table-p", table));
     };
@@ -929,7 +955,8 @@ pub(crate) fn ct_lookup_with_symbols(table: &Value, ch: i64, mode: SymbolMode) -
     let idx = chartab_idx(ch, 0, 0);
     let mut val = obj.contents[idx];
     if is_sub_char_table(val) {
-        let is_uniprop = obj.purpose.as_symbol_id(mode) == Some(char_code_property_table_sym_id())
+        let is_uniprop = obj.purpose.as_symbol_id(policy.symbol_mode())
+            == Some(char_code_property_table_sym_id())
             && obj.extras.len() == 5;
         val = sub_char_table_ref(val, ch, is_uniprop);
     }
@@ -940,7 +967,7 @@ pub(crate) fn ct_lookup_with_symbols(table: &Value, ch: i64, mode: SymbolMode) -
         return Ok(obj.defalt);
     }
     if is_char_table(&obj.parent) {
-        return ct_lookup_with_symbols(&obj.parent, ch, mode);
+        return ct_lookup_impl(&obj.parent, ch, policy);
     }
     Ok(Value::NIL)
 }
