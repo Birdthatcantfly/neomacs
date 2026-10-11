@@ -1972,7 +1972,7 @@ enum SelectedInternSoftObarray {
 /// Threading: owns only Rust bytes and numeric metadata, no Lisp references.
 #[derive(Debug)]
 struct RewrittenSymbolName {
-    bytes: Vec<u8>,
+    bytes: smallvec::SmallVec<[u8; 64]>,
     chars: crate::heap_types::GnuDeclaredCharacterCount,
 }
 
@@ -1982,7 +1982,17 @@ impl RewrittenSymbolName {
     }
 
     fn into_lisp_string(self) -> crate::heap_types::LispString {
-        crate::heap_types::LispString::from_emacs_bytes_with_declared_chars(self.bytes, self.chars)
+        let bytes = if self.bytes.spilled() {
+            self.bytes.into_vec()
+        } else {
+            // Inline storage bounds len to 64. Reserve the trailing NUL once,
+            // when a miss requires an owned Lisp name, without growing scratch
+            // or changing the raw query used before name construction.
+            let mut bytes = Vec::with_capacity(self.bytes.len() + 1);
+            bytes.extend_from_slice(&self.bytes);
+            bytes
+        };
+        crate::heap_types::LispString::from_emacs_bytes_with_declared_chars(bytes, self.chars)
     }
 }
 
@@ -2061,7 +2071,7 @@ fn rewrite_intern_shorthand(
                     crate::heap_types::GnuDeclaredCharacterCountError::TooLarge,
                 ));
             };
-            let mut rewritten = Vec::with_capacity(capacity);
+            let mut rewritten = smallvec::SmallVec::<[u8; 64]>::with_capacity(capacity);
             rewritten.extend_from_slice(long.as_bytes());
             rewritten.extend_from_slice(suffix);
             // GNU lread.c:5004 uses signed character-count arithmetic; native
