@@ -62,6 +62,12 @@ const SIZE_BYTE_UNIBYTE_NORMAL: i64 = -1;
 const SIZE_BYTE_UNIBYTE_RODATA: i64 = -2;
 const SIZE_BYTE_UNIBYTE_IMMOVABLE: i64 = -3;
 
+// Retaining a small cleared payload avoids a second allocation and zero fill.
+// Larger copied payloads are recycled so their materialized storage can be
+// reused before the string object is swept. This is a storage policy only;
+// both paths securely erase all initialized bytes and preserve Lisp identity.
+const CLEAR_STRING_RETAIN_BYTES: usize = 4096;
+
 /// The two GNU string storage representations.
 ///
 /// Keep this distinction typed at allocation boundaries: an empty unibyte
@@ -745,6 +751,81 @@ impl LispString {
         }
     }
 
+    /// Erase owned bytes before they can be released or reused.
+    ///
+    /// Mutator-only: the exclusive borrow covers the complete live allocation.
+    /// Unlike an ordinary memset followed by free, these writes cannot be
+    /// eliminated as dead stores. Borrowed dump and static storage is untouched.
+    fn erase_owned_payload(&mut self) {
+        if self.storage_capacity == 0 {
+            return;
+        }
+        let len = self.sbytes() + 1;
+        // SAFETY: owned storage contains `len` initialized bytes, including the
+        // trailing NUL, and `&mut self` excludes other mutator access.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(self.data as *mut u8, len) };
+        #[cfg(all(target_os = "linux", any(target_env = "gnu", target_env = "musl")))]
+        {
+            // SAFETY: the entire slice is writable; explicit_bzero preserves
+            // the erasure even when the allocation is immediately freed.
+            unsafe { libc::explicit_bzero(bytes.as_mut_ptr().cast(), bytes.len()) };
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // SAFETY: both lengths describe the writable slice exactly. Handle
+            // a library rejection without leaving any sensitive bytes behind.
+            if unsafe { libc::memset_s(bytes.as_mut_ptr().cast(), bytes.len(), 0, bytes.len()) }
+                != 0
+            {
+                for byte in bytes {
+                    // SAFETY: `byte` exclusively references a live payload byte.
+                    unsafe { std::ptr::write_volatile(byte, 0) };
+                }
+            }
+        }
+        #[cfg(not(any(
+            all(target_os = "linux", any(target_env = "gnu", target_env = "musl")),
+            target_os = "macos"
+        )))]
+        for byte in bytes {
+            // SAFETY: `byte` exclusively references a live payload byte.
+            unsafe { std::ptr::write_volatile(byte, 0) };
+        }
+        std::sync::atomic::compiler_fence(Ordering::SeqCst);
+    }
+
+    /// Clear the bytes and properties, then expose every byte as a character.
+    ///
+    /// GNU `Fclear_string` erases the old contents. Small owned payloads stay
+    /// in place; larger ordinary payloads are erased before replacement so
+    /// subsequent copies can reuse their materialized storage before GC.
+    /// Pinned bytecode storage stays in place for this mutation; GNU's unibyte
+    /// conversion then demotes its marker. Borrowed dump or static bytes receive
+    /// a separate zero payload.
+    /// Published owners must use the `with_lisp_string_mut` mutation wrapper.
+    pub(crate) fn clear_contents_to_unibyte(&mut self) {
+        let len = self.sbytes();
+        self.clear_intervals();
+        if len != 0 || self.is_multibyte() {
+            if self.storage_capacity != 0
+                && (len <= CLEAR_STRING_RETAIN_BYTES || self.is_immovable())
+            {
+                self.erase_owned_payload();
+            } else {
+                // Every valid string already carries a NUL at `len`. Reserve
+                // that byte with the zero allocation so replacement does not
+                // grow and copy the payload merely to append its terminator.
+                let mut replacement = vec![0; len + 1];
+                replacement.truncate(len);
+                self.erase_owned_payload();
+                self.replace_owned_payload(replacement);
+            }
+            self.size = len;
+            self.size_byte = SIZE_BYTE_UNIBYTE_NORMAL;
+        }
+        crate::emacs_core::string_pos_cache::note_string_bytes_changed();
+    }
+
     /// Mutable text-property interval tree attached to this string.
     ///
     /// SATB enforcement lives inside `ensure_intervals` (the pre-mutation
@@ -869,8 +950,9 @@ impl LispString {
 
     /// Recompute cached `size` (and `size_byte`) from the current data.
     ///
-    /// Every change to a string's bytes ends here, so this is also where
-    /// the character<->byte position cache learns its pairs may be stale.
+    /// General byte mutations end here and invalidate cached positions.
+    /// `clear_contents_to_unibyte` restores its known shape and invalidates
+    /// the cache directly, without scanning the zeroed bytes.
     fn recompute_size(&mut self, byte_len: usize) {
         crate::emacs_core::string_pos_cache::note_string_bytes_changed();
         if self.size_byte >= 0 {
@@ -1194,6 +1276,10 @@ mod string_collection_capacity_tests;
 #[cfg(test)]
 #[path = "heap_types/tests/text_property_view_test.rs"]
 mod text_property_view_tests;
+
+#[cfg(test)]
+#[path = "heap_types/tests/clear_string_in_place_test.rs"]
+mod clear_string_in_place_tests;
 
 #[derive(Debug)]
 pub struct OverlayData {

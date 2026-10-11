@@ -3201,8 +3201,7 @@ pub(crate) fn builtin_clear_string(args: Vec<Value>) -> EvalResult {
     let _ = expect_lisp_string(&args[0])?;
     if args[0].is_string() {
         let _ = args[0].with_lisp_string_mut(|lisp_str| {
-            let len = lisp_str.sbytes();
-            *lisp_str = crate::heap_types::LispString::from_unibyte(vec![0; len]);
+            lisp_str.clear_contents_to_unibyte();
         });
     }
     Ok(Value::NIL)
