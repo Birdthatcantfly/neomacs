@@ -494,15 +494,24 @@ pub(crate) fn publish_collection_observation_window(observed: CompiledObservatio
 #[inline(never)]
 pub(crate) extern "C" fn neovm_jit_unobserved_collection_owner(owner_bits: i64) -> i8 {
     use super::super::collection_reads::{CompiledJournalMode, compiled_journal_mode};
-    if compiled_journal_mode() != CompiledJournalMode::Observed {
-        return 0;
-    }
     let bits = owner_bits as usize;
     let owner = TaggedValue::from_bits(bits);
     if !owner.is_cons() {
         return 0;
     }
     let address = bits & !super::super::value::TAG_MASK;
+    // An ordinary obligation cannot be discharged by an observation proof.
+    // This mirror is published at every protocol transition and heap install;
+    // the installed mutator exclusively owns it, just as in the Rust cons
+    // barrier. Returning zero grants no exemption: the caller still executes
+    // its setter and SATB barrier. ALL is the common concurrent-mark refusal,
+    // so reject it before reading policy or reconstructing the heap window.
+    if TAGGED_HEAP_BARRIER_WINDOW.with(|window| window.get().covers(address)) {
+        return 0;
+    }
+    if compiled_journal_mode() != CompiledJournalMode::Observed {
+        return 0;
+    }
     let eligible = TAGGED_HEAP.with(|slot| {
         let heap = slot.get();
         if heap.is_null() {

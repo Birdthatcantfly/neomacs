@@ -334,6 +334,58 @@ fn observed_concurrent_barrier_overrides_empty_gap() {
 }
 
 #[test]
+fn observed_tracking_refusal_keeps_full_setter_and_reopens_gap_after_disarm() {
+    use crate::tagged::gc::WriteTrackingMode;
+
+    crate::test_utils::init_test_tracing();
+    let _mode = ObservedMode::begin();
+    let mut context = context();
+    let [left, target, right] = rooted_cons_triplet(&mut context);
+    let (_, endpoints) = capture(|| (left.cons_car(), right.cons_car()));
+    let endpoints = endpoints.expect("retained endpoint observations");
+    assert!(!is_observed(target.bits()));
+
+    context
+        .tagged_heap
+        .set_write_tracking_mode(WriteTrackingMode::OwnersAndRecords);
+    assert_eq!(
+        context.tagged_heap.jit_barrier_window_for_test(),
+        BarrierWindow::ALL
+    );
+    assert_eq!(
+        neovm_jit_unobserved_collection_owner(target.bits() as i64),
+        0
+    );
+    native_setcar(&mut context, target, TaggedValue::make_int(12));
+    assert!(context.tagged_heap.is_dirty_owner(target));
+    assert!(
+        compiled_observation_gate(BarrierWindow::NONE)
+            .excluded
+            .is_none()
+    );
+    assert!(endpoints.unchanged());
+
+    context
+        .tagged_heap
+        .set_write_tracking_mode(WriteTrackingMode::Disabled);
+    assert_eq!(
+        neovm_jit_unobserved_collection_owner(target.bits() as i64),
+        1
+    );
+    assert!(
+        compiled_observation_gate(BarrierWindow::NONE)
+            .excluded
+            .is_some_and(|gap| gap.covers(address(target)))
+    );
+    let (value, current) = capture(|| target.cons_car());
+    assert_eq!(value, TaggedValue::make_int(12));
+    let current = current.expect("a new read closes the unobserved gap");
+    native_setcar(&mut context, target, TaggedValue::make_int(23));
+    assert!(!current.unchanged());
+    assert!(endpoints.unchanged());
+}
+
+#[test]
 fn observed_cons_gap_retains_vector_and_string_dependencies() {
     crate::test_utils::init_test_tracing();
     let _mode = ObservedMode::begin();
