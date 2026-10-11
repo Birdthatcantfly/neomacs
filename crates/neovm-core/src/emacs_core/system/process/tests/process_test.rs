@@ -9972,7 +9972,14 @@ fn network_lookup_literal_family_filtering_helpers() {
     assert!(!v4_any.is_empty());
     assert_eq!(v4_any, v4_only);
     assert_eq!(v4_any[0], loopback_v4);
-    assert!(v4_rejected.is_empty());
+    // GNU process.c:4765-4802 forwards AF_INET6 to native getaddrinfo and
+    // preserves returned IPv6 addresses. Darwin can satisfy this hint with an
+    // IPv4-mapped IPv6 address; EAI_ADDRFAMILY is not a portable invariant.
+    assert!(v4_rejected.iter().all(|address| {
+        address
+            .as_vector_data()
+            .is_some_and(|elements| elements.len() == 9)
+    }));
 
     let v6_any = resolve_network_lookup_addresses("::1", None, None);
     let v6_only = resolve_network_lookup_addresses("::1", Some(NetworkAddressFamily::Ipv6), None);
@@ -10168,7 +10175,14 @@ fn process_network_interface_and_signal_runtime_surface() {
                 (and (equal v4-any v4-only)
                      (consp v4-only)
                      (equal (car v4-only) [127 0 0 1 0])))
-              (null (network-lookup-address-info "127.0.0.1" 'ipv6))
+              ;; GNU retains native IPv6 answers, including mapped addresses.
+              (let ((entries (network-lookup-address-info "127.0.0.1" 'ipv6))
+                    (ok t))
+                (while (and ok entries)
+                  (setq ok (and (vectorp (car entries))
+                                (= (length (car entries)) 9)))
+                  (setq entries (cdr entries)))
+                ok)
               (let* ((v6-any (network-lookup-address-info "::1"))
                      (v6-only (network-lookup-address-info "::1" 'ipv6)))
                 (and (equal v6-any v6-only)
