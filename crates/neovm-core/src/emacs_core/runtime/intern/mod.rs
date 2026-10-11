@@ -1548,7 +1548,7 @@ pub fn make_uninterned_symbol_with_name_value(name_value: TaggedValue) -> SymId 
 /// name atom. Supplied-count Lisp-string queries use their separate APIs.
 /// Threading: cached ids and process-lifetime spellings contain no Lisp heap
 /// state. Each thread validates the existing shared registry epoch before use.
-#[inline]
+#[inline(always)]
 pub fn lookup_interned(s: &str) -> Option<SymId> {
     ensure_thread_local_cache_epoch_current();
     if let Some(sym_id) = thread_local_interned_str(s) {

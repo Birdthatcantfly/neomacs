@@ -315,6 +315,7 @@ impl<'a> StringSyntaxLookup<'a> {
         )
     }
 
+    #[inline(always)]
     pub(crate) fn for_source(
         base: Option<BufferSyntaxLookup>,
         source: crate::emacs_core::syntax::StringSyntaxPositionSource<'a>,
