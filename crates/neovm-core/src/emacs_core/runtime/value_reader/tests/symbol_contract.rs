@@ -6,7 +6,7 @@ fn symbols_contract_delimiters_and_escape_eof() {
     crate::test_utils::init_test_tracing();
     let ob = crate::emacs_core::symbol::Obarray::new();
     let (value, position) = read_one("gdj-symbol#tail", 0, &ob).unwrap().unwrap();
-    assert!(value.is_symbol_named("gdj-symbol"));
+    assert!(value.is_symbol_named("gdj-symbol", SymbolMode::Bare));
     assert_eq!(position, 10);
     for source in ["a\\", "\\", "#:a\\", "#_a\\"] {
         assert_eq!(
@@ -15,7 +15,7 @@ fn symbols_contract_delimiters_and_escape_eof() {
         );
     }
     let (empty, position) = read_one("#_#_tail", 0, &ob).unwrap().unwrap();
-    assert_eq!(empty.as_symbol_id(), Some(intern("")));
+    assert_eq!(empty.as_bare_symbol_id(), Some(intern("")));
     assert_eq!(position, 2);
     let pairs = Value::list(vec![Value::cons(
         Value::string(""),
@@ -29,7 +29,7 @@ fn symbols_contract_delimiters_and_escape_eof() {
             .unwrap()
             .unwrap();
         let name = crate::emacs_core::intern::resolve_lisp_visible_symbol_name(
-            symbol.as_symbol_id().unwrap(),
+            symbol.as_bare_symbol_id().unwrap(),
         );
         assert_eq!(
             name.text().as_bytes(),
@@ -49,8 +49,9 @@ fn symbols_contract_source_encoding_is_distinct_from_byte_identity() {
         .unwrap()
         .unwrap();
     assert_eq!(position, 3);
-    let name =
-        crate::emacs_core::intern::resolve_lisp_visible_symbol_name(symbol.as_symbol_id().unwrap());
+    let name = crate::emacs_core::intern::resolve_lisp_visible_symbol_name(
+        symbol.as_bare_symbol_id().unwrap(),
+    );
     assert_eq!(name.text().as_bytes(), b"a\xa0b");
     assert!(!name.text().is_multibyte());
     let source = LispString::from_emacs_bytes(b"gdj-unit-multibyte-new-name".to_vec());
@@ -58,8 +59,9 @@ fn symbols_contract_source_encoding_is_distinct_from_byte_identity() {
         .read_one(0, &ob)
         .unwrap()
         .unwrap();
-    let name =
-        crate::emacs_core::intern::resolve_lisp_visible_symbol_name(symbol.as_symbol_id().unwrap());
+    let name = crate::emacs_core::intern::resolve_lisp_visible_symbol_name(
+        symbol.as_bare_symbol_id().unwrap(),
+    );
     assert!(name.text().is_multibyte());
 }
 
@@ -77,7 +79,7 @@ fn symbols_contract_shorthands_keep_source_order_and_skip_core_operators() {
         .read_one_with_shorthands(0, &ob, Some(&shorthands))
         .unwrap()
         .unwrap();
-    assert!(symbol.is_symbol_named("string-trim"));
+    assert!(symbol.is_symbol_named("string-trim", SymbolMode::Bare));
     let pairs = Value::list(vec![Value::cons(
         Value::string("<"),
         Value::string("wrong-"),
@@ -88,5 +90,5 @@ fn symbols_contract_shorthands_keep_source_order_and_skip_core_operators() {
         .read_one_with_shorthands(0, &ob, Some(&shorthands))
         .unwrap()
         .unwrap();
-    assert!(symbol.is_symbol_named("<="));
+    assert!(symbol.is_symbol_named("<=", SymbolMode::Bare));
 }

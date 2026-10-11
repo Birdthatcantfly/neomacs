@@ -29,7 +29,12 @@ fn declared_count_caps_fast_ascii_token_and_whitespace() {
     let ob = crate::emacs_core::symbol::Obarray::new();
     let text = source(b"abc", 1);
     let mut reader = logical_reader(&text, 1, &ob);
-    assert!(reader.read_form().expect("one symbol").is_symbol_named("a"));
+    assert!(
+        reader
+            .read_form()
+            .expect("one symbol")
+            .is_symbol_named("a", SymbolMode::Bare)
+    );
     assert_eq!(reader.pos, 1);
     assert_eq!(reader.character_cursor.position(), Some(CharPos0::new(1)));
     assert!(reader.current_code().is_none());
@@ -59,7 +64,7 @@ fn logical_index_does_not_reverse_map_consumed_unicode_bytes() {
         )
         .expect("read")
         .expect("symbol");
-    assert!(result.0.is_symbol_named("é"));
+    assert!(result.0.is_symbol_named("é", SymbolMode::Bare));
     assert_eq!(result.1, CharPos0::new(1));
 }
 
@@ -71,7 +76,12 @@ fn logical_end_stops_unicode_comment_and_string_ascii_copy() {
     let text = source(";é\nbX".as_bytes(), 4);
     let mut reader = logical_reader(&text, 4, &ob);
     assert!(reader.skip_ws_and_comments());
-    assert!(reader.read_form().expect("symbol").is_symbol_named("b"));
+    assert!(
+        reader
+            .read_form()
+            .expect("symbol")
+            .is_symbol_named("b", SymbolMode::Bare)
+    );
     assert_eq!(reader.pos, 5);
     let text = source(b"\"abc\"tail", 4);
     let mut reader = logical_reader(&text, 4, &ob);
@@ -144,7 +154,7 @@ fn logical_partial_end_zero_and_end_at_schars_preserve_original_units() {
         )
         .expect("full logical range")
         .expect("symbol");
-    assert!(pair.0.is_symbol_named("b"));
+    assert!(pair.0.is_symbol_named("b", SymbolMode::Bare));
     assert_eq!(pair.1, CharPos0::new(1));
 }
 
@@ -165,7 +175,7 @@ fn read_from_string_start_uses_original_source_cached_boundary() {
         vec![input, Value::fixnum(1), Value::fixnum(2)],
     )
     .expect("cached logical source range");
-    assert!(pair.cons_car().is_symbol_named("a"));
+    assert!(pair.cons_car().is_symbol_named("a", context.symbol_mode()));
     assert_eq!(pair.cons_cdr().as_fixnum(), Some(2));
 }
 
@@ -248,7 +258,7 @@ fn terminal_logical_cursor_keeps_string_comment_and_error_slices_bounded() {
         reader
             .read_form()
             .expect("symbol stops before terminal whitespace")
-            .is_symbol_named("a")
+            .is_symbol_named("a", SymbolMode::Bare)
     );
     assert_eq!(reader.character_cursor.position(), Some(CharPos0::new(1)));
     assert_eq!(reader.pos, 1);

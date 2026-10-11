@@ -3414,6 +3414,7 @@ fn replace_match_declared_string(
     md: &super::regex::MatchData,
     subexp: usize,
     obarray: &crate::emacs_core::symbol::Obarray,
+    mode: SymbolMode,
 ) -> EvalResult {
     let source = args.get(3).copied().unwrap_or(Value::NIL);
     let string = source.as_lisp_string().ok_or_else(|| {
@@ -3553,7 +3554,7 @@ fn replace_match_declared_string(
                 continue;
             }
             if byte == bytes.len() {
-                let style = crate::emacs_core::coding::effective_text_quoting_style(obarray);
+                let style = crate::emacs_core::coding::effective_text_quoting_style(obarray, mode);
                 return Err(signal(
                     LispCondition::Error,
                     vec![Value::string(
@@ -3604,7 +3605,8 @@ fn replace_match_declared_string(
                 }
                 code if code == u32::from(b'?') => {} // GNU's string-path exception
                 _ => {
-                    let style = crate::emacs_core::coding::effective_text_quoting_style(obarray);
+                    let style =
+                        crate::emacs_core::coding::effective_text_quoting_style(obarray, mode);
                     return Err(signal(
                         LispCondition::Error,
                         vec![Value::string(
@@ -3732,7 +3734,7 @@ pub(crate) fn builtin_replace_match_with_state_and_flags(
                 && (0..md.group_count())
                     .any(|index| md.lisp_group(index).is_some() && md.group(index).is_none());
             if declared_source || unchecked_subexp || unchecked_backref {
-                return replace_match_declared_string(args, md, subexp, obarray);
+                return replace_match_declared_string(args, md, subexp, obarray, mode);
             }
         }
         let string_md_snapshot = md_snapshot.as_ref().map(match_data_for_explicit_string_arg);

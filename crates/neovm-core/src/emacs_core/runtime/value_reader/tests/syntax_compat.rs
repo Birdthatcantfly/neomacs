@@ -11,11 +11,21 @@ fn rea09_property_triples_replace_and_validate_like_set_text_properties() {
     let runs = get_string_text_properties_for_value(value).unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!((runs[0].start, runs[0].end), (0, 2));
-    assert!(runs[0].plist.cons_car().is_symbol_named("c"));
+    assert!(
+        runs[0]
+            .plist
+            .cons_car()
+            .is_symbol_named("c", SymbolMode::Bare)
+    );
     let value = read1(r#"#("abc" 2 1 face)"#);
     let runs = get_string_text_properties_for_value(value).unwrap();
     assert_eq!((runs[0].start, runs[0].end), (1, 2));
-    assert!(runs[0].plist.cons_car().is_symbol_named("face"));
+    assert!(
+        runs[0]
+            .plist
+            .cons_car()
+            .is_symbol_named("face", SymbolMode::Bare)
+    );
     let error = read_result(r#"#("abc" 0 1 (a))"#).unwrap_err();
     assert_eq!(
         error
@@ -33,7 +43,7 @@ fn rea09_property_triples_replace_and_validate_like_set_text_properties() {
             .map(crate::emacs_core::intern::resolve_sym),
         Some("wrong-type-argument")
     );
-    assert!(error.signal_data[0].is_symbol_named("integer-or-marker-p"));
+    assert!(error.signal_data[0].is_symbol_named("integer-or-marker-p", SymbolMode::Bare));
     assert_eq!(read_result(r#"#("a" . nil)"#).unwrap_err().message, ".");
 }
 

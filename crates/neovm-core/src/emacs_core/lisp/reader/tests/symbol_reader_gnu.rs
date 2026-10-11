@@ -149,3 +149,15 @@ fn symbols_gnu_empty_uninterned_name_identity() {
         include_str!("symbol_reader_gnu/empty_uninterned_name_identity.expect"),
     );
 }
+
+// Append to lisp/reader/tests/symbol_reader_gnu.rs, using its assert_gnu helper.
+// GNU: lisp.h:1076–1128,1308–1324; lread.c:4819–4846,4932–4950,4966–5013.
+// Expected output must be refreshed from GNU; no expected text is hand-written.
+#[test]
+fn symbols_gnu_positioned_intern_gdj_cross_contract() {
+    assert_gnu(
+        "positioned_intern_gdj",
+        include_str!("symbol_reader_gnu/positioned_intern_gdj.el"),
+        include_str!("symbol_reader_gnu/positioned_intern_gdj.expect"),
+    );
+}

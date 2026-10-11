@@ -76,7 +76,7 @@ fn native_same_source_read_observes_error_cache_and_fresh_control() {
             vec![fresh, Value::fixnum(1), Value::fixnum(2)],
         )
         .expect("fresh source maps forward");
-        assert!(pair.cons_car().is_symbol_named(name));
+        assert!(pair.cons_car().is_symbol_named(name, context.symbol_mode()));
         assert_eq!(pair.cons_cdr().as_fixnum(), Some(2));
     }
 }
@@ -138,7 +138,7 @@ fn logical_eof_does_not_update_cache_for_unread_minus_one() {
         parser
             .read_form()
             .expect("limited symbol")
-            .is_symbol_named("a")
+            .is_symbol_named("a", SymbolMode::Bare)
     );
     assert_eq!(
         crate::emacs_core::string_pos_cache::string_char_to_byte(sentinel, payload, 1),
@@ -181,7 +181,12 @@ fn byte_sources_do_not_bind_original_string_cache() {
         parser.original_string,
         OriginalStringCacheBinding::Uncached
     ));
-    assert!(parser.read_form().expect("name").is_symbol_named("name"));
+    assert!(
+        parser
+            .read_form()
+            .expect("name")
+            .is_symbol_named("name", SymbolMode::Bare)
+    );
 }
 
 #[test]
