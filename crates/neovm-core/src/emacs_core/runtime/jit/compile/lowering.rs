@@ -7427,9 +7427,21 @@ fn lower_simple_op_arms(
                     Some(stack[args_at..].iter().copied().collect())
                 }
                 _ => {
-                    for (i, &v) in stack[args_at..].iter().enumerate() {
-                        fb.ins()
-                            .stack_store(rt.ptr_ty, v, rt.call_args_slot, (i * 8) as i32);
+                    if !aot
+                        && n == 2
+                        && matches!(spec, Some((_, _, _, _, SpecCalleeKind::Bytecode)))
+                    {
+                        // Match the bytecode shim's arity-two payload read.
+                        // The existing stack slot is eight-byte aligned;
+                        // stack_store does not require vector alignment.
+                        let pair = fb.ins().splat(types::I64X2, stack[args_at]);
+                        let pair = fb.ins().insertlane(pair, stack[args_at + 1], 1);
+                        fb.ins().stack_store(rt.ptr_ty, pair, rt.call_args_slot, 0);
+                    } else {
+                        for (i, &v) in stack[args_at..].iter().enumerate() {
+                            fb.ins()
+                                .stack_store(rt.ptr_ty, v, rt.call_args_slot, (i * 8) as i32);
+                        }
                     }
                     None
                 }
