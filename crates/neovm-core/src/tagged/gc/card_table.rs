@@ -12,15 +12,20 @@
 //! with every mutator stopped.
 
 use std::alloc::{self, Layout};
+use std::mem::size_of;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 /// log2 of the card size: 512 bytes, 32 cons cells.
 pub(crate) const CARD_SHIFT: u32 = 9;
+pub(crate) const CARD_BYTES: usize = 1 << CARD_SHIFT;
 /// Index bits: 2^23 one-byte cards, an aliasing period of 4 GiB.
 pub(crate) const CARD_INDEX_BITS: u32 = 23;
 pub(crate) const CARD_INDEX_MASK: usize = (1 << CARD_INDEX_BITS) - 1;
 pub(crate) const CARD_TABLE_BYTES: usize = 1 << CARD_INDEX_BITS;
+/// Cons blocks and arena pages are 64 KiB-aligned chunks of 128 cards.
+pub(crate) const CHUNK_BYTES: usize = 64 * 1024;
+pub(crate) const CHUNK_CARDS: usize = CHUNK_BYTES / CARD_BYTES;
 pub(crate) const CARD_CLEAN: u8 = 0;
 pub(crate) const CARD_DIRTY: u8 = 1;
 
@@ -71,6 +76,21 @@ impl CardTable {
     #[inline]
     pub(crate) fn is_dirty(&self, owner_addr: usize) -> bool {
         self.byte(card_index(owner_addr)).load(Ordering::Relaxed) != CARD_CLEAN
+    }
+
+    /// Whether any card of the 64 KiB chunk at CHUNK_BASE is dirty: its 128
+    /// card bytes are contiguous in the table, read as sixteen words.
+    /// Collector side, with every mutator stopped.
+    #[inline]
+    pub(crate) fn chunk_has_dirty(&self, chunk_base: usize) -> bool {
+        const WORDS: usize = CHUNK_CARDS / size_of::<u64>();
+        debug_assert_eq!(chunk_base % CHUNK_BYTES, 0);
+        let first = card_index(chunk_base);
+        // SAFETY: a chunk's cards are CHUNK_CARDS consecutive in-table bytes
+        // starting at a CHUNK_CARDS-aligned index, so the words are aligned
+        // and in bounds; every mutator is stopped, so no store races.
+        let words = unsafe { self.bytes.as_ptr().add(first).cast::<u64>() };
+        (0..WORDS).any(|word| unsafe { words.add(word).read() } != 0)
     }
 
     /// Collector side, with every mutator stopped.

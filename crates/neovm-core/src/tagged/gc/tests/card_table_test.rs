@@ -69,6 +69,22 @@ fn card_index_masks_and_aliases_without_losing_marks() {
     assert!(!cards.is_dirty(alias));
 }
 
+#[test]
+fn chunk_summary_sees_every_card_of_its_chunk_only() {
+    use super::card_table::{CARD_BYTES, CHUNK_BYTES};
+    let cards = CardTable::new();
+    let chunk = 0x7f00_0001_0000usize;
+    assert!(!cards.chunk_has_dirty(chunk));
+    for offset in [0, CARD_BYTES * 7, CHUNK_BYTES - CARD_BYTES] {
+        cards.mark(chunk + offset);
+        assert!(cards.chunk_has_dirty(chunk), "offset {offset}");
+        assert!(!cards.chunk_has_dirty(chunk + CHUNK_BYTES));
+        assert!(!cards.chunk_has_dirty(chunk - CHUNK_BYTES));
+        cards.clear(chunk + offset);
+        assert!(!cards.chunk_has_dirty(chunk));
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum OwnerClass {
     Cons,
@@ -188,4 +204,40 @@ fn gen0_heap_never_builds_a_card_table() {
     let child = heap.alloc_cons(TaggedValue::T, TaggedValue::NIL);
     store_young_child(owner, OwnerClass::ArenaVector, child);
     assert!(heap.card_table().is_none());
+}
+
+/// S2: the minor traces old owners through their dirty cards, not the R log.
+/// An old neighbour in the same card is scanned even though only its
+/// sibling was logged; an old cons on a clean card is not a root.
+#[test]
+fn minor_traces_every_old_cell_of_a_dirty_card() {
+    let mut heap = verified_heap();
+    set_tagged_heap(&mut heap);
+    let roots = ScratchRoots::new();
+    let logged = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
+    let neighbour = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
+    roots.keep(logged);
+    roots.keep(neighbour);
+    minor(&mut heap, &[logged, neighbour]);
+    assert_eq!(
+        card_index(card_addr(logged)),
+        card_index(card_addr(neighbour))
+    );
+    assert!(heap.value_is_old_for_test(neighbour));
+
+    let logged_child = heap.alloc_string(LispString::from_utf8("logged-child"));
+    store_young_child(logged, OwnerClass::Cons, logged_child);
+    // An unbarriered store into the neighbour: only the shared card covers it.
+    let hidden_child = heap.alloc_string(LispString::from_utf8("card-only-child"));
+    unsafe { (*(neighbour.xcons_ptr() as *mut ConsCell)).set_car(hidden_child) };
+    assert_eq!(heap.current_mutator_gc().remset, [logged]);
+
+    // The verifying minor would panic if the neighbour's child were missed.
+    minor(&mut heap, &[logged, neighbour]);
+    assert!(
+        heap.value_is_old_for_test(hidden_child),
+        "the dirty card scanned the neighbour"
+    );
+    assert!(heap.value_is_old_for_test(logged_child));
+    assert!(!heap.owner_card_is_dirty(card_addr(logged)));
 }

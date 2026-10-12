@@ -1183,6 +1183,42 @@ impl<T: PagedObject> ObjectArena<T> {
         out
     }
 
+    /// Card-mark S2: visit the TENURED allocated slots that start in a dirty
+    /// card, on every page (retired pages hold only tenured slots and stay
+    /// owners of old-to-young edges). `visit` must not touch this arena.
+    pub(super) fn for_each_tenured_slot_in_dirty_cards(
+        &self,
+        cards: &super::card_table::CardTable,
+        visit: &mut impl FnMut(*mut GcHeader),
+    ) {
+        use super::card_table::CARD_BYTES;
+        for page in &self.pages {
+            let base = page.base_addr();
+            if !cards.chunk_has_dirty(base) {
+                continue;
+            }
+            for start in (0..OBJECT_PAGE_BYTES).step_by(CARD_BYTES) {
+                if !cards.is_dirty(base + start) {
+                    continue;
+                }
+                let first = start.div_ceil(T::SLOT_BYTES);
+                let end = (start + CARD_BYTES)
+                    .div_ceil(T::SLOT_BYTES)
+                    .min(ObjectPage::<T>::SLOTS);
+                for slot in first..end {
+                    if !page.is_allocated(slot) {
+                        continue;
+                    }
+                    let header = page.slot_ptr(slot) as *mut GcHeader;
+                    // SAFETY: allocated bit set => readable header.
+                    if unsafe { (*header).tenured } {
+                        visit(header);
+                    }
+                }
+            }
+        }
+    }
+
     /// Visit the header of every ALLOCATED slot of a non-retired page, in
     /// place (allocated-bit-first). Retired pages are skipped: every slot
     /// on one is tenured. `visit` must not touch this arena.

@@ -106,12 +106,17 @@ impl TaggedHeap {
         }
         self.generational.r_seed = owners;
         // No Lisp allocation or safepoint inside enumeration; R_seed is
-        // collector-owned and remains rooted throughout the cycle.
+        // collector-owned and remains rooted throughout the cycle. Owners in
+        // cons blocks and arena pages are traced through their dirty cards;
+        // Box and mapped owners keep the per-owner path.
         for i in 0..self.generational.r_seed.len() {
-            self.push_value_children_to_gray(
-                self.generational.r_seed[i],
-                "generational-remembered",
-            );
+            let owner = self.generational.r_seed[i];
+            if !self.owner_is_card_scanned(owner) {
+                self.push_value_children_to_gray(owner, "generational-remembered");
+            }
+        }
+        for owner in self.dirty_card_owners_world_stopped() {
+            self.push_value_children_to_gray(owner, "generational-card");
         }
     }
 
@@ -266,8 +271,8 @@ impl TaggedHeap {
             // Every mutator is stopped and the weak/finalizer fixpoints are
             // complete. Check before promotion could hide a missing mark and
             // before any sweep can reclaim the missed young child.
-            self.verify_dump_partition();
             self.verify_remembered_owner_cards_world_stopped();
+            self.verify_dump_partition();
         }
         let partition_first = self.partition_dump && !self.dump_blackened;
         let mut headers = std::mem::take(&mut self.generational.promo);
@@ -421,6 +426,68 @@ impl TaggedHeap {
         if let Some(cards) = self.card_table() {
             cards.clear(owner_addr);
         }
+    }
+
+    /// Whether a minor reaches OWNER's children through its dirty card: an
+    /// old cons in an owned block, or a page-arena object. Box and mapped
+    /// owners stay on the remembered-set path.
+    pub(super) fn owner_is_card_scanned(&self, owner: TaggedValue) -> bool {
+        if self.owner_is_mapped(owner) {
+            return false;
+        }
+        if owner.is_cons() {
+            return self.old_cons_trailer(owner).is_some();
+        }
+        let Some(addr) = Self::value_heap_addr(owner) else {
+            return false;
+        };
+        // SAFETY: a logged owner is live, so its header is readable.
+        self.owns_heap_value_object(owner, addr)
+            && !unsafe { &*(addr as *const GcHeader) }.flags.boxed()
+    }
+
+    /// Old objects that start in a dirty card: old cells of every cons block
+    /// and tenured slots of every arena page (retired pages included).
+    /// Collected with every mutator stopped; an aliased card only adds owners.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn dirty_card_owners_world_stopped(&self) -> Vec<TaggedValue> {
+        let Some(cards) = self.card_table() else {
+            return Vec::new();
+        };
+        let mut owners = Vec::new();
+        for block in &self.cons_blocks {
+            block.for_each_old_cell_in_dirty_cards(cards, &mut |cell| {
+                // SAFETY: an old cell of an owned block is a live cons.
+                owners.push(unsafe { TaggedValue::from_cons_ptr(cell) });
+            });
+        }
+        let mut visit = |header: *mut GcHeader| match unsafe { (*header).kind } {
+            HeapObjectKind::VecLike => owners
+                .push(unsafe { TaggedValue::from_veclike_ptr(header as *const VecLikeHeader) }),
+            HeapObjectKind::String => {
+                owners.push(unsafe { TaggedValue::from_string_ptr(header as *const StringObj) })
+            }
+            HeapObjectKind::Float => {}
+        };
+        // Floats and bignums hold no Lisp references.
+        self.string_arena
+            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
+        self.vector_arena
+            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
+        self.bytecode_arena
+            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
+        self.lambda_arena
+            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
+        self.macro_arena
+            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
+        self.record_arena
+            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
+        self.symbol_with_pos_arena
+            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
+        self.marker_arena
+            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
+        owners
     }
 
     /// S1 invariant: every unmapped owner in R_seed or a mutator R log has a

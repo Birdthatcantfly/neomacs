@@ -225,6 +225,34 @@ impl ConsBlock {
         self.trailer().count_old(self.next_index as usize)
     }
 
+    /// Card-mark S2: visit the old cells that start in a dirty card. Cells
+    /// are 16 bytes from the block base, so a 512-byte card holds 32 cells.
+    pub(super) fn for_each_old_cell_in_dirty_cards(
+        &self,
+        cards: &super::card_table::CardTable,
+        visit: &mut impl FnMut(*mut ConsCell),
+    ) {
+        use super::card_table::CARD_BYTES;
+        const CELLS_PER_CARD: usize = CARD_BYTES / size_of::<ConsCell>();
+        let used = self.next_index as usize;
+        let trailer = self.trailer();
+        let base = self.base_addr();
+        if !cards.chunk_has_dirty(base) {
+            return;
+        }
+        for first in (0..used).step_by(CELLS_PER_CARD) {
+            if !cards.is_dirty(base + first * size_of::<ConsCell>()) {
+                continue;
+            }
+            for index in first..(first + CELLS_PER_CARD).min(used) {
+                if trailer.is_old(index) {
+                    // SAFETY: `index < next_index` names a cell of this block.
+                    visit(unsafe { self.cells_ptr().add(index) });
+                }
+            }
+        }
+    }
+
     /// Sweep: thread reclaimed cells into the global intrusive free list and
     /// return the number of live cells in this block.
     pub(super) fn sweep(&mut self, free_list: &mut *mut ConsCell) -> usize {
