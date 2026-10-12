@@ -13,7 +13,7 @@
 //! |---|---|---|
 //! | `legacy` (default) | `Legacy` | the persistent per-thread module defines each leaf in place (the B4 path, unchanged) |
 //! | `sync` | `Sync` | the split, run in line: the eval thread's backend compiles each packaged function at once. Deterministic |
-//! | `on` | `Threaded` | entry tier-ups, first-sight and OSR compiles hand their package to a worker thread (`bg::worker`); the function stays interpreted until its leaf is installed. Under `NEOVM_JIT_TIER2=on`, upgrades use a worker too, and the old native leaf keeps serving calls until install. Other re-tiers and the AOT drain run as under `sync`. x86-64 Linux; elsewhere `on` is `sync` |
+//! | `on` | `Threaded` | entry tier-ups, first-sight and OSR compiles of a function larger than `NEOVM_JIT_BG_INLINE_INSTS` CLIF instructions hand their package to a worker thread (`bg::worker`); the function stays interpreted until its leaf is installed. Smaller ones run their backend in line, as under `sync`. Under `NEOVM_JIT_TIER2=on`, upgrades use a worker too, and the old native leaf keeps serving calls until install. Other re-tiers and the AOT drain run as under `sync`. x86-64 Linux; elsewhere `on` is `sync` |
 //! | `auto` | `Threaded` or `Sync` | `on` when the process's affinity has at least two CPUs, else `sync` (a worker on the eval thread's only CPU just competes with it) |
 //!
 //! The companions -- worker count, queue caps, the classes that defer, worker
@@ -634,7 +634,7 @@ pub(crate) fn install(
         job.settle(Settled::Discarded(DiscardReason::Dropped));
         return Err(Discard::Stale(DiscardReason::Dropped));
     }
-    if let Some(rt) = rt {
+    let calls = rt.map(|rt| {
         rt.defer_tier_up(job.saved_hold);
         let calls = u64::from(rt.heat().saturating_sub(job.requested_heat));
         bump_stats(|s| {
@@ -644,12 +644,24 @@ pub(crate) fn install(
                 s.interp_calls_while_pending += calls;
             }
         });
-    }
+        calls
+    });
     bump_stats(|s| {
         s.backend_us += out.backend_us;
         s.backend_max_us = s.backend_max_us.max(out.backend_us);
         s.queue_wait_us += out.queue_wait_us;
     });
+    tracing::debug!(
+        target: "neovm_jit::bg",
+        id = job.id,
+        class = <&'static str>::from(job.class),
+        clif_insts = job.leaf().clif_insts,
+        calls_while_pending = calls,
+        latency_us = job.enqueued_at.elapsed().as_micros() as u64,
+        queue_wait_us = out.queue_wait_us,
+        backend_us = out.backend_us,
+        "pending backend installs"
+    );
     let entry = match out.result {
         Ok(entry) => entry,
         Err(err) => {
@@ -995,36 +1007,54 @@ pub(crate) fn defer_route(insts: u64) -> Option<(JobClass, DeferRoute)> {
     }
     match mode() {
         BgMode::Legacy | BgMode::Sync => None,
-        BgMode::Threaded if osr_backend_in_line(class, insts) => None,
+        BgMode::Threaded if backend_in_line(class, insts) => None,
         BgMode::Threaded => Some((class, DeferRoute::Worker)),
     }
 }
 
-/// Whether an OSR leaf's backend runs in line although a worker could take
-/// it: its function is at most [`osr_in_line_insts`] CLIF instructions.
-/// The loop that asked for it is running now and interprets until the leaf
-/// installs, so a small backend costs less in line than the wait it saves.
-/// A size, never a clock: the same function always takes the same route.
-fn osr_backend_in_line(class: JobClass, insts: u64) -> bool {
-    class == JobClass::Osr && insts <= osr_in_line_insts()
+/// Whether a leaf's backend runs in line although a worker could take it:
+/// its function interprets until the leaf installs (an OSR loop, an entry
+/// or first-sight tier-up) and is at most [`in_line_insts`] CLIF
+/// instructions. A small backend costs less in line than the interpreted
+/// calls it would otherwise wait through (behind any larger job queued
+/// first). An upgrade always defers: its old native leaf serves the calls
+/// meanwhile. A size, never a clock: the same function always takes the
+/// same route.
+fn backend_in_line(class: JobClass, insts: u64) -> bool {
+    let interprets_while_pending = match class {
+        JobClass::Osr | JobClass::FirstSight | JobClass::Entry => true,
+        JobClass::Upgrade => false,
+    };
+    interprets_while_pending && insts <= in_line_insts()
 }
 
-/// `NEOVM_JIT_BG_OSR_INLINE_INSTS`: the largest OSR function (CLIF
-/// instructions) whose backend runs in line under `NEOVM_JIT_BG=on`
-/// (default [`OSR_INLINE_INSTS`]; `0` defers every OSR backend).
-fn osr_in_line_insts() -> u64 {
+/// `NEOVM_JIT_BG_INLINE_INSTS`: the largest function (CLIF instructions)
+/// whose OSR, first-sight or entry backend runs in line under
+/// `NEOVM_JIT_BG=on` (default [`INLINE_INSTS`]; `0` defers every backend).
+/// Unit tests read it as `0` unless they pin it: a test that forces the
+/// worker exercises the deferred route whatever its function's size.
+fn in_line_insts() -> u64 {
     #[cfg(test)]
-    if let Some(limit) = OSR_INLINE_INSTS_TEST.with(Cell::get) {
-        return limit;
+    {
+        INLINE_INSTS_TEST.with(Cell::get).unwrap_or(0)
     }
-    static LIMIT: OnceLock<u64> = OnceLock::new();
-    *LIMIT.get_or_init(|| {
-        knob_count("NEOVM_JIT_BG_OSR_INLINE_INSTS", OSR_INLINE_INSTS as usize) as u64
-    })
+    #[cfg(not(test))]
+    {
+        in_line_insts_knob()
+    }
 }
 
-/// See [`osr_in_line_insts`].
-pub(crate) const OSR_INLINE_INSTS: u64 = 1024;
+/// The knob behind [`in_line_insts`], read once per process.
+fn in_line_insts_knob() -> u64 {
+    static LIMIT: OnceLock<u64> = OnceLock::new();
+    *LIMIT.get_or_init(|| knob_count("NEOVM_JIT_BG_INLINE_INSTS", INLINE_INSTS as usize) as u64)
+}
+
+/// See [`in_line_insts`]. A backend this large takes about 5 ms; below it
+/// what a deferral costs (calls interpreted meanwhile and, when the
+/// activation that asked runs on in a loop, a second, OSR compile of the
+/// same body) outweighs the stall it saves.
+pub(crate) const INLINE_INSTS: u64 = 8192;
 
 /// Start worker `index` for `pool` (x86-64 Linux only; see
 /// [`workers_supported`]).
@@ -1319,7 +1349,7 @@ thread_local! {
     static DEFERRED_INSTALL_TEST: Cell<bool> = const { Cell::new(false) };
     static FAIL_BACKEND_TEST: Cell<bool> = const { Cell::new(false) };
     static QUEUE_CAP_TEST: Cell<Option<usize>> = const { Cell::new(None) };
-    static OSR_INLINE_INSTS_TEST: Cell<Option<u64>> = const { Cell::new(None) };
+    static INLINE_INSTS_TEST: Cell<Option<u64>> = const { Cell::new(None) };
     static HOLD_PUBLISH_TEST: Cell<bool> = const { Cell::new(false) };
     static HELD_TEST: RefCell<Vec<(Arc<JobCell>, BackendOut)>> = const { RefCell::new(Vec::new()) };
 }
@@ -1342,11 +1372,11 @@ pub(crate) fn take_served_for_test() -> Vec<(JobClass, u64, bool)> {
     std::mem::take(&mut *SERVED_TEST.lock().unwrap_or_else(|p| p.into_inner()))
 }
 
-/// Pin [`osr_in_line_insts`] for this thread (tests only); `None` returns to
-/// the knob.
+/// Pin [`in_line_insts`] for this thread (tests only); `None` returns to
+/// the tests' `0`.
 #[cfg(test)]
-pub(crate) fn force_osr_inline_insts_for_test(limit: Option<u64>) {
-    OSR_INLINE_INSTS_TEST.with(|c| c.set(limit));
+pub(crate) fn force_inline_insts_for_test(limit: Option<u64>) {
+    INLINE_INSTS_TEST.with(|c| c.set(limit));
 }
 
 /// Cap the queue at `cap` jobs for pushes and admissions from this thread
@@ -1457,8 +1487,8 @@ mod soak_tests;
 mod mutator_tests;
 
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
-#[path = "bg/tests/osr_size_test.rs"]
-mod osr_size_tests;
+#[path = "bg/tests/inline_size_test.rs"]
+mod inline_size_tests;
 
 /// Scoped ownership for tests of a particular backend's thread-local module.
 /// Native execution fixtures should await the real worker instead.
