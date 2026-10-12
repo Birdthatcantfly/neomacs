@@ -867,7 +867,8 @@ impl LispString {
     /// strings this is also `data.len()` (= size, since each byte is one char).
     pub fn sbytes(&self) -> usize {
         if self.size_byte < 0 {
-            self.schars()
+            // Unibyte constructors keep the size word free of count-proof metadata.
+            self.size
         } else {
             self.size_byte as usize
         }
