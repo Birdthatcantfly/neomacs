@@ -2123,7 +2123,20 @@ fn ensure_thread_local_cache_epoch_current() {
 // outlining this small helper adds a call for every name probe.
 #[inline(always)]
 fn thread_local_interned_str(s: &str) -> Option<SymId> {
-    INTERN_STR_CACHE.with(|cache| cache.borrow().get(s).copied())
+    match INTERN_STR_CACHE.try_with(|cache| cache.borrow().get(s).copied()) {
+        Ok(sym_id) => sym_id,
+        Err(error) => panic_intern_str_cache_access(error),
+    }
+}
+
+// Match LocalKey::with's destruction failure while keeping its cold panic
+// separate from the positive-cache lookup. The installed try_with API carries
+// an inline hint; this wrapper is inlined at each existing lookup call site.
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn panic_intern_str_cache_access(error: std::thread::AccessError) -> ! {
+    panic!("cannot access a Thread Local Storage value during or after destruction: {error:?}")
 }
 
 #[inline]
