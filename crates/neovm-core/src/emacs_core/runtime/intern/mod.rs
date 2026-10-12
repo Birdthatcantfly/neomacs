@@ -1474,6 +1474,86 @@ pub fn intern(s: &str) -> SymId {
     sym_id
 }
 
+/// A validated computed ASCII spelling for the ordinary reader hit path.
+///
+/// Threading: this borrows immutable token bytes and owns no Lisp state. It
+/// cannot represent a raw-byte or supplied-count symbol-name query.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ValidatedAsciiName<'a>(&'a str);
+
+/// The ordinary ASCII reader path does not accept non-ASCII spellings.
+#[derive(Debug, thiserror::Error)]
+#[error("reader symbol spelling is not ASCII")]
+pub(crate) struct NonAsciiReaderName;
+
+impl<'a> TryFrom<&'a str> for ValidatedAsciiName<'a> {
+    type Error = NonAsciiReaderName;
+
+    #[inline]
+    fn try_from(name: &'a str) -> Result<Self, Self::Error> {
+        if name.is_ascii() {
+            Ok(Self(name))
+        } else {
+            Err(NonAsciiReaderName)
+        }
+    }
+}
+
+/// Intern an ordinary reader spelling, deferring its exact representation to
+/// canonical creation. GNU lread.c:4213-4253 returns a hit without retaining a
+/// name; only a new symbol retains the source's encoding and character count.
+///
+/// `make_name` must reconstruct this same property-free computed ASCII token.
+/// It runs under the registry write lock and must not execute Lisp, GC or
+/// reenter the symbol registry. The reader supplies only its leaf token-copy
+/// operation. The closure borrows its token; it does not construct a name on
+/// either a positive-cache hit or an uncached canonical hit.
+#[inline]
+pub(crate) fn intern_ascii_reader_name<F>(name: ValidatedAsciiName<'_>, make_name: F) -> SymId
+where
+    F: FnOnce() -> LispString,
+{
+    #[cfg(test)]
+    {
+        // Account for this interner entry just like intern, including reader
+        // hits that previously used the lookup-only entry point.
+        INTERN_CALLS.set(INTERN_CALLS.get() + 1);
+        INTERN_CALL_NAMES.with(|names| names.borrow_mut().push(name.0.to_owned()));
+    }
+    // Use exactly intern's existing epoch validation and positive cache. The
+    // source-encoding decision belongs only to the cold creation closure.
+    ensure_thread_local_cache_epoch_current();
+    if let Some(id) = thread_local_interned_str(name.0) {
+        return id;
+    }
+    intern_ascii_reader_name_uncached(name, make_name)
+}
+
+#[cold]
+fn intern_ascii_reader_name_uncached<F>(name: ValidatedAsciiName<'_>, make_name: F) -> SymId
+where
+    F: FnOnce() -> LispString,
+{
+    let mut registry = global_symbol_registry().write();
+    // Recheck canonical membership under the write lock. No negative result
+    // from a dropped read lock is reused across a concurrent unintern/create.
+    let id = if let Some(id) = registry.lookup(name.0) {
+        id
+    } else {
+        let exact = make_name();
+        debug_assert_eq!(exact.as_bytes(), name.0.as_bytes());
+        debug_assert_eq!(exact.schars(), name.0.len());
+        debug_assert!(!exact.has_intervals());
+        registry.intern_reader_name(exact, ReaderSymbolKind::Canonical)
+    };
+    let canonical_name = registry.resolve(id);
+    drop(registry);
+    // As in intern, admission retains the epoch validated before lookup. A
+    // concurrent invalidation between drop and admission is checked next use.
+    thread_local_record_interned_str(canonical_name, id);
+    id
+}
+
 /// Intern an exact Lisp-string name using the global runtime symbol registry.
 #[inline]
 pub fn intern_lisp_string(s: &LispString) -> SymId {
@@ -2215,3 +2295,7 @@ mod declared_name_identity_tests;
 #[cfg(test)]
 #[path = "tests/native_lookup_cache.rs"]
 mod native_lookup_cache_tests;
+
+#[cfg(test)]
+#[path = "tests/ascii_reader_name.rs"]
+mod ascii_reader_name_tests;

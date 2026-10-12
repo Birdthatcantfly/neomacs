@@ -2895,28 +2895,17 @@ impl<'a> Reader<'a> {
             return self.intern_empty_symbol();
         }
 
-        // Fast path: a plain ASCII symbol with no shorthand rewrite and no
-        // escapes interns straight from its &str view. `intern(&str)` hits the
-        // interner's utf8_map without allocating, and on miss builds exactly the
-        // same atom the LispString path would (name_atom_from_str for ASCII ==
-        // LispString::from_unibyte). This skips the per-token heap LispString
-        // for the overwhelming majority of symbols read while loading.
+        // A computed ASCII spelling has encoding-independent canonical hit
+        // identity. Retain this token's exact source encoding only if the
+        // shared hit path must create its first canonical symbol.
         if matches!(self.shorthands, ReaderShorthands::Unbound)
             && token.quoting == SymbolQuoting::Plain
             && let Some(text) = token_text
-            && text.is_ascii()
+            && let Ok(name) = super::intern::ValidatedAsciiName::try_from(text)
         {
-            if !token.source_semantics.is_multibyte() {
-                return Ok(Value::from_sym_id(intern(text)));
-            }
-            if let Some(id) = super::intern::lookup_interned(text) {
-                return Ok(Value::from_sym_id(id));
-            }
-            // The miss has already ruled out an existing spelling. The
-            // creator checks again under its write lock and retains this
-            // source's multibyte name if it creates the canonical symbol.
-            return Ok(Value::from_sym_id(super::intern::intern_reader_name(
-                token.to_lisp_string(),
+            return Ok(Value::from_sym_id(super::intern::intern_ascii_reader_name(
+                name,
+                || token.to_lisp_string(),
             )));
         }
 
