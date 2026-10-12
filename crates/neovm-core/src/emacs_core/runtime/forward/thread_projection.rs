@@ -3,9 +3,9 @@
 //! When a second Lisp thread is admitted, every mutable variable cell is to
 //! become `SYMBOL_FORWARDED` to one of these descriptors, and dynamic
 //! bindings then live in per-owner slots selected by the descriptor's
-//! [`TlsIndex`]. The value the symbol held before admission stays in the
-//! descriptor's [`CanonicalStorage`], which records the cell's LOGICAL
-//! redirect.
+//! [`TlsIndex`]. What the symbol held before admission stays behind the
+//! descriptor as its canonical storage: the LOGICAL redirect
+//! ([`CanonicalArm`]) and, for a plain variable, the canonical value word.
 //!
 //! # Encoding: a per-buffer header no buffer has
 //!
@@ -15,10 +15,12 @@
 //! `local_flags_idx = -1` and `default = UNBOUND`. The family byte stays
 //! `BufferObj`, so `LispFwdType`, `ForwardSlot` and every dispatch over them
 //! are exactly what they were: no switch sees a new value, and none is
-//! lowered differently.
+//! lowered differently. A header is neither `Copy` nor `Clone` and real
+//! per-buffer forwarders take a typed `BufferSlot`, so the marker only ever
+//! heads a descriptor ([`LispBufferObjFwd::thread_projection`]).
 //!
-//! Every existing reader refuses such a cell with a check it already makes
-//! for per-buffer slots, before touching any storage:
+//! Every hot reader refuses such a cell with a check it already makes for
+//! per-buffer slots, before touching any storage:
 //! - `LispFwd::load` answers `None` (the per-buffer arm), so the VM's
 //!   forwarded varref and the interpreter fall back to their general walks;
 //! - `LispBufferObjFwd::value_in` fails its `off < slots.len()` test and
@@ -33,33 +35,18 @@
 //! - the projected cell also carries the host-projection bit, which every
 //!   checked writer refuses.
 //!
-//! # Round-2 obligations (owner-aware paths, admission)
-//!
-//! Each needs an out-of-line hook on a branch a real per-buffer descriptor
-//! never takes (`from_u16` failing, `off >= len`, an UNBOUND result):
-//! - `Obarray::find_symbol_value`, `find_symbol_value_in_buffer` and
-//!   `value_without_buffer_id` answer `Some(UNBOUND)` for a projected cell:
-//!   their callers' void handling is where owner-aware reads start;
-//! - `make-local-variable` / `kill-local-variable` (`custom`) must check
-//!   for a projection before localizing, or the cell leaves `Forwarded`;
-//! - the remaining type-only `BufferObj` tests give per-buffer semantics:
-//!   `data/mod.rs` (`local-variable-if-set-p`, `setq-default` refusal,
-//!   `default-value`), `eval/mod.rs` assignment checks,
-//!   `variable-binding-locus` (`symbols.rs`), the VM varset slow path
-//!   (which signals "Invalid buffer slot offset") and the specbind and
-//!   `set_internal` BufferObj arms;
-//! - pdump writes a per-buffer cell as `Forwarded`, losing the canonical
-//!   value, and `Obarray::clone` shares the descriptor;
-//! - the canonical plain word is rooted by a lease fixed at projection;
-//!   canonical writes must replace it (SATB-noted).
+//! The slow paths those refusals reach route a projected cell to its
+//! canonical storage (`eval::thread_projection`), each from a branch inside
+//! its existing per-buffer handling.
 //!
 //! # Reachability
 //!
-//! Admission does not exist yet. Every constructor here, the World's table
-//! and the cell transitions into this state are compiled for tests only, so
-//! the production binary is unchanged.
+//! Admission does not exist yet. The constructor, the World's table and the
+//! cell transitions INTO the projected state from an unprojected variable
+//! are compiled for tests only, so production code reaches the routing only
+//! through a projected cell, which it cannot create.
 
-use super::{AtomicValue, LispBufferObjFwd, LispFwd};
+use super::{LispBufferObjFwd, LispFwd, LispObjFwd};
 use crate::buffer::buffer::BUFFER_SLOT_COUNT;
 use crate::emacs_core::symbol::BlvPtr;
 use crate::emacs_core::value::Value;
@@ -91,34 +78,26 @@ impl TlsIndex {
     }
 }
 
-/// The canonical value word of a projected `Plainval` variable: the global
-/// value every owner without a binding reads. Stores note the overwritten
-/// word first (`AtomicValue::store`), as the forwarder slots do.
-#[repr(transparent)]
-pub struct CanonicalPlainCell(AtomicValue);
-
-static_assertions::assert_not_impl_any!(CanonicalPlainCell: Copy, Clone);
-
-impl CanonicalPlainCell {
-    /// The canonical global value ([`Value::UNBOUND`] when void).
-    #[inline]
-    pub fn get(&self) -> Value {
-        self.0.load()
-    }
-}
-
-impl std::fmt::Debug for CanonicalPlainCell {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("CanonicalPlainCell").field(&self.0).finish()
-    }
-}
-
 /// The buffer-local record a projected `SYMBOL_LOCALIZED` variable keeps.
 /// The obarray's BLV pool still owns, traces and frees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CanonicalBlv(BlvPtr);
 
 static_assertions::assert_not_impl_any!(CanonicalBlv: Send, Sync);
+
+impl CanonicalBlv {
+    /// The record a localized cell names.
+    #[inline]
+    pub(crate) fn new(blv: BlvPtr) -> Self {
+        Self(blv)
+    }
+
+    /// The record, for the obarray that owns it.
+    #[inline]
+    pub(crate) fn blv(self) -> BlvPtr {
+        self.0
+    }
+}
 
 /// A GNU built-in forwarder a projected variable keeps as its canonical
 /// storage: never a projection's own header, so a projection never wraps a
@@ -129,6 +108,12 @@ pub struct BuiltinForwarder(&'static LispFwd);
 static_assertions::assert_not_impl_any!(BuiltinForwarder: Send, Sync);
 
 impl BuiltinForwarder {
+    /// FWD as a canonical backing, or `None` for a projection's header.
+    #[inline]
+    pub fn new(fwd: &'static LispFwd) -> Option<Self> {
+        fwd.thread_projection().is_none().then_some(Self(fwd))
+    }
+
     /// The GNU descriptor.
     #[inline]
     pub fn descriptor(self) -> &'static LispFwd {
@@ -136,13 +121,21 @@ impl BuiltinForwarder {
     }
 }
 
-/// Where a projected variable's canonical (shared, unbound-owner) state
-/// lives: the cell's logical redirect before projection. `Varalias` has no
-/// arm: an alias stays an alias and resolves to its projected base.
-#[derive(Debug)]
-pub enum CanonicalStorage {
-    /// GNU `SYMBOL_PLAINVAL`: the global value word.
-    Plain(CanonicalPlainCell),
+impl PartialEq for BuiltinForwarder {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.0, other.0)
+    }
+}
+
+impl Eq for BuiltinForwarder {}
+
+/// A projected variable's LOGICAL redirect: what its cell would hold if it
+/// were not projected. `Varalias` has no arm: an alias stays an alias and
+/// resolves to its projected base.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanonicalArm {
+    /// GNU `SYMBOL_PLAINVAL`: the value is the descriptor's plain word.
+    Plain,
     /// GNU `SYMBOL_LOCALIZED`: the variable's buffer-local record.
     Localized(CanonicalBlv),
     /// GNU `SYMBOL_FORWARDED`: the built-in descriptor, still rooted where
@@ -150,7 +143,7 @@ pub enum CanonicalStorage {
     Forwarded(BuiltinForwarder),
 }
 
-static_assertions::assert_not_impl_any!(CanonicalStorage: Copy, Clone, Send, Sync);
+static_assertions::assert_not_impl_any!(CanonicalArm: Send, Sync);
 
 /// The thread-projection descriptor: a `SYMBOL_FORWARDED` cell's target once
 /// its variable is owner-local. See the module documentation for why its
@@ -162,7 +155,19 @@ static_assertions::assert_not_impl_any!(CanonicalStorage: Copy, Clone, Send, Syn
 pub struct ThreadProjectionDescriptor {
     header: LispBufferObjFwd,
     index: TlsIndex,
-    canonical: CanonicalStorage,
+    /// The canonical value word while the logical arm is `Plain`: a
+    /// `DEFVAR_LISP`-shaped slot registered with the obarray's forwarder
+    /// roots, so the existing root scan traces it and every store notes the
+    /// overwritten word first ([`LispObjFwd::set`]). It holds UNBOUND for a
+    /// void variable.
+    plain: &'static LispObjFwd,
+    /// The logical redirect. A projected variable can change arm the way an
+    /// unprojected one does (`make-local-variable` localizes a plain or
+    /// forwarded variable) without leaving its projection.
+    arm: std::cell::Cell<CanonicalArm>,
+    /// Whether the cell carried the host-projection bit before projection,
+    /// so the logical cell gets it back while it is revealed.
+    host_projected: bool,
 }
 
 static_assertions::assert_not_impl_any!(ThreadProjectionDescriptor: Copy, Clone, Send, Sync);
@@ -182,10 +187,59 @@ impl ThreadProjectionDescriptor {
         self.index
     }
 
-    /// The variable's canonical storage (its logical redirect).
+    /// The variable's logical redirect.
     #[inline]
-    pub fn canonical(&self) -> &CanonicalStorage {
-        &self.canonical
+    pub fn arm(&self) -> CanonicalArm {
+        self.arm.get()
+    }
+
+    /// Record a change of the variable's logical redirect.
+    #[inline]
+    pub(crate) fn set_arm(&self, arm: CanonicalArm) {
+        self.arm.set(arm);
+    }
+
+    /// The canonical plain word ([`Value::UNBOUND`] when void). Meaningful
+    /// while the arm is [`CanonicalArm::Plain`].
+    #[inline]
+    pub fn plain_value(&self) -> Value {
+        self.plain.get()
+    }
+
+    /// Store the canonical plain word; the overwritten word is noted for a
+    /// running mark first.
+    #[inline]
+    pub(crate) fn set_plain_value(&self, value: Value) {
+        self.plain.set(value);
+    }
+
+    /// The forwarder whose slot is the plain word, for root registration
+    /// by the obarray that projects the variable.
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn plain_root(&self) -> &'static LispFwd {
+        use super::FwdDescriptor;
+        self.plain.header()
+    }
+
+    /// Whether the logical cell carries the host-projection bit.
+    #[inline]
+    pub fn host_projected(&self) -> bool {
+        self.host_projected
+    }
+
+    /// The forwarder governing stores to the variable: none for a plain
+    /// cell, the BLV's (if any) for a localized one, the builtin itself for a
+    /// forwarded one.
+    #[inline]
+    pub(crate) fn logical_forwarder(&self) -> Option<&'static LispFwd> {
+        match self.arm() {
+            CanonicalArm::Plain => None,
+            // SAFETY: a projection's localized arm names a live record of
+            // the obarray's BLV pool; only its forwarder field is read.
+            CanonicalArm::Localized(blv) => unsafe { (*blv.blv().as_ptr()).fwd },
+            CanonicalArm::Forwarded(builtin) => Some(builtin.descriptor()),
+        }
     }
 
     /// The per-buffer header a symbol cell stores.
@@ -196,42 +250,44 @@ impl ThreadProjectionDescriptor {
     }
 }
 
+impl LispBufferObjFwd {
+    /// The thread projection this per-buffer header heads, if it carries the
+    /// marker. Called only where a real per-buffer forwarder cannot be:
+    /// after a slot access that the marker made fail.
+    #[inline]
+    pub fn thread_projection(&self) -> Option<&ThreadProjectionDescriptor> {
+        if self.offset != THREAD_PROJECTION_OFFSET {
+            return None;
+        }
+        // SAFETY: a `LispBufferObjFwd` carrying THREAD_PROJECTION_OFFSET is
+        // only ever built by `ThreadProjectionTable`, as the first `repr(C)`
+        // field (offset 0, pinned above) of a leaked, never-freed
+        // `ThreadProjectionDescriptor`: `alloc_buffer_objfwd` takes a typed
+        // `BufferSlot` (below BUFFER_SLOT_COUNT, pinned below the marker),
+        // the struct's `ty` and `offset` are private to this module, and it
+        // is neither `Copy` nor `Clone`, so no header with the marker exists
+        // apart from its descriptor. The cast therefore names that
+        // descriptor, which outlives `self`'s borrow.
+        Some(unsafe { &*std::ptr::from_ref(self).cast::<ThreadProjectionDescriptor>() })
+    }
+}
+
+impl LispFwd {
+    /// The thread projection this header heads, if it is one.
+    #[inline]
+    pub fn thread_projection(&self) -> Option<&ThreadProjectionDescriptor> {
+        self.as_buffer_obj_fwd()?.thread_projection()
+    }
+}
+
 impl std::fmt::Debug for ThreadProjectionDescriptor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ThreadProjectionDescriptor")
             .field("index", &self.index)
-            .field("canonical", &self.canonical)
+            .field("arm", &self.arm.get())
+            .field("plain", &self.plain)
+            .field("host_projected", &self.host_projected)
             .finish_non_exhaustive()
-    }
-}
-
-#[cfg(test)]
-impl CanonicalStorage {
-    /// The canonical storage of a variable whose cell was `Plainval` VALUE.
-    pub(crate) fn plain(value: Value) -> Self {
-        Self::Plain(CanonicalPlainCell(AtomicValue::new(value)))
-    }
-
-    /// The canonical storage of a variable whose cell was `Localized` BLV.
-    pub(crate) fn localized(blv: BlvPtr) -> Self {
-        Self::Localized(CanonicalBlv(blv))
-    }
-
-    /// The canonical storage of a forwarded variable, or `None` for a
-    /// projection's own header.
-    pub(crate) fn forwarded(fwd: &'static LispFwd) -> Option<Self> {
-        let is_projection = fwd
-            .as_buffer_obj_fwd()
-            .is_some_and(|buf_fwd| buf_fwd.offset == THREAD_PROJECTION_OFFSET);
-        (!is_projection).then_some(Self::Forwarded(BuiltinForwarder(fwd)))
-    }
-
-    /// The heap value this record keeps alive itself: only the plain word.
-    pub(crate) fn owned_value(&self) -> Option<Value> {
-        match self {
-            Self::Plain(cell) => Some(cell.get()),
-            Self::Localized(_) | Self::Forwarded(_) => None,
-        }
     }
 }
 
@@ -247,8 +303,6 @@ impl CanonicalStorage {
 #[derive(Debug, Default)]
 pub struct ThreadProjectionTable {
     issued: Vec<&'static ThreadProjectionDescriptor>,
-    /// Roots for canonical plain words, one per projection that has one.
-    roots: Vec<crate::emacs_core::owned_roots::OwnedRoots>,
     // The table lives in a confined World.
     _thread_confined: std::marker::PhantomData<*const ()>,
 }
@@ -289,11 +343,16 @@ impl ThreadProjectionTable {
 
 #[cfg(test)]
 impl ThreadProjectionTable {
-    /// Issue the next slot with CANONICAL as its backing. Test-only until
+    /// Issue the next slot over logical redirect ARM, with PLAIN as the
+    /// canonical plain word (UNBOUND unless ARM is `Plain`). Test-only until
     /// stopped admission exists: no production path builds a projection.
+    /// The caller registers [`ThreadProjectionDescriptor::plain_root`] with
+    /// its obarray's forwarder roots.
     pub(crate) fn project_for_test(
         &mut self,
-        canonical: CanonicalStorage,
+        arm: CanonicalArm,
+        plain: Value,
+        host_projected: bool,
     ) -> &'static ThreadProjectionDescriptor {
         let next = u32::try_from(self.issued.len() + 1)
             .ok()
@@ -309,15 +368,12 @@ impl ThreadProjectionTable {
                     default: Value::UNBOUND,
                 },
                 index: TlsIndex(next),
-                canonical,
+                plain: super::alloc_objfwd(plain),
+                arm: std::cell::Cell::new(arm),
+                host_projected,
             }));
         self.issued.push(descriptor);
         descriptor
-    }
-
-    /// Keep ROOTS alive as long as the table: the canonical plain words.
-    pub(crate) fn retain_roots(&mut self, roots: crate::emacs_core::owned_roots::OwnedRoots) {
-        self.roots.push(roots);
     }
 
     /// The descriptor issued for INDEX, if any.

@@ -27,8 +27,9 @@
 
 mod cell;
 mod fn_stamps;
+mod projection;
 mod property_revision;
-use cell::{ArmMut, CellWrite, MarkGate, read_symbol_children};
+use cell::{ArmMut, CellWrite, MarkGate, RevealedCell, read_symbol_children};
 pub(crate) use cell::{
     BlvPtr, DumpedCell, DumpedSymbolFlags, LISP_SYMBOL_FLAGS_OFFSET,
     LISP_SYMBOL_INTERNED_GLOBAL_OFFSET, LISP_SYMBOL_SIZE, LISP_SYMBOL_VAL_OFFSET, ValueCell,
@@ -36,6 +37,7 @@ pub(crate) use cell::{
 pub use cell::{LispSymbol, SymbolFlags};
 #[cfg(test)]
 pub(crate) use fn_stamps::force_fn_stamps_for_test;
+pub(crate) use projection::{ConcealOutcome, RevealedProjection};
 pub use property_revision::SymbolPropertyRevision;
 
 use super::defvar_bool::ByteBooleanVars;
@@ -1452,6 +1454,22 @@ impl Clone for Obarray {
             &'static crate::emacs_core::forward::LispFwd,
         > = rustc_hash::FxHashMap::default();
         let mut value_fwds = Vec::with_capacity(self.value_fwds.len());
+        let mut clone_stateful = |orig: &'static crate::emacs_core::forward::LispFwd| {
+            let key = std::ptr::from_ref(orig) as usize;
+            if let Some(&existing) = fwd_map.get(&key) {
+                return Some(existing);
+            }
+            let copy = orig.clone_stateful()?;
+            if copy.owned_value().is_some() {
+                value_fwds.push(copy);
+            }
+            fwd_map.insert(key, copy);
+            Some(copy)
+        };
+        // A copy is unprojected: a thread projection's canonical storage
+        // belongs to the source's owners, so each projected cell gets the
+        // copy of its logical arm, and its logical host-projection bit back.
+        let mut normalized = Vec::new();
         for idx in 0..symbols.len() {
             let Some(mut write) = symbols.cell_write(idx, MarkGate::read()) else {
                 continue;
@@ -1464,23 +1482,32 @@ impl Clone for Obarray {
                 }
                 ArmMut::Forwarded(forwarded) => {
                     let orig = forwarded.descriptor();
-                    let key = std::ptr::from_ref(orig) as usize;
-                    let copy = match fwd_map.get(&key) {
-                        Some(&existing) => existing,
-                        None => {
-                            let Some(copy) = orig.clone_stateful() else {
-                                continue;
-                            };
-                            if copy.owned_value().is_some() {
-                                value_fwds.push(copy);
+                    if let Some(projection) = orig.thread_projection() {
+                        use crate::emacs_core::forward::CanonicalArm;
+                        let logical = match projection.arm() {
+                            CanonicalArm::Plain => RevealedCell::Plain(projection.plain_value()),
+                            CanonicalArm::Localized(blv) => RevealedCell::Localized(
+                                blv_map.get(&blv.blv()).copied().unwrap_or(blv.blv()),
+                            ),
+                            CanonicalArm::Forwarded(builtin) => {
+                                let builtin = builtin.descriptor();
+                                RevealedCell::Forwarded(clone_stateful(builtin).unwrap_or(builtin))
                             }
-                            fwd_map.insert(key, copy);
-                            copy
-                        }
-                    };
-                    forwarded.forward_to(copy);
+                        };
+                        forwarded.reveal_projection(logical);
+                        normalized.push((idx, projection.host_projected()));
+                        continue;
+                    }
+                    if let Some(copy) = clone_stateful(orig) {
+                        forwarded.forward_to(copy);
+                    }
                 }
                 ArmMut::Plain(_) | ArmMut::Alias(_) => {}
+            }
+        }
+        for (idx, host_projected) in normalized {
+            if let Some(sym) = symbols.get_mut(idx) {
+                sym.set_runtime_projected(host_projected);
             }
         }
         // A BLV built from a forwarded symbol keeps a pointer to the same
@@ -2743,6 +2770,24 @@ impl Obarray {
         binding: impl FnOnce() -> Value,
     ) -> Option<Value> {
         let blv_ptr = self.blv_ptr(id)?;
+        // SAFETY: `blv_ptr` names the record `id`'s LOCALIZED cell holds,
+        // which this obarray's pool owns for `&self`'s lifetime.
+        Some(unsafe { Self::read_blv_with_lookup(blv_ptr, target_buf, binding) })
+    }
+
+    /// The read half of [`Self::read_localized_with_lookup`] for a record
+    /// already in hand.
+    ///
+    /// # Safety
+    ///
+    /// `blv_ptr` names a live record of this obarray's BLV pool, and no
+    /// reference to it is held across the call.
+    #[inline(always)]
+    pub(super) unsafe fn read_blv_with_lookup(
+        blv_ptr: *mut LispBufferLocalValue,
+        target_buf: Value,
+        binding: impl FnOnce() -> Value,
+    ) -> Value {
         let epoch = blv_alist_epoch();
         // SAFETY: the BLV record is a separate heap allocation reached only
         // through the symbol's raw pointer; the evaluator thread is its only
@@ -2761,7 +2806,7 @@ impl Obarray {
             if (*blv_ptr).alist_epoch == epoch
                 && crate::emacs_core::value::eq_value(&(*blv_ptr).where_buf, &target_buf)
             {
-                return Some((*blv_ptr).valcell.cons_cdr());
+                return (*blv_ptr).valcell.cons_cdr();
             }
             // Miss: GNU `find_symbol_value` swaps the binding in
             // (`swap_in_symval_forwarding`) so the NEXT read is a cell read.
@@ -2781,7 +2826,7 @@ impl Obarray {
             (*blv_ptr).found = found;
             store_value_atomic(&mut (*blv_ptr).valcell, valcell);
             (*blv_ptr).alist_epoch = epoch;
-            Some(valcell.cons_cdr())
+            valcell.cons_cdr()
         }
     }
 
@@ -2905,48 +2950,6 @@ impl Obarray {
             "a C variable is declared after Lisp aliased or localized it: {id:?}"
         );
         installed
-    }
-
-    /// Project `id`'s variable to owner-local bindings: its cell becomes
-    /// `Forwarded` over a descriptor TABLE issues (a per-buffer header no
-    /// buffer has), whose canonical record keeps the cell's logical storage,
-    /// and its host-projection bit is set so every checked writer refuses
-    /// it, as stopped admission will require. `None`, changing nothing, for
-    /// an alias (it resolves to its base) or a variable already projected.
-    ///
-    /// Test-only: no production path converts a symbol yet.
-    #[cfg(test)]
-    pub(crate) fn project_thread_variable_for_test(
-        &mut self,
-        id: SymId,
-        table: &mut crate::emacs_core::forward::ThreadProjectionTable,
-    ) -> Option<&'static crate::emacs_core::forward::ThreadProjectionDescriptor> {
-        use crate::emacs_core::forward::CanonicalStorage;
-        let projection = {
-            let mut write = self.cell_write_ensure(id);
-            match write.arm() {
-                ArmMut::Plain(plain) => {
-                    let projection = table.project_for_test(CanonicalStorage::plain(plain.value()));
-                    plain.project_thread(projection);
-                    projection
-                }
-                ArmMut::Localized(local) => {
-                    let projection =
-                        table.project_for_test(CanonicalStorage::localized(local.blv()));
-                    local.project_thread(projection);
-                    projection
-                }
-                ArmMut::Forwarded(forwarded) => {
-                    let canonical = CanonicalStorage::forwarded(forwarded.descriptor())?;
-                    let projection = table.project_for_test(canonical);
-                    forwarded.project_thread(projection);
-                    projection
-                }
-                ArmMut::Alias(_) => return None,
-            }
-        };
-        self.mark_runtime_projected_id(id);
-        Some(projection)
     }
 
     /// Install a GNU `Lisp_Boolfwd`-equivalent descriptor on a symbol.
@@ -3915,7 +3918,24 @@ impl Obarray {
     ///
     /// Phase F: reads from the redirect union (`val`) rather than the
     /// legacy `value` enum field. Mirrors GNU `boundp` (`data.c:805-810`).
+    /// A thread projection answers as the variable it projects is by
+    /// default, as for a localized one.
+    #[inline(always)]
     pub fn boundp_id(&self, id: SymId) -> bool {
+        self.boundp_id_with(id, |fwd| self.host_projected_forwarded_boundp(fwd))
+    }
+
+    /// [`Self::boundp_id`]'s walk, with PROJECTED answering a forwarded
+    /// cell that carries the host-projection bit -- every thread projection
+    /// does, and only such a cell can be one. A caller with buffer context
+    /// (`boundp`) answers it there; [`Self::boundp_id`] answers by default.
+    /// Inlined into every caller, as the walk always was.
+    #[inline(always)]
+    pub(crate) fn boundp_id_with(
+        &self,
+        id: SymId,
+        projected: impl FnOnce(&'static crate::emacs_core::forward::LispFwd) -> bool,
+    ) -> bool {
         let mut current = id;
         for _ in 0..50 {
             let Some(s) = self.slot(current) else {
@@ -3934,7 +3954,7 @@ impl Obarray {
                         .blv(current)
                         .is_some_and(|blv| blv.defcell.cons_cdr() != Value::UNBOUND);
                 }
-                ValueCell::Forwarded(_) => {
+                ValueCell::Forwarded(fwd) => {
                     // A forwarded slot is never unbound, whatever it forwards
                     // to: GNU's C storage has no "unbound" representation for
                     // any `Lisp_Fwd` variant, which is the same fact that
@@ -3945,11 +3965,29 @@ impl Obarray {
                     // (`src/data.c:733-736`).  Enumerating the variants here
                     // was how `DEFVAR_LISP` and `DEFVAR_KBOARD` came back
                     // unbound the moment they became forwarded (ledger 170).
-                    return true;
+                    // A thread projection always carries the host-projection
+                    // bit, so no other forwarded cell looks at its
+                    // descriptor.
+                    debug_assert!(
+                        s.flags().runtime_projected() || fwd.thread_projection().is_none(),
+                        "a thread projection carries the host-projection bit"
+                    );
+                    return !s.runtime_projected_on_arm() || projected(fwd);
                 }
             }
         }
         false // cycle
+    }
+
+    /// [`Self::boundp_id`] of a host-projected forwarded cell: a thread
+    /// projection is bound as the variable it projects is by default.
+    #[cold]
+    #[inline(never)]
+    fn host_projected_forwarded_boundp(&self, fwd: &crate::emacs_core::forward::LispFwd) -> bool {
+        match fwd.thread_projection() {
+            None => true,
+            Some(projection) => self.projected_default_value(projection).is_some(),
+        }
     }
 
     /// Check if a symbol has a function cell.
@@ -4406,9 +4444,13 @@ impl Obarray {
                     return (!value.is_unbound()).then_some(value);
                 }
                 ValueCell::Forwarded(fwd) => {
-                    return fwd
-                        .load()
-                        .or_else(|| fwd.as_buffer_obj_fwd().map(|buf_fwd| buf_fwd.default));
+                    return fwd.load().or_else(|| {
+                        let buf_fwd = fwd.as_buffer_obj_fwd()?;
+                        match buf_fwd.thread_projection() {
+                            None => Some(buf_fwd.default),
+                            Some(projection) => self.projected_default_value(projection),
+                        }
+                    });
                 }
             }
         }

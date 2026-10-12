@@ -15,7 +15,7 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
   = note: the following trait bounds were not satisfied:
           `*const (): Send`
           which is required by `ThreadProjectionDescriptor: Send`
-          `NonNull<LispBufferLocalValue>: Send`
-          which is required by `ThreadProjectionDescriptor: Send`
           `*const (): Sync`
+          which is required by `ThreadProjectionDescriptor: Send`
+          `NonNull<LispBufferLocalValue>: Send`
           which is required by `ThreadProjectionDescriptor: Send`

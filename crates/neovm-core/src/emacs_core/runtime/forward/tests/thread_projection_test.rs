@@ -7,7 +7,8 @@ use crate::buffer::buffer::{BUFFER_SLOT_COUNT, BufferSlot};
 
 static_assertions::assert_not_impl_any!(ThreadProjectionDescriptor: Copy, Clone, Send, Sync);
 static_assertions::assert_not_impl_any!(ThreadProjectionTable: Send, Sync, Clone);
-static_assertions::assert_not_impl_any!(CanonicalStorage: Copy, Clone, Send, Sync);
+static_assertions::assert_not_impl_any!(CanonicalBlv: Send, Sync);
+static_assertions::assert_impl_all!(CanonicalArm: Copy, Eq);
 static_assertions::assert_not_impl_any!(BuiltinForwarder: Send, Sync);
 static_assertions::assert_impl_all!(TlsIndex: Copy, Eq, std::hash::Hash, std::fmt::Debug);
 static_assertions::assert_eq_size!(TlsIndex, Option<TlsIndex>, u32);
@@ -20,7 +21,7 @@ fn plain_projection(
     table: &mut ThreadProjectionTable,
     value: Value,
 ) -> &'static ThreadProjectionDescriptor {
-    table.project_for_test(CanonicalStorage::plain(value))
+    table.project_for_test(CanonicalArm::Plain, value, false)
 }
 
 /// The family byte is untouched: a projection reads as a per-buffer header
@@ -51,7 +52,7 @@ fn slot_accessors_reject_the_marker_and_answer_real_slots() {
     assert_eq!(projected.slot_index().below(usize::from(u16::MAX)), None);
 
     let real = alloc_buffer_objfwd(
-        5,
+        BufferSlot::from_u16(5).unwrap(),
         -1,
         crate::buffer::buffer::BufferSlotPredicate::String,
         Value::NIL,
@@ -100,10 +101,10 @@ fn table_issues_dense_indices_and_resolves_only_its_own_headers() {
         second
     ));
 
-    // A real per-buffer header, another table's projection and a copy of a
-    // projection's header are not this table's projections.
+    // A real per-buffer header and another table's projection are not this
+    // table's projections (a header cannot be copied out of its body).
     let real = alloc_buffer_objfwd(
-        0,
+        BufferSlot::from_u16(0).unwrap(),
         -1,
         crate::buffer::buffer::BufferSlotPredicate::String,
         Value::NIL,
@@ -112,10 +113,6 @@ fn table_issues_dense_indices_and_resolves_only_its_own_headers() {
     let mut other = ThreadProjectionTable::default();
     let foreign = plain_projection(&mut other, Value::NIL);
     assert!(table.projection(foreign.header()).is_none());
-    let copied: &'static LispBufferObjFwd =
-        Box::leak(Box::new(*first.header().as_buffer_obj_fwd().unwrap()));
-    assert_eq!(copied.offset, THREAD_PROJECTION_OFFSET);
-    assert!(table.projection(copied.header()).is_none());
     // Nor is anything else.
     assert!(
         table
@@ -128,58 +125,71 @@ fn table_issues_dense_indices_and_resolves_only_its_own_headers() {
 fn canonical_storage_keeps_the_logical_cell() {
     let mut table = ThreadProjectionTable::default();
     let plain = plain_projection(&mut table, Value::fixnum(4242));
-    match plain.canonical() {
-        CanonicalStorage::Plain(cell) => assert_eq!(cell.get(), Value::fixnum(4242)),
-        other => panic!("canonical storage became {other:?}"),
-    }
-    assert_eq!(plain.canonical().owned_value(), Some(Value::fixnum(4242)));
+    assert_eq!(plain.arm(), CanonicalArm::Plain);
+    assert_eq!(plain.plain_value(), Value::fixnum(4242));
+    // The plain word is an ordinary objfwd the obarray roots.
+    assert_eq!(plain.plain_root().load(), Some(Value::fixnum(4242)));
+    plain.set_plain_value(Value::fixnum(1));
+    assert_eq!(plain.plain_value(), Value::fixnum(1));
+    assert_eq!(plain.plain_root().load(), Some(Value::fixnum(1)));
 
     let builtin = alloc_objfwd(Value::fixnum(7)).header();
-    let wrapped =
-        table.project_for_test(CanonicalStorage::forwarded(builtin).expect("a GNU family"));
-    assert_eq!(wrapped.canonical().owned_value(), None);
-    match wrapped.canonical() {
-        CanonicalStorage::Forwarded(canonical) => {
+    let arm = CanonicalArm::Forwarded(BuiltinForwarder::new(builtin).expect("a GNU family"));
+    let wrapped = table.project_for_test(arm, Value::UNBOUND, true);
+    assert!(wrapped.host_projected());
+    match wrapped.arm() {
+        CanonicalArm::Forwarded(canonical) => {
             assert!(std::ptr::eq(canonical.descriptor(), builtin));
         }
         other => panic!("canonical storage became {other:?}"),
     }
+    wrapped.set_arm(CanonicalArm::Plain);
+    assert_eq!(wrapped.arm(), CanonicalArm::Plain);
 }
 
 #[test]
 fn a_projection_never_wraps_a_projection() {
     let mut table = ThreadProjectionTable::default();
     let inner = plain_projection(&mut table, Value::NIL).header();
-    assert!(CanonicalStorage::forwarded(inner).is_none());
+    assert!(BuiltinForwarder::new(inner).is_none());
     for header in [
         alloc_intfwd(LispInteger::from_i64(1)).header(),
         alloc_boolfwd(true).header(),
         alloc_objfwd(Value::NIL).header(),
         alloc_kboard_objfwd(Value::NIL).header(),
         alloc_buffer_objfwd(
-            3,
+            BufferSlot::from_u16(3).unwrap(),
             -1,
             crate::buffer::buffer::BufferSlotPredicate::String,
             Value::NIL,
         )
         .header(),
     ] {
-        assert!(
-            CanonicalStorage::forwarded(header).is_some(),
-            "{:?}",
-            header.ty()
-        );
+        assert!(BuiltinForwarder::new(header).is_some(), "{:?}", header.ty());
     }
 }
 
-/// The marker is unreachable for a real per-buffer registration.
+/// The cast resolver answers exactly the projections, and nothing else.
 #[test]
-#[should_panic(expected = "per-buffer slot offset")]
-fn a_real_per_buffer_slot_cannot_carry_the_marker() {
-    alloc_buffer_objfwd(
-        THREAD_PROJECTION_OFFSET,
-        -1,
-        crate::buffer::buffer::BufferSlotPredicate::Unrestricted,
-        Value::NIL,
-    );
+fn headers_resolve_to_their_projection() {
+    let mut table = ThreadProjectionTable::default();
+    let projection = plain_projection(&mut table, Value::fixnum(3));
+    let resolved = projection
+        .header()
+        .thread_projection()
+        .expect("a projection");
+    assert!(std::ptr::eq(resolved, projection));
+    assert_eq!(resolved.index(), projection.index());
+    for header in [
+        alloc_objfwd(Value::NIL).header(),
+        alloc_buffer_objfwd(
+            BufferSlot::from_u16(0).unwrap(),
+            -1,
+            crate::buffer::buffer::BufferSlotPredicate::Unrestricted,
+            Value::NIL,
+        )
+        .header(),
+    ] {
+        assert!(header.thread_projection().is_none(), "{:?}", header.ty());
+    }
 }

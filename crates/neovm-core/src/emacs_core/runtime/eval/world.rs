@@ -8,9 +8,9 @@ use super::*;
 use crate::buffer::buffer::{BufferStorage, OwnedBufferStorageParts};
 use crate::emacs_core::defvar_bool::ByteBooleanVars;
 use crate::emacs_core::symbol::{
-    CanonicalDispatchCells, DebuggerDescriptor, FunctionEpoch, FunctionEpochBump,
+    CanonicalDispatchCells, ConcealOutcome, DebuggerDescriptor, FunctionEpoch, FunctionEpochBump,
     LispVariableLocality, MakeAliasError, NotPlain, OBARRAY_DISPATCH_CELLS_OFFSET,
-    SetInternalAlist, SetInternalBind,
+    RevealedProjection, SetInternalAlist, SetInternalBind,
 };
 use crate::heap_types::LispString;
 use std::cell::{Cell, UnsafeCell};
@@ -688,6 +688,8 @@ obarray_method_proxies! {
         ) -> Option<Value>;
     pub(crate) fn set_plain_untrapped_value_id(id: SymId, value: Value) -> bool;
     pub(crate) fn mark_runtime_projected_id(id: SymId);
+    pub(crate) fn reveal_projection(id: SymId) -> Option<RevealedProjection>;
+    pub(crate) fn conceal_projection(revealed: RevealedProjection) -> ConcealOutcome;
     pub(crate) fn store_plain_value_id(id: SymId, value: Value) -> Result<(), NotPlain>;
     pub(crate) fn set_internal_localized(sym_id: SymId,
             value: Value,
@@ -1044,21 +1046,15 @@ impl WorldStorageBuilder {
 impl Context {
     /// Project `id`'s variable through this World's table
     /// (`Obarray::project_thread_variable_for_test`, a redirect change and
-    /// so a canonical-changing phase), rooting a canonical plain word with an
-    /// owned-roots lease the table keeps.
+    /// so a canonical-changing phase).
     pub(crate) fn project_thread_variable_for_test(
         &mut self,
         id: SymId,
     ) -> Option<&'static crate::emacs_core::forward::ThreadProjectionDescriptor> {
         let world = Arc::clone(&self.obarray.lease.0);
         let mut table = world.thread_projections.borrow_mut();
-        let projection = self.obarray.with_dispatch_write(|obarray| {
-            obarray.project_thread_variable_for_test(id, &mut table)
-        })?;
-        if let Some(value) = projection.canonical().owned_value() {
-            table.retain_roots(self.retain_gc_roots([value]));
-        }
-        Some(projection)
+        self.obarray
+            .with_dispatch_write(|obarray| obarray.project_thread_variable_for_test(id, &mut table))
     }
 
     /// The projection CELL's header heads, resolved by the World's table.

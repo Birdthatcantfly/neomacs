@@ -3347,57 +3347,21 @@ pub(crate) fn dump_symbol_data(
 ) -> DumpSymbolData {
     // Phase I (pdump v21): encode redirect + flags directly.
     use crate::emacs_core::symbol::ValueCell;
-    let redirect = sd.redirect();
+    let mut redirect = sd.redirect();
     let val = match sd.value_cell() {
-        ValueCell::Plain(plain) => {
-            let v = match dynamic_default {
-                Some(Some(value)) => value,
-                Some(None) => Value::UNBOUND,
-                None => plain,
-            };
-            // Preserve the UNBOUND sentinel — DumpValue::Unbound maps back to
-            // Value::UNBOUND on load, which is the correct "unbound" state.
-            DumpSymbolVal::Plain(encoder.dump_value(&v))
-        }
+        ValueCell::Plain(plain) => dump_plain_val(encoder, plain, dynamic_default),
         ValueCell::Alias(target) => DumpSymbolVal::Alias(dump_sym_id(target)),
-        ValueCell::Localized(blv) => {
-            // Read the BLV to get the global default, the local_if_set flag and
-            // the forwarder `make_blv` copied across (`src/data.c:2112-2140`).
-            // The BLV is heap-allocated and valid while sd is alive.
-            let (default_val, local_if_set, forwarder) = unsafe {
-                let blv = &*blv.as_ptr();
-                let default_val = blv.defcell.cons_cdr();
-                (default_val, blv.local_if_set, blv.fwd.map(|fwd| fwd.ty()))
-            };
-            let default_val = match dynamic_default {
-                Some(Some(value)) => value,
-                Some(None) => Value::UNBOUND,
-                None => default_val,
-            };
-            DumpSymbolVal::Localized {
-                default: encoder.dump_value(&default_val),
-                local_if_set,
-                forwarder: forwarder.and_then(dump_localized_forwarder),
+        ValueCell::Localized(blv) => dump_localized_val(encoder, blv, dynamic_default),
+        ValueCell::Forwarded(fwd) => match fwd.thread_projection() {
+            None => dump_forwarded_val(encoder, fwd),
+            // An image holds no owners: a thread projection is dumped as the
+            // variable it projects, and loads unprojected.
+            Some(projection) => {
+                let (logical, val) = dump_projected_val(encoder, projection, dynamic_default);
+                redirect = logical;
+                val
             }
-        }
-        ValueCell::Forwarded(fwd) => {
-            use crate::emacs_core::forward::ForwardSlot;
-            match fwd.slot() {
-                ForwardSlot::Bool(bool_fwd) => DumpSymbolVal::BoolForwarded(bool_fwd.get()),
-                ForwardSlot::Int(int_fwd) => {
-                    DumpSymbolVal::IntForwarded(encoder.dump_value(&int_fwd.get()))
-                }
-                ForwardSlot::Obj(obj_fwd) => {
-                    DumpSymbolVal::ObjForwarded(encoder.dump_value(&obj_fwd.get()))
-                }
-                ForwardSlot::KboardObj(kbd_fwd) => {
-                    DumpSymbolVal::KboardForwarded(encoder.dump_value(&kbd_fwd.get()))
-                }
-                // BUFFER_OBJFWD forwarders are re-installed from
-                // BUFFER_SLOT_INFO in reconstruct_evaluator.
-                ForwardSlot::BufferObj(_) => DumpSymbolVal::Forwarded,
-            }
-        }
+        },
     };
     DumpSymbolData {
         redirect: redirect.into(),
@@ -3407,6 +3371,102 @@ pub(crate) fn dump_symbol_data(
         val,
         function: encoder.dump_value(&sd.function),
         plist: encoder.dump_value(&sd.plist),
+    }
+}
+
+/// SD's dumped redirect and value, printed, from a fresh encoder.
+#[cfg(test)]
+pub(crate) fn dumped_symbol_value_for_test(sd: &LispSymbol) -> String {
+    let data = dump_symbol_data(&mut DumpEncoder::new(), sd, None);
+    format!("{:?} {:?}", data.redirect, data.val)
+}
+
+fn dump_plain_val(
+    encoder: &mut DumpEncoder,
+    plain: Value,
+    dynamic_default: Option<Option<Value>>,
+) -> DumpSymbolVal {
+    let v = match dynamic_default {
+        Some(Some(value)) => value,
+        Some(None) => Value::UNBOUND,
+        None => plain,
+    };
+    // Preserve the UNBOUND sentinel — DumpValue::Unbound maps back to
+    // Value::UNBOUND on load, which is the correct "unbound" state.
+    DumpSymbolVal::Plain(encoder.dump_value(&v))
+}
+
+fn dump_localized_val(
+    encoder: &mut DumpEncoder,
+    blv: crate::emacs_core::symbol::BlvPtr,
+    dynamic_default: Option<Option<Value>>,
+) -> DumpSymbolVal {
+    // Read the BLV to get the global default, the local_if_set flag and
+    // the forwarder `make_blv` copied across (`src/data.c:2112-2140`).
+    // SAFETY: the BLV is a record of the dumped obarray's pool, valid while
+    // the symbol naming it (or its projection) is alive.
+    let (default_val, local_if_set, forwarder) = unsafe {
+        let blv = &*blv.as_ptr();
+        let default_val = blv.defcell.cons_cdr();
+        (default_val, blv.local_if_set, blv.fwd.map(|fwd| fwd.ty()))
+    };
+    let default_val = match dynamic_default {
+        Some(Some(value)) => value,
+        Some(None) => Value::UNBOUND,
+        None => default_val,
+    };
+    DumpSymbolVal::Localized {
+        default: encoder.dump_value(&default_val),
+        local_if_set,
+        forwarder: forwarder.and_then(dump_localized_forwarder),
+    }
+}
+
+fn dump_forwarded_val(
+    encoder: &mut DumpEncoder,
+    fwd: &crate::emacs_core::forward::LispFwd,
+) -> DumpSymbolVal {
+    use crate::emacs_core::forward::ForwardSlot;
+    match fwd.slot() {
+        ForwardSlot::Bool(bool_fwd) => DumpSymbolVal::BoolForwarded(bool_fwd.get()),
+        ForwardSlot::Int(int_fwd) => {
+            DumpSymbolVal::IntForwarded(encoder.dump_value(&int_fwd.get()))
+        }
+        ForwardSlot::Obj(obj_fwd) => {
+            DumpSymbolVal::ObjForwarded(encoder.dump_value(&obj_fwd.get()))
+        }
+        ForwardSlot::KboardObj(kbd_fwd) => {
+            DumpSymbolVal::KboardForwarded(encoder.dump_value(&kbd_fwd.get()))
+        }
+        // BUFFER_OBJFWD forwarders are re-installed from
+        // BUFFER_SLOT_INFO in reconstruct_evaluator.
+        ForwardSlot::BufferObj(_) => DumpSymbolVal::Forwarded,
+    }
+}
+
+/// The redirect and value a thread-projected symbol dumps as: those of the
+/// variable it projects.
+#[cold]
+fn dump_projected_val(
+    encoder: &mut DumpEncoder,
+    projection: &crate::emacs_core::forward::ThreadProjectionDescriptor,
+    dynamic_default: Option<Option<Value>>,
+) -> (crate::emacs_core::symbol::SymbolRedirect, DumpSymbolVal) {
+    use crate::emacs_core::forward::CanonicalArm;
+    use crate::emacs_core::symbol::SymbolRedirect;
+    match projection.arm() {
+        CanonicalArm::Plain => (
+            SymbolRedirect::Plainval,
+            dump_plain_val(encoder, projection.plain_value(), dynamic_default),
+        ),
+        CanonicalArm::Localized(blv) => (
+            SymbolRedirect::Localized,
+            dump_localized_val(encoder, blv.blv(), dynamic_default),
+        ),
+        CanonicalArm::Forwarded(builtin) => (
+            SymbolRedirect::Forwarded,
+            dump_forwarded_val(encoder, builtin.descriptor()),
+        ),
     }
 }
 

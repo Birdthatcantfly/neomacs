@@ -1,10 +1,10 @@
 //! Phase 0 step 2: a thread-projected variable (its cell `Forwarded` over a
 //! `ThreadProjectionDescriptor`, its host-projection bit set) is refused by
 //! every reader that works without an owner, and by every checked cached
-//! writer, before any of them dereferences a value pointer. Admission does
-//! not exist yet, so the owner-aware slow paths behind each refusal still
-//! answer as for a void variable; these tests pin the refusal, not GNU
-//! thread semantics.
+//! writer, before any of them dereferences a value pointer. The slow paths
+//! behind each refusal answer from the variable's canonical storage (round
+//! 2); `thread_projection_transparency_test` checks that every operation
+//! then behaves as on the unprojected variable.
 
 use super::set_builtin_frontend_for_test;
 use super::var_fast::{VarCacheTier, set_var_cache_tiers_for_test};
@@ -12,7 +12,7 @@ use crate::emacs_core::bytecode::opcode::Op;
 use crate::emacs_core::bytecode::{ByteCodeFunction, Vm};
 use crate::emacs_core::eval::{Context, SymbolValueLookup};
 use crate::emacs_core::forward::{
-    CanonicalStorage, LispFwdType, ThreadProjectionDescriptor, alloc_objfwd,
+    CanonicalArm, LispFwdType, ThreadProjectionDescriptor, alloc_objfwd,
 };
 use crate::emacs_core::intern::{SymId, intern};
 use crate::emacs_core::print::print_value;
@@ -140,17 +140,23 @@ fn every_context_free_reader_refuses_a_projected_variable() {
         assert!(slot_read.is_unbound(), "{name}: value_in");
 
         // Obarray readers: `do_symval_forwarding` without context. The
-        // per-buffer readers answer the header's UNBOUND default, which
-        // their callers' void handling refuses (a round-2 hook point).
+        // per-buffer readers answer the header's UNBOUND default; their
+        // context-aware callers find the projection first.
         assert_eq!(ev.obarray.symbol_value_id_copied(id), None, "{name}");
         assert_eq!(
             ev.obarray.find_symbol_value(id),
             Some(Value::UNBOUND),
             "{name}: find_symbol_value"
         );
+        // ROUND-2 HOOK: the per-buffer arm's default read finds the
+        // projection and answers the canonical default.
         assert_eq!(
-            ev.obarray.default_value_id_copied(id),
-            Some(Value::UNBOUND),
+            ev.obarray
+                .default_value_id_copied(id)
+                .as_ref()
+                .map(print_value)
+                .as_deref(),
+            Some(if name == "tpr-local" { "4545" } else { before }),
             "{name}: default_value_id_copied"
         );
         assert!(
@@ -162,30 +168,34 @@ fn every_context_free_reader_refuses_a_projected_variable() {
         );
         // Stage A cached tiers (`var_fast.rs`) and the Rust builtin frontend.
         assert_eq!(ev.read_var_cached(id), None, "{name}: read_var_cached");
+        // The builtin frontend's cached read refuses, and its fallback
+        // (`special_variable_value_by_id`) answers the canonical value.
         assert_eq!(
-            ev.builtin_var_value(id).filter(|value| !value.is_unbound()),
-            None,
+            ev.builtin_var_value(id)
+                .as_ref()
+                .map(print_value)
+                .as_deref(),
+            Some(before),
             "{name}: builtin_var_value"
         );
-        // The interpreter's descriptor shortcuts.
+        // The interpreter's descriptor shortcut refuses; its per-buffer
+        // shortcut finds the projection on the slot it lacks.
         assert_eq!(ev.forwarded_descriptor_value(sym), None, "{name}");
-        assert_eq!(ev.forwarded_buffer_obj_value(sym), None, "{name}");
-        // The VM and the interpreter fall back to the general walk, which
-        // has no owner to ask yet: void, never the old value.
-        let vm = vm_read(&mut ev, name);
-        assert_eq!(vm, "void-variable", "{name}: VM varref");
-        assert_ne!(vm, before);
-        // ROUND-2 HOOK: the interpreter's general walk ends at
-        // `Obarray::find_symbol_value`, which answers the header's UNBOUND
-        // default, and `find_symbol_value_by_id` binds it. Real per-buffer
-        // reads never get there (`forwarded_buffer_obj_value` answers
-        // first), so the owner-aware read goes on that cold fallback.
-        let interp = eval_read(&mut ev, name);
-        assert_eq!(interp, "#<unbound>", "{name}: eval");
+        assert!(
+            matches!(
+                ev.forwarded_buffer_obj_value(id, sym),
+                Some(SymbolValueLookup::Bound(_))
+            ),
+            "{name}"
+        );
+        // Behind the refusals, the VM's void branch and the interpreter's
+        // per-buffer branch answer the canonical value.
+        assert_eq!(vm_read(&mut ev, name), before, "{name}: VM varref");
+        assert_eq!(eval_read(&mut ev, name), before, "{name}: eval");
         assert!(
             matches!(
                 ev.find_symbol_value_by_id(id),
-                Ok(SymbolValueLookup::Bound(value)) if value.is_unbound()
+                Ok(SymbolValueLookup::Bound(value)) if print_value(&value) == before
             ),
             "{name}: find_symbol_value_by_id"
         );
@@ -202,22 +212,20 @@ fn projection_keeps_the_cells_logical_storage() {
     for &(name, _) in SHAPES {
         project(&mut ev, name);
     }
-    let canonical = |ev: &Context, name: &str| projection_of(ev, intern(name)).canonical();
-    match canonical(&ev, "tpr-plain") {
-        CanonicalStorage::Plain(cell) => assert_eq!(cell.get(), Value::fixnum(4242)),
-        other => panic!("tpr-plain kept {other:?}"),
-    }
-    assert!(matches!(
-        canonical(&ev, "tpr-local"),
-        CanonicalStorage::Localized(_)
-    ));
+    let arm = |ev: &Context, name: &str| projection_of(ev, intern(name)).arm();
+    assert_eq!(arm(&ev, "tpr-plain"), CanonicalArm::Plain);
+    assert_eq!(
+        projection_of(&ev, intern("tpr-plain")).plain_value(),
+        Value::fixnum(4242)
+    );
+    assert!(matches!(arm(&ev, "tpr-local"), CanonicalArm::Localized(_)));
     for (name, ty) in [
         ("tpr-obj", LispFwdType::Obj),
         ("tpr-int", LispFwdType::Int),
         ("tpr-bool", LispFwdType::Bool),
     ] {
-        match canonical(&ev, name) {
-            CanonicalStorage::Forwarded(builtin) => {
+        match arm(&ev, name) {
+            CanonicalArm::Forwarded(builtin) => {
                 assert_eq!(builtin.descriptor().ty(), ty, "{name}");
             }
             other => panic!("{name} kept {other:?}"),
@@ -242,8 +250,8 @@ fn aliases_and_projections_are_not_projected() {
         None
     );
     assert_eq!(ev.thread_projection_count_for_test(), 1);
-    // The alias still names its base; reading through it refuses with it.
-    assert_eq!(vm_read(&mut ev, "tpr-alias"), "void-variable");
+    // The alias still names its base and reads its canonical value.
+    assert_eq!(vm_read(&mut ev, "tpr-alias"), "4242");
 }
 
 /// Every checked cached writer refuses a projection on the host-projection
@@ -269,22 +277,93 @@ fn checked_cached_writers_refuse_a_projected_variable() {
             "{name}: plain writers refuse"
         );
     }
-    match projection_of(&ev, intern("tpr-plain")).canonical() {
-        CanonicalStorage::Plain(cell) => assert_eq!(cell.get(), Value::fixnum(4242)),
-        other => panic!("tpr-plain kept {other:?}"),
-    }
+    assert_eq!(
+        projection_of(&ev, intern("tpr-plain")).plain_value(),
+        Value::fixnum(4242)
+    );
     set_var_cache_tiers_for_test(&[]);
 }
 
-/// A projected plain variable's canonical word is a GC root: the heap value
-/// it held survives an exact collection.
+/// A projected plain variable's canonical word is a GC root (an objfwd the
+/// obarray traces): the heap value it held survives an exact collection,
+/// and so does one written through the projection.
 #[test]
 fn canonical_plain_word_survives_collection() {
     let mut ev = fixture();
     project(&mut ev, "tpr-heap");
     ev.gc_collect_exact();
-    match projection_of(&ev, intern("tpr-heap")).canonical() {
-        CanonicalStorage::Plain(cell) => assert_eq!(print_value(&cell.get()), "(tpr 1 2 3)"),
-        other => panic!("tpr-heap kept {other:?}"),
+    assert_eq!(
+        print_value(&projection_of(&ev, intern("tpr-heap")).plain_value()),
+        "(tpr 1 2 3)"
+    );
+    ev.eval_str("(setq tpr-heap (list 'tpr 4 5))")
+        .expect("setq evaluates");
+    ev.gc_collect_exact();
+    assert_eq!(
+        print_value(&projection_of(&ev, intern("tpr-heap")).plain_value()),
+        "(tpr 4 5)"
+    );
+    assert_eq!(eval_read(&mut ev, "tpr-heap"), "(tpr 4 5)");
+}
+
+/// A copy of a projected obarray is unprojected: each projected cell gets
+/// (a copy of) the variable it projects and its logical host bit back, and
+/// writes to the copy do not reach the source's canonical storage.
+#[test]
+fn obarray_clone_normalizes_projections() {
+    let mut ev = fixture();
+    let unprojected = fixture();
+    for &(name, _) in SHAPES {
+        project(&mut ev, name);
+    }
+    let mut copy = ev.obarray.clone();
+    for &(name, _) in SHAPES {
+        let id = intern(name);
+        let sym = copy.get_by_id(id).expect("symbol");
+        let want = unprojected.obarray.get_by_id(id).expect("symbol");
+        assert_eq!(sym.redirect(), want.redirect(), "{name}: logical redirect");
+        assert_eq!(
+            sym.flags().runtime_projected(),
+            want.flags().runtime_projected(),
+            "{name}: logical host bit"
+        );
+        assert!(
+            sym.forwarded_descriptor()
+                .and_then(|fwd| fwd.thread_projection())
+                .is_none(),
+            "{name}: no projection in the copy"
+        );
+        assert_eq!(
+            copy.default_value_id_copied(id),
+            unprojected.obarray.default_value_id_copied(id),
+            "{name}: default"
+        );
+    }
+    copy.set_symbol_value_id(intern("tpr-plain"), Value::fixnum(1));
+    copy.set_symbol_value_id(intern("tpr-obj"), Value::fixnum(2));
+    assert_eq!(
+        projection_of(&ev, intern("tpr-plain")).plain_value(),
+        Value::fixnum(4242)
+    );
+    assert_eq!(eval_read(&mut ev, "tpr-obj"), "4343");
+}
+
+/// An image holds no owners: a projected symbol dumps exactly as the
+/// variable it projects.
+#[test]
+fn pdump_writes_the_projected_variable() {
+    use crate::emacs_core::pdump::convert::dumped_symbol_value_for_test;
+    let mut ev = fixture();
+    let unprojected = fixture();
+    for &(name, _) in SHAPES {
+        project(&mut ev, name);
+    }
+    for &(name, _) in SHAPES {
+        let id = intern(name);
+        assert_eq!(
+            dumped_symbol_value_for_test(ev.obarray.get_by_id(id).expect("symbol")),
+            dumped_symbol_value_for_test(unprojected.obarray.get_by_id(id).expect("symbol")),
+            "{name}"
+        );
     }
 }

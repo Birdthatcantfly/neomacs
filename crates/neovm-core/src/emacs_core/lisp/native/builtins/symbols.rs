@@ -283,8 +283,26 @@ pub(crate) fn boundp_in(eval: &super::eval::Context, symbol: SymId) -> EvalResul
         return Ok(Value::bool_val(binding.as_value().is_some()));
     }
     Ok(Value::bool_val(
-        obarray.boundp_id(resolved) || obarray.is_constant_id(resolved),
+        obarray.boundp_id_with(resolved, |fwd| host_projected_boundp(eval, resolved, fwd))
+            || obarray.is_constant_id(resolved),
     ))
+}
+
+/// `boundp` of a host-projected forwarded cell. A thread projection is
+/// bound as the variable it projects is in the current buffer; any other
+/// forwarded cell always is.
+#[cold]
+#[inline(never)]
+fn host_projected_boundp(
+    eval: &super::eval::Context,
+    resolved: SymId,
+    fwd: &crate::emacs_core::forward::LispFwd,
+) -> bool {
+    fwd.thread_projection().is_none()
+        || matches!(
+            eval.find_symbol_value_by_id(resolved),
+            Ok(crate::emacs_core::eval::SymbolValueLookup::Bound(_))
+        )
 }
 
 pub(crate) fn builtin_obarrayp(args: Vec<Value>) -> EvalResult {
@@ -4236,6 +4254,19 @@ fn symbol_name_for_value_lt(
     }
 }
 
+/// `variable-binding-locus` of a thread-projected variable, on the variable
+/// it projects.
+/// ROUND 3: an owner's `let` binding is not a buffer binding either.
+#[cold]
+#[inline(never)]
+fn projected_variable_binding_locus(
+    ctx: &mut crate::emacs_core::eval::Context,
+    resolved: SymId,
+    args: Vec<Value>,
+) -> EvalResult {
+    ctx.with_revealed_projection(resolved, |ctx| builtin_variable_binding_locus(ctx, args))
+}
+
 pub(crate) fn builtin_variable_binding_locus(
     ctx: &mut crate::emacs_core::eval::Context,
     args: Vec<Value>,
@@ -4280,7 +4311,9 @@ pub(crate) fn builtin_variable_binding_locus(
                     let is_local = {
                         if let Some(buf_fwd) = fwd.as_buffer_obj_fwd() {
                             let Some(slot) = buf_fwd.buffer_slot() else {
-                                return Ok(Value::NIL);
+                                // Only a thread projection's header has no
+                                // slot: ask the variable it projects.
+                                return projected_variable_binding_locus(ctx, resolved, args);
                             };
                             let flags_idx = buf_fwd.local_flags_idx;
                             flags_idx == -1 || buf.slot_local_flag(slot)
@@ -4714,6 +4747,18 @@ pub(crate) fn builtin_interactive_form(
 /// - SYMBOL_FORWARDED with BUFFER_OBJFWD: always return `t` per
 ///   GNU `data.c:2459`, since BUFFER_OBJFWD slots become local
 ///   automatically when set.
+/// `local-variable-if-set-p` of a thread-projected variable, on the variable
+/// it projects.
+#[cold]
+#[inline(never)]
+fn projected_local_variable_if_set_p(
+    ctx: &mut crate::emacs_core::eval::Context,
+    resolved: SymId,
+    args: Vec<Value>,
+) -> EvalResult {
+    ctx.with_revealed_projection(resolved, |ctx| builtin_local_variable_if_set_p(ctx, args))
+}
+
 pub(crate) fn builtin_local_variable_if_set_p(
     ctx: &mut crate::emacs_core::eval::Context,
     args: Vec<Value>,
@@ -4751,10 +4796,13 @@ pub(crate) fn builtin_local_variable_if_set_p(
             // symbols because setting them auto-localizes the per-buffer slot
             // (`data.c:2458-2460`). Other forwarder kinds are not
             // buffer-local variables.
-            let is_buffer_objfwd = sym
+            let buf_fwd = sym
                 .forwarded_descriptor()
-                .is_some_and(|fwd| fwd.ty() == crate::emacs_core::forward::LispFwdType::BufferObj);
-            Ok(Value::bool_val(is_buffer_objfwd))
+                .and_then(|fwd| fwd.as_buffer_obj_fwd());
+            if buf_fwd.is_some_and(|buf_fwd| buf_fwd.thread_projection().is_some()) {
+                return projected_local_variable_if_set_p(ctx, resolved_id, args);
+            }
+            Ok(Value::bool_val(buf_fwd.is_some()))
         }
         _ => Ok(Value::NIL),
     }

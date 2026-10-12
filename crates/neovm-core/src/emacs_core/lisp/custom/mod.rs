@@ -81,6 +81,9 @@ pub(crate) fn builtin_make_variable_buffer_local(
     Ok(result)
 }
 
+// Inlined into `builtin_make_variable_buffer_local`, as it was before the
+// cold projection handler below became a second caller.
+#[inline(always)]
 pub(crate) fn builtin_make_variable_buffer_local_with_state(
     obarray: &mut crate::emacs_core::symbol::Obarray,
     _custom: &mut CustomManager,
@@ -102,10 +105,13 @@ pub(crate) fn builtin_make_variable_buffer_local_with_state(
     // GNU signals from inside the redirect switch, BEFORE the constant check
     // below (`src/data.c:2220-2223` then `:2230-2231`).
     keyboard_variable_may_not_be_buffer_local(obarray, resolved_id, args[0])?;
-    // A per-buffer variable already is one: GNU returns it unchanged, before
-    // the constant check (`src/data.c:2225-2226`).
     if obarray.forward_type(resolved_id) == Some(crate::emacs_core::forward::LispFwdType::BufferObj)
     {
+        if obarray.thread_projection_of(resolved_id).is_some() {
+            return make_projected_variable_buffer_local(obarray, _custom, args, resolved_id);
+        }
+        // A per-buffer variable already is one: GNU returns it unchanged,
+        // before the constant check (`src/data.c:2225-2226`).
         return Ok((args[0], resolved_id));
     }
     if obarray.is_constant_id(resolved_id) {
@@ -123,6 +129,21 @@ pub(crate) fn builtin_make_variable_buffer_local_with_state(
     obarray.make_symbol_localized(resolved_id, default_value);
     obarray.set_blv_local_if_set(resolved_id, true);
     Ok((args[0], resolved_id))
+}
+
+/// `make-variable-buffer-local` of a thread-projected variable, on the
+/// variable it projects.
+#[cold]
+#[inline(never)]
+fn make_projected_variable_buffer_local(
+    obarray: &mut crate::emacs_core::symbol::Obarray,
+    custom: &mut CustomManager,
+    args: Vec<Value>,
+    resolved: SymId,
+) -> Result<(Value, SymId), Flow> {
+    obarray.with_revealed_projection(resolved, |obarray| {
+        builtin_make_variable_buffer_local_with_state(obarray, custom, args)
+    })
 }
 
 /// `(make-local-variable VARIABLE)` -- make variable local in current buffer.
@@ -197,8 +218,13 @@ pub(crate) fn builtin_make_local_variable(
             .get_by_id(resolved)
             .and_then(|s| s.forwarded_descriptor())
             .and_then(|fwd| fwd.as_buffer_obj_fwd())
-            .and_then(|buf_fwd| buf_fwd.buffer_slot());
+            .map(|buf_fwd| buf_fwd.buffer_slot());
         if let Some(slot) = buf_objfwd {
+            let Some(slot) = slot else {
+                // Only a thread projection's header has no slot: localize
+                // the variable it projects.
+                return make_projected_variable_local(ctx, resolved, args);
+            };
             if let Some(buf_id) = ctx.buffers.current_buffer_id()
                 && let Some(buf) = ctx.buffers.get_mut(buf_id)
             {
@@ -241,6 +267,18 @@ pub(crate) fn builtin_make_local_variable(
         }
     }
     Ok(args[0])
+}
+
+/// `make-local-variable` of a thread-projected variable: the same operation
+/// on the variable it projects, whose new arm the projection then records.
+#[cold]
+#[inline(never)]
+fn make_projected_variable_local(
+    ctx: &mut super::eval::Context,
+    resolved: SymId,
+    args: Vec<Value>,
+) -> EvalResult {
+    ctx.with_revealed_projection(resolved, |ctx| builtin_make_local_variable(ctx, args))
 }
 
 /// `(local-variable-p VARIABLE &optional BUFFER)` -- test if variable is local.
@@ -539,6 +577,21 @@ pub(crate) struct KillLocalVariableOutcome {
     pub buffer_id: Option<crate::buffer::BufferId>,
 }
 
+/// `kill-local-variable` of a thread-projected variable, on the variable it
+/// projects.
+#[cold]
+#[inline(never)]
+fn kill_projected_local_variable(
+    ctx: &mut crate::emacs_core::eval::Context,
+    resolved: SymId,
+    args: &[Value],
+) -> Result<KillLocalVariableOutcome, Flow> {
+    ctx.with_revealed_projection(resolved, |ctx| builtin_kill_local_variable_impl(ctx, args))
+}
+
+// Inlined into `builtin_kill_local_variable`, its one ordinary caller, as it
+// was before the cold projection handler above became a second caller.
+#[inline(always)]
 pub(crate) fn builtin_kill_local_variable_impl(
     ctx: &mut crate::emacs_core::eval::Context,
     args: &[Value],
@@ -571,9 +624,16 @@ pub(crate) fn builtin_kill_local_variable_impl(
             .get_by_id(resolved)
             .and_then(|s| s.forwarded_descriptor())
             .and_then(|fwd| fwd.as_buffer_obj_fwd())
-            .and_then(|buf_fwd| {
-                crate::buffer::buffer::lookup_buffer_slot(resolved_name).zip(buf_fwd.buffer_slot())
-            });
+            .map(|buf_fwd| buf_fwd.buffer_slot());
+        let forwarded_slot = match forwarded_slot {
+            // Only a thread projection's header has no slot: kill the
+            // binding of the variable it projects.
+            Some(None) => return kill_projected_local_variable(ctx, resolved, args),
+            Some(Some(slot)) => {
+                crate::buffer::buffer::lookup_buffer_slot(resolved_name).map(|info| (info, slot))
+            }
+            None => None,
+        };
         if let Some((info, slot)) = forwarded_slot {
             let offset = slot.index();
             let default_value = ctx.buffers.buffer_defaults.get(offset).copied();

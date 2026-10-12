@@ -1608,7 +1608,7 @@ impl Context {
                     }
                     let id = intern(info.name);
                     let fwd = alloc_buffer_objfwd(
-                        info.offset.as_u16(),
+                        info.offset,
                         info.local_flags_idx,
                         info.predicate,
                         info.default.to_value(),

@@ -183,6 +183,18 @@ impl SymbolFlags {
         unsafe { (*p).store(byte, Ordering::Relaxed) };
     }
 
+    /// Atomic (relaxed) read of [`Self::runtime_projected`], for a reader
+    /// that tests the bit on one arm only: a fresh byte load there, so the
+    /// byte read for the redirect dispatch is not kept live across it.
+    #[inline(always)]
+    fn load_runtime_projected(&self) -> bool {
+        let p = std::ptr::from_ref(&self.0).cast::<AtomicU8>();
+        // SAFETY: as in `store_byte`; a shared reference permits an atomic
+        // load.
+        let byte = unsafe { (*p).load(Ordering::Relaxed) };
+        byte & Self::RUNTIME_PROJECTED_BIT != 0
+    }
+
     /// Atomic (relaxed) read of the redirect tag, for the concurrent GC obarray
     /// scan. Pairs with the `store_byte` writes above so the scan never reads a
     /// torn flags byte while the mutator changes a redirect/flag bit.
@@ -550,6 +562,14 @@ impl LispSymbol {
     #[inline(always)]
     pub fn flags(&self) -> SymbolFlags {
         self.flags
+    }
+
+    /// [`SymbolFlags::runtime_projected`] read afresh from the cell, for a
+    /// test on one arm of a redirect dispatch (the `boundp` walks' forwarded
+    /// arm): the other arms never see the flags byte again.
+    #[inline(always)]
+    pub(crate) fn runtime_projected_on_arm(&self) -> bool {
+        self.flags.load_runtime_projected()
     }
 
     /// Read the redirect tag.
@@ -1047,12 +1067,16 @@ impl ForwardedArm<'_, '_> {
 }
 
 /// Thread projection (Phase 0 step 2): every mutable arm but an alias moves
-/// to `Forwarded` over its projection descriptor's per-buffer header, the
-/// canonical record keeping what the cell held. Test-only until stopped
-/// admission exists.
-#[cfg(test)]
+/// to `Forwarded` over its projection descriptor's per-buffer header ("conceal"),
+/// the descriptor keeping the cell's logical storage, and a concealed cell
+/// can be given that logical storage back for the length of an operation
+/// that runs on the unprojected representation ("reveal").
+///
+/// Production code only ever conceals a cell it revealed: concealing an
+/// unprojected variable for the first time is projection itself, which only
+/// tests (and later, admission) do.
 impl PlainArm<'_, '_> {
-    pub(super) fn project_thread(
+    pub(super) fn conceal_projection(
         self,
         projection: &'static crate::emacs_core::forward::ThreadProjectionDescriptor,
     ) {
@@ -1063,11 +1087,10 @@ impl PlainArm<'_, '_> {
     }
 }
 
-#[cfg(test)]
 impl LocalizedArm<'_, '_> {
     /// The one move out of `Localized`: the record stays in the obarray's
-    /// pool, named by the projection's canonical storage.
-    pub(super) fn project_thread(
+    /// pool, named by the projection's logical arm.
+    pub(super) fn conceal_projection(
         self,
         projection: &'static crate::emacs_core::forward::ThreadProjectionDescriptor,
     ) {
@@ -1078,14 +1101,39 @@ impl LocalizedArm<'_, '_> {
     }
 }
 
-#[cfg(test)]
+/// A projected cell's logical arm and word, as [`ForwardedArm::reveal_projection`]
+/// installs them.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum RevealedCell {
+    Plain(Value),
+    Localized(BlvPtr),
+    Forwarded(&'static LispFwd),
+}
+
 impl ForwardedArm<'_, '_> {
-    pub(super) fn project_thread(
+    pub(super) fn conceal_projection(
         self,
         projection: &'static crate::emacs_core::forward::ThreadProjectionDescriptor,
     ) {
         self.write
             .publish(NewTag::Keep, CellWord::forwarded(projection.header()));
+    }
+
+    /// Give a concealed cell its logical arm and word back.
+    pub(super) fn reveal_projection(self, cell: RevealedCell) {
+        match cell {
+            RevealedCell::Plain(value) => self.write.publish(
+                NewTag::Set(SymbolRedirect::Plainval),
+                CellWord::plain(value),
+            ),
+            RevealedCell::Localized(blv) => self.write.publish(
+                NewTag::Set(SymbolRedirect::Localized),
+                CellWord::localized(blv),
+            ),
+            RevealedCell::Forwarded(fwd) => {
+                self.write.publish(NewTag::Keep, CellWord::forwarded(fwd));
+            }
+        }
     }
 }
 

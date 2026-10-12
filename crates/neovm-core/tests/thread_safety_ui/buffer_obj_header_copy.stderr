@@ -1,0 +1,5 @@
+error[E0507]: cannot move out of `*fwd` which is behind a shared reference
+ --> tests/thread_safety_ui/buffer_obj_header_copy.rs:6:5
+  |
+6 |     *fwd
+  |     ^^^^ move occurs because `*fwd` has type `LispBufferObjFwd`, which does not implement the `Copy` trait

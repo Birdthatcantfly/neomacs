@@ -6030,25 +6030,46 @@ impl Context {
         }
     }
 
+    /// A per-buffer forwarder's value in the current buffer, or `None` for
+    /// any other cell. A thread projection's header has no slot: its
+    /// variable's own value answers instead (`thread_projection`).
     #[inline]
     fn forwarded_buffer_obj_value(
         &self,
+        sym_id: SymId,
         sym: &crate::emacs_core::symbol::LispSymbol,
-    ) -> Option<Value> {
+    ) -> Option<SymbolValueLookup> {
         let buf_fwd = sym.forwarded_descriptor()?.as_buffer_obj_fwd()?;
-        let slot = buf_fwd.buffer_slot()?;
+        let Some(slot) = buf_fwd.buffer_slot() else {
+            return buf_fwd
+                .thread_projection()
+                .map(|projection| self.projected_value(sym_id, projection));
+        };
+        Some(SymbolValueLookup::Bound(
+            self.per_buffer_value(buf_fwd, slot),
+        ))
+    }
+
+    /// A real per-buffer forwarder's value in the current buffer, falling
+    /// back to the buffer defaults and then the forwarder's own default.
+    #[inline(always)]
+    fn per_buffer_value(
+        &self,
+        buf_fwd: &crate::emacs_core::forward::LispBufferObjFwd,
+        slot: crate::buffer::buffer::BufferSlot,
+    ) -> Value {
         let off = slot.index();
         if let Some(buf) = self.buffers.current_buffer() {
             let local = buf_fwd.local_flags_idx < 0 || buf.slot_local_flag(slot);
             if local && off < buf.slots.len() {
-                return Some(buf.slots[off]);
+                return buf.slots[off];
             }
         }
 
         if off < self.buffers.buffer_defaults.len() {
-            Some(self.buffers.buffer_defaults[off])
+            self.buffers.buffer_defaults[off]
         } else {
-            Some(buf_fwd.default)
+            buf_fwd.default
         }
     }
 
@@ -6178,8 +6199,8 @@ impl Context {
                     }
                 }
                 crate::emacs_core::symbol::ValueCell::Forwarded(_) => {
-                    if let Some(value) = self.forwarded_buffer_obj_value(sym) {
-                        return Ok(SymbolValueLookup::Bound(value));
+                    if let Some(lookup) = self.forwarded_buffer_obj_value(sym_id, sym) {
+                        return Ok(lookup);
                     }
                     // The remaining descriptor variants are GNU's one-load
                     // `do_symval_forwarding` cases.  Without them every read
@@ -6228,8 +6249,8 @@ impl Context {
                     }
                 }
                 SymbolRedirect::Forwarded => {
-                    if let Some(value) = self.forwarded_buffer_obj_value(sym) {
-                        return Ok(SymbolValueLookup::Bound(value));
+                    if let Some(lookup) = self.forwarded_buffer_obj_value(resolved, sym) {
+                        return Ok(lookup);
                     }
                 }
                 SymbolRedirect::Plainval | SymbolRedirect::Varalias => {}
@@ -6817,28 +6838,49 @@ fn store_runtime_binding(
     //     binding, unless a surrounding `let` is shadowing the buffer
     //     binding, in which case the write targets the default path
     //     (`set_default_internal`)
-    if symbol_is_interned_global
-        && matches!(redirect, Some(SymbolRedirect::Forwarded))
-        && let Some(current_id) = buffers.current_buffer_id()
-        && let Some(info) = crate::buffer::buffer::lookup_buffer_slot_by_sym_id(sym_id)
+    //
+    // The descriptor decides the arm, as GNU's `BUFFER_OBJFWDP` does: a
+    // per-buffer slot's own descriptor names its slot, so no other cell
+    // reads the slot table here.
+    if matches!(redirect, Some(SymbolRedirect::Forwarded))
+        && let Some(buf_fwd) = symbol
+            .and_then(|s| s.forwarded_descriptor())
+            .and_then(|fwd| fwd.as_buffer_obj_fwd())
     {
-        let has_local = buffers
-            .get(current_id)
-            .map(|buf| info.local_flags_idx < 0 || buf.slot_local_flag(info.offset))
-            .unwrap_or(false);
-        if has_local {
+        // A thread projection's header names no slot: store on the variable
+        // it projects. ROUND 3: an owner's binding takes the write first.
+        let Some(slot) = buf_fwd.buffer_slot() else {
+            return store_projected_runtime_binding(
+                obarray, buffers, _custom, specpdl, sym_id, checked,
+            );
+        };
+        debug_assert!(
+            crate::buffer::buffer::lookup_buffer_slot_by_sym_id(sym_id).is_some_and(|info| {
+                info.offset == slot && info.local_flags_idx == buf_fwd.local_flags_idx
+            }),
+            "a per-buffer descriptor is its slot's own"
+        );
+        if symbol_is_interned_global && let Some(current_id) = buffers.current_buffer_id() {
+            let has_local = buffers
+                .get(current_id)
+                .map(|buf| buf_fwd.local_flags_idx < 0 || buf.slot_local_flag(slot))
+                .unwrap_or(false);
+            if has_local {
+                let _ = buffers.set_buffer_local_property_by_sym_id(current_id, sym_id, value);
+                return Some(current_id);
+            }
+
+            let let_shadows = let_shadows_buffer_binding_p_in_state(specpdl, buffers, sym_id);
+            if let_shadows {
+                if let Some(info) = crate::buffer::buffer::lookup_buffer_slot_by_sym_id(sym_id) {
+                    buffers.set_buffer_default_slot(info, value);
+                }
+                return None;
+            }
+
             let _ = buffers.set_buffer_local_property_by_sym_id(current_id, sym_id, value);
             return Some(current_id);
         }
-
-        let let_shadows = let_shadows_buffer_binding_p_in_state(specpdl, buffers, sym_id);
-        if let_shadows {
-            buffers.set_buffer_default_slot(info, value);
-            return None;
-        }
-
-        let _ = buffers.set_buffer_local_property_by_sym_id(current_id, sym_id, value);
-        return Some(current_id);
     }
 
     // Non-forwarded per-buffer variables like `buffer-undo-list`
@@ -6861,6 +6903,23 @@ fn store_runtime_binding(
 
     obarray.set_symbol_value_id(sym_id, value);
     None
+}
+
+/// [`store_runtime_binding`] of a thread-projected variable: the same store,
+/// on the cell revealed as the variable it projects.
+#[cold]
+#[inline(never)]
+fn store_projected_runtime_binding(
+    obarray: &mut Obarray,
+    buffers: &mut BufferManager,
+    custom: &CustomManager,
+    specpdl: &[SpecBinding],
+    sym_id: SymId,
+    checked: ForwardChecked,
+) -> Option<crate::buffer::BufferId> {
+    obarray.with_revealed_projection(sym_id, |obarray| {
+        store_runtime_binding(obarray, buffers, custom, specpdl, sym_id, checked)
+    })
 }
 
 /// Map the buffer module's typed predicate failure into GNU-compatible Lisp
@@ -6985,6 +7044,26 @@ pub(crate) fn check_forwarded_store_at(
     let Some(fwd) = assignment_forwarder(obarray, sym_id) else {
         return Ok(ForwardChecked(value));
     };
+    if fwd.ty() == LispFwdType::BufferObj
+        && let Some(projection) = fwd.thread_projection()
+    {
+        return check_projected_store(projection, buffers, specpdl, sym_id, value, site);
+    }
+    check_store_through(fwd, buffers, specpdl, sym_id, value, site)
+}
+
+/// [`check_forwarded_store_at`] once the governing forwarder FWD is known.
+#[inline(always)]
+fn check_store_through(
+    fwd: &crate::emacs_core::forward::LispFwd,
+    buffers: &BufferManager,
+    specpdl: &[SpecBinding],
+    sym_id: SymId,
+    value: Value,
+    site: ForwardStoreSite,
+) -> Result<ForwardChecked, Flow> {
+    use crate::emacs_core::forward::LispFwdType;
+
     if fwd.ty() == LispFwdType::BufferObj {
         if site == ForwardStoreSite::SetDefault {
             return Ok(ForwardChecked(value));
@@ -7012,6 +7091,25 @@ pub(crate) fn check_forwarded_store_at(
     match fwd.store(value) {
         Ok(store) => Ok(ForwardChecked(store.canonical_value())),
         Err(error) => Err(forward_store_signal(error, value)),
+    }
+}
+
+/// [`check_forwarded_store_at`] for a thread-projected variable: the rule of
+/// the forwarder its logical arm has (none for a plain cell, the BLV's for a
+/// localized one, the builtin's own for a forwarded one).
+#[cold]
+#[inline(never)]
+fn check_projected_store(
+    projection: &crate::emacs_core::forward::ThreadProjectionDescriptor,
+    buffers: &BufferManager,
+    specpdl: &[SpecBinding],
+    sym_id: SymId,
+    value: Value,
+    site: ForwardStoreSite,
+) -> Result<ForwardChecked, Flow> {
+    match projection.logical_forwarder() {
+        None => Ok(ForwardChecked(value)),
+        Some(fwd) => check_store_through(fwd, buffers, specpdl, sym_id, value, site),
     }
 }
 
@@ -7060,7 +7158,14 @@ pub(crate) fn check_forwarded_unbind(
     sym_id: SymId,
     reported: Value,
 ) -> Result<(), Flow> {
-    if assignment_forwarder(obarray, sym_id).is_none() {
+    let Some(fwd) = assignment_forwarder(obarray, sym_id) else {
+        return Ok(());
+    };
+    if let Some(projection) = fwd.thread_projection()
+        && projection.logical_forwarder().is_none()
+    {
+        // A projected plain or forwarder-less localized variable can be
+        // unbound, as it could unprojected.
         return Ok(());
     }
     Err(signal(
@@ -7414,8 +7519,11 @@ impl Context {
                     }
                 }
                 SymbolRedirect::Forwarded => {
-                    if let Some(value) = self.forwarded_buffer_obj_value(sym) {
-                        return Some(value);
+                    if let Some(lookup) = self.forwarded_buffer_obj_value(resolved, sym) {
+                        return match lookup {
+                            SymbolValueLookup::Bound(value) => Some(value),
+                            SymbolValueLookup::Unbound => None,
+                        };
                     }
                 }
                 SymbolRedirect::Plainval | SymbolRedirect::Varalias => {}
@@ -7571,10 +7679,12 @@ impl Context {
                 }
             }
             SymbolRedirect::Forwarded => {
-                if sym
-                    .forwarded_descriptor()
-                    .is_some_and(|fwd| fwd.ty() == LispFwdType::BufferObj)
+                if let Some(fwd) = sym.forwarded_descriptor()
+                    && fwd.ty() == LispFwdType::BufferObj
                 {
+                    if let Some(projection) = fwd.thread_projection() {
+                        return self.projected_watcher_where(sym_id, projection, current_id);
+                    }
                     return Value::make_buffer(current_id);
                 }
                 Value::NIL
@@ -7618,6 +7728,7 @@ mod pdump_reconstruct;
 mod macroexpand;
 
 mod specpdl;
+mod thread_projection;
 pub(crate) use specpdl::{CurrentBufferScope, ExcursionScope, RestrictionScope};
 
 mod builtin_vars;
@@ -7741,6 +7852,9 @@ mod cconv_memo_tests;
 #[cfg(test)]
 #[path = "tests/thread_projection_readers_test.rs"]
 mod thread_projection_reader_tests;
+#[cfg(test)]
+#[path = "tests/thread_projection_transparency_test.rs"]
+mod thread_projection_transparency_tests;
 #[cfg(test)]
 #[path = "tests/var_fast_test.rs"]
 mod var_fast_tests;

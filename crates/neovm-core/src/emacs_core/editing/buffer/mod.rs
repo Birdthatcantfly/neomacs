@@ -5484,11 +5484,32 @@ pub(crate) fn buffer_local_value_in(
         None if resolved_id == intern("nil") => Ok(Value::NIL),
         None if resolved_id == intern("t") => Ok(Value::T),
         None if resolve_sym(resolved_id).starts_with(':') => Ok(Value::from_sym_id(resolved_id)),
-        None => eval
-            .obarray()
-            .find_symbol_value(resolved_id)
-            .ok_or_else(|| signal(LispCondition::VoidVariable, vec![original_arg])),
+        None => match eval.obarray().find_symbol_value(resolved_id) {
+            // Only a thread projection's per-buffer header reads UNBOUND
+            // here: the variable it projects answers its default.
+            Some(value) if value.is_unbound() => {
+                projected_buffer_local_default(eval, resolved_id, original_arg)
+            }
+            Some(value) => Ok(value),
+            None => Err(signal(LispCondition::VoidVariable, vec![original_arg])),
+        },
     }
+}
+
+/// `buffer-local-value` of a thread-projected variable without a binding in
+/// the buffer: the default of the variable it projects.
+#[cold]
+#[inline(never)]
+fn projected_buffer_local_default(
+    eval: &super::eval::Context,
+    resolved: crate::emacs_core::intern::SymId,
+    original_arg: Value,
+) -> EvalResult {
+    let obarray = eval.obarray();
+    obarray
+        .thread_projection_of(resolved)
+        .and_then(|projection| obarray.projected_default_value(projection))
+        .ok_or_else(|| signal(LispCondition::VoidVariable, vec![original_arg]))
 }
 
 // ===========================================================================

@@ -73,7 +73,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(test)]
 pub use thread_projection::ThreadProjectionTable;
 pub use thread_projection::{
-    BuiltinForwarder, CanonicalBlv, CanonicalPlainCell, CanonicalStorage, THREAD_PROJECTION_OFFSET,
+    BuiltinForwarder, CanonicalArm, CanonicalBlv, THREAD_PROJECTION_OFFSET,
     ThreadProjectionDescriptor, TlsIndex,
 };
 
@@ -736,7 +736,6 @@ impl LispObjFwd {
 /// playing the same role as GNU's `Lisp_Buffer_Objfwd::offset` (a byte
 /// offset into `struct buffer`). Phase 8 wires this up.
 #[repr(C)]
-#[derive(Copy, Clone)]
 pub struct LispBufferObjFwd {
     ty: LispFwdType,
     /// Index into `Buffer::slots`. Mirrors GNU `Lisp_Buffer_Objfwd::offset`.
@@ -759,8 +758,11 @@ pub struct LispBufferObjFwd {
     pub default: Value,
 }
 
-static_assertions::assert_impl_all!(LispBufferObjFwd: Copy, Clone, std::fmt::Debug);
-static_assertions::assert_not_impl_any!(LispBufferObjFwd: Send, Sync);
+static_assertions::assert_impl_all!(LispBufferObjFwd: std::fmt::Debug);
+// Neither `Copy` nor `Clone`: a header is never lifted out of the body it
+// heads, so a thread projection's marker offset only ever sits at the start
+// of a `ThreadProjectionDescriptor` ([`LispBufferObjFwd::thread_projection`]).
+static_assertions::assert_not_impl_any!(LispBufferObjFwd: Copy, Clone, Send, Sync);
 
 /// A per-buffer forwarder's slot index, read but not yet checked: the only
 /// way to an index is [`Self::below`], the bounds test every raw slot-array
@@ -976,7 +978,9 @@ impl LispKboardObjFwd {
 /// initialization because the per-process forwarders are constructed
 /// from runtime data (slot index assignments).
 ///
-/// `offset` is the index into [`crate::buffer::buffer::Buffer::slots`].
+/// `slot` is the index into [`crate::buffer::buffer::Buffer::slots`]: a
+/// typed slot, so a real forwarder never carries the thread-projection
+/// marker.
 /// `local_flags_idx` mirrors GNU's `local-flags` index: `-1` means
 /// "always-local in every buffer" (e.g. `buffer-file-name`,
 /// `point`); a positive index points at a bit in
@@ -984,22 +988,14 @@ impl LispKboardObjFwd {
 /// `predicate` is the closed predicate used by `store_symval_forwarding`.
 /// `default` is the value copied into every fresh buffer's slot.
 pub fn alloc_buffer_objfwd(
-    offset: u16,
+    slot: crate::buffer::buffer::BufferSlot,
     local_flags_idx: i16,
     predicate: crate::buffer::buffer::BufferSlotPredicate,
     default: Value,
 ) -> &'static LispBufferObjFwd {
-    // A real slot never carries the thread-projection marker
-    // (`thread_projection::THREAD_PROJECTION_OFFSET`, const-asserted above
-    // every slot index); the marker is what makes a projection's header
-    // fail every per-buffer slot access.
-    debug_assert!(
-        usize::from(offset) < crate::buffer::buffer::BUFFER_SLOT_COUNT,
-        "per-buffer slot offset {offset} out of range"
-    );
     let fwd = Box::new(LispBufferObjFwd {
         ty: LispFwdType::BufferObj,
-        offset,
+        offset: slot.as_u16(),
         local_flags_idx,
         predicate,
         default,

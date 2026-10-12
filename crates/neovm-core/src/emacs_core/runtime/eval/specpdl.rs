@@ -412,7 +412,10 @@ impl Context {
     }
 
     /// Storage-only restoration below watcher and constant-check policy.
-    fn discard_restore_default_binding(&mut self, sym_id: SymId, saved: Option<Value>) {
+    /// Inlined into both of its callers (the panic-recovery drain and its
+    /// thread-projection reveal), as into the drain when it was the only one.
+    #[inline(always)]
+    pub(super) fn discard_restore_default_binding(&mut self, sym_id: SymId, saved: Option<Value>) {
         use crate::emacs_core::forward::ForwardSlot;
 
         // Follow the storage writer's bounded alias walk without constructing
@@ -431,6 +434,9 @@ impl Context {
         }
         let value = saved.unwrap_or(Value::UNBOUND);
         let forwarder = self.obarray.forwarder(resolved);
+        if forwarder.is_some_and(|fwd| fwd.thread_projection().is_some()) {
+            return self.discard_restore_projected(resolved, saved);
+        }
         // GNU set_internal refuses Qunbound for both built-in arms before
         // storing (data.c:1725-1728,1805-1808). Descriptor type checking alone
         // is insufficient: a Bool would accept UNBOUND as true, and an Obj
@@ -616,8 +622,11 @@ impl Context {
                         Ok(store) => store.canonical_value(),
                         Err(error) => return Err(forward_store_signal(error, value)),
                     };
-                    if let Some(slot) = buf_fwd.buffer_slot()
-                        && let Some(buf_id) = self.buffers.current_buffer_id()
+                    let Some(slot) = buf_fwd.buffer_slot() else {
+                        // Only a thread projection's header has no slot.
+                        return self.set_projected_internal(sym_id, resolved, value, bindflag);
+                    };
+                    if let Some(buf_id) = self.buffers.current_buffer_id()
                         && let Some(buf) = self.buffers.get_mut(buf_id)
                     {
                         buf.slots[slot.index()] = stored;
@@ -786,7 +795,8 @@ impl Context {
             if let Some(fwd) = forwarded {
                 if let Some(buf_fwd) = fwd.as_buffer_obj_fwd() {
                     let Some(slot) = buf_fwd.buffer_slot() else {
-                        return Ok(());
+                        // Only a thread projection's header has no slot.
+                        return self.specbind_projected(resolved, value);
                     };
                     let off = slot.index();
                     let flags_idx = buf_fwd.local_flags_idx;

@@ -8,8 +8,9 @@
 //! - Compiled after projection, `FwdKind::of` classifies the site `Plain`,
 //!   whose redirect guard refuses it at run time.
 //!
-//! Either way the shim answers as the VM does (void until owner-aware slow
-//! paths exist), and never with the value the cell held.
+//! Either way the shim answers as the VM does: the canonical value, read by
+//! the VM's projection-aware slow path, never through a pointer native code
+//! cached into the cell.
 
 use super::inline_vars::with_compile_env_for_test;
 use super::shims::VARREF_SHIM_CALLS;
@@ -124,7 +125,7 @@ fn inline_reads_compiled_before_projection_refuse_it() {
 
         project(&mut ev, name);
         let want = interpret(&mut ev, name);
-        assert_eq!(want, "void-variable", "{name}: VM refuses");
+        assert_eq!(want, before, "{name}: VM reads the canonical value");
         let (got, shim_calls) = run(&mut ev, &leaf);
         assert_eq!(got, want, "{name}: native answers as the VM");
         assert_eq!(shim_calls, 1, "{name}: the guard refused, the shim read");
@@ -134,10 +135,10 @@ fn inline_reads_compiled_before_projection_refuse_it() {
 #[test]
 fn reads_compiled_after_projection_refuse_it() {
     let mut ev = fixture();
-    for &(name, _) in SHAPES {
+    for &(name, before) in SHAPES {
         project(&mut ev, name);
         let want = interpret(&mut ev, name);
-        assert_eq!(want, "void-variable", "{name}: VM refuses");
+        assert_eq!(want, before, "{name}: VM reads the canonical value");
         // Inline knob on: classified `Plain` (no inline forwarded read).
         let leaf = compile_inline(&ev, name);
         let (got, shim_calls) = run(&mut ev, &leaf);
@@ -154,5 +155,114 @@ fn reads_compiled_after_projection_refuse_it() {
             (want.as_str(), 1),
             "{name} plain"
         );
+    }
+}
+
+/// `(list (let ((V 50)) (setq V 51) V) V)` through `varbind`, `varset`,
+/// `varref` and `unbind`.
+const WRITE_OPS: [Op; 9] = [
+    Op::Constant(1),
+    Op::VarBind(0),
+    Op::Constant(2),
+    Op::VarSet(0),
+    Op::VarRef(0),
+    Op::Unbind(1),
+    Op::VarRef(0),
+    Op::List(2),
+    Op::Return,
+];
+
+fn write_constants(name: &str) -> [Value; 3] {
+    [Value::symbol(name), Value::fixnum(50), Value::fixnum(51)]
+}
+
+fn write_function(name: &str) -> ByteCodeFunction {
+    let mut f = function(name);
+    f.ops = WRITE_OPS.to_vec();
+    f.constants = write_constants(name).to_vec().into();
+    f
+}
+
+fn compile_writer_inline(ev: &Context, name: &str) -> CompiledLeaf {
+    force_inline_vars_for_test(Some(InlineVarsKnob::ALL));
+    let constants = write_constants(name);
+    let leaf = with_compile_env_for_test(ev, || lower_leaf(&WRITE_OPS, &constants, 0));
+    force_inline_vars_for_test(None);
+    leaf.expect("writer lowers")
+}
+
+/// Run LEAF: `(answer, varbind + varset + unbind shim calls)`.
+fn run_writer(ev: &mut Context, leaf: &CompiledLeaf) -> (String, usize) {
+    use super::shims::{UNBIND_SHIM_CALLS, VARBIND_SHIM_CALLS, VARSET_SHIM_CALLS};
+    let calls = || {
+        VARBIND_SHIM_CALLS.with(|c| c.get())
+            + VARSET_SHIM_CALLS.with(|c| c.get())
+            + UNBIND_SHIM_CALLS.with(|c| c.get())
+    };
+    let start = calls();
+    let (got, _) = run(ev, leaf);
+    (got, calls() - start)
+}
+
+/// Compiled binds and sets, lowered before or after projection, reach the
+/// shims (their guards refuse the projected cell) and through them the
+/// variable's canonical storage: the answer and the value left behind are
+/// the unprojected ones. The localized shape is left out: its `let` over a
+/// buffer-local binding is the round-3 `LetLocal` case.
+#[test]
+fn writes_compiled_before_and_after_projection_reach_canonical_storage() {
+    let mut ev = fixture();
+    for &(name, before) in SHAPES.iter().filter(|(name, _)| *name != "tpj-local") {
+        let want = {
+            let mut vm = Vm::from_context(&mut ev);
+            answer(vm.execute(&write_function(name), vec![]))
+        };
+        let compiled_before = compile_writer_inline(&ev, name);
+        let (got, _) = run_writer(&mut ev, &compiled_before);
+        assert_eq!(got, want, "{name}: native before projection");
+
+        project(&mut ev, name);
+        let vm_after = {
+            let mut vm = Vm::from_context(&mut ev);
+            answer(vm.execute(&write_function(name), vec![]))
+        };
+        assert_eq!(vm_after, want, "{name}: VM after projection");
+        let (got, shim_calls) = run_writer(&mut ev, &compiled_before);
+        assert_eq!(got, want, "{name}: compiled before projection");
+        assert!(shim_calls >= 3, "{name}: the guards refused ({shim_calls})");
+        let compiled_after = compile_writer_inline(&ev, name);
+        let (got, shim_calls) = run_writer(&mut ev, &compiled_after);
+        assert_eq!(got, want, "{name}: compiled after projection");
+        assert!(shim_calls >= 3, "{name}: the guards refused ({shim_calls})");
+        let default = compile_bytecode_function(&write_function(name)).expect("compiles");
+        let (got, _) = run_writer(&mut ev, &default);
+        assert_eq!(got, want, "{name}: default lowering");
+        assert_eq!(interpret(&mut ev, name), before, "{name}: restored");
+    }
+}
+
+/// A compiled `setq` of a projected variable stores its canonical value,
+/// whichever side of the projection it was lowered on.
+#[test]
+fn setq_compiled_across_projection_stores_canonically() {
+    const OPS: [Op; 4] = [Op::Constant(1), Op::VarSet(0), Op::VarRef(0), Op::Return];
+    let compile = |ev: &Context, name: &str| {
+        force_inline_vars_for_test(Some(InlineVarsKnob::ALL));
+        let constants = [Value::symbol(name), Value::fixnum(7)];
+        let leaf = with_compile_env_for_test(ev, || lower_leaf(&OPS, &constants, 0));
+        force_inline_vars_for_test(None);
+        leaf.expect("setter lowers")
+    };
+    let mut ev = fixture();
+    for &(name, _) in SHAPES {
+        let compiled_before = compile(&ev, name);
+        project(&mut ev, name);
+        let want = if name == "tpj-bool" { "t" } else { "7" };
+        let (got, _) = run(&mut ev, &compiled_before);
+        assert_eq!(got, want, "{name}: compiled before projection");
+        assert_eq!(interpret(&mut ev, name), want, "{name}: canonical");
+        let compiled_after = compile(&ev, name);
+        let (got, _) = run(&mut ev, &compiled_after);
+        assert_eq!(got, want, "{name}: compiled after projection");
     }
 }

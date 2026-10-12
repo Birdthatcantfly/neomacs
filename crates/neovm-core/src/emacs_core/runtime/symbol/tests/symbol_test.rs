@@ -944,7 +944,12 @@ fn install_buffer_objfwd_flips_redirect() {
     use crate::emacs_core::forward::alloc_buffer_objfwd;
     let mut ob = Obarray::new();
     let id = intern("phase8-fwd-x");
-    let fwd = alloc_buffer_objfwd(0, -1, BufferSlotPredicate::String, Value::fixnum(42));
+    let fwd = alloc_buffer_objfwd(
+        crate::buffer::buffer::BufferSlot::from_u16(0).unwrap(),
+        -1,
+        BufferSlotPredicate::String,
+        Value::fixnum(42),
+    );
     ob.install_buffer_objfwd(id, fwd);
     let sym = ob.get_by_id(id).expect("symbol installed");
     assert_eq!(sym.redirect(), SymbolRedirect::Forwarded);
@@ -963,7 +968,12 @@ fn find_symbol_value_forwarded_reads_buffer_slot() {
     use crate::emacs_core::forward::alloc_buffer_objfwd;
     let mut ob = Obarray::new();
     let id = intern("phase8-fwd-slot-x");
-    let fwd = alloc_buffer_objfwd(3, -1, BufferSlotPredicate::String, Value::fixnum(0));
+    let fwd = alloc_buffer_objfwd(
+        crate::buffer::buffer::BufferSlot::from_u16(3).unwrap(),
+        -1,
+        BufferSlotPredicate::String,
+        Value::fixnum(0),
+    );
     ob.install_buffer_objfwd(id, fwd);
 
     // Synthetic buffer slot table.
@@ -983,7 +993,12 @@ fn find_symbol_value_forwarded_returns_default_without_buffer() {
     use crate::emacs_core::forward::alloc_buffer_objfwd;
     let mut ob = Obarray::new();
     let id = intern("phase8-fwd-default-x");
-    let fwd = alloc_buffer_objfwd(5, -1, BufferSlotPredicate::String, Value::fixnum(7));
+    let fwd = alloc_buffer_objfwd(
+        crate::buffer::buffer::BufferSlot::from_u16(5).unwrap(),
+        -1,
+        BufferSlotPredicate::String,
+        Value::fixnum(7),
+    );
     ob.install_buffer_objfwd(id, fwd);
     let v = ob.find_symbol_value_in_buffer(id, None, Value::NIL, Value::NIL, None, 0, None);
     assert_eq!(v, Some(Value::fixnum(7)));

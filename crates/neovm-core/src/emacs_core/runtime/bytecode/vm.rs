@@ -6677,12 +6677,10 @@ impl<'a> Vm<'a> {
                 // `void-variable` instead of returning the sentinel
                 // to the caller. Mirrors GNU `Fsymbol_value` which
                 // signals when `find_symbol_value` returns
-                // `Qunbound`.
+                // `Qunbound`. A thread projection reads UNBOUND here too;
+                // its canonical value answers on this branch.
                 if val.is_unbound() {
-                    return Err(signal(
-                        LispCondition::VoidVariable,
-                        vec![Value::from_sym_id(name_id)],
-                    ));
+                    return self.ctx.projected_value_or_void(name_id, resolved);
                 }
                 return Ok(val);
             }
@@ -6806,10 +6804,8 @@ impl<'a> Vm<'a> {
             {
                 if let Some(buf_fwd) = buf_fwd {
                     let Some(slot) = buf_fwd.buffer_slot() else {
-                        return Err(signal(
-                            "error",
-                            vec![Value::string("Invalid buffer slot offset")],
-                        ));
+                        // Only a thread projection's header has no slot.
+                        return self.assign_projected_var_id(name_id, resolved, value);
                     };
                     let offset = slot.index();
                     let flags_idx = buf_fwd.local_flags_idx;
@@ -6909,6 +6905,30 @@ impl<'a> Vm<'a> {
         self.ctx
             .publish_runtime_binding_write_by_resolved_id(resolved, value);
         Ok(())
+    }
+
+    /// `Bvarset` of a thread-projected variable: the same assignment, with
+    /// the cell revealed as the variable it projects (the plain store first,
+    /// as the `varset` callers offer it).
+    /// ROUND 3: an owner's binding takes the write first.
+    #[cold]
+    #[inline(never)]
+    fn assign_projected_var_id(
+        &mut self,
+        name_id: SymId,
+        resolved: SymId,
+        value: Value,
+    ) -> Result<(), Flow> {
+        let revealed = self.ctx.obarray.reveal_projection(resolved);
+        let result = if self.ctx.try_set_plain_variable(name_id, value) {
+            Ok(())
+        } else {
+            self.assign_var_id(name_id, value)
+        };
+        if let Some(revealed) = revealed {
+            let _ = self.ctx.obarray.conceal_projection(revealed);
+        }
+        result
     }
 
     #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
