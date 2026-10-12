@@ -311,11 +311,33 @@ pub(crate) fn with_string_syntax_lookup<'a, R>(
     if intervals.is_empty() && !supplied_nonidentity {
         return Ok(with_lookup(&base));
     }
+    with_string_property_syntax_lookup(
+        base,
+        source,
+        syntax_properties,
+        intervals.as_table(),
+        with_lookup,
+    )
+}
+
+/// Keep property-sized scan state off ordinary string matcher frames.
+///
+/// Threading: the existing adapter and callback remain mutator-local borrows.
+/// Its first deferred position error still precedes match-data publication.
+#[cold]
+#[inline(never)]
+fn with_string_property_syntax_lookup<'a, R>(
+    base: BufferSyntaxLookup,
+    source: crate::emacs_core::syntax::StringSyntaxPositionSource<'a>,
+    syntax_properties: crate::emacs_core::syntax::SyntaxProperties<'a>,
+    intervals: Option<&'a crate::buffer::TextPropertyTable>,
+    with_lookup: impl for<'scan> FnOnce(&'scan dyn SyntaxLookup) -> R,
+) -> Result<R, crate::emacs_core::syntax::StringSyntaxPositionError> {
     let lookup = StringRegexpSyntaxLookup {
         property_lookup: crate::emacs_core::syntax::StringSyntaxPropByteRun::for_source(
             syntax_properties,
             source,
-            intervals.as_table(),
+            intervals,
         ),
         base,
     };
