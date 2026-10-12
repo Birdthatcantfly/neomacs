@@ -1745,6 +1745,7 @@ impl TaggedHeap {
                     && trailer.try_claim_unlogged(index)
                 {
                     self.current_mutator_gc_mut().remset.push(owner);
+                    self.mark_owner_card(owner.xcons_ptr() as usize);
                 }
             } else if let Some(addr) = Self::value_heap_addr(owner) {
                 let header = unsafe { &*(addr as *const GcHeader) };
@@ -1759,6 +1760,7 @@ impl TaggedHeap {
                 }
                 if !major_mark && unsafe { &*(addr as *const GcHeader) }.claim_remembered() {
                     self.current_mutator_gc_mut().remset.push(owner);
+                    self.mark_owner_card(addr);
                 }
             }
             return;
@@ -2757,6 +2759,8 @@ mod incremental;
 mod reclamation;
 use reclamation::ReclamationMode;
 
+mod card_table;
+use card_table::CardTable;
 mod cons_block_trailer;
 use cons_block_trailer::*;
 mod collection_observed;
@@ -2904,6 +2908,9 @@ fn maybe_resize_for_test(ht: &mut crate::emacs_core::value::LispHashTable) {
     }
 }
 
+#[cfg(test)]
+#[path = "gc/tests/card_table_test.rs"]
+mod card_table_tests;
 #[cfg(test)]
 #[path = "gc/tests/generational_test.rs"]
 mod generational_tests;

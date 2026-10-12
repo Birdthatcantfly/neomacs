@@ -141,6 +141,8 @@ pub(super) struct GenCensus {
     /// Phase-0 retention is independent of measurement and U35 claims. Only
     /// the first facade exclusion installs this cold metadata.
     pub(super) facade_mark: Option<std::sync::Arc<super::facade_mark::FacadeMarkState>>,
+    /// GEN1 card table (card-mark S1), built by the first logged owner.
+    pub(super) cards: Option<super::card_table::CardTable>,
 }
 
 /// Only measurement history leaves the carrier during a census. Concurrent
@@ -174,6 +176,7 @@ impl GenCensus {
             census_disabled: false,
             concurrent: None,
             facade_mark: None,
+            cards: None,
         }))
     }
 
@@ -190,6 +193,7 @@ impl GenCensus {
             census_disabled: true,
             concurrent: None,
             facade_mark: None,
+            cards: None,
         }
     }
 

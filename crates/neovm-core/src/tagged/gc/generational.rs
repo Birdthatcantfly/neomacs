@@ -149,6 +149,9 @@ impl TaggedHeap {
             if self.owner_is_mapped(owner) {
                 continue;
             }
+            if let Some(addr) = Self::owner_card_addr(owner) {
+                self.clear_owner_card(addr);
+            }
             if owner.is_cons() {
                 if let Some((trailer, index)) = self.old_cons_trailer(owner)
                     && trailer.is_old(index)
@@ -264,6 +267,7 @@ impl TaggedHeap {
             // complete. Check before promotion could hide a missing mark and
             // before any sweep can reclaim the missed young child.
             self.verify_dump_partition();
+            self.verify_remembered_owner_cards_world_stopped();
         }
         let partition_first = self.partition_dump && !self.dump_blackened;
         let mut headers = std::mem::take(&mut self.generational.promo);
@@ -369,5 +373,76 @@ impl TaggedHeap {
     #[cfg(test)]
     pub(crate) fn remembered_log_len_for_test(&self) -> usize {
         self.mutators().map(|m| m.remset.len()).sum()
+    }
+}
+
+impl TaggedHeap {
+    /// The address whose card covers OWNER: a cons cell or an object header.
+    /// Mapped owners stay on the window path and the persistent mapped set.
+    #[inline]
+    pub(super) fn owner_card_addr(owner: TaggedValue) -> Option<usize> {
+        if owner.is_cons() {
+            Some(owner.xcons_ptr() as usize)
+        } else {
+            Self::value_heap_addr(owner)
+        }
+    }
+
+    /// The GEN1 card table, carried with the heap's other optional cold
+    /// state so that it never widens the inline heap layout.
+    #[inline]
+    pub(super) fn card_table(&self) -> Option<&CardTable> {
+        self.census
+            .as_deref()
+            .and_then(|carrier| carrier.cards.as_ref())
+    }
+
+    /// Mark the card of a newly logged owner. Mutator side, GEN1 only; the
+    /// first mark builds the carrier and the table.
+    #[inline]
+    pub(super) fn mark_owner_card(&mut self, owner_addr: usize) {
+        self.census
+            .get_or_insert_with(|| Box::new(GenCensus::disabled()))
+            .cards
+            .get_or_insert_with(CardTable::new)
+            .mark(owner_addr);
+    }
+
+    #[inline]
+    pub(super) fn owner_card_is_dirty(&self, owner_addr: usize) -> bool {
+        self.card_table()
+            .is_some_and(|cards| cards.is_dirty(owner_addr))
+    }
+
+    /// Clear with every mutator stopped, together with the owner's logged bit:
+    /// a logged owner always keeps a dirty card until its claim is reset.
+    #[inline]
+    fn clear_owner_card(&self, owner_addr: usize) {
+        if let Some(cards) = self.card_table() {
+            cards.clear(owner_addr);
+        }
+    }
+
+    /// S1 invariant: every unmapped owner in R_seed or a mutator R log has a
+    /// dirty card. Runs in GEN1 verify mode with every mutator stopped.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn verify_remembered_owner_cards_world_stopped(&self) {
+        let logged = self
+            .generational
+            .r_seed
+            .iter()
+            .chain(self.mutators().flat_map(|mutator| mutator.remset.iter()));
+        for &owner in logged {
+            if self.owner_is_mapped(owner) {
+                continue;
+            }
+            if let Some(addr) = Self::owner_card_addr(owner) {
+                assert!(
+                    self.owner_card_is_dirty(addr),
+                    "GC verify: remembered owner {owner:?} has a clean card"
+                );
+            }
+        }
     }
 }
