@@ -19,10 +19,13 @@
 fn aot_call_bearing_deopt_across_call_side_effect_once_and_eq() {
     let dir = tempfile::tempdir().expect("tempdir");
     // Set the AOT env BEFORE any AOT code runs (OnceLock-memoized gates).
+    // The #A leaf is JIT-compiled on its first call and must answer natively
+    // on that call, so its backend runs in line (`sync`), not on the worker.
     // SAFETY: single-threaded test setup before any AOT entry point reads these.
     unsafe {
         std::env::set_var("NEOVM_AOT", "force");
         std::env::set_var("NEOVM_AOT_DIR", dir.path());
+        std::env::set_var("NEOVM_JIT_BG", "sync");
     }
     // The crate-internal self-test does the full emit→place→serve-from-AOT→assert
     // (call-bearing serve + deopt-across-call side-effect-exactly-once + #A
@@ -31,6 +34,7 @@ fn aot_call_bearing_deopt_across_call_side_effect_once_and_eq() {
     unsafe {
         std::env::remove_var("NEOVM_AOT");
         std::env::remove_var("NEOVM_AOT_DIR");
+        std::env::remove_var("NEOVM_JIT_BG");
     }
     if let Err(e) = r {
         panic!("call-bearing AOT self-test failed: {e}");

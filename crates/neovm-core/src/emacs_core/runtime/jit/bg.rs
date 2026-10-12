@@ -6,15 +6,15 @@
 //! reads the heap, the obarray and the eval thread's knobs, and it is
 //! unchanged. The backend is Cranelift alone.
 //!
-//! `NEOVM_JIT_BG` ([`mode`], read once per process; tests override it per
-//! thread) picks where the backend runs:
+//! `NEOVM_JIT_BG` ([`mode`], read once per process; unit tests read it unset
+//! as `sync` and override it per thread) picks where the backend runs:
 //!
 //! | value | [`BgMode`] | what runs where |
 //! |---|---|---|
-//! | `legacy` (default) | `Legacy` | the persistent per-thread module defines each leaf in place (the B4 path, unchanged) |
+//! | `legacy` | `Legacy` | the persistent per-thread module defines each leaf in place (the B4 path) |
 //! | `sync` | `Sync` | the split, run in line: the eval thread's backend compiles each packaged function at once. Deterministic |
 //! | `on` | `Threaded` | entry tier-ups, first-sight and OSR compiles of a function larger than `NEOVM_JIT_BG_INLINE_INSTS` CLIF instructions hand their package to a worker thread (`bg::worker`); the function stays interpreted until its leaf is installed. Smaller ones run their backend in line, as under `sync`. Under `NEOVM_JIT_TIER2=on`, upgrades use a worker too, and the old native leaf keeps serving calls until install. Other re-tiers and the AOT drain run as under `sync`. x86-64 Linux; elsewhere `on` is `sync` |
-//! | `auto` | `Threaded` or `Sync` | `on` when the process's affinity has at least two CPUs, else `sync` (a worker on the eval thread's only CPU just competes with it) |
+//! | `auto` (default) | `Threaded` or `Sync` | `on` when the process's affinity has at least two CPUs, else `sync` (a worker on the eval thread's only CPU just competes with it) |
 //!
 //! The companions -- worker count, queue caps, the classes that defer, worker
 //! placement and the stress soak -- are in the knob table of `jit/mod.rs`.
@@ -84,18 +84,18 @@ pub(crate) const fn workers_supported() -> bool {
     cfg!(all(target_os = "linux", target_arch = "x86_64"))
 }
 
-/// The mode a `NEOVM_JIT_BG` value selects; anything unrecognised (or
-/// unset) is [`BgMode::Legacy`]. `auto` is `on` when this process may run
-/// on at least two CPUs (its affinity), else `sync`: on one CPU a worker
-/// only competes with the eval thread.
+/// The mode a `NEOVM_JIT_BG` value selects; unset (or unrecognised) is
+/// `auto`: `on` when this process may run on at least two CPUs (its
+/// affinity), else `sync`, since on one CPU a worker only competes with the
+/// eval thread. `legacy` keeps the persistent per-thread module.
 pub(crate) fn parse_mode(value: Option<&str>) -> BgMode {
     match value.map(str::trim) {
+        Some("legacy") => BgMode::Legacy,
         Some("sync") => BgMode::Sync,
         Some("on") if workers_supported() => BgMode::Threaded,
         Some("on") => BgMode::Sync,
-        Some("auto") if workers_supported() && available_cpus() >= 2 => BgMode::Threaded,
-        Some("auto") => BgMode::Sync,
-        _ => BgMode::Legacy,
+        _ if workers_supported() && available_cpus() >= 2 => BgMode::Threaded,
+        _ => BgMode::Sync,
     }
 }
 
@@ -120,10 +120,16 @@ pub(crate) fn mode() -> BgMode {
     }
     static MODE: OnceLock<BgMode> = OnceLock::new();
     *MODE.get_or_init(|| {
-        let mode = parse_mode(std::env::var("NEOVM_JIT_BG").ok().as_deref());
+        let value = std::env::var("NEOVM_JIT_BG").ok();
+        // Unit tests assert what a tier-up installed by the call that
+        // triggered it, so unset they take the deterministic split
+        // (`sync`); `NEOVM_JIT_BG=on` runs them against the worker.
+        #[cfg(test)]
+        let value = value.or_else(|| Some("sync".to_owned()));
+        let mode = parse_mode(value.as_deref());
         if mode != BgMode::Legacy {
             let name: &'static str = mode.into();
-            tracing::info!(target: "neovm::jit::knobs", "NEOVM_JIT_BG={name} is on in this process");
+            tracing::info!(target: "neovm::jit::knobs", "NEOVM_JIT_BG resolves to {name} in this process");
         }
         mode
     })

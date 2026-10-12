@@ -135,9 +135,10 @@ fn jit_bg_sync_split_names_repeated_labels_uniquely() {
 
 #[test]
 fn jit_bg_mode_parses_its_values() {
-    assert_eq!(parse_mode(None), BgMode::Legacy);
+    let auto = parse_mode(Some("auto"));
+    assert_eq!(parse_mode(None), auto, "unset is auto");
+    assert_eq!(parse_mode(Some("bogus")), auto, "unrecognised is auto");
     assert_eq!(parse_mode(Some("legacy")), BgMode::Legacy);
-    assert_eq!(parse_mode(Some("bogus")), BgMode::Legacy);
     assert_eq!(parse_mode(Some("sync")), BgMode::Sync);
     assert_eq!(parse_mode(Some(" sync ")), BgMode::Sync);
 }
