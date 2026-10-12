@@ -3343,20 +3343,6 @@ pub(crate) fn build_mir_leaf_fn<S: LeafSink>(
             ));
             let call_result_slot =
                 fb.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
-            let inline_alloc = !aot && super::jit_inline_alloc_on();
-            // Use final MIR: scalar-replaced Cons emits no allocation, while
-            // a remaining Call may construct a direct callee's &rest list.
-            let inline_cons_allocating_body = inline_alloc
-                && m.blocks
-                    .iter()
-                    .flat_map(|b| b.insts.iter())
-                    .any(|inst| match &inst.op {
-                        MirOp::Cons(..) => plan.cons_repl[inst.result.0 as usize].is_none(),
-                        MirOp::Opaque {
-                            op: Op::Call(_), ..
-                        } => true,
-                        _ => false,
-                    });
             Some(RtCtx {
                 refs,
                 vmctx_var,
@@ -3369,8 +3355,7 @@ pub(crate) fn build_mir_leaf_fn<S: LeafSink>(
                 rootwin: None,
                 heap: None,
                 cons_store_probe_order: super::heap_inline::ConsStoreProbeOrder::default(),
-                inline_cons_allocating_body,
-                inline_alloc,
+                inline_alloc: !aot && super::jit_inline_alloc_on(),
                 generational: std::cell::Cell::new(aot.then_some(false)),
                 direct_sites: std::cell::Cell::new(0),
                 self_direct_source: super::direct_call::source_for_abi(abi),
@@ -4245,11 +4230,6 @@ pub(crate) struct RtCtx {
     /// Compiler-only branch order from decoded explicit Cons store sites.
     /// This carries no Lisp identity and is not published into native state.
     pub(crate) cons_store_probe_order: super::heap_inline::ConsStoreProbeOrder,
-    /// Compiler-only conservative fact about inline Cons allocation, including
-    /// direct calls that may construct &rest lists. Allocating bodies already
-    /// retain the heap on their hot path; splitting its cold SSA would instead
-    /// extend vmctx's lifetime and spill loop values. No runtime state is added.
-    pub(crate) inline_cons_allocating_body: bool,
     /// Allocate conses and box floats inline (`heap_inline`): JIT code with
     /// `NEOVM_JIT_INLINE_ALLOC` on; never AOT, whose leaves keep the shims.
     pub(crate) inline_alloc: bool,

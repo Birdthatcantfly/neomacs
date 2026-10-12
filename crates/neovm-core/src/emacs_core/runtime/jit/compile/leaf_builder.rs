@@ -170,10 +170,6 @@ pub(super) fn build_leaf_fn<S: LeafSink>(
             ));
             let call_result_slot =
                 fb.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
-            let inline_alloc = !aot && jit_inline_alloc_on();
-            // Direct &rest calls can allocate a list without an Op::Cons.
-            let inline_cons_allocating_body =
-                inline_alloc && ops.iter().any(|op| matches!(op, Op::Cons | Op::Call(_)));
             Some(RtCtx {
                 refs,
                 vmctx_var,
@@ -186,8 +182,7 @@ pub(super) fn build_leaf_fn<S: LeafSink>(
                 rootwin: None,
                 heap: None,
                 cons_store_probe_order,
-                inline_cons_allocating_body,
-                inline_alloc,
+                inline_alloc: !aot && jit_inline_alloc_on(),
                 generational: std::cell::Cell::new(aot.then_some(false)),
                 direct_sites: std::cell::Cell::new(0),
                 self_direct_source: direct_call::source_for_abi(abi),

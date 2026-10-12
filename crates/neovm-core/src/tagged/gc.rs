@@ -960,10 +960,6 @@ pub struct TaggedHeap {
     compiled_observation_exclusion_37: Cell<u8>,
     compiled_observation_exclusion_38: Cell<u8>,
     compiled_observation_exclusion_39: Cell<u8>,
-    /// Published with the preceding proof words under the same exclusive
-    /// mutator scope. This byte lets a cold store reject absent proofs before
-    /// loading their words; it never replaces an individual admission test.
-    compiled_cons_proofs: Cell<barrier_window::CompiledConsProofs>,
 }
 
 impl Default for TaggedHeap {
@@ -1213,7 +1209,6 @@ impl TaggedHeap {
             compiled_observation_exclusion_37: Cell::new(0),
             compiled_observation_exclusion_38: Cell::new(0),
             compiled_observation_exclusion_39: Cell::new(0),
-            compiled_cons_proofs: Cell::new(barrier_window::CompiledConsProofs::Absent),
         };
         if knobs::concurrent_claims_on() {
             heap.install_concurrent_claims();
@@ -2792,10 +2787,9 @@ mod barrier_window;
 #[cfg(feature = "jit")]
 pub(crate) use barrier_window::neovm_jit_unobserved_collection_owner;
 pub(crate) use barrier_window::{
-    BarrierWindow, CompiledObservationGate, HEAP_JIT_CONS_PROOFS, HEAP_JIT_EXCLUSION_LEN,
-    HEAP_JIT_EXCLUSION_LO, HEAP_JIT_SINGLE_CONS, HEAP_JIT_SLOT_BARRIER_LEN,
-    HEAP_JIT_SLOT_BARRIER_LO, current_collection_dump_window,
-    publish_collection_observation_window,
+    BarrierWindow, CompiledObservationGate, HEAP_JIT_EXCLUSION_LEN, HEAP_JIT_EXCLUSION_LO,
+    HEAP_JIT_SINGLE_CONS, HEAP_JIT_SLOT_BARRIER_LEN, HEAP_JIT_SLOT_BARRIER_LO,
+    current_collection_dump_window, publish_collection_observation_window,
 };
 
 mod jit_state;

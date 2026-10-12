@@ -46,30 +46,6 @@ pub(crate) const HEAP_JIT_SINGLE_CONS: usize = HEAP_JIT_EXCLUSION_LO + 2 * size_
 pub(crate) const HEAP_JIT_SLOT_BARRIER_LO: usize = HEAP_JIT_EXCLUSION_LO + 3 * size_of::<usize>();
 #[cfg_attr(not(feature = "jit"), allow(dead_code))]
 pub(crate) const HEAP_JIT_SLOT_BARRIER_LEN: usize = HEAP_JIT_EXCLUSION_LO + 4 * size_of::<usize>();
-#[cfg_attr(not(feature = "jit"), allow(dead_code))]
-pub(crate) const HEAP_JIT_CONS_PROOFS: usize =
-    std::mem::offset_of!(TaggedHeap, compiled_cons_proofs);
-
-/// Availability of the published exact-cons or empty-gap proof. Only the
-/// installed mutator writes this byte, together with the protocol words,
-/// without a callback or safepoint. The GC worker never reads this state.
-/// Native code must reload it at a store site, never across a safepoint.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub(super) enum CompiledConsProofs {
-    Absent = 0,
-    Present = 1,
-}
-
-impl CompiledConsProofs {
-    fn from_published(single: usize, gap: BarrierWindow) -> Self {
-        if single == 0 && gap.len == 0 {
-            Self::Absent
-        } else {
-            Self::Present
-        }
-    }
-}
 
 // Each byte is independently within its own UnsafeCell. The executing mutator
 // sets them individually; native word loads use the whole heap's provenance.
@@ -78,9 +54,6 @@ impl CompiledConsProofs {
 const _: () = {
     assert!(size_of::<Cell<u8>>() == 1);
     assert!(std::mem::align_of::<Cell<u8>>() == 1);
-    assert!(size_of::<Cell<CompiledConsProofs>>() == 1);
-    assert!(std::mem::align_of::<Cell<CompiledConsProofs>>() == 1);
-    assert!(HEAP_JIT_CONS_PROOFS == HEAP_JIT_EXCLUSION_LO + 40);
     assert!(5 * size_of::<usize>() <= 40);
     let offsets = [
         std::mem::offset_of!(TaggedHeap, compiled_observation_exclusion_00),
@@ -424,8 +397,6 @@ impl TaggedHeap {
         self.compiled_observation_exclusion_37.set(bytes[37]);
         self.compiled_observation_exclusion_38.set(bytes[38]);
         self.compiled_observation_exclusion_39.set(bytes[39]);
-        self.compiled_cons_proofs
-            .set(CompiledConsProofs::from_published(single, gap));
         self.jit
             .set_barrier_window(self.compiled_barrier_window(ordinary, gate));
     }

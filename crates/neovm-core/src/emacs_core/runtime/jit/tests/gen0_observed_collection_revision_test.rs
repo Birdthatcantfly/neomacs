@@ -661,7 +661,6 @@ fn gen0_native_refined_gap_closes_when_owner_is_read_after_store() {
         (Op::Setcdr, StoreKind::Setcdr),
     ] {
         let mut context = context(false);
-        let leaf = compile_bytecode_function(&store_function(op)).expect("native cons setter");
         let mut owners = std::array::from_fn::<_, 3, _>(|_| {
             context.tagged_heap.alloc_cons(Value::NIL, Value::NIL)
         });
@@ -672,6 +671,7 @@ fn gen0_native_refined_gap_closes_when_owner_is_read_after_store() {
         }
         let (_, endpoints) = capture(|| (first.cons_car(), last.cons_car()));
         let endpoints = endpoints.expect("the endpoints bound a real empty interval");
+        let leaf = compile_bytecode_function(&store_function(op)).expect("native cons setter");
         let before = LispCollectionRevision::current();
         let shims = cons_shims();
         for value in [12, 23, 34] {
@@ -696,7 +696,6 @@ fn gen0_native_refined_gap_closes_when_owner_is_read_after_store() {
                 .covers(address),
             "the primary hull is retained; the native secondary interval bypasses its empty interior"
         );
-
         let (value, reads) = capture(|| kind.read(target));
         assert_eq!(value, Value::make_int(34));
         let reads = reads.expect("a certificate taken after the inline mutation");
@@ -719,6 +718,41 @@ fn gen0_native_refined_gap_closes_when_owner_is_read_after_store() {
         );
         assert!(endpoints.unchanged());
     }
+}
+
+#[test]
+fn gen0_pre_capture_leaf_completes_interior_stores_in_the_shim() {
+    let _journal = JournalMode::observed();
+    let mut context = context(false);
+    assert!(!crate::tagged::gc::has_collection_observations());
+    // Compiled before any capture: main's hull gate, with no native proofs.
+    let leaf = compile_bytecode_function(&store_function(Op::Setcar)).expect("pre-capture setcar");
+    let mut owners =
+        std::array::from_fn::<_, 3, _>(|_| context.tagged_heap.alloc_cons(Value::NIL, Value::NIL));
+    owners.sort_unstable_by_key(|owner| owner.bits());
+    let [first, target, last] = owners;
+    for owner in owners {
+        context.push_specpdl_root(owner);
+    }
+    let (_, endpoints) = capture(|| (first.cons_car(), last.cons_car()));
+    let endpoints = endpoints.expect("the endpoints bound a real empty interval");
+    let before = LispCollectionRevision::current();
+    let shims = cons_shims();
+    for value in [12, 23, 34] {
+        native(
+            &mut context,
+            &leaf,
+            &StoreKind::Setcar.args(target, Value::make_int(value)),
+        );
+    }
+    assert_eq!(LispCollectionRevision::current(), before);
+    assert_eq!(
+        cons_shims(),
+        shims + 3,
+        "a published gap does not change a pre-capture leaf's hull refusal"
+    );
+    assert!(endpoints.unchanged());
+    assert_eq!(target.cons_car(), Value::make_int(34));
 }
 
 fn standalone_heap() -> TaggedHeap {

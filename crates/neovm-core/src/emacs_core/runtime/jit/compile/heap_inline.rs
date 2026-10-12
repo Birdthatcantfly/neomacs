@@ -39,9 +39,8 @@
 use super::jit_layout::CONTEXT_TAGGED_HEAP_OFFSET;
 use super::jit_layout::heap::{
     FLOAT_SLOT_BYTES, HEAP_JIT_BARRIER_LEN, HEAP_JIT_BARRIER_LO, HEAP_JIT_CONS_CUR,
-    HEAP_JIT_CONS_LIM, HEAP_JIT_CONS_PROOFS, HEAP_JIT_EXCLUSION_LEN, HEAP_JIT_EXCLUSION_LO,
-    HEAP_JIT_FLOAT_CUR, HEAP_JIT_FLOAT_LIM, HEAP_JIT_SINGLE_CONS, HEAP_JIT_SLOT_BARRIER_LEN,
-    HEAP_JIT_SLOT_BARRIER_LO,
+    HEAP_JIT_CONS_LIM, HEAP_JIT_EXCLUSION_LEN, HEAP_JIT_EXCLUSION_LO, HEAP_JIT_FLOAT_CUR,
+    HEAP_JIT_FLOAT_LIM, HEAP_JIT_SINGLE_CONS, HEAP_JIT_SLOT_BARRIER_LEN, HEAP_JIT_SLOT_BARRIER_LO,
 };
 use super::*;
 
@@ -185,20 +184,10 @@ fn emit_barrier_window_check(
     let len = fb.ins().load(types::I64, flags, heap, len_offset as i32);
     let offset = fb.ins().isub(owner, lo);
     let inside = fb.ins().icmp(IntCC::UnsignedLessThan, offset, len);
-    if observed && owner_kind == NativeStoreOwner::Cons && !first_probe {
-        // A pre-capture leaf keeps the original hot hull rejection. If a
-        // later capture widens it, the same negative proofs still refine
-        // its cold interior refusal without paying on ordinary heap stores.
-        let probe = fb.create_block();
-        fb.ins().brif(inside, probe, &[], outside, &[]);
-        fb.switch_to_block(probe);
-        fb.seal_block(probe);
-        emit_cons_observation_exemptions(fb, heap, owner, outside);
-        fb.ins().jump(slow, &[]);
-    } else {
-        // Off, Eager and GEN1 retain their original emission byte-for-byte.
-        fb.ins().brif(inside, slow, &[], outside, &[]);
-    }
+    // A pre-capture leaf keeps main's hull rejection byte-for-byte: interior
+    // probes there perturbed its hot loop's register allocation, while the
+    // collection shim already completes any store a later capture exempts.
+    fb.ins().brif(inside, slow, &[], outside, &[]);
     fb.switch_to_block(outside);
     fb.seal_block(outside);
 }
@@ -476,8 +465,11 @@ pub(crate) fn emit_inline_cons_store_with_proof(
 /// Explicit setcar/setcdr only: keep negative-proof admissions separate from
 /// the general barrier's shared outside block. BLV/HOF callers retain their
 /// existing helper. This uses the heap's published observation protocol.
-/// Off, Eager and GEN1 delegate before making new blocks. A pre-capture leaf
-/// retains its original hot hull rejection, with negative proofs kept cold.
+/// Off, Eager and GEN1 delegate before making new blocks, and so does a leaf
+/// compiled before any collection observation: its stores keep main's hull
+/// gate and refuse to the collection shim, which completes any later
+/// observation-dependent store. Cold proof blocks there would only perturb
+/// the hot loop's register allocation.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_explicit_cons_store_with_proof(
     fb: &mut FunctionBuilder,
@@ -494,7 +486,7 @@ pub(crate) fn emit_explicit_cons_store_with_proof(
         .refs
         .group_enabled(super::shim_refs::ShimGroup::CollectionObservationGate)
         && !rt.generational_enabled();
-    if !observed {
+    if !observed || !rt.refs.observation_exclusions_enabled() {
         emit_inline_cons_store_with_proof(fb, rt, cell, value, is_cdr, slow, res, merge, proof);
         return;
     }
@@ -507,58 +499,11 @@ pub(crate) fn emit_explicit_cons_store_with_proof(
         fb.seal_block(typed);
     }
     note_inline_site();
-    let hull_first = !rt.refs.observation_exclusions_enabled();
-    let mut heap = if hull_first {
-        // Before captures, keep the original hoisted heap admission.
-        heap_ptr(fb, rt)
-    } else {
-        // The extra interactive refusal paths must not retain the entry's
-        // heap SSA across the loop. This Context owns the stable box and no
-        // callback or safepoint intervenes in this store site.
-        let vmctx = fb.use_var(rt.vmctx_var);
-        load_heap_ptr(fb, vmctx)
-    };
-    if hull_first {
-        let probe = fb.create_block();
-        fb.set_cold_block(probe);
-        let owner = iadd_imm_p(fb, cell, -(TAG_CONS as i64));
-        emit_explicit_cons_hull_admission(fb, heap, owner, cell, value, is_cdr, res, merge, probe);
-        fb.switch_to_block(probe);
-        fb.seal_block(probe);
-        // The Context's aligned heap Box pointer is immutable during execution.
-        // An atomic reload keeps this cold SSA distinct from the hot hull load:
-        // ordinary redundant-load elimination would extend the hot heap's live
-        // range into these probes. On x86-64 this is a MOV, reached only after
-        // hull refusal, with no writer, callback or safepoint before the store.
-        // Allocating bodies already keep the heap SSA live for their hot
-        // region bump. Retain that operand here rather than extending vmctx's
-        // cold lifetime and spilling the loop's saved values.
-        if !rt.inline_cons_allocating_body {
-            let vmctx = fb.use_var(rt.vmctx_var);
-            let address = iadd_imm_p(fb, vmctx, CONTEXT_TAGGED_HEAP_OFFSET as i64);
-            heap = fb
-                .ins()
-                .atomic_load(types::I64, MemFlagsData::trusted(), address);
-        }
-    }
-    let flags = MemFlagsData::new().with_notrap();
-    if hull_first {
-        // Ordinary ALL publishes no negative proofs. Reject that common
-        // cold state before untagging the owner or testing an empty range.
-        // The publisher derives this byte from the actual proof words.
-        // Publication cannot interleave this no-safepoint site. Load the
-        // individual words only if a proof exists; all admission predicates
-        // below remain unchanged.
-        let present = fb
-            .ins()
-            .load(types::I8, flags, heap, HEAP_JIT_CONS_PROOFS as i32);
-        let enabled = icmp_imm_p(fb, IntCC::NotEqual, present, 0);
-        let probes = fb.create_block();
-        fb.set_cold_block(probes);
-        fb.ins().brif(enabled, probes, &[], slow, &[]);
-        fb.switch_to_block(probes);
-        fb.seal_block(probes);
-    }
+    // The extra interactive refusal paths must not retain the entry's heap
+    // SSA across the loop. This Context owns the stable box and no callback
+    // or safepoint intervenes in this store site.
+    let vmctx = fb.use_var(rt.vmctx_var);
+    let heap = load_heap_ptr(fb, vmctx);
     for (probe_index, probe) in rt.cons_store_probe_order.probes().into_iter().enumerate() {
         let flags = MemFlagsData::new().with_notrap();
         let admitted = match probe {
@@ -566,7 +511,7 @@ pub(crate) fn emit_explicit_cons_store_with_proof(
                 let single = fb
                     .ins()
                     .load(types::I64, flags, heap, HEAP_JIT_SINGLE_CONS as i32);
-                let owner = if !hull_first && probe_index == 0 {
+                let owner = if probe_index == 0 {
                     iadd_imm_p(fb, cell, -(TAG_CONS as i64))
                 } else {
                     // Keep refusal-path addresses separate from the hot
@@ -576,11 +521,11 @@ pub(crate) fn emit_explicit_cons_store_with_proof(
                 fb.ins().icmp(IntCC::Equal, owner, single)
             }
             ConsStoreProbe::Range => {
-                let owner = if !hull_first && probe_index == 0 {
+                let owner = if probe_index == 0 {
                     iadd_imm_p(fb, cell, -(TAG_CONS as i64))
                 } else {
-                    // This owner has passed the tag/proof guard. Masking is
-                    // equivalent, but keeps cold raw-owner SSA separate.
+                    // This owner has passed the tag guard. Masking is
+                    // equivalent, but keeps refusal-path owner SSA separate.
                     band_imm_p(fb, cell, !(TAG_MASK as i64))
                 };
                 let len = fb
@@ -596,10 +541,6 @@ pub(crate) fn emit_explicit_cons_store_with_proof(
         };
         let store = fb.create_block();
         let next_probe = fb.create_block();
-        if hull_first {
-            fb.set_cold_block(store);
-            fb.set_cold_block(next_probe);
-        }
         fb.ins().brif(admitted, store, &[], next_probe, &[]);
         fb.switch_to_block(store);
         fb.seal_block(store);
@@ -607,18 +548,14 @@ pub(crate) fn emit_explicit_cons_store_with_proof(
         fb.switch_to_block(next_probe);
         fb.seal_block(next_probe);
     }
-    if hull_first {
-        fb.ins().jump(slow, &[]);
-    } else {
-        let owner = band_imm_p(fb, cell, !(TAG_MASK as i64));
-        emit_explicit_cons_hull_admission(fb, heap, owner, cell, value, is_cdr, res, merge, slow);
-    }
+    let owner = band_imm_p(fb, cell, !(TAG_MASK as i64));
+    emit_explicit_cons_hull_admission(fb, heap, owner, cell, value, is_cdr, res, merge, slow);
     #[cfg(debug_assertions)]
     INLINE_HEAP_STORES_EMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Keep each hull-outside admission adjacent to its store too. The rejected
-/// edge is the caller's cold proof probes or its existing collection shim.
+/// edge is the caller's existing collection shim.
 #[allow(clippy::too_many_arguments)]
 fn emit_explicit_cons_hull_admission(
     fb: &mut FunctionBuilder,
