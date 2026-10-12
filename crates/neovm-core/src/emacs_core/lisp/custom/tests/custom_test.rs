@@ -1183,3 +1183,22 @@ fn setq_default_works_on_new_variable() {
     let results = bootstrap_eval_all(r#"(setq-default new-var 100) new-var"#);
     assert_eq!(results[1], "OK 100");
 }
+
+/// GNU `Fmake_variable_buffer_local` returns a `DEFVAR_PER_BUFFER` variable
+/// unchanged (`src/data.c:2225-2226`): it stays a per-buffer slot, not a
+/// BLV. The values Lisp sees are GNU's oracle expectation
+/// (`oracle_make_variable_buffer_local_leaves_per_buffer_slot_alone`); this
+/// pins the representation behind them.
+#[test]
+fn make_variable_buffer_local_leaves_per_buffer_slots_alone() {
+    let mut ev = Context::new();
+    ev.eval_str("(progn (make-variable-buffer-local 'fill-column) (setq fill-column 33))")
+        .expect("evaluates");
+    assert_eq!(
+        ev.obarray
+            .get_by_id(intern("fill-column"))
+            .expect("symbol")
+            .redirect(),
+        crate::emacs_core::symbol::SymbolRedirect::Forwarded
+    );
+}

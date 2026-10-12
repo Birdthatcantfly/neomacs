@@ -112,6 +112,27 @@ fn oracle_buffer_local_value_in_different_buffer() {
 }
 
 #[test]
+fn oracle_make_variable_buffer_local_leaves_per_buffer_slot_alone() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+
+    // GNU src/data.c:Fmake_variable_buffer_local returns a DEFVAR_PER_BUFFER
+    // variable unchanged before its constant check: it already is
+    // per-buffer, so `setq` still makes a buffer-local value and the default
+    // stays put.
+    let form = r#"
+(list (make-variable-buffer-local 'fill-column)
+      (with-temp-buffer
+        (setq fill-column 33)
+        (list fill-column
+              (default-value 'fill-column)
+              (local-variable-p 'fill-column)
+              (local-variable-if-set-p 'fill-column))))
+"#;
+    let expect = expect_test::expect![[r#""OK (fill-column (33 70 t t))""#]];
+    crate::common::assert_oracle_parity_expect(form, expect);
+}
+
+#[test]
 fn oracle_local_variable_if_set_auto_local_alias_and_forwarded_edges() {
     return_if_neovm_enable_oracle_proptest_not_set!();
 

@@ -102,6 +102,12 @@ pub(crate) fn builtin_make_variable_buffer_local_with_state(
     // GNU signals from inside the redirect switch, BEFORE the constant check
     // below (`src/data.c:2220-2223` then `:2230-2231`).
     keyboard_variable_may_not_be_buffer_local(obarray, resolved_id, args[0])?;
+    // A per-buffer variable already is one: GNU returns it unchanged, before
+    // the constant check (`src/data.c:2225-2226`).
+    if obarray.forward_type(resolved_id) == Some(crate::emacs_core::forward::LispFwdType::BufferObj)
+    {
+        return Ok((args[0], resolved_id));
+    }
     if obarray.is_constant_id(resolved_id) {
         return Err(signal(LispCondition::SettingConstant, vec![args[0]]));
     }
