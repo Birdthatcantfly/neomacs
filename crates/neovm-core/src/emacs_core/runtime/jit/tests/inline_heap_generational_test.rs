@@ -683,3 +683,62 @@ fn gen1_optimized_heap_value_stores_remember_their_young_children() {
         assert_eq!(young.cons_car(), marker, "the young child survived");
     }
 }
+
+/// A proven fixnum makes no old-to-young edge, so GEN1 emits no remembered-set
+/// filter for it. The store still overwrites a reference a concurrent mark may
+/// need: the shared owner window must send it to the shim, which logs the old
+/// car as the SATB pre-image. GEN0 compiles the same leaf without the fact.
+#[test]
+fn proven_fixnum_store_logs_its_pointer_pre_image_during_a_concurrent_mark() {
+    for generational in [false, true] {
+        let mut context = context(generational);
+        let (leaf, _) = opt_store_leaf(vec![
+            Op::StackRef(1),
+            Op::StackRef(1),
+            Op::Add1,
+            Op::Setcar,
+            Op::Return,
+        ]);
+        let owner = Value::cons(Value::NIL, Value::NIL);
+        context.assign("u34-satb-owner", owner);
+        let old = context.eval_str("(list 'old)").expect("old child");
+        crate::tagged::mutate::set_cons_car(owner, old);
+        context.gc_collect_exact();
+        assert_eq!(
+            context.tagged_heap.value_is_old_for_test(owner),
+            generational
+        );
+        assert_eq!(owner.cons_car(), old);
+
+        context.tagged_heap.set_concurrent_active_for_test(true);
+        let before = cons_shims();
+        assert_eq!(
+            native(&mut context, &leaf, &[owner, Value::make_int(6)]),
+            Value::make_int(7)
+        );
+        let logged = context.tagged_heap.take_satb_shared_for_test();
+        context.tagged_heap.set_concurrent_active_for_test(false);
+        assert_eq!(
+            cons_shims() - before,
+            1,
+            "a mark sends the store to the shim"
+        );
+        assert!(
+            logged.iter().any(|value| value.bits() == old.bits()),
+            "generational={generational}: the overwritten car is logged: {logged:?}"
+        );
+        assert_eq!(owner.cons_car(), Value::make_int(7));
+
+        let before = cons_shims();
+        assert_eq!(
+            native(&mut context, &leaf, &[owner, Value::make_int(8)]),
+            Value::make_int(9)
+        );
+        assert_eq!(
+            cons_shims(),
+            before,
+            "outside a mark the store stays inline"
+        );
+        assert!(context.tagged_heap.take_satb_shared_for_test().is_empty());
+    }
+}
