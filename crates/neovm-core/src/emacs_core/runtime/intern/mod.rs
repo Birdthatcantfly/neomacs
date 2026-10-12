@@ -2031,7 +2031,8 @@ thread_local! {
     // Cell, not RefCell: read on EVERY cached symbol query (epoch check),
     // and a u64 needs no borrow flag.
     static THREAD_CACHE_EPOCH: Cell<u64> = const { Cell::new(0) };
-    static INTERN_STR_CACHE: RefCell<FxHashMap<&'static str, SymId>> = RefCell::new(FxHashMap::default());
+    static INTERN_STR_CACHE: RefCell<HashMap<&'static str, SymId, FxBuildHasher>> =
+        RefCell::new(HashMap::with_hasher(FxBuildHasher));
     static SYMBOL_CACHE: RefCell<Vec<SymbolCacheEntry>> = const { RefCell::new(Vec::new()) };
     static NAME_CANONICAL_SYMBOL_CACHE: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
@@ -2119,11 +2120,40 @@ fn ensure_thread_local_cache_epoch_current() {
     });
 }
 
+/// A paired spelling/hash query for the private native positive cache.
+///
+/// `&str` supplies only the ordinary UTF-8 domain. Supplied-count Lisp names
+/// keep their separate registry APIs; cache admission already proves the
+/// canonical atom's bytes and computed character count. Hash exactly as a
+/// stored `&'static str`, not as its byte slice.
+#[derive(Debug)]
+struct NativeCacheQuery<'a> {
+    name: &'a str,
+    hash: u64,
+}
+
+impl<'a> From<&'a str> for NativeCacheQuery<'a> {
+    #[inline(always)]
+    fn from(name: &'a str) -> Self {
+        Self {
+            name,
+            hash: FxBuildHasher.hash_one(name),
+        }
+    }
+}
+
 // Preserve the cache hit inside both ordinary intern and reader lookup;
 // outlining this small helper adds a call for every name probe.
 #[inline(always)]
 fn thread_local_interned_str(s: &str) -> Option<SymId> {
-    match INTERN_STR_CACHE.try_with(|cache| cache.borrow().get(s).copied()) {
+    let query = NativeCacheQuery::from(s);
+    match INTERN_STR_CACHE.try_with(|cache| {
+        cache
+            .borrow()
+            .raw_entry()
+            .from_hash(query.hash, |candidate| *candidate == query.name)
+            .map(|(_, id)| *id)
+    }) {
         Ok(sym_id) => sym_id,
         Err(error) => panic_intern_str_cache_access(error),
     }

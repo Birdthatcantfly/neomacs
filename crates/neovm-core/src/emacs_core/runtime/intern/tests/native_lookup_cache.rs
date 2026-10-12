@@ -46,8 +46,20 @@ fn cached_native_lookup_does_not_acquire_the_registry_lock() {
     use std::sync::mpsc;
     use std::time::Duration;
 
-    let id = intern("gdj-native-lookup-cache-lock-free-hit");
-    let canonical = global_symbol_registry().read().resolve(id);
+    let cached: Vec<_> = [
+        "",
+        "gdj-native-lookup-cache-lock-free-hit",
+        "gdj-native-lookup-cache-lock-free-hit-λ",
+        "gdj-native-lookup-cache-lock-free-hit\0tail",
+    ]
+    .into_iter()
+    .map(|name| {
+        let id = intern(name);
+        let canonical = global_symbol_registry().read().resolve(id);
+        (id, canonical)
+    })
+    .collect();
+    let expected: Vec<_> = cached.iter().map(|(id, _)| Some(*id)).collect();
     let (send, receive) = mpsc::channel();
     let registry = global_symbol_registry().write();
     let epoch = symbol_registry_epoch_value();
@@ -56,9 +68,14 @@ fn cached_native_lookup_does_not_acquire_the_registry_lock() {
         // already validated immutable atom in this worker's existing cache;
         // no Lisp state or heap borrow crosses the thread boundary.
         ensure_thread_local_cache_epoch_current();
-        thread_local_record_interned_str(canonical, id);
-        let answer = lookup_interned(canonical);
-        send.send(answer).expect("test receiver remains alive");
+        for &(id, canonical) in &cached {
+            thread_local_record_interned_str(canonical, id);
+        }
+        let answers: Vec<_> = cached
+            .iter()
+            .map(|(_, canonical)| lookup_interned(canonical))
+            .collect();
+        send.send(answers).expect("test receiver remains alive");
     });
     let answer = receive.recv_timeout(Duration::from_secs(2));
     // With epoch publication inside the write guard, unrelated uninterns
@@ -71,7 +88,7 @@ fn cached_native_lookup_does_not_acquire_the_registry_lock() {
     assert_eq!(after, epoch);
     assert_eq!(
         answer.expect("cache hit must finish while lock is held"),
-        Some(id)
+        expected
     );
 }
 
