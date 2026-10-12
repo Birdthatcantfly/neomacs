@@ -1046,6 +1046,49 @@ impl ForwardedArm<'_, '_> {
     }
 }
 
+/// Thread projection (Phase 0 step 2): every mutable arm but an alias moves
+/// to `Forwarded` over its projection descriptor's per-buffer header, the
+/// canonical record keeping what the cell held. Test-only until stopped
+/// admission exists.
+#[cfg(test)]
+impl PlainArm<'_, '_> {
+    pub(super) fn project_thread(
+        self,
+        projection: &'static crate::emacs_core::forward::ThreadProjectionDescriptor,
+    ) {
+        self.write.publish(
+            NewTag::Set(SymbolRedirect::Forwarded),
+            CellWord::forwarded(projection.header()),
+        );
+    }
+}
+
+#[cfg(test)]
+impl LocalizedArm<'_, '_> {
+    /// The one move out of `Localized`: the record stays in the obarray's
+    /// pool, named by the projection's canonical storage.
+    pub(super) fn project_thread(
+        self,
+        projection: &'static crate::emacs_core::forward::ThreadProjectionDescriptor,
+    ) {
+        self.write.publish(
+            NewTag::Set(SymbolRedirect::Forwarded),
+            CellWord::forwarded(projection.header()),
+        );
+    }
+}
+
+#[cfg(test)]
+impl ForwardedArm<'_, '_> {
+    pub(super) fn project_thread(
+        self,
+        projection: &'static crate::emacs_core::forward::ThreadProjectionDescriptor,
+    ) {
+        self.write
+            .publish(NewTag::Keep, CellWord::forwarded(projection.header()));
+    }
+}
+
 // ===========================================================================
 // The GC's reader
 // ===========================================================================

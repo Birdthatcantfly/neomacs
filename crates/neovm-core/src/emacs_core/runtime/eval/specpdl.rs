@@ -616,7 +616,7 @@ impl Context {
                         Ok(store) => store.canonical_value(),
                         Err(error) => return Err(forward_store_signal(error, value)),
                     };
-                    if let Some(slot) = crate::buffer::buffer::BufferSlot::from_u16(buf_fwd.offset)
+                    if let Some(slot) = buf_fwd.buffer_slot()
                         && let Some(buf_id) = self.buffers.current_buffer_id()
                         && let Some(buf) = self.buffers.get_mut(buf_id)
                     {
@@ -785,8 +785,7 @@ impl Context {
         {
             if let Some(fwd) = forwarded {
                 if let Some(buf_fwd) = fwd.as_buffer_obj_fwd() {
-                    let Some(slot) = crate::buffer::buffer::BufferSlot::from_u16(buf_fwd.offset)
-                    else {
+                    let Some(slot) = buf_fwd.buffer_slot() else {
                         return Ok(());
                     };
                     let off = slot.index();

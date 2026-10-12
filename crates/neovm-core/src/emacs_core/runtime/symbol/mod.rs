@@ -2896,6 +2896,48 @@ impl Obarray {
         installed
     }
 
+    /// Project `id`'s variable to owner-local bindings: its cell becomes
+    /// `Forwarded` over a descriptor TABLE issues (a per-buffer header no
+    /// buffer has), whose canonical record keeps the cell's logical storage,
+    /// and its host-projection bit is set so every checked writer refuses
+    /// it, as stopped admission will require. `None`, changing nothing, for
+    /// an alias (it resolves to its base) or a variable already projected.
+    ///
+    /// Test-only: no production path converts a symbol yet.
+    #[cfg(test)]
+    pub(crate) fn project_thread_variable_for_test(
+        &mut self,
+        id: SymId,
+        table: &mut crate::emacs_core::forward::ThreadProjectionTable,
+    ) -> Option<&'static crate::emacs_core::forward::ThreadProjectionDescriptor> {
+        use crate::emacs_core::forward::CanonicalStorage;
+        let projection = {
+            let mut write = self.cell_write_ensure(id);
+            match write.arm() {
+                ArmMut::Plain(plain) => {
+                    let projection = table.project_for_test(CanonicalStorage::plain(plain.value()));
+                    plain.project_thread(projection);
+                    projection
+                }
+                ArmMut::Localized(local) => {
+                    let projection =
+                        table.project_for_test(CanonicalStorage::localized(local.blv()));
+                    local.project_thread(projection);
+                    projection
+                }
+                ArmMut::Forwarded(forwarded) => {
+                    let canonical = CanonicalStorage::forwarded(forwarded.descriptor())?;
+                    let projection = table.project_for_test(canonical);
+                    forwarded.project_thread(projection);
+                    projection
+                }
+                ArmMut::Alias(_) => return None,
+            }
+        };
+        self.mark_runtime_projected_id(id);
+        Some(projection)
+    }
+
     /// Install a GNU `Lisp_Boolfwd`-equivalent descriptor on a symbol.
     /// Every non-nil write becomes native `true`, and reads expose only `t`
     /// or `nil`, matching `do_symval_forwarding` / `store_symval_forwarding`

@@ -4061,9 +4061,7 @@ pub(crate) fn builtin_variable_binding_locus(
                 if let Some(buf) = ctx.buffers.current_buffer() {
                     let is_local = {
                         if let Some(buf_fwd) = fwd.as_buffer_obj_fwd() {
-                            let Some(slot) =
-                                crate::buffer::buffer::BufferSlot::from_u16(buf_fwd.offset)
-                            else {
+                            let Some(slot) = buf_fwd.buffer_slot() else {
                                 return Ok(Value::NIL);
                             };
                             let flags_idx = buf_fwd.local_flags_idx;

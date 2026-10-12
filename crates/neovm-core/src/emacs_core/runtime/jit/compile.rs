@@ -4311,6 +4311,9 @@ mod tail_call_tests;
 #[path = "tests/compile_test.rs"]
 mod tests;
 #[cfg(test)]
+#[path = "tests/thread_projection_test.rs"]
+mod thread_projection_tests;
+#[cfg(test)]
 #[path = "tests/varref_inline_test.rs"]
 mod varref_inline_tests;
 

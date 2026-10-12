@@ -191,7 +191,7 @@ pub(crate) fn builtin_make_local_variable(
             .get_by_id(resolved)
             .and_then(|s| s.forwarded_descriptor())
             .and_then(|fwd| fwd.as_buffer_obj_fwd())
-            .and_then(|buf_fwd| crate::buffer::buffer::BufferSlot::from_u16(buf_fwd.offset));
+            .and_then(|buf_fwd| buf_fwd.buffer_slot());
         if let Some(slot) = buf_objfwd {
             if let Some(buf_id) = ctx.buffers.current_buffer_id()
                 && let Some(buf) = ctx.buffers.get_mut(buf_id)
@@ -566,8 +566,7 @@ pub(crate) fn builtin_kill_local_variable_impl(
             .and_then(|s| s.forwarded_descriptor())
             .and_then(|fwd| fwd.as_buffer_obj_fwd())
             .and_then(|buf_fwd| {
-                crate::buffer::buffer::lookup_buffer_slot(resolved_name)
-                    .zip(crate::buffer::buffer::BufferSlot::from_u16(buf_fwd.offset))
+                crate::buffer::buffer::lookup_buffer_slot(resolved_name).zip(buf_fwd.buffer_slot())
             });
         if let Some((info, slot)) = forwarded_slot {
             let offset = slot.index();

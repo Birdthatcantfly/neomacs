@@ -6805,8 +6805,7 @@ impl<'a> Vm<'a> {
                 .and_then(|fwd| fwd.as_buffer_obj_fwd());
             {
                 if let Some(buf_fwd) = buf_fwd {
-                    let Some(slot) = crate::buffer::buffer::BufferSlot::from_u16(buf_fwd.offset)
-                    else {
+                    let Some(slot) = buf_fwd.buffer_slot() else {
                         return Err(signal(
                             "error",
                             vec![Value::string("Invalid buffer slot offset")],

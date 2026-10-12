@@ -5944,9 +5944,9 @@ impl Context {
             .and_then(|fwd| fwd.as_buffer_obj_fwd())
             && let Some(buf_id) = self.buffers.current_buffer_id()
         {
-            let offset = buf_fwd.offset as usize;
+            let offset = buf_fwd.slot_index();
             if let Some(buf) = self.buffers.get_mut(buf_id)
-                && offset < buf.slots.len()
+                && let Some(offset) = offset.below(buf.slots.len())
             {
                 buf.slots[offset] = value;
                 self.refresh_gc_runtime_settings_after_change_by_id(sym_id);
@@ -6024,7 +6024,7 @@ impl Context {
         sym: &crate::emacs_core::symbol::LispSymbol,
     ) -> Option<Value> {
         let buf_fwd = sym.forwarded_descriptor()?.as_buffer_obj_fwd()?;
-        let slot = crate::buffer::buffer::BufferSlot::from_u16(buf_fwd.offset)?;
+        let slot = buf_fwd.buffer_slot()?;
         let off = slot.index();
         if let Some(buf) = self.buffers.current_buffer() {
             let local = buf_fwd.local_flags_idx < 0 || buf.slot_local_flag(slot);
@@ -7726,6 +7726,9 @@ mod varset_plain_fast_path_tests;
 #[cfg(test)]
 #[path = "tests/cconv_memo_test.rs"]
 mod cconv_memo_tests;
+#[cfg(test)]
+#[path = "tests/thread_projection_readers_test.rs"]
+mod thread_projection_reader_tests;
 #[cfg(test)]
 #[path = "tests/var_fast_test.rs"]
 mod var_fast_tests;

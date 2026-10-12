@@ -41,6 +41,10 @@ struct World {
     coding_systems: Box<UnsafeCell<CodingSystemManager>>,
     macro_perf_stats: Box<UnsafeCell<MacroPerfStats>>,
     buffers: Box<UnsafeCell<BufferStorage>>,
+    /// Owner-local variable slot assignments (Phase 0 step 2). Test-only
+    /// until stopped admission exists; no view or Context field reaches it.
+    #[cfg(test)]
+    thread_projections: std::cell::RefCell<crate::emacs_core::forward::ThreadProjectionTable>,
 }
 
 impl fmt::Debug for World {
@@ -949,6 +953,8 @@ impl WorldStorageBuilder {
             coding_systems: Box::new(UnsafeCell::new(self.coding_systems)),
             macro_perf_stats: Box::new(UnsafeCell::new(self.macro_perf_stats)),
             buffers,
+            #[cfg(test)]
+            thread_projections: Default::default(),
         }));
         // SAFETY: rederive the upstream TLS installation from the finalized
         // heap cell before any allocation-capable Context setup resumes. All
@@ -1029,6 +1035,49 @@ impl WorldStorageBuilder {
                 )
             },
         }
+    }
+}
+
+/// Thread-projection hooks for tests (Phase 0 step 2): no production path
+/// projects a variable yet.
+#[cfg(test)]
+impl Context {
+    /// Project `id`'s variable through this World's table
+    /// (`Obarray::project_thread_variable_for_test`, a redirect change and
+    /// so a canonical-changing phase), rooting a canonical plain word with an
+    /// owned-roots lease the table keeps.
+    pub(crate) fn project_thread_variable_for_test(
+        &mut self,
+        id: SymId,
+    ) -> Option<&'static crate::emacs_core::forward::ThreadProjectionDescriptor> {
+        let world = Arc::clone(&self.obarray.lease.0);
+        let mut table = world.thread_projections.borrow_mut();
+        let projection = self.obarray.with_dispatch_write(|obarray| {
+            obarray.project_thread_variable_for_test(id, &mut table)
+        })?;
+        if let Some(value) = projection.canonical().owned_value() {
+            table.retain_roots(self.retain_gc_roots([value]));
+        }
+        Some(projection)
+    }
+
+    /// The projection CELL's header heads, resolved by the World's table.
+    pub(crate) fn thread_projection_for_test(
+        &self,
+        id: SymId,
+    ) -> Option<&'static crate::emacs_core::forward::ThreadProjectionDescriptor> {
+        let fwd = self.obarray.get_by_id(id)?.forwarded_descriptor()?;
+        self.obarray
+            .lease
+            .0
+            .thread_projections
+            .borrow()
+            .projection(fwd)
+    }
+
+    /// How many projections this World's table has issued.
+    pub(crate) fn thread_projection_count_for_test(&self) -> usize {
+        self.obarray.lease.0.thread_projections.borrow().len()
     }
 }
 

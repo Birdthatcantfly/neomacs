@@ -70,6 +70,12 @@ use crate::buffer::buffer::BufferSlotPredicateError;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(test)]
+pub use thread_projection::ThreadProjectionTable;
+pub use thread_projection::{
+    BuiltinForwarder, CanonicalBlv, CanonicalPlainCell, CanonicalStorage, THREAD_PROJECTION_OFFSET,
+    ThreadProjectionDescriptor, TlsIndex,
+};
 
 /// Discriminant for [`LispFwd`]. Mirrors GNU `enum Lisp_Fwd_Type`
 /// (`src/lisp.h:3046-3055`). Always read the first field of any `*Fwd`
@@ -734,7 +740,12 @@ impl LispObjFwd {
 pub struct LispBufferObjFwd {
     ty: LispFwdType,
     /// Index into `Buffer::slots`. Mirrors GNU `Lisp_Buffer_Objfwd::offset`.
-    pub offset: u16,
+    /// Private: a thread projection's header carries
+    /// [`THREAD_PROJECTION_OFFSET`] here, which no buffer has, so the only
+    /// readers are the accessors below, each a check every slot access
+    /// already made ([`Self::buffer_slot`], [`Self::slot_index_below`],
+    /// [`Self::value_in`]).
+    offset: u16,
     /// Index into `buffer_local_flags` for "is this buffer-local in the
     /// current buffer?" tests. -1 means "always local everywhere",
     /// matching GNU's `PER_BUFFER_IDX(idx) == -1`.
@@ -751,7 +762,36 @@ pub struct LispBufferObjFwd {
 static_assertions::assert_impl_all!(LispBufferObjFwd: Copy, Clone, std::fmt::Debug);
 static_assertions::assert_not_impl_any!(LispBufferObjFwd: Send, Sync);
 
+/// A per-buffer forwarder's slot index, read but not yet checked: the only
+/// way to an index is [`Self::below`], the bounds test every raw slot-array
+/// access makes, so the thread-projection marker can never index storage.
+#[derive(Clone, Copy, Debug)]
+#[must_use]
+pub struct UncheckedSlotIndex(usize);
+
+impl UncheckedSlotIndex {
+    /// The index, when it is below LEN.
+    #[inline(always)]
+    pub fn below(self, len: usize) -> Option<usize> {
+        (self.0 < len).then_some(self.0)
+    }
+}
+
 impl LispBufferObjFwd {
+    /// The buffer slot this forwarder names: `BufferSlot::from_u16` of its
+    /// offset, `None` for an index no buffer has (a thread projection's
+    /// marker).
+    #[inline(always)]
+    pub fn buffer_slot(&self) -> Option<crate::buffer::buffer::BufferSlot> {
+        crate::buffer::buffer::BufferSlot::from_u16(self.offset)
+    }
+
+    /// The offset as a slot index, usable only through its bounds check.
+    #[inline(always)]
+    pub fn slot_index(&self) -> UncheckedSlotIndex {
+        UncheckedSlotIndex(self.offset as usize)
+    }
+
     /// GNU `do_symval_forwarding`'s `Lisp_Fwd_Buffer_Obj` arm plus
     /// `PER_BUFFER_VALUE_P` (`src/data.c:1345-1350`, `buffer.h:1640`): the
     /// value this slot reads in the buffer whose slot array is SLOTS and whose
@@ -949,6 +989,14 @@ pub fn alloc_buffer_objfwd(
     predicate: crate::buffer::buffer::BufferSlotPredicate,
     default: Value,
 ) -> &'static LispBufferObjFwd {
+    // A real slot never carries the thread-projection marker
+    // (`thread_projection::THREAD_PROJECTION_OFFSET`, const-asserted above
+    // every slot index); the marker is what makes a projection's header
+    // fail every per-buffer slot access.
+    debug_assert!(
+        usize::from(offset) < crate::buffer::buffer::BUFFER_SLOT_COUNT,
+        "per-buffer slot offset {offset} out of range"
+    );
     let fwd = Box::new(LispBufferObjFwd {
         ty: LispFwdType::BufferObj,
         offset,
@@ -1011,6 +1059,8 @@ pub fn alloc_intfwd(initial: LispInteger) -> &'static LispIntFwd {
     }))
 }
 
+mod thread_projection;
+
 #[cfg(test)]
 #[path = "tests/forward_test.rs"]
 mod tests;
@@ -1022,3 +1072,7 @@ mod gnu_parity_tests;
 #[cfg(test)]
 #[path = "tests/atomic_forward_test.rs"]
 mod atomic_tests;
+
+#[cfg(test)]
+#[path = "tests/thread_projection_test.rs"]
+mod thread_projection_tests;
