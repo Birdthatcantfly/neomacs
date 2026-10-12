@@ -9755,8 +9755,6 @@ pub(crate) fn re_search(
     syntax: &dyn SyntaxLookup,
     point: usize,
 ) -> Option<(usize, MatchRegisters)> {
-    let match_syntax = MatchSyntax::for_pattern(pattern, syntax);
-    let syntax = &match_syntax;
     let text_len = text.len();
     // GNU regex-emacs.c:3483: `if (fastmap && startpos < total_size &&
     // !bufp->can_be_null)` — the fastmap skip is gated ONLY on having an
@@ -9845,7 +9843,7 @@ pub(crate) fn re_search(
     let mut dfa_lease = if !dfa_enabled || dfa_cold_pending {
         None
     } else {
-        dfa::DfaLease::acquire(pattern, syntax.lookup, dfa_max_stop)
+        dfa::DfaLease::acquire(pattern, syntax, dfa_max_stop)
     };
     // Never-built successful searches have no lease under the cold path,
     // so they never read the first-step knob. A newly built lease renews
@@ -9854,6 +9852,11 @@ pub(crate) fn re_search(
         .as_ref()
         .is_some_and(|lease| lease.inline_first_step_enabled());
     let mut dfa_cold_heat = dfa::ColdSearchHeat::default();
+    // Literal searches above never consume boundary coordinates. Keep the
+    // invocation's typed plan out of their path and out of DFA setup, then
+    // select it once for all candidates that enter either matcher.
+    let match_syntax = MatchSyntax::for_pattern(pattern, syntax);
+    let syntax = &match_syntax;
     macro_rules! try_candidate {
         ($pos:expr, $stop:expr) => {{
             let found = match dfa_lease.as_mut() {
