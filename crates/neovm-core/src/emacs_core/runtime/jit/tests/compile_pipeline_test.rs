@@ -141,6 +141,94 @@ pub(crate) fn mask_code_text(text: &str) -> String {
     out
 }
 
+/// Hex immediates in `[ADDRESS_FLOOR, ADDRESS_CEILING)` are runtime
+/// addresses (shim entries, statics, heap boxes, leaf buffers). The window
+/// covers every platform and allocator: macOS arm64 maps the heap and the
+/// binary from 2^32 up, Linux x86-64 sits near 2^46..2^47, Linux arm64 reaches
+/// 2^48. Constants the lowering emits that are not addresses (tag and payload
+/// masks, fixnum range bounds, sign-extended words) are outside it or are
+/// single-bit / all-ones patterns, which [`is_runtime_address`] excludes.
+// 64-bit Mach-O reserves the low 4 GiB as __PAGEZERO, so no macOS user mapping
+// sits below 2^32 (lowest seen: statics at 0x1_08a7_4b70) unless the binary is
+// linked with a custom -pagezero_size.
+const ADDRESS_FLOOR: u64 = 1 << 32;
+const ADDRESS_CEILING: u64 = 1 << 48;
+
+fn is_runtime_address(value: u64) -> bool {
+    (ADDRESS_FLOOR..ADDRESS_CEILING).contains(&value)
+        && !value.is_power_of_two()
+        && value & value.wrapping_add(1) != 0
+}
+
+/// Rewrite every runtime-address immediate in CLIF `text` to `0xADDR<n>`,
+/// where `n` numbers the distinct addresses by first appearance. Two dumps of
+/// one body then compare equal wherever their address operands have the same
+/// shape (same address reused, same count of distinct addresses), whatever
+/// the platform put the heap at; a changed constant, instruction or
+/// address-sharing pattern still differs. Cranelift prints immediates of
+/// 10000 or more in hex with `_` digit groups (`0x7fff_e833_27a0`).
+pub(crate) fn mask_runtime_addresses(text: &str) -> String {
+    let mut seen: Vec<u64> = Vec::new();
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("0x") {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + 2..];
+        let len = tail
+            .find(|c: char| !(c.is_ascii_hexdigit() || c == '_'))
+            .unwrap_or(tail.len());
+        let address = u64::from_str_radix(&tail[..len].replace('_', ""), 16)
+            .ok()
+            .filter(|&value| is_runtime_address(value));
+        match address {
+            Some(value) => {
+                let index = seen.iter().position(|&v| v == value).unwrap_or_else(|| {
+                    seen.push(value);
+                    seen.len() - 1
+                });
+                out.push_str(&format!("0xADDR{index}"));
+            }
+            None => out.push_str(&rest[at..at + 2 + len]),
+        }
+        rest = &tail[len..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Addresses from any platform's heap or binary mapping mask to the same
+/// first-appearance names; constants that are not addresses survive.
+#[test]
+fn mask_runtime_addresses_hides_addresses_of_every_platform() {
+    let linux = "v1 = iconst.i64 0x7fff_e833_27a0\nv2 = iconst.i64 0x7fff_e833_27a8\nv3 = iconst.i64 0x7fff_e833_27a0";
+    let macos = "v1 = iconst.i64 0x1_0123_4560\nv2 = iconst.i64 0x1_0123_4568\nv3 = iconst.i64 0x1_0123_4560";
+    let arm_linux = "v1 = iconst.i64 0xffff_9abc_def0\nv2 = iconst.i64 0xffff_9abc_def8\nv3 = iconst.i64 0xffff_9abc_def0";
+    let want = "v1 = iconst.i64 0xADDR0\nv2 = iconst.i64 0xADDR1\nv3 = iconst.i64 0xADDR0";
+    for dump in [linux, macos, arm_linux] {
+        assert_eq!(mask_runtime_addresses(dump), want);
+    }
+}
+
+#[test]
+fn mask_runtime_addresses_keeps_constants_and_still_tells_dumps_apart() {
+    let constants = "iconst.i64 0x1fff_ffff_ffff_ffff\niconst.i64 0xffff_ffff\niconst.i64 0x1_0000_0000\niconst.i64 0x18\niconst.i64 4096";
+    assert_eq!(mask_runtime_addresses(constants), constants);
+    let base = "iconst.i64 0x7fff_e833_27a0\niconst.i64 0x7fff_e833_27a8";
+    // The same two addresses, but one reused: a different shape.
+    let reused = "iconst.i64 0x7fff_e833_27a0\niconst.i64 0x7fff_e833_27a0";
+    assert_ne!(mask_runtime_addresses(base), mask_runtime_addresses(reused));
+    // A changed non-address immediate or instruction is not hidden.
+    let other = "iconst.i64 0x7fff_e833_27a0\niconst.i64 0x7fff_e833_27a8\niconst.i64 0x1fff_ffff_ffff_fffe";
+    assert_ne!(
+        mask_runtime_addresses(&format!("{base}\niconst.i64 0x1fff_ffff_ffff_ffff")),
+        mask_runtime_addresses(other)
+    );
+    assert_ne!(
+        mask_runtime_addresses("iadd v1, v2"),
+        mask_runtime_addresses("isub v1, v2")
+    );
+}
+
 /// The register-allocated code of every leaf `compile` builds on this
 /// thread, one entry per leaf: `size=` plus the masked disassembly (the
 /// `NEOVM_JIT_DUMP_ASM` capture; addresses and bytes are dropped).

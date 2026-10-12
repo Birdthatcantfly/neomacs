@@ -6,7 +6,7 @@
 
 use crate::emacs_core::jit::compile::opt_census::SelectedTier;
 
-use super::compile_pipeline_tests::{captured_clif, function};
+use super::compile_pipeline_tests::{captured_clif, function, mask_runtime_addresses};
 use super::*;
 use crate::emacs_core::jit::bg::{BgMode, force_mode_for_test};
 use crate::emacs_core::jit::cache;
@@ -220,32 +220,6 @@ fn opt_array_native_range_off_preserves_t1_clif_even_eager_shims() {
     let _roots = Roots::new(&[arg]);
     let f = source();
     let answer = expected(&mut ctx, &f, &[arg]);
-    fn mask(text: &str) -> String {
-        // Established campaign policy: replace ONLY canonical pointer-valued
-        // hex literals 2^40..2^47; never integer tags/domain/overflow constants.
-        let mut out = String::new();
-        let bytes = text.as_bytes();
-        let mut at = 0;
-        while at < bytes.len() {
-            if bytes[at..].starts_with(b"0x") {
-                let mut end = at + 2;
-                while end < bytes.len() && (bytes[end].is_ascii_hexdigit() || bytes[end] == b'_') {
-                    end += 1;
-                }
-                let number = text[at + 2..end].replace('_', "");
-                if u64::from_str_radix(&number, 16)
-                    .is_ok_and(|n| ((1u64 << 40)..(1u64 << 47)).contains(&n))
-                {
-                    out.push_str("0xPTR");
-                    at = end;
-                    continue;
-                }
-            }
-            out.push(bytes[at] as char);
-            at += 1;
-        }
-        out
-    }
     for lazy in [true, false] {
         super::shim_refs::force_lazy_shims_for_test(lazy);
         force_opt_for_test(Some(OptMode::Off), Some(OptAdmit::ALL));
@@ -261,8 +235,8 @@ fn opt_array_native_range_off_preserves_t1_clif_even_eager_shims() {
         })
         .join("\n");
         assert_eq!(
-            mask(&off),
-            mask(&none),
+            mask_runtime_addresses(&off),
+            mask_runtime_addresses(&none),
             "range-off opt preserves old T1 import/order"
         );
         assert!(

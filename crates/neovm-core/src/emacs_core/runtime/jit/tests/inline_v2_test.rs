@@ -1,6 +1,7 @@
 //! P2.3's annotated fuser front and legacy-MIR refusal.
 use super::*;
 use crate::emacs_core::eval::Context;
+use crate::emacs_core::jit::compile::compile_pipeline_tests::mask_runtime_addresses;
 use crate::emacs_core::jit::compile::lowering;
 use crate::emacs_core::jit::compile::{self, Inline2Mode, NativeRun, force_inline2_for_test};
 use crate::emacs_core::value::LambdaParams;
@@ -168,29 +169,6 @@ fn inline_v2_refuses_legacy_mir_and_resumes_inner_chain() {
     assert_eq!(frames[0].stack, vec![arg, arg]);
 }
 
-fn mask_addresses(input: &str) -> String {
-    let mut output = String::new();
-    let mut rest = input;
-    while let Some(at) = rest.find("0x") {
-        output.push_str(&rest[..at]);
-        let tail = &rest[at + 2..];
-        let n = tail
-            .find(|c: char| !c.is_ascii_hexdigit() && c != '_')
-            .unwrap_or(tail.len());
-        let digits = tail[..n].replace('_', "");
-        let is_pointer = u64::from_str_radix(&digits, 16)
-            .is_ok_and(|bits| (0x100_0000_0000..=0x7fff_ffff_ffff).contains(&bits));
-        if is_pointer {
-            output.push_str("0xADDR");
-        } else {
-            output.push_str(&rest[at..at + 2 + n]);
-        }
-        rest = &tail[n..];
-    }
-    output.push_str(rest);
-    output
-}
-
 /// Compare off against the original baseline path explicitly: legacy
 /// fusion, feedback publication, then lower_leaf_full. The corpus covers
 /// arithmetic guards, branch/return rebasing and stack shuffles.
@@ -244,8 +222,8 @@ fn inline_v2_off_clif_matches_the_legacy_fuser_corpus() {
         .unwrap();
         lowering::force_clif_dump_for_test(None);
         assert_eq!(
-            mask_addresses(&std::fs::read_to_string(off_path).unwrap()),
-            mask_addresses(&std::fs::read_to_string(legacy_path).unwrap()),
+            mask_runtime_addresses(&std::fs::read_to_string(off_path).unwrap()),
+            mask_runtime_addresses(&std::fs::read_to_string(legacy_path).unwrap()),
             "corpus body {index}"
         );
     }

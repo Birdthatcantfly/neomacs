@@ -1156,32 +1156,6 @@ fn opt_gvn_native_list_bridge_retains_setcar_and_reuses_other_field() {
 // Baseline/candidate run every observable case before the CLIF assertion.
 // Threading: plans/roots/capture paths are invocation-owned compiler scratch.
 
-/// Mask ONLY positive canonical x86-64 userspace pointer immediates. The
-/// fixture has no mathematical or tagged literal in this range. Preserve all
-/// smaller constants, tag masks, PCs, opcodes, branches and SSA identities.
-fn coemit_mask_pointer_immediates(text: &str) -> String {
-    let mut output = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find("0x") {
-        output.push_str(&rest[..at]);
-        let suffix = &rest[at + 2..];
-        let end = suffix
-            .find(|c: char| !(c.is_ascii_hexdigit() || c == '_'))
-            .unwrap_or(suffix.len());
-        let token = &suffix[..end];
-        let value = u64::from_str_radix(&token.replace('_', ""), 16).ok();
-        if value.is_some_and(|v| (0x100_0000_0000..0x8000_0000_0000).contains(&v)) {
-            output.push_str("0xPOINTER");
-        } else {
-            output.push_str("0x");
-            output.push_str(token);
-        }
-        rest = &suffix[end..];
-    }
-    output.push_str(rest);
-    output
-}
-
 fn coemit_after_store_source(cdr: bool) -> (ByteCodeFunction, usize) {
     let mut p = Program::new(4); // p,x,bad,payload
     p.copy(0);
@@ -1257,7 +1231,10 @@ fn coemit_lower_capture(source: &ByteCodeFunction, plan: &ir::Func) -> (Compiled
         result = Some(lower(source, plan));
     });
     assert_eq!(clif.len(), 1, "one actual native Opt body");
-    (result.unwrap(), coemit_mask_pointer_immediates(&clif[0]))
+    (
+        result.unwrap(),
+        super::compile_pipeline_tests::mask_runtime_addresses(&clif[0]),
+    )
 }
 
 fn coemit_resume(
