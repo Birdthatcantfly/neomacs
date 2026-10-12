@@ -394,6 +394,7 @@ impl Frames {
                 rt,
                 cell,
                 value,
+                super::heap_inline::StoredValueProof::Dynamic,
                 matches!(op, Op::Setcdr),
                 deopt,
                 result,

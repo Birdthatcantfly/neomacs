@@ -33,6 +33,8 @@ mod sink_numeric_facts;
 mod sink_snapshot;
 #[path = "opt_sqrt_emission.rs"]
 mod sqrt_emission;
+#[path = "opt_store_facts.rs"]
+mod store_facts;
 
 /// Global variables carry only values crossing IR blocks; local float payloads
 /// remain unboxed until an actual edge or observable operation needs them.
@@ -87,6 +89,9 @@ pub(super) struct EmitContext<'a, 'b> {
     /// recipe versions. Never shared with runtime/TLS or another compilation.
     pub numeric_facts: sink_numeric_facts::NumericFacts,
     pub known_fixnum_slots: &'a HashMap<usize, Vec<bool>>,
+    /// Built by [`emit`] for GEN1 only, whose remembered-set barrier alone
+    /// reads stored-value immediacy. Compilation-owned compiler ids.
+    pub stored_values: store_facts::StoredValueFacts,
 }
 
 impl SsaValues {
@@ -848,6 +853,7 @@ fn returns_call_result(
 fn shared_operation(
     ctx: &mut EmitContext,
     local: &mut LocalValues,
+    id: ir::Inst,
     inst: &ir::InstData,
     live_after: &[ir::Value],
     returns_result: bool,
@@ -961,11 +967,18 @@ fn shared_operation(
         precise_snapshot(ctx, local, frame)?
     };
     let deopt_start = deopts.len();
-    let cons_proof = if checked_cons {
+    let owner = if checked_cons {
         heap_inline::ConsStoreProof::GuardedCons(stack[base])
     } else {
         heap_inline::ConsStoreProof::Dynamic
     };
+    // The stored value is the last operand, after operand preparation chose
+    // its tagged word: the proof binds that exact word.
+    let value = match (ctx.stored_values.class(id), stack.last()) {
+        (Some(class), Some(&word)) => heap_inline::StoredValueProof::Proven(word, class),
+        _ => heap_inline::StoredValueProof::Dynamic,
+    };
+    let store_proof = heap_inline::StoreProof { owner, value };
     if array_emission::has_plain_read(ctx, inst) {
         let result = array_emission::emit_plain_read(ctx, local, inst)?;
         stack.truncate(base);
@@ -973,7 +986,7 @@ fn shared_operation(
         stack.push(result.0);
         reps.push(result.1);
     } else {
-        lowering::lower_simple_op_with_cons_proof_and_result(
+        lowering::lower_simple_op_with_store_proof_and_result(
             ctx.fb,
             inst.pc as usize,
             deopts,
@@ -994,7 +1007,7 @@ fn shared_operation(
             ctx.spec_expected_base,
             ctx.dynamic_prefix,
             ctx.consts_base,
-            cons_proof,
+            store_proof,
             if matches!(inst.op, ir::Opcode::OpaqueBool(_)) {
                 boolean::BoolResultMode::BoolFlag
             } else {
@@ -1027,6 +1040,9 @@ fn shared_operation(
 pub(super) fn emit(mut ctx: EmitContext<'_, '_>) -> Result<(), CompileError> {
     if let Some(proof) = ctx.verified_sink {
         ctx.numeric_facts = sink_numeric_facts::NumericFacts::build(ctx.func, proof);
+    }
+    if ctx.rt.is_some_and(RtCtx::generational_enabled) {
+        ctx.stored_values = store_facts::StoredValueFacts::build(ctx.func);
     }
     if ctx.func.values.iter().enumerate().any(|(index, value)| {
         !matches!(value.rep, ir::Rep::Tagged | ir::Rep::Bool)
@@ -1182,6 +1198,7 @@ pub(super) fn emit(mut ctx: EmitContext<'_, '_>) -> Result<(), CompileError> {
                     shared_operation(
                         &mut ctx,
                         &mut local,
+                        id,
                         inst,
                         &live_after,
                         false,
@@ -1221,6 +1238,7 @@ pub(super) fn emit(mut ctx: EmitContext<'_, '_>) -> Result<(), CompileError> {
                         shared_operation(
                             &mut ctx,
                             &mut local,
+                            id,
                             inst,
                             &live_after,
                             false,
@@ -1263,6 +1281,7 @@ pub(super) fn emit(mut ctx: EmitContext<'_, '_>) -> Result<(), CompileError> {
                     shared_operation(
                         &mut ctx,
                         &mut local,
+                        id,
                         inst,
                         &live_after,
                         returns_result,

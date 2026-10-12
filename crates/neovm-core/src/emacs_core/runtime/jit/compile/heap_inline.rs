@@ -275,6 +275,7 @@ pub(crate) fn emit_cons_store_barrier(
     rt: &RtCtx,
     owner: ClifValue,
     value: ClifValue,
+    value_proof: StoredValueProof,
     slow: Block,
 ) {
     // BLV stores also dereference vmctx here; give them the same heap-identity
@@ -289,14 +290,15 @@ pub(crate) fn emit_cons_store_barrier(
         return;
     }
     let journal = gen1_journals_every_store();
-    if super::lowering::is_known_fixnum(fb, value) {
+    let class = value_proof.class_of(fb, value);
+    if class == Some(StoredValueClass::Fixnum) {
         if journal {
             emit_collection_write(fb, rt, owner, TAG_CONS);
         }
         return;
     }
     let store = fb.create_block();
-    if super::lowering::iconst_bits(fb, value).is_none() {
+    if class.is_none() {
         let bitmap = fb.create_block();
         let immediate = super::lowering::fixnum_tag_test(fb, value);
         fb.ins().brif(immediate, store, &[], bitmap, &[]);
@@ -343,6 +345,7 @@ fn emit_slot_store_barrier(
     heap: ClifValue,
     owner: ClifValue,
     value: ClifValue,
+    value_proof: StoredValueProof,
     slow: Block,
 ) {
     use super::jit_layout::heap::GC_HEADER_TENURED_OFFSET;
@@ -353,24 +356,27 @@ fn emit_slot_store_barrier(
     } else {
         jit_gen0_collection_journal_eager()
     };
-    if rt.generational_enabled() && super::lowering::is_known_fixnum(fb, value) {
+    let class = rt
+        .generational_enabled()
+        .then(|| value_proof.class_of(fb, value))
+        .flatten();
+    if class == Some(StoredValueClass::Fixnum) {
         if journal {
             emit_collection_write(fb, rt, owner, crate::tagged::value::TAG_VECLIKE);
         }
         return;
     }
-    let immediate_store =
-        if rt.generational_enabled() && super::lowering::iconst_bits(fb, value).is_none() {
-            let store = fb.create_block();
-            let check = fb.create_block();
-            let immediate = super::lowering::fixnum_tag_test(fb, value);
-            fb.ins().brif(immediate, store, &[], check, &[]);
-            fb.switch_to_block(check);
-            fb.seal_block(check);
-            Some(store)
-        } else {
-            None
-        };
+    let immediate_store = if rt.generational_enabled() && class.is_none() {
+        let store = fb.create_block();
+        let check = fb.create_block();
+        let immediate = super::lowering::fixnum_tag_test(fb, value);
+        fb.ins().brif(immediate, store, &[], check, &[]);
+        fb.switch_to_block(check);
+        fb.seal_block(check);
+        Some(store)
+    } else {
+        None
+    };
     let pair = fb.ins().uload16(
         types::I64,
         MemFlagsData::trusted(),
@@ -403,17 +409,63 @@ pub(crate) enum ConsStoreProof {
     GuardedCons(ClifValue),
 }
 
+/// Whether a stored word can be a fixnum, the one immediate the GEN1
+/// remembered-set barrier filters dynamically. Symbols are not filtered: an
+/// uninterned symbol's liveness is tracked in a side table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StoredValueClass {
+    /// Always a fixnum: the store creates no old-to-young edge.
+    Fixnum,
+    /// Never a fixnum: the dynamic fixnum-tag test could never skip.
+    NonFixnum,
+}
+
+/// Compile-owned optimizer fact about the exact tagged CLIF word a store
+/// writes. A fact bound to another word (an operand rewritten after the
+/// analysis) is ignored. Threading: compiler-owned, with no runtime state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum StoredValueProof {
+    #[default]
+    Dynamic,
+    Proven(ClifValue, StoredValueClass),
+}
+
+impl StoredValueProof {
+    /// The class of VALUE from this proof or from VALUE's own CLIF shape.
+    fn class_of(self, fb: &FunctionBuilder, value: ClifValue) -> Option<StoredValueClass> {
+        if super::lowering::is_known_fixnum(fb, value) {
+            return Some(StoredValueClass::Fixnum);
+        }
+        if super::lowering::iconst_bits(fb, value).is_some() {
+            return Some(StoredValueClass::NonFixnum);
+        }
+        match self {
+            Self::Proven(word, class) if word == value => Some(class),
+            Self::Proven(..) | Self::Dynamic => None,
+        }
+    }
+}
+
+/// Every compile-owned fact about one explicit store's operands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StoreProof {
+    pub(crate) owner: ConsStoreProof,
+    pub(crate) value: StoredValueProof,
+}
+
 /// `setcar` (`is_cdr == false`) or `setcdr` of `cell` to `value`, inline —
 /// GNU `Bsetcar`/`Bsetcdr`'s `XSETCAR`/`XSETCDR`: a cons outside the barrier
 /// window is stored in place, `res` is defined as `value` and control jumps
 /// to `merge`; anything else branches to `slow`, where the caller emits the
 /// unchanged shim call (the non-cons signal included). Neither op consults
 /// the function cell, in GNU or here.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_inline_cons_store(
     fb: &mut FunctionBuilder,
     rt: &RtCtx,
     cell: ClifValue,
     value: ClifValue,
+    value_proof: StoredValueProof,
     is_cdr: bool,
     slow: Block,
     res: Variable,
@@ -425,7 +477,7 @@ pub(crate) fn emit_inline_cons_store(
     fb.ins().brif(is_cons, typed, &[], slow, &[]);
     fb.switch_to_block(typed);
     fb.seal_block(typed);
-    emit_inline_cons_store_known_cons(fb, rt, cell, value, is_cdr, slow, res, merge);
+    emit_inline_cons_store_known_cons(fb, rt, cell, value, value_proof, is_cdr, slow, res, merge);
 }
 
 /// Store through an SSA value whose cons identity was already guarded.
@@ -433,11 +485,13 @@ pub(crate) fn emit_inline_cons_store(
 /// the mutable write-barrier window is still reloaded here. This introduces
 /// no runtime state or cross-mutator cache, and shares the ordinary store's
 /// barrier, effect, output and instrumentation exactly.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_inline_cons_store_known_cons(
     fb: &mut FunctionBuilder,
     rt: &RtCtx,
     cell: ClifValue,
     value: ClifValue,
+    value_proof: StoredValueProof,
     is_cdr: bool,
     slow: Block,
     res: Variable,
@@ -446,7 +500,7 @@ pub(crate) fn emit_inline_cons_store_known_cons(
     // The tag is known, so untagging is a subtract (folds into the store's
     // addressing).
     let ptr = iadd_imm_p(fb, cell, -(TAG_CONS as i64));
-    emit_cons_store_barrier(fb, rt, ptr, value, slow);
+    emit_cons_store_barrier(fb, rt, ptr, value, value_proof, slow);
     let field = if is_cdr {
         core::mem::offset_of!(ConsCell, cdr_or_next)
     } else {
@@ -462,8 +516,9 @@ pub(crate) fn emit_inline_cons_store_known_cons(
 
 /// Opt-only proof seam. Dynamic or mismatched proofs emit the original main
 /// helper; an exact guarded cons emits main's existing known-cons helper.
-/// Both routes preserve its window reload, GEN1 unlogged-bit store, collection
-/// revision mutation, output, slow shim and instrumentation unchanged.
+/// Both routes preserve its window reload, collection revision mutation,
+/// output, slow shim and instrumentation unchanged. The value proof reaches
+/// only the GEN1 remembered-set filter; GEN0 never reads it.
 /// Threading: the proof is compiler-owned, with no shared mutator state.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_inline_cons_store_with_proof(
@@ -475,12 +530,22 @@ pub(crate) fn emit_inline_cons_store_with_proof(
     slow: Block,
     res: Variable,
     merge: Block,
-    proof: ConsStoreProof,
+    proof: StoreProof,
 ) {
-    if matches!(proof, ConsStoreProof::GuardedCons(checked) if checked == cell) {
-        emit_inline_cons_store_known_cons(fb, rt, cell, value, is_cdr, slow, res, merge);
+    if matches!(proof.owner, ConsStoreProof::GuardedCons(checked) if checked == cell) {
+        emit_inline_cons_store_known_cons(
+            fb,
+            rt,
+            cell,
+            value,
+            proof.value,
+            is_cdr,
+            slow,
+            res,
+            merge,
+        );
     } else {
-        emit_inline_cons_store(fb, rt, cell, value, is_cdr, slow, res, merge);
+        emit_inline_cons_store(fb, rt, cell, value, proof.value, is_cdr, slow, res, merge);
     }
 }
 
@@ -502,7 +567,7 @@ pub(crate) fn emit_explicit_cons_store_with_proof(
     slow: Block,
     res: Variable,
     merge: Block,
-    proof: ConsStoreProof,
+    proof: StoreProof,
 ) {
     let observed = rt
         .refs
@@ -512,7 +577,7 @@ pub(crate) fn emit_explicit_cons_store_with_proof(
         emit_inline_cons_store_with_proof(fb, rt, cell, value, is_cdr, slow, res, merge, proof);
         return;
     }
-    if !matches!(proof, ConsStoreProof::GuardedCons(checked) if checked == cell) {
+    if !matches!(proof.owner, ConsStoreProof::GuardedCons(checked) if checked == cell) {
         let tag = band_imm_p(fb, cell, TAG_MASK as i64);
         let is_cons = icmp_imm_p(fb, IntCC::Equal, tag, TAG_CONS as i64);
         let typed = fb.create_block();
@@ -648,12 +713,14 @@ fn emit_direct_admitted_cons_store(
 ///
 /// Returns `false`, emitting nothing, when a layout probe fails
 /// (`LispValueVec::jit_slice_offsets` / `jit_owned_probe`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_inline_aset(
     fb: &mut FunctionBuilder,
     rt: &RtCtx,
     array: ClifValue,
     index: ClifValue,
     value: ClifValue,
+    value_proof: StoredValueProof,
     slow: Block,
     res: Variable,
     cont: Block,
@@ -671,7 +738,7 @@ pub(crate) fn emit_inline_aset(
         unreachable!("the slice offsets were probed above");
     };
     let heap = heap_ptr(fb, rt);
-    emit_slot_store_barrier(fb, rt, heap, object, value, slow);
+    emit_slot_store_barrier(fb, rt, heap, object, value, value_proof, slow);
     fb.ins().store(MemFlagsData::trusted(), value, slot, 0);
     fb.def_var(res, value);
     fb.ins().jump(cont, &[]);

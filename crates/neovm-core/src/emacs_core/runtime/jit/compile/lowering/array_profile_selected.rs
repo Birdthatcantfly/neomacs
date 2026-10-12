@@ -45,7 +45,7 @@ pub(crate) fn lower_simple_op_with_array_profile(
     dynamic_prefix: usize,
     consts_base: Option<ClifValue>,
 ) -> Result<(), CompileError> {
-    lower_simple_op_with_cons_proof_array_profile(
+    lower_simple_op_with_store_proof_array_profile(
         fb,
         pc,
         deopt_sites,
@@ -66,12 +66,12 @@ pub(crate) fn lower_simple_op_with_array_profile(
         spec_expected_base,
         dynamic_prefix,
         consts_base,
-        super::super::heap_inline::ConsStoreProof::Dynamic,
+        super::super::heap_inline::StoreProof::default(),
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn lower_simple_op_with_cons_proof_array_profile(
+fn lower_simple_op_with_store_proof_array_profile(
     fb: &mut FunctionBuilder,
     pc: usize,
     deopt_sites: &mut Vec<PendingDeopt>,
@@ -109,7 +109,7 @@ fn lower_simple_op_with_cons_proof_array_profile(
     // `idx < dynamic_prefix` loads `consts_base[idx]` instead of baking.
     dynamic_prefix: usize,
     consts_base: Option<ClifValue>,
-    cons_proof: super::super::heap_inline::ConsStoreProof,
+    store_proof: super::super::heap_inline::StoreProof,
 ) -> Result<(), CompileError> {
     // Non-unboxing ops must see only tagged Values: force-tag the whole stack so
     // their gc_push / signal snapshot / shim args never observe a raw slot (closes
@@ -152,7 +152,7 @@ fn lower_simple_op_with_cons_proof_array_profile(
         spec_expected_base,
         dynamic_prefix,
         consts_base,
-        cons_proof,
+        store_proof,
     )?;
     // Re-sync the reps after a non-unboxing op: the slots below `keep` are
     // untouched (the audited-op invariant, checked in debug builds), and its

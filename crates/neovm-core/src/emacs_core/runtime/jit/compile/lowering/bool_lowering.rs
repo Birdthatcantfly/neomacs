@@ -7,7 +7,7 @@
 
 use super::*;
 
-pub(crate) fn lower_simple_op_with_cons_proof_and_result(
+pub(crate) fn lower_simple_op_with_store_proof_and_result(
     fb: &mut FunctionBuilder,
     pc: usize,
     deopt_sites: &mut Vec<PendingDeopt>,
@@ -45,11 +45,11 @@ pub(crate) fn lower_simple_op_with_cons_proof_and_result(
     // `idx < dynamic_prefix` loads `consts_base[idx]` instead of baking.
     dynamic_prefix: usize,
     consts_base: Option<ClifValue>,
-    cons_proof: super::super::heap_inline::ConsStoreProof,
+    store_proof: super::super::heap_inline::StoreProof,
     result_mode: BoolResultMode,
 ) -> Result<(), CompileError> {
     if result_mode == BoolResultMode::TaggedLisp && !reps.contains(&SlotRep::Bool) {
-        return lower_simple_op_with_cons_proof(
+        return lower_simple_op_with_store_proof(
             fb,
             pc,
             deopt_sites,
@@ -70,7 +70,7 @@ pub(crate) fn lower_simple_op_with_cons_proof_and_result(
             spec_expected_base,
             dynamic_prefix,
             consts_base,
-            cons_proof,
+            store_proof,
         );
     }
     if result_mode == BoolResultMode::BoolFlag && !BoolResultMode::supports(op) {
@@ -107,7 +107,7 @@ pub(crate) fn lower_simple_op_with_cons_proof_and_result(
         spec_expected_base,
         dynamic_prefix,
         consts_base,
-        cons_proof,
+        store_proof,
         result_mode,
     )?;
     // Re-sync the reps after a non-unboxing op: the slots below `keep` are
@@ -168,7 +168,7 @@ fn lower_simple_op_bool_arms(
     // `idx < dynamic_prefix` loads `consts_base[idx]` instead of baking.
     dynamic_prefix: usize,
     consts_base: Option<ClifValue>,
-    cons_proof: super::super::heap_inline::ConsStoreProof,
+    store_proof: super::super::heap_inline::StoreProof,
     result_mode: BoolResultMode,
 ) -> Result<(), CompileError> {
     if let Some(rt) = rt
@@ -209,7 +209,7 @@ fn lower_simple_op_bool_arms(
             spec_expected_base,
             dynamic_prefix,
             consts_base,
-            cons_proof,
+            store_proof,
         );
     }
     match op {

@@ -166,7 +166,8 @@ fn a_covering_window_sends_every_store_to_the_barrier() {
 /// the temporary module belong to this invocation and contain no Lisp state.
 fn cons_store_clif(
     is_cdr: bool,
-    proof: impl FnOnce(ClifValue, ClifValue) -> heap_inline::ConsStoreProof,
+    generational: bool,
+    proof: impl FnOnce(ClifValue, ClifValue) -> heap_inline::StoreProof,
 ) -> Function {
     let mut module = JITModule::new(
         cranelift_jit::JITBuilder::new(cranelift_module::default_libcall_names()).unwrap(),
@@ -222,7 +223,7 @@ fn cons_store_clif(
             heap: Some(params[0]),
             cons_store_probe_order: Default::default(),
             inline_alloc: false,
-            generational: std::cell::Cell::new(Some(false)),
+            generational: std::cell::Cell::new(Some(generational)),
             direct_sites: std::cell::Cell::new(0),
             self_direct_source: None,
             poll: t2_profile::PollEmit::default(),
@@ -296,12 +297,16 @@ fn opt_cons_store_proofs_keep_deopt_and_barrier_paths() {
     let ctx_ptr = &mut eval as *mut Context as *mut u8;
     for op in [Op::Setcar, Op::Setcdr] {
         let is_cdr = matches!(op, Op::Setcdr);
-        let dynamic = cons_store_clif(is_cdr, |_, _| heap_inline::ConsStoreProof::default());
-        let wrong = cons_store_clif(is_cdr, |_, other| {
-            heap_inline::ConsStoreProof::GuardedCons(other)
+        let owner = |owner| heap_inline::StoreProof {
+            owner,
+            ..Default::default()
+        };
+        let dynamic = cons_store_clif(is_cdr, false, |_, _| Default::default());
+        let wrong = cons_store_clif(is_cdr, false, |_, other| {
+            owner(heap_inline::ConsStoreProof::GuardedCons(other))
         });
-        let matching = cons_store_clif(is_cdr, |cell, _| {
-            heap_inline::ConsStoreProof::GuardedCons(cell)
+        let matching = cons_store_clif(is_cdr, false, |cell, _| {
+            owner(heap_inline::ConsStoreProof::GuardedCons(cell))
         });
         assert_eq!(
             dynamic.display().to_string(),
@@ -402,6 +407,73 @@ fn opt_cons_store_proofs_keep_deopt_and_barrier_paths() {
         );
         assert_eq!(print_value(&args[0]), old_cell);
         assert_eq!(shim_calls(), before);
+    }
+}
+
+/// GEN1's remembered-set filter reads a stored-value proof only for the exact
+/// word it binds: a fixnum proof removes the filter, a non-fixnum proof only
+/// its dynamic tag test. GEN0 never reads either. Threading: CLIF only, built
+/// and dropped by this test; no Lisp object or heap state is involved.
+#[test]
+fn stored_value_proofs_shape_only_the_gen1_remembered_set_filter() {
+    use cranelift_codegen::ir::Opcode;
+    use heap_inline::{StoreProof, StoredValueClass, StoredValueProof};
+    let count = |clif: &Function, opcode| {
+        clif.layout
+            .blocks()
+            .flat_map(|block| clif.layout.block_insts(block))
+            .filter(|inst| clif.dfg.insts[*inst].opcode() == opcode)
+            .count()
+    };
+    fn proven(word: ClifValue, class: StoredValueClass) -> StoreProof {
+        StoreProof {
+            value: StoredValueProof::Proven(word, class),
+            ..Default::default()
+        }
+    }
+    for is_cdr in [false, true] {
+        for generational in [false, true] {
+            let clif = |proof: fn(ClifValue, ClifValue) -> StoreProof| {
+                cons_store_clif(is_cdr, generational, proof)
+            };
+            let dynamic = clif(|_, _| StoreProof::default());
+            let fixnum = clif(|_, value| proven(value, StoredValueClass::Fixnum));
+            let non_fixnum = clif(|_, value| proven(value, StoredValueClass::NonFixnum));
+            let other_word = clif(|cell, _| proven(cell, StoredValueClass::Fixnum));
+            let text = |clif: &Function| clif.display().to_string();
+            assert_eq!(
+                text(&other_word),
+                text(&dynamic),
+                "a proof for another word is ignored"
+            );
+            if !generational {
+                assert_eq!(text(&fixnum), text(&dynamic), "GEN0 ignores proofs");
+                assert_eq!(text(&non_fixnum), text(&dynamic), "GEN0 ignores proofs");
+                assert_eq!(count(&dynamic, Opcode::AtomicLoad), 0);
+                continue;
+            }
+            assert_eq!(count(&dynamic, Opcode::AtomicLoad), 1);
+            assert_eq!(
+                count(&fixnum, Opcode::AtomicLoad),
+                0,
+                "a fixnum creates no old-to-young edge"
+            );
+            assert_eq!(
+                count(&fixnum, Opcode::Brif),
+                count(&dynamic, Opcode::Brif) - 2,
+                "the tag test and the unlogged test both vanish"
+            );
+            assert_eq!(count(&non_fixnum, Opcode::AtomicLoad), 1);
+            assert_eq!(
+                count(&non_fixnum, Opcode::Brif),
+                count(&dynamic, Opcode::Brif) - 1,
+                "only the dead tag test vanishes"
+            );
+            for kept in [Opcode::Load, Opcode::Store] {
+                assert_eq!(count(&fixnum, kept), count(&dynamic, kept));
+                assert_eq!(count(&non_fixnum, kept), count(&dynamic, kept));
+            }
+        }
     }
 }
 

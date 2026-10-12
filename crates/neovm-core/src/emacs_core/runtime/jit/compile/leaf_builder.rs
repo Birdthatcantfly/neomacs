@@ -539,6 +539,7 @@ pub(super) fn build_leaf_fn<S: LeafSink>(
                 sqrt_witnesses: &HashMap::new(),
                 point: crate::emacs_core::jit::opt::sink_recipes::RecipePoint::Entry(func.entry),
                 sink_produced: HashMap::new(),
+                stored_values: Default::default(),
             })?;
         } else {
             for (leader_index, &l) in cfg.leaders.iter().enumerate() {

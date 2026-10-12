@@ -526,3 +526,160 @@ mod gen0_observed_blv_cold_capture;
 #[cfg(test)]
 #[path = "gen0_observed_interior_gap.rs"]
 mod gen0_observed_interior_gap;
+
+/// `(lambda (owner x) BODY)` through the optimizing tier, with its CLIF.
+/// Threading: the forced tier selection is compiler configuration owned by
+/// this test thread and restored on drop; the leaf belongs to the caller.
+fn opt_store_leaf(ops: Vec<Op>) -> (CompiledLeaf, String) {
+    use super::compile_pipeline_tests::captured_clif;
+    use crate::emacs_core::jit::opt::ir::ParamShape;
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            force_opt_for_test(None, None);
+        }
+    }
+    let _restore = Restore;
+    force_opt_for_test(Some(OptMode::Opt), Some(OptAdmit::ALL));
+    let mut function = store_function(Op::Setcar);
+    function.ops = ops;
+    function.seal_hand_assembled_ops();
+    let mut leaf = None;
+    let clif = captured_clif(|| {
+        leaf = Some(
+            lower_leaf_full_osr_with_opt(
+                function.executable_ops(),
+                &function.constants,
+                2,
+                function.executable_gnu_byte_offset_map(),
+                None,
+                None,
+                0,
+                Some(ParamShape {
+                    required: 2,
+                    ..ParamShape::default()
+                }),
+            )
+            .expect("store lowers"),
+        );
+    });
+    let leaf = leaf.unwrap();
+    assert_eq!(
+        leaf.selected_tier(),
+        crate::emacs_core::jit::compile::opt_census::SelectedTier::Opt
+    );
+    assert_eq!(clif.len(), 1);
+    (leaf, clif.into_iter().next().unwrap())
+}
+
+fn unlogged_old_owner(context: &mut Context) -> Value {
+    let owner = Value::cons(Value::NIL, Value::NIL);
+    context.assign("u34-opt-owner", owner);
+    context.gc_collect_exact();
+    assert!(context.tagged_heap.value_is_old_for_test(owner));
+    assert!(!context.tagged_heap.is_remembered_for_test(owner));
+    owner
+}
+
+/// The optimizer's own checked `1+` result is a fixnum on every path that
+/// reaches the store, so GEN1 emits no remembered-set filter there. A float
+/// or overflowing input leaves through the checked deopt before any store.
+#[test]
+fn gen1_optimized_fixnum_store_needs_no_remembered_set_filter() {
+    let mut context = context(true);
+    let (leaf, clif) = opt_store_leaf(vec![
+        Op::StackRef(1),
+        Op::StackRef(1),
+        Op::Add1,
+        Op::Setcar,
+        Op::Return,
+    ]);
+    assert!(
+        !clif.contains("atomic_load"),
+        "a proven fixnum needs no unlogged-bit test:\n{clif}"
+    );
+    let owner = unlogged_old_owner(&mut context);
+    let before = cons_shims();
+    assert_eq!(
+        native(&mut context, &leaf, &[owner, Value::make_int(41)]),
+        Value::make_int(42)
+    );
+    assert_eq!(owner.cons_car(), Value::make_int(42));
+    assert_eq!(cons_shims(), before);
+    assert!(!context.tagged_heap.is_remembered_for_test(owner));
+
+    let float = context.eval_str("1.5").expect("float");
+    for input in [float, Value::make_int(Value::MOST_POSITIVE_FIXNUM)] {
+        let ctx_ptr = &mut context as *mut Context as *mut u8;
+        assert!(
+            matches!(leaf.call(ctx_ptr, &[owner, input]), NativeRun::DeoptAt(_)),
+            "a non-fixnum result leaves before the store"
+        );
+        assert_eq!(owner.cons_car(), Value::make_int(42));
+    }
+    assert_eq!(cons_shims(), before);
+}
+
+/// Each store's young child must survive a minor collection through its old
+/// owner. Fresh conses and branch-refined conses are proven never fixnums:
+/// the dynamic tag test goes, the unlogged-bit test that remembers stays.
+#[test]
+fn gen1_optimized_heap_value_stores_remember_their_young_children() {
+    let mut context = context(true);
+    let fresh = vec![
+        Op::StackRef(1),
+        Op::StackRef(1),
+        Op::Dup,
+        Op::Cons,
+        Op::Setcar,
+        Op::Return,
+    ];
+    // (if (consp x) (setcar owner x) x)
+    let refined = vec![
+        Op::Dup,
+        Op::Consp,
+        Op::GotoIfNil(7),
+        Op::StackRef(1),
+        Op::StackRef(1),
+        Op::Setcar,
+        Op::Return,
+        Op::Return,
+    ];
+    for (index, ops) in [fresh, refined].into_iter().enumerate() {
+        let (leaf, clif) = opt_store_leaf(ops);
+        assert_eq!(
+            clif.matches("atomic_load").count(),
+            1,
+            "the unlogged-bit test stays:\n{clif}"
+        );
+        assert!(
+            !clif
+                .lines()
+                .any(|line| line.contains("band") && line.trim_end().ends_with(" = 3")),
+            "no fixnum tag test remains:\n{clif}"
+        );
+        let owner = unlogged_old_owner(&mut context);
+        let roots = context.save_specpdl_roots();
+        let marker = Value::make_int(90 + index as i64);
+        let child = Value::cons(marker, Value::NIL);
+        context.push_specpdl_root(child);
+        assert!(!context.tagged_heap.value_is_old_for_test(child));
+        let before = cons_shims();
+        native(&mut context, &leaf, &[owner, child]);
+        assert_eq!(cons_shims() - before, 1, "the first store logs the owner");
+        assert!(context.tagged_heap.is_remembered_for_test(owner));
+        native(&mut context, &leaf, &[owner, child]);
+        assert_eq!(cons_shims() - before, 1, "a logged owner stays inline");
+        context.restore_specpdl_roots(roots);
+
+        minor(&mut context);
+        let stored = owner.cons_car();
+        assert!(context.tagged_heap.value_is_old_for_test(stored));
+        let young = if index == 0 {
+            stored.cons_car()
+        } else {
+            stored
+        };
+        assert_eq!(young.cons_car(), marker, "the young child survived");
+    }
+}

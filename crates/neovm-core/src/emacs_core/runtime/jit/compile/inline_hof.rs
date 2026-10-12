@@ -538,7 +538,15 @@ fn emit_callback(
                     let merge = fb.create_block();
                     if captures.store(pc) {
                         heap_inline::emit_inline_cons_store_known_cons(
-                            fb, rt, cell, value, false, deopt, output, merge,
+                            fb,
+                            rt,
+                            cell,
+                            value,
+                            heap_inline::StoredValueProof::Dynamic,
+                            false,
+                            deopt,
+                            output,
+                            merge,
                         );
                     } else {
                         heap_inline::emit_inline_cons_store(
@@ -546,6 +554,7 @@ fn emit_callback(
                             rt,
                             cell,
                             value,
+                            heap_inline::StoredValueProof::Dynamic,
                             matches!(op, Op::Setcdr),
                             deopt,
                             output,

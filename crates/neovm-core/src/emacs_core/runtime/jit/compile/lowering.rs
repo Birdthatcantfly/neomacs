@@ -6414,7 +6414,7 @@ pub(crate) fn lower_simple_op(
     dynamic_prefix: usize,
     consts_base: Option<ClifValue>,
 ) -> Result<(), CompileError> {
-    lower_simple_op_with_cons_proof(
+    lower_simple_op_with_store_proof(
         fb,
         pc,
         deopt_sites,
@@ -6435,15 +6435,16 @@ pub(crate) fn lower_simple_op(
         spec_expected_base,
         dynamic_prefix,
         consts_base,
-        super::heap_inline::ConsStoreProof::Dynamic,
+        super::heap_inline::StoreProof::default(),
     )
 }
 
-/// Shared per-op lowering with an explicit proof for a cons store operand.
-/// Baseline callers use [`lower_simple_op`] and retain their dynamic tag test.
-/// A proof never replaces the caller's explicit guard or the write barrier.
+/// Shared per-op lowering with explicit proofs for a store's operands.
+/// Baseline callers use [`lower_simple_op`] and retain their dynamic tests.
+/// A proof never replaces the caller's explicit guard or the barrier's owner
+/// window; a stored-value proof only filters GEN1's remembered-set test.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn lower_simple_op_with_cons_proof(
+pub(crate) fn lower_simple_op_with_store_proof(
     fb: &mut FunctionBuilder,
     pc: usize,
     deopt_sites: &mut Vec<PendingDeopt>,
@@ -6481,7 +6482,7 @@ pub(crate) fn lower_simple_op_with_cons_proof(
     // `idx < dynamic_prefix` loads `consts_base[idx]` instead of baking.
     dynamic_prefix: usize,
     consts_base: Option<ClifValue>,
-    cons_proof: super::heap_inline::ConsStoreProof,
+    store_proof: super::heap_inline::StoreProof,
 ) -> Result<(), CompileError> {
     // Non-unboxing ops must see only tagged Values: force-tag the whole stack so
     // their gc_push / signal snapshot / shim args never observe a raw slot (closes
@@ -6516,7 +6517,7 @@ pub(crate) fn lower_simple_op_with_cons_proof(
         spec_expected_base,
         dynamic_prefix,
         consts_base,
-        cons_proof,
+        store_proof,
     )?;
     // Re-sync the reps after a non-unboxing op: the slots below `keep` are
     // untouched (the audited-op invariant, checked in debug builds), and its
@@ -6669,7 +6670,7 @@ fn lower_simple_op_arms(
     // `idx < dynamic_prefix` loads `consts_base[idx]` instead of baking.
     dynamic_prefix: usize,
     consts_base: Option<ClifValue>,
-    cons_proof: super::heap_inline::ConsStoreProof,
+    store_proof: super::heap_inline::StoreProof,
 ) -> Result<(), CompileError> {
     if let Some(rt) = rt
         && !aot
@@ -8134,6 +8135,7 @@ fn lower_simple_op_arms(
                     operands[0],
                     operands[1],
                     operands[2],
+                    store_proof.value,
                     slow,
                     res,
                     cont,
@@ -8542,7 +8544,7 @@ fn lower_simple_op_arms(
                         slow,
                         res,
                         merge,
-                        cons_proof,
+                        store_proof,
                     );
                     fb.switch_to_block(slow);
                     fb.seal_block(slow);
@@ -8646,7 +8648,7 @@ fn lower_simple_op_arms(
 }
 
 mod bool_lowering;
-pub(crate) use bool_lowering::lower_simple_op_with_cons_proof_and_result;
+pub(crate) use bool_lowering::lower_simple_op_with_store_proof_and_result;
 
 /// Read one final-capability-certified plain array slot, with current backing.
 /// Threading: physical words belong to the current compiler/activation; this

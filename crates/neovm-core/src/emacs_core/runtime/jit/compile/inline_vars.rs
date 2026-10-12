@@ -1264,7 +1264,14 @@ fn emit_varset_fast(
             }
             if rt.generational_enabled() {
                 let owner = iadd_imm_p(fb, valcell, -(TAG_CONS as i64));
-                super::heap_inline::emit_cons_store_barrier(fb, rt, owner, stored, slow);
+                super::heap_inline::emit_cons_store_barrier(
+                    fb,
+                    rt,
+                    owner,
+                    stored,
+                    super::heap_inline::StoredValueProof::Dynamic,
+                    slow,
+                );
             } else if super::jit_gen0_collection_journal_eager() {
                 let owner = iadd_imm_p(fb, valcell, -(TAG_CONS as i64));
                 super::heap_inline::emit_collection_write(fb, rt, owner, TAG_CONS);
@@ -1527,7 +1534,14 @@ fn emit_varbind_fast(
             }
             if rt.generational_enabled() {
                 let owner = iadd_imm_p(fb, valcell, -(TAG_CONS as i64));
-                super::heap_inline::emit_cons_store_barrier(fb, rt, owner, stored, slow);
+                super::heap_inline::emit_cons_store_barrier(
+                    fb,
+                    rt,
+                    owner,
+                    stored,
+                    super::heap_inline::StoredValueProof::Dynamic,
+                    slow,
+                );
             } else if super::jit_gen0_collection_journal_eager() {
                 let owner = iadd_imm_p(fb, valcell, -(TAG_CONS as i64));
                 super::heap_inline::emit_collection_write(fb, rt, owner, TAG_CONS);
@@ -1856,7 +1870,14 @@ fn emit_unbind_fast(
         for restore in &restores {
             if let Restore::Cons { cons, value } = restore {
                 let owner = iadd_imm_p(fb, *cons, -(TAG_CONS as i64));
-                super::heap_inline::emit_cons_store_barrier(fb, rt, owner, *value, slow);
+                super::heap_inline::emit_cons_store_barrier(
+                    fb,
+                    rt,
+                    owner,
+                    *value,
+                    super::heap_inline::StoredValueProof::Dynamic,
+                    slow,
+                );
             }
         }
     }
