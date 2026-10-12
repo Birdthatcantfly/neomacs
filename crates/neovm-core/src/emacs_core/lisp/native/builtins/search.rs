@@ -194,14 +194,16 @@ impl FastStringMatchError {
 /// `RE_SETUP_SYNTAX_TABLE_FOR_OBJECT` for a string object (src/syntax.c:277),
 /// with the current buffer's syntax table as the base and the STRING's own
 /// intervals supplying each character's positional `syntax-table` property.
-fn string_regexp_syntax_lookup<'a>(
+#[inline]
+fn with_string_regexp_syntax_lookup<'a, R>(
     syntax_table: Option<&crate::emacs_core::syntax::SyntaxTable>,
     category_table: Option<Value>,
     word_boundary: crate::emacs_core::regex_emacs::WordBoundaryLookup,
     source: crate::emacs_core::syntax::StringSyntaxPositionSource<'a>,
     syntax_properties: crate::emacs_core::syntax::SyntaxProperties<'a>,
-) -> super::regex::StringSyntaxLookup<'a> {
-    super::regex::StringSyntaxLookup::for_source(
+    with_lookup: impl for<'scan> FnOnce(&'scan dyn crate::emacs_core::regex_emacs::SyntaxLookup) -> R,
+) -> Result<R, crate::emacs_core::syntax::StringSyntaxPositionError> {
+    super::regex::with_string_syntax_lookup(
         syntax_table.map(
             |syntax_table| crate::emacs_core::regex_emacs::BufferSyntaxLookup {
                 syntax_table: *syntax_table,
@@ -211,6 +213,7 @@ fn string_regexp_syntax_lookup<'a>(
         ),
         source,
         syntax_properties,
+        with_lookup,
     )
 }
 
@@ -303,21 +306,20 @@ impl FastStringMatchSyntax {
                 base.word_boundary.symbol_mode()
             }),
         );
-        let lookup = super::regex::StringSyntaxLookup::for_source(self.base, source, properties);
         let result =
-            super::regex::string_search_full_with_case_fold_source_lisp_pattern_posix_syntax(
-                pattern,
-                string,
-                searched_string,
-                start,
-                case_fold,
-                false,
-                None,
-                lookup.as_lookup(),
-            );
-        if let Some(error) = lookup.position_error() {
-            return Err(FastStringMatchError::Syntax(error));
-        }
+            super::regex::with_string_syntax_lookup(self.base, source, properties, |syntax| {
+                super::regex::string_search_full_with_case_fold_source_lisp_pattern_posix_syntax(
+                    pattern,
+                    string,
+                    searched_string,
+                    start,
+                    case_fold,
+                    false,
+                    None,
+                    syntax,
+                )
+            })
+            .map_err(FastStringMatchError::Syntax)?;
         result.map_err(FastStringMatchError::Regexp)
     }
 }
@@ -2283,27 +2285,26 @@ pub(crate) fn builtin_string_match_with_state(
                         args[1],
                         args.get(2),
                     )?;
-                    let string_syntax = string_regexp_syntax_lookup(
+                    let result = with_string_regexp_syntax_lookup(
                         syntax_table,
                         category_table,
                         word_boundary,
                         validated_string_syntax_source(&args[1])?,
                         syntax_properties,
-                    );
-                    let syntax = string_syntax.as_lookup();
-                    let result = super::regex::string_search_full_with_case_fold_source_lisp_pattern_posix_syntax(
-                        pattern,
-                        string,
-                        super::regex::SearchedString::Heap(args[1]),
-                        start,
-                        case_fold,
-                        false,
-                        case_translation_table,
-                        syntax,
-                    );
-                    if let Some(error) = string_syntax.position_error() {
-                        return Err(string_syntax_position_signal(error));
-                    }
+                        |syntax| {
+                            super::regex::string_search_full_with_case_fold_source_lisp_pattern_posix_syntax(
+                                pattern,
+                                string,
+                                super::regex::SearchedString::Heap(args[1]),
+                                start,
+                                case_fold,
+                                false,
+                                case_translation_table,
+                                syntax,
+                            )
+                        },
+                    )
+                    .map_err(string_syntax_position_signal)?;
                     let target = if inhibit_modify { None } else { match_data };
                     commit_string_search_success(result, target)
                 }
@@ -2431,24 +2432,27 @@ fn string_match_fast(
         // The cache key and a `[[:word:]]` fastmap depend on the base syntax
         // table alone, so the key lookup needs neither the word-boundary
         // tables nor the property resolver.
-        let key_lookup = string_regexp_syntax_lookup(
+        match with_string_regexp_syntax_lookup(
             syntax_table.as_ref(),
             category_table,
             crate::emacs_core::regex_emacs::WordBoundaryLookup::default()
                 .with_symbol_mode(eval.symbol_mode()),
             source,
             crate::emacs_core::syntax::SyntaxProperties::Ignore,
-        );
-        match super::regex::compile_string_search_pattern(
-            pattern,
-            string,
-            case_fold,
-            false,
-            case_translation_table,
-            key_lookup.as_lookup(),
+            |syntax| {
+                super::regex::compile_string_search_pattern(
+                    pattern,
+                    string,
+                    case_fold,
+                    false,
+                    case_translation_table,
+                    syntax,
+                )
+            },
         ) {
-            Ok(compiled) => compiled,
-            Err(msg) => return Some(Err(regex_error_signal(msg))),
+            Ok(Ok(compiled)) => compiled,
+            Ok(Err(msg)) => return Some(Err(regex_error_signal(msg))),
+            Err(error) => return Some(Err(string_syntax_position_signal(error))),
         }
     };
     let (word_boundary, syntax_properties) = if compiled.uses_syntax {
@@ -2463,25 +2467,26 @@ fn string_match_fast(
             crate::emacs_core::syntax::SyntaxProperties::Ignore,
         )
     };
-    let lookup = string_regexp_syntax_lookup(
+    // The register carrier stays in place; it must not replace the removed
+    // lookup aggregate with another large by-value return.
+    let mut regs = super::regex::SearchRegisters::default();
+    let found = match with_string_regexp_syntax_lookup(
         syntax_table.as_ref(),
         category_table,
         word_boundary,
         source,
         syntax_properties,
-    );
-    let mut regs = super::regex::SearchRegisters::default();
-    let found = super::regex::string_search_compiled_into(
-        &compiled,
-        string,
-        start,
-        lookup.as_lookup(),
-        &mut regs,
-    );
-    note_frontend_fast_call();
-    if let Some(error) = lookup.position_error() {
-        return Some(Err(string_syntax_position_signal(error)));
-    }
+        |syntax| {
+            let found = super::regex::string_search_compiled_into(
+                &compiled, string, start, syntax, &mut regs,
+            );
+            note_frontend_fast_call();
+            found
+        },
+    ) {
+        Ok(found) => found,
+        Err(error) => return Some(Err(string_syntax_position_signal(error))),
+    };
     Some(match found {
         Ok(true) => {
             let target = (!inhibit_modify && !inhibit_changing).then_some(&mut eval.match_data);
@@ -2533,27 +2538,26 @@ pub(crate) fn builtin_posix_string_match_with_state(
                         args[1],
                         args.get(2),
                     )?;
-                    let string_syntax = string_regexp_syntax_lookup(
+                    let result = with_string_regexp_syntax_lookup(
                         syntax_table,
                         category_table,
                         word_boundary,
                         validated_string_syntax_source(&args[1])?,
                         syntax_properties,
-                    );
-                    let syntax = string_syntax.as_lookup();
-                    let result = super::regex::string_search_full_with_case_fold_source_lisp_pattern_posix_syntax(
-                        pattern,
-                        string,
-                        super::regex::SearchedString::Heap(args[1]),
-                        start,
-                        case_fold,
-                        true,
-                        case_translation_table,
-                        syntax,
-                    );
-                    if let Some(error) = string_syntax.position_error() {
-                        return Err(string_syntax_position_signal(error));
-                    }
+                        |syntax| {
+                            super::regex::string_search_full_with_case_fold_source_lisp_pattern_posix_syntax(
+                                pattern,
+                                string,
+                                super::regex::SearchedString::Heap(args[1]),
+                                start,
+                                case_fold,
+                                true,
+                                case_translation_table,
+                                syntax,
+                            )
+                        },
+                    )
+                    .map_err(string_syntax_position_signal)?;
                     let target = if inhibit_modify { None } else { match_data };
                     commit_string_search_success(result, target)
                 }
@@ -2590,28 +2594,26 @@ pub(crate) fn builtin_string_match_p_with_case_fold(
                 args[1],
                 args.get(2),
             )?;
-            let string_syntax = string_regexp_syntax_lookup(
+            let result = with_string_regexp_syntax_lookup(
                 syntax_table,
                 category_table,
                 word_boundary,
                 validated_string_syntax_source(&args[1])?,
                 syntax_properties,
-            );
-            let syntax = string_syntax.as_lookup();
-            let result =
-                super::regex::string_search_full_with_case_fold_source_lisp_pattern_posix_syntax(
-                    pattern,
-                    string,
-                    super::regex::SearchedString::Heap(args[1]),
-                    start,
-                    case_fold,
-                    false,
-                    case_translation_table,
-                    syntax,
-                );
-            if let Some(error) = string_syntax.position_error() {
-                return Err(string_syntax_position_signal(error));
-            }
+                |syntax| {
+                    super::regex::string_search_full_with_case_fold_source_lisp_pattern_posix_syntax(
+                        pattern,
+                        string,
+                        super::regex::SearchedString::Heap(args[1]),
+                        start,
+                        case_fold,
+                        false,
+                        case_translation_table,
+                        syntax,
+                    )
+                },
+            )
+            .map_err(string_syntax_position_signal)?;
             commit_string_search_success(result, None)
         }
         _ => {

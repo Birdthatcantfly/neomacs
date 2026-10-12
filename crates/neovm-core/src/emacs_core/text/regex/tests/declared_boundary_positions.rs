@@ -117,18 +117,18 @@ fn supplied_boundary_converts_current_once_before_previous_logical_lookup() {
         category_table: None,
         word_boundary: WordBoundaryLookup::default(),
     };
-    let lookup = crate::emacs_core::regex::StringSyntaxLookup::for_source(
+    let result = crate::emacs_core::regex::with_string_syntax_lookup(
         Some(base),
         StringSyntaxPositionSource::try_from(&source).expect("validated test source"),
         SyntaxProperties::for_scan(true, &context.obarray, &context.buffers),
+        |lookup| {
+            crate::emacs_core::string_pos_cache::reset_string_pos_cache();
+            lookup.boundary_syntax_at(request(SyntaxAssertion::WordBoundary, 'c', 'd'));
+        },
     );
-    crate::emacs_core::string_pos_cache::reset_string_pos_cache();
-    lookup
-        .as_lookup()
-        .boundary_syntax_at(request(SyntaxAssertion::WordBoundary, 'c', 'd'));
     assert_eq!(
-        lookup.position_error(),
-        Some(StringSyntaxPositionError::OutOfRange {
+        result,
+        Err(StringSyntaxPositionError::OutOfRange {
             position: GnuStringCharPos::new(-1)
         })
     );
@@ -156,16 +156,16 @@ fn supplied_symbol_beginning_skips_invalid_previous_after_nonword_current() {
         category_table: None,
         word_boundary: WordBoundaryLookup::default(),
     };
-    let lookup = crate::emacs_core::regex::StringSyntaxLookup::for_source(
+    let classes = crate::emacs_core::regex::with_string_syntax_lookup(
         Some(base),
         StringSyntaxPositionSource::try_from(&source).expect("validated test source"),
         SyntaxProperties::for_scan(true, &context.obarray, &context.buffers),
-    );
-    crate::emacs_core::string_pos_cache::reset_string_pos_cache();
-    let classes =
-        lookup
-            .as_lookup()
-            .boundary_syntax_at(request(SyntaxAssertion::SymbolBeginning, 'c', '!'));
+        |lookup| {
+            crate::emacs_core::string_pos_cache::reset_string_pos_cache();
+            lookup.boundary_syntax_at(request(SyntaxAssertion::SymbolBeginning, 'c', '!'))
+        },
+    )
+    .expect("nonword current must skip the invalid previous position");
     assert_eq!(classes.previous(), None);
     assert_eq!(
         classes.current(),
@@ -174,7 +174,6 @@ fn supplied_symbol_beginning_skips_invalid_previous_after_nonword_current() {
             SyntaxClass::Punctuation
         ))
     );
-    assert_eq!(lookup.position_error(), None);
     crate::emacs_core::string_pos_cache::reset_string_pos_cache();
 }
 

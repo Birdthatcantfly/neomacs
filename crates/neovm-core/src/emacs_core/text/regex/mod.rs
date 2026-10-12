@@ -276,98 +276,55 @@ pub(crate) struct StringRegexpSyntaxLookup<'a> {
     property_lookup: crate::emacs_core::syntax::StringSyntaxPropByteRun<'a>,
 }
 
-/// The syntax lookup a regexp over a searched STRING runs under.
+/// Run one matcher with GNU's string-object syntax setup (syntax.c:277–311).
 ///
-/// The three variants are the three answers GNU's setup can produce, and
-/// separating them is what keeps the common case free: only
-/// [`Self::Propertized`] has a per-character property test, so a `string-match`
-/// over a string with no `syntax-table` properties to read -- very nearly all
-/// of them -- runs the identical position-free path it ran before strings
-/// carried syntax at all.
-pub(crate) enum StringSyntaxLookup<'a> {
-    /// No current buffer to take a base table from: GNU's standard
-    /// classification, as before.
-    Standard(DefaultSyntaxLookup),
-    /// The current buffer's table, with no positional property to read --
-    /// either the string carries none, or `parse-sexp-lookup-properties` is
-    /// nil.
-    Table(BufferSyntaxLookup),
-    /// The current buffer's table plus the string's own `syntax-table`
-    /// properties.
-    Propertized(StringRegexpSyntaxLookup<'a>),
-}
-
-impl<'a> StringSyntaxLookup<'a> {
-    /// GNU `RE_SETUP_SYNTAX_TABLE_FOR_OBJECT` for a string object
-    /// (src/syntax.c:277): `SETUP_BUFFER_SYNTAX_TABLE` for the base table
-    /// whatever the object, and the object's own intervals for the positional
-    /// property.
-    #[cfg(test)]
-    pub(crate) fn new(
-        base: Option<BufferSyntaxLookup>,
-        string: &'a LispString,
-        syntax_properties: crate::emacs_core::syntax::SyntaxProperties<'a>,
-    ) -> Self {
-        Self::for_source(
-            base,
-            crate::emacs_core::syntax::StringSyntaxPositionSource::owned(string),
+/// Keeping each adapter local avoids returning a property-sized enum for an
+/// ordinary table lookup. The higher-ranked callback borrow cannot escape in R.
+/// The callback may run matcher/compile work only: it must not run Lisp or
+/// publish match data before this helper has rejected the first deferred error.
+/// Supplied-count state and property resolution keep their existing ownership.
+#[inline]
+pub(crate) fn with_string_syntax_lookup<'a, R>(
+    base: Option<BufferSyntaxLookup>,
+    source: crate::emacs_core::syntax::StringSyntaxPositionSource<'a>,
+    syntax_properties: crate::emacs_core::syntax::SyntaxProperties<'a>,
+    with_lookup: impl for<'scan> FnOnce(&'scan dyn SyntaxLookup) -> R,
+) -> Result<R, crate::emacs_core::syntax::StringSyntaxPositionError> {
+    let Some(base) = base else {
+        return Ok(with_lookup(&DefaultSyntaxLookup));
+    };
+    match syntax_properties {
+        crate::emacs_core::syntax::SyntaxProperties::Ignore
+        | crate::emacs_core::syntax::SyntaxProperties::PositionedIgnore => {
+            // GNU syntax.h:154–167 skips object coordinates when properties are ignored.
+            return Ok(with_lookup(&base));
+        }
+        crate::emacs_core::syntax::SyntaxProperties::Honor(_)
+        | crate::emacs_core::syntax::SyntaxProperties::PositionedHonor(_) => {}
+    }
+    let string = source.string();
+    let intervals = string.intervals();
+    let supplied_nonidentity = string.character_count_kind()
+        == crate::heap_types::StringCharacterCountKind::Supplied
+        && string.is_multibyte()
+        && string.schars() != string.sbytes();
+    if intervals.is_empty() && !supplied_nonidentity {
+        return Ok(with_lookup(&base));
+    }
+    let lookup = StringRegexpSyntaxLookup {
+        property_lookup: crate::emacs_core::syntax::StringSyntaxPropByteRun::for_source(
             syntax_properties,
-        )
-    }
-
-    #[inline(always)]
-    pub(crate) fn for_source(
-        base: Option<BufferSyntaxLookup>,
-        source: crate::emacs_core::syntax::StringSyntaxPositionSource<'a>,
-        syntax_properties: crate::emacs_core::syntax::SyntaxProperties<'a>,
-    ) -> Self {
-        let Some(base) = base else {
-            return Self::Standard(DefaultSyntaxLookup);
-        };
-        // Only a honouring scan looks at the intervals at all: the caller has
-        // already established that a string with none cannot honour anything,
-        // so the ignoring path here touches the string object not at all.
-        let (crate::emacs_core::syntax::SyntaxProperties::Honor(_)
-        | crate::emacs_core::syntax::SyntaxProperties::PositionedHonor(_)) = syntax_properties
-        else {
-            return Self::Table(base);
-        };
-        let string = source.string();
-        let intervals = string.intervals();
-        let supplied_nonidentity = string.character_count_kind()
-            == crate::heap_types::StringCharacterCountKind::Supplied
-            && string.is_multibyte()
-            && string.schars() != string.sbytes();
-        if intervals.is_empty() && !supplied_nonidentity {
-            return Self::Table(base);
-        }
-        Self::Propertized(StringRegexpSyntaxLookup {
-            property_lookup: crate::emacs_core::syntax::StringSyntaxPropByteRun::for_source(
-                syntax_properties,
-                source,
-                intervals.as_table(),
-            ),
-            base,
-        })
-    }
-
-    /// First deferred GNU syntax lookup failure. Read before consuming any
-    /// success carrier, even if the matcher ultimately reports no match.
-    pub(crate) fn position_error(
-        &self,
-    ) -> Option<crate::emacs_core::syntax::StringSyntaxPositionError> {
-        match self {
-            Self::Standard(_) | Self::Table(_) => None,
-            Self::Propertized(lookup) => lookup.property_lookup.position_error(),
-        }
-    }
-
-    pub(crate) fn as_lookup(&self) -> &dyn SyntaxLookup {
-        match self {
-            Self::Standard(lookup) => lookup,
-            Self::Table(lookup) => lookup,
-            Self::Propertized(lookup) => lookup,
-        }
+            source,
+            intervals.as_table(),
+        ),
+        base,
+    };
+    let result = with_lookup(&lookup);
+    // GNU signals during syntax lookup, even when matching ultimately fails.
+    // Preserve that error before returning a successful or failed match result.
+    match lookup.property_lookup.position_error() {
+        Some(error) => Err(error),
+        None => Ok(result),
     }
 }
 
