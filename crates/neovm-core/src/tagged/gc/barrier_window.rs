@@ -249,16 +249,17 @@ impl TaggedHeap {
         }
     }
 
-    /// Native GEN0 stores share the existing window test with certificate
-    /// owners. The enclosing span is only a coarse rejection filter: its
-    /// outlined setter checks the exact sticky mark before journaling.
+    /// Native GEN0 and GEN1 stores share the existing window test with
+    /// certificate owners. The enclosing span is only a coarse rejection
+    /// filter: its outlined setter checks the exact sticky mark before
+    /// journaling. GEN1 keeps its remembered-set test after this window.
     pub(super) fn compiled_barrier_window(
         &self,
         ordinary: BarrierWindow,
         gate: CompiledObservationGate,
     ) -> BarrierWindow {
         let [below, above] = gate.observed;
-        if self.generational.enabled || (below.len == 0 && above.len == 0) {
+        if below.len == 0 && above.len == 0 {
             return ordinary;
         }
         if ordinary == BarrierWindow::ALL {
@@ -493,7 +494,9 @@ pub(crate) extern "C" fn neovm_jit_unobserved_collection_owner(owner_bits: i64) 
         // inputs; ordinary ALL preserves tracking and concurrent SATB writes.
         let heap = unsafe { &*heap };
         let ordinary = heap.barrier_window();
-        if heap.generational.enabled || ordinary.covers(address) {
+        // GEN1 refines the same hull: its native gate keeps the remembered-set
+        // test after the window, so an excluded gap admits no unbarriered store.
+        if ordinary.covers(address) {
             return false;
         }
         original_hull_covers_refused_owner(heap, ordinary, address)

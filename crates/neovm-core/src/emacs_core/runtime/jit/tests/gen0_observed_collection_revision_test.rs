@@ -318,7 +318,11 @@ fn gen0_mapped_blv_keeps_remembered_proof_until_its_default_cell_is_observed() {
 }
 
 fn blv_context(local: bool) -> Context {
-    let mut context = context(false);
+    blv_context_in(local, false)
+}
+
+fn blv_context_in(local: bool, generational: bool) -> Context {
+    let mut context = context(generational);
     context.specpdl.reserve(16);
     context.jit_bind_stack.reserve(16);
     let setup = if local {
@@ -352,9 +356,13 @@ fn aset_leaf() -> CompiledLeaf {
 }
 
 fn fixture(kind: StoreKind) -> (Context, Value, CompiledLeaf) {
+    fixture_in(kind, false)
+}
+
+fn fixture_in(kind: StoreKind, generational: bool) -> (Context, Value, CompiledLeaf) {
     if matches!(kind, StoreKind::BlvDefault | StoreKind::BlvLocal) {
         let local = matches!(kind, StoreKind::BlvLocal);
-        let mut context = blv_context(local);
+        let mut context = blv_context_in(local, generational);
         let owner = blv_cell(&context, local);
         // Return the supplied value directly: a VarRef after VarSet would
         // intentionally observe the BLV cell inside setter-only captures.
@@ -367,7 +375,7 @@ fn fixture(kind: StoreKind) -> (Context, Value, CompiledLeaf) {
         context.push_specpdl_root(owner);
         return (context, owner, leaf);
     }
-    let mut context = context(false);
+    let mut context = context(generational);
     let leaf = match kind {
         StoreKind::Setcar | StoreKind::Setcdr => {
             compile_bytecode_function(&store_function(if matches!(kind, StoreKind::Setcar) {
@@ -403,8 +411,13 @@ fn fixture(kind: StoreKind) -> (Context, Value, CompiledLeaf) {
 }
 
 fn check_first_store(kind: StoreKind) {
+    check_first_store_in(kind, false);
+}
+
+/// GEN0 and GEN1 make the same observed-owner journal decision.
+fn check_first_store_in(kind: StoreKind, generational: bool) {
     let _journal = JournalMode::observed();
-    let (mut context, owner, leaf) = fixture(kind);
+    let (mut context, owner, leaf) = fixture_in(kind, generational);
     assert!(!is_observed(owner.bits()), "fresh owner: {kind:?}");
     let before = LispCollectionRevision::current();
     let shims_before = kind.shim_calls();
@@ -1060,3 +1073,6 @@ fn gen0_observed_collection_store_cost_probe() {
         result.as_fixnum().expect("fixnum result"), gcs_before, gcs_after,
         usize::from(envelope), owner_in_envelope, observed_neighbors, journal_steps);
 }
+
+#[path = "gen1_observed_collection_gate_test.rs"]
+mod gen1_observed_collection_gate;

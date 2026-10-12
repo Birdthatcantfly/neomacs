@@ -158,11 +158,12 @@ fn reclaimed_endpoints_contract(kind: OwnerKind, generational: bool) {
     assert!(heap.owns_heap_value_for_test(middle));
     assert!(!heap.owns_heap_value_for_test(last));
     let published = heap.jit_barrier_window_for_test();
-    if generational || matches!(kind, OwnerKind::String) {
+    // GEN1 shares GEN0's observed-owner hull; exact-mark strings never widen it.
+    if matches!(kind, OwnerKind::String) {
         assert_eq!(
             published,
             BarrierWindow::NONE,
-            "GEN1 and exact-mark string stores keep their ordinary gate"
+            "exact-mark string stores keep their ordinary gate"
         );
     } else {
         assert!(published.covers(addresses[1]));

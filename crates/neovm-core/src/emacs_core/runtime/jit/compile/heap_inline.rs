@@ -226,6 +226,16 @@ fn emit_cons_observation_exemptions(
     fb.seal_block(hull);
 }
 
+/// Whether GEN1 native stores record collection history for every owner.
+/// Off and Eager keep that original GEN1 journal. Observed mode instead uses
+/// the GEN0 observed-owner gate: the published barrier window covers every
+/// observed owner, whose refusal reaches the shim that journals it, so an
+/// accepted inline store needs no history. The remembered-set barrier below
+/// is separate and unchanged; history never discharges a GC obligation.
+fn gen1_journals_every_store() -> bool {
+    !jit_gen0_collection_journal_on() || jit_gen0_collection_journal_eager()
+}
+
 /// Record an accepted Cons or VecLike store with the existing GEN1 helper.
 /// This has no Lisp allocation, callback or safe point; it runs the same
 /// projected recorder as the interpreter's setter before the actual store.
@@ -278,8 +288,11 @@ pub(crate) fn emit_cons_store_barrier(
         }
         return;
     }
+    let journal = gen1_journals_every_store();
     if super::lowering::is_known_fixnum(fb, value) {
-        emit_collection_write(fb, rt, owner, TAG_CONS);
+        if journal {
+            emit_collection_write(fb, rt, owner, TAG_CONS);
+        }
         return;
     }
     let store = fb.create_block();
@@ -315,7 +328,9 @@ pub(crate) fn emit_cons_store_barrier(
     fb.ins().brif(unlogged, slow, &[], store, &[]);
     fb.switch_to_block(store);
     fb.seal_block(store);
-    emit_collection_write(fb, rt, owner, TAG_CONS);
+    if journal {
+        emit_collection_write(fb, rt, owner, TAG_CONS);
+    }
     #[cfg(debug_assertions)]
     GENERATIONAL_CONS_TESTS_EMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
@@ -333,8 +348,15 @@ fn emit_slot_store_barrier(
     use super::jit_layout::heap::GC_HEADER_TENURED_OFFSET;
     use crate::tagged::header::GcHeader;
     emit_barrier_window_check(fb, rt, heap, owner, slow, NativeStoreOwner::Slots);
+    let journal = if rt.generational_enabled() {
+        gen1_journals_every_store()
+    } else {
+        jit_gen0_collection_journal_eager()
+    };
     if rt.generational_enabled() && super::lowering::is_known_fixnum(fb, value) {
-        emit_collection_write(fb, rt, owner, crate::tagged::value::TAG_VECLIKE);
+        if journal {
+            emit_collection_write(fb, rt, owner, crate::tagged::value::TAG_VECLIKE);
+        }
         return;
     }
     let immediate_store =
@@ -365,7 +387,7 @@ fn emit_slot_store_barrier(
     fb.ins().brif(needs_remembering, slow, &[], store, &[]);
     fb.switch_to_block(store);
     fb.seal_block(store);
-    if rt.generational_enabled() || jit_gen0_collection_journal_eager() {
+    if journal {
         emit_collection_write(fb, rt, owner, crate::tagged::value::TAG_VECLIKE);
     }
 }

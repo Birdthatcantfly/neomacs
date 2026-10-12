@@ -1291,10 +1291,11 @@ fn emit_inline_string_aset(
         object,
         (base + LispString::JIT_SIZE_BYTE_OFFSET) as i32,
     );
-    let observed_gen0 = super::jit_gen0_collection_journal_on()
-        && !rt.generational_enabled()
-        && !super::jit_gen0_collection_journal_eager();
-    // Capacity is ordinary exclusive payload state, exactly as in OFF/GEN1.
+    // String bytes need no GC barrier, so GEN0 and GEN1 share one observed
+    // gate: a marked owner refuses to the setter, which journals it.
+    let observed =
+        super::jit_gen0_collection_journal_on() && !super::jit_gen0_collection_journal_eager();
+    // Capacity is ordinary exclusive payload state, exactly as in OFF.
     let capacity = fb.ins().load(
         types::I64,
         flags,
@@ -1306,7 +1307,7 @@ fn emit_inline_string_aset(
     // Unsigned: a negative index or code is out of range too.
     let in_range = fb.ins().icmp(IntCC::UnsignedLessThan, i, size);
     let owned = icmp_imm_p(fb, IntCC::NotEqual, capacity, 0);
-    let store = if observed_gen0 {
+    let store = if observed {
         let basic_ok = fb.ins().band(in_range, owned);
         emit_observed_string_aset_admission(
             fb,
@@ -1347,9 +1348,7 @@ fn emit_inline_string_aset(
         (base + LispString::JIT_DATA_OFFSET) as i32,
     );
     let at = fb.ins().iadd(data, i);
-    if super::jit_gen0_collection_journal_on()
-        && (rt.generational_enabled() || super::jit_gen0_collection_journal_eager())
-    {
+    if super::jit_gen0_collection_journal_eager() {
         let record = rt
             .refs
             .try_get(fb.func, Shim::StringCollectionWrite)
