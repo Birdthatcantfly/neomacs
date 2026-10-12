@@ -39,6 +39,7 @@ use crate::emacs_core::value::Value;
 
 mod opt_evidence;
 pub(crate) use opt_evidence::has_ready_opt_osr;
+mod osr_wait;
 
 /// Why a body is interpreted for now although it is hot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +58,9 @@ enum DeferReason {
     /// The background compile queue was full (`jit::bg`): the compile is
     /// asked again, as it was, once the body's heat doubled.
     Backlog,
+    /// The compile depends on a pending optimized OSR compile of the body
+    /// (`osr_wait`): asked again, as it was, once that job has settled.
+    AwaitingOsr,
 }
 
 /// One thread's knowledge of a function's compiled state.
@@ -477,11 +481,13 @@ thread_local! {
 }
 
 /// A pending OSR compile: the job and the header's entry depths the front
-/// computed.
+/// computed, plus the normal entry compile waiting on its outcome, if any
+/// (released when this leaves `OSR_PENDING`, however it leaves).
 struct PendingOsr {
     job: Box<super::bg::PendingJob>,
     stack_depth: usize,
     bind_depth: usize,
+    wait: Option<osr_wait::EntryWait>,
 }
 
 /// What an OSR attempt at a hot back-edge did ([`try_run_osr_probe`]).
@@ -988,7 +994,7 @@ fn osr_lookup(ctx: *mut Context, func: &ByteCodeFunction, osr_pc: usize, id: u64
     let compiled = compile_osr_leaf(&live.obarray, func, osr_pc, id, name_hint);
     drop(defer);
     if let Some(entry) = &compiled {
-        register_osr_inline_deps(id, osr_pc, &entry.leaf);
+        register_osr_inline_deps(id, osr_pc, &entry.leaf, EntryLeaves::Cached);
     }
     match (compiled, super::bg::take_deferred()) {
         (Some(entry), Some(code)) => {
@@ -1007,6 +1013,7 @@ fn osr_lookup(ctx: *mut Context, func: &ByteCodeFunction, osr_pc: usize, id: u64
                         job,
                         stack_depth,
                         bind_depth,
+                        wait: None,
                     },
                 )
             });
@@ -1041,10 +1048,31 @@ fn probe_osr_pending(key: (u64, usize), ctx: Option<&Context>) -> Option<OsrLook
         super::bg::note_osr_wait();
         return Some(OsrLookup::Pending);
     }
+    install_osr_pending(key, ctx, EntryLeaves::Cached)
+}
+
+/// Whose inline dependencies an OSR installation re-reads for `id`'s entry.
+#[derive(Clone, Copy)]
+enum EntryLeaves {
+    /// The entry cache slot, outside any borrow of the cache.
+    Cached,
+    /// None: the entry cache is borrowed to compile this id, whose slot holds
+    /// no leaf or job; that compile registers the entry and OSR leaves.
+    Compiling,
+}
+
+/// Install `key`'s ready pending OSR job (see [`probe_osr_pending`]).
+/// Settling the job releases a normal entry compile waiting on it.
+fn install_osr_pending(
+    key: (u64, usize),
+    ctx: Option<&Context>,
+    entry_leaves: EntryLeaves,
+) -> Option<OsrLookup> {
     let PendingOsr {
         job,
         stack_depth,
         bind_depth,
+        wait,
     } = OSR_PENDING.with(|p| p.borrow_mut().remove(&key))?;
     let entry = match super::bg::install(job, None, ctx) {
         Ok(leaf) => Some(OsrEntry {
@@ -1062,9 +1090,11 @@ fn probe_osr_pending(key: (u64, usize), ctx: Option<&Context>) -> Option<OsrLook
         }
     };
     if let Some(entry) = &entry {
-        register_osr_inline_deps(key.0, key.1, &entry.leaf);
+        register_osr_inline_deps(key.0, key.1, &entry.leaf, entry_leaves);
     }
     OSR_CACHE.with(|c| c.borrow_mut().insert(key, entry.clone()));
+    // The entry's next call compiles against the installed (or refused) leaf.
+    drop(wait);
     Some(OsrLookup::Entry(entry))
 }
 
@@ -1120,12 +1150,20 @@ fn register_inline_deps(id: u64, leaf: &CompiledLeaf) {
 /// Replace one OSR variant's memberships while preserving the source's entry
 /// leaf and other loop variants. This is cold compile/installation work on
 /// the owning mutator thread, outside any cache borrow.
-fn register_osr_inline_deps(id: u64, osr_pc: usize, leaf: &CompiledLeaf) {
+fn register_osr_inline_deps(
+    id: u64,
+    osr_pc: usize,
+    leaf: &CompiledLeaf,
+    entry_leaves: EntryLeaves,
+) {
     if !super::compile::jit_inline2_mode().enabled() {
         return;
     }
     forget_inline_deps(id);
-    add_entry_inline_deps(id);
+    match entry_leaves {
+        EntryLeaves::Cached => add_entry_inline_deps(id),
+        EntryLeaves::Compiling => {}
+    }
     add_osr_inline_deps(id, Some(osr_pc));
     add_inline_deps(id, leaf);
 }
@@ -1278,6 +1316,13 @@ fn compile_cache_entry(
             || super::aot::retier::earned_native_admission(rt),
         ..request
     };
+    // Background OSR backends only: decide after the optimized OSR compile
+    // this frontend depends on settles, as a synchronous compile would.
+    if super::bg::pending_count() != 0
+        && let Some(entry) = osr_wait::await_opt_osr(id, func, obarray, request)
+    {
+        return entry;
+    }
     numeric_feedback_trace(id, func);
     record_compiled_obarray(obarray);
     // Per-function entry names (perf map, CLIF/asm dumps), only when asked.
@@ -1804,6 +1849,7 @@ pub(crate) fn cache_entry_kind_for_test(id: u64) -> &'static str {
         Some(CacheEntry::Deferred(DeferReason::NotProfitable)) => "deferred",
         Some(CacheEntry::Deferred(DeferReason::Reoptimize { .. })) => "deferred-reopt",
         Some(CacheEntry::Deferred(DeferReason::Backlog)) => "deferred-backlog",
+        Some(CacheEntry::Deferred(DeferReason::AwaitingOsr)) => "deferred-osr",
         Some(CacheEntry::Pending(_)) => "pending",
         None => "none",
     })
@@ -2721,8 +2767,8 @@ pub fn try_run_compiled(
                 };
                 (policy, profit_gate_bypassed || prev_bypassed)
             }
-            // A refused background compile, asked again as it was.
-            Some(DeferReason::Backlog) | None => (policy, prev_bypassed),
+            // A refused or waiting background compile, asked again as it was.
+            Some(DeferReason::Backlog | DeferReason::AwaitingOsr) | None => (policy, prev_bypassed),
         };
         let request = CompileRequest {
             regalloc: policy,

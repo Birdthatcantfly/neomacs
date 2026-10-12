@@ -842,6 +842,20 @@ pub(crate) fn profit_gate_bypassed_now() -> bool {
     BYPASS_PROFIT_GATE.with(|b| b.get())
 }
 
+/// Whether a compile of `f` under `request` keeps its selected frontend only
+/// with installed Opt OSR evidence (`opt_profit::ready_osr_front`): the same
+/// frontend choice [`compile_bytecode_function_requested`] makes, without
+/// compiling. Threading: immutable source and configuration reads.
+pub(crate) fn front_requires_osr_evidence(f: &ByteCodeFunction, request: CompileRequest) -> bool {
+    let front = opt_profit::front(
+        request,
+        f.executable_ops(),
+        opt_profit::CallDensity::from(body_is_call_heavy(f.executable_ops(), &f.constants)),
+        f.jit_runtime(),
+    );
+    opt_profit::requires_osr_evidence(front)
+}
+
 /// [`compile_bytecode_function_tiered`] with the full [`CompileRequest`].
 pub fn compile_bytecode_function_requested(
     f: &ByteCodeFunction,
