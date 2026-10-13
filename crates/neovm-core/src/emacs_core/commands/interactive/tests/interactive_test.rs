@@ -1,5 +1,7 @@
 use super::*;
 use crate::emacs_core::error::{FlowKind, FlowRef};
+use crate::emacs_core::eval::VariableView;
+use crate::emacs_core::symbol::CanonicalAccess;
 fn test_ob() -> crate::emacs_core::symbol::Obarray {
     crate::emacs_core::symbol::Obarray::new()
 }
@@ -101,7 +103,11 @@ fn interactive_control_letter_domain_matches_gnu_callint() {
 }
 
 fn eval_all_with(ev: &mut Context, src: &str) -> Vec<String> {
-    let forms = crate::emacs_core::value_reader::read_all(src, &test_ob()).expect("parse");
+    let forms = crate::emacs_core::value_reader::read_all(
+        src,
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse");
     let roots = ev.save_specpdl_roots();
     for form in &forms {
         ev.push_specpdl_root(*form);
@@ -132,9 +138,13 @@ fn eval_first_form_after_marker(eval: &mut Context, source: &str, marker: &str) 
     let start = source
         .find(marker)
         .unwrap_or_else(|| panic!("missing GNU subr.el marker: {marker}"));
-    let (form, _) = crate::emacs_core::value_reader::read_one(&source[start..], 0, &test_ob())
-        .unwrap_or_else(|err| panic!("parse GNU subr.el from {marker} failed: {:?}", err))
-        .unwrap_or_else(|| panic!("no GNU subr.el form found after marker: {marker}"));
+    let (form, _) = crate::emacs_core::value_reader::read_one(
+        &source[start..],
+        0,
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .unwrap_or_else(|err| panic!("parse GNU subr.el from {marker} failed: {:?}", err))
+    .unwrap_or_else(|| panic!("no GNU subr.el form found after marker: {marker}"));
     eval.eval_form(form)
         .unwrap_or_else(|err| panic!("evaluate GNU subr.el form {marker} failed: {:?}", err));
 }
@@ -1656,7 +1666,7 @@ fn call_interactively_state_resolution_defers_motion_but_handles_noarg_cases() {
         // No collection, replacement or manager/interior borrow can escape.
         ev.obarray.with_legacy_value_write(|obarray| {
             resolve_call_interactively_target_and_args_in_state(
-                obarray,
+                VariableView::canonical(CanonicalAccess::TEST, obarray),
                 &mut Vec::new(),
                 buffers,
                 custom,
@@ -1686,7 +1696,7 @@ fn call_interactively_state_resolution_defers_motion_but_handles_noarg_cases() {
         // No collection, replacement or manager/interior borrow can escape.
         ev.obarray.with_legacy_value_write(|obarray| {
             resolve_call_interactively_target_and_args_in_state(
-                obarray,
+                VariableView::canonical(CanonicalAccess::TEST, obarray),
                 &mut Vec::new(),
                 buffers,
                 custom,
@@ -1719,7 +1729,7 @@ fn call_interactively_state_resolution_defers_prompting_specs_to_eval() {
         // No collection, replacement or manager/interior borrow can escape.
         ev.obarray.with_legacy_value_write(|obarray| {
             resolve_call_interactively_target_and_args_in_state(
-                obarray,
+                VariableView::canonical(CanonicalAccess::TEST, obarray),
                 &mut Vec::new(),
                 buffers,
                 custom,
@@ -1772,7 +1782,7 @@ fn call_interactively_state_resolution_handles_simple_string_codes_without_eval(
         // No collection, replacement or manager/interior borrow can escape.
         ev.obarray.with_legacy_value_write(|obarray| {
             resolve_call_interactively_target_and_args_in_state(
-                obarray,
+                VariableView::canonical(CanonicalAccess::TEST, obarray),
                 &mut Vec::new(),
                 buffers,
                 custom,
@@ -1827,7 +1837,7 @@ fn call_interactively_state_resolution_defers_shift_selection_without_effects() 
         // No collection, replacement or manager/interior borrow can escape.
         ev.obarray.with_legacy_value_write(|obarray| {
             resolve_call_interactively_target_and_args_in_state(
-                obarray,
+                VariableView::canonical(CanonicalAccess::TEST, obarray),
                 &mut Vec::new(),
                 buffers,
                 custom,
@@ -1863,7 +1873,7 @@ fn call_interactively_state_resolution_handles_optional_coding_without_prefix() 
         // No collection, replacement or manager/interior borrow can escape.
         ev.obarray.with_legacy_value_write(|obarray| {
             resolve_call_interactively_target_and_args_in_state(
-                obarray,
+                VariableView::canonical(CanonicalAccess::TEST, obarray),
                 &mut Vec::new(),
                 buffers,
                 custom,
@@ -6055,8 +6065,10 @@ fn where_is_preference_reuses_one_predeclared_snapshot() {
         vec![Value::fixnum(KEY_CHAR_CTRL | i64::from(b'c'))],
     ];
 
-    let preferred_modifier =
-        WhereIsPreferredModifier::snapshot(&obarray, crate::tagged::SymbolMode::Bare);
+    let preferred_modifier = WhereIsPreferredModifier::snapshot(
+        VariableView::canonical(CanonicalAccess::TEST, &obarray),
+        crate::tagged::SymbolMode::Bare,
+    );
     crate::emacs_core::intern::reset_intern_calls();
     let selected = select_where_is_preferred_sequence(preferred_modifier, &sequences);
 
@@ -6092,7 +6104,11 @@ fn where_is_preferred_modifier_accepts_gnu_solitary_names() {
     ] {
         obarray.set_symbol_value("where-is-preferred-modifier", Value::symbol(name));
         assert_eq!(
-            WhereIsPreferredModifier::snapshot(&obarray, crate::tagged::SymbolMode::Bare).mask(),
+            WhereIsPreferredModifier::snapshot(
+                VariableView::canonical(CanonicalAccess::TEST, &obarray),
+                crate::tagged::SymbolMode::Bare
+            )
+            .mask(),
             expected,
             "GNU solitary modifier spelling {name}"
         );

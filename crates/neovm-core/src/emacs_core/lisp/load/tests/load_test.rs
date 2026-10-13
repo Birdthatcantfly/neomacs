@@ -1,5 +1,7 @@
 use super::*;
 use crate::emacs_core::error::{FlowRef, FlowResultExt as _};
+use crate::emacs_core::eval::VariableView;
+use crate::emacs_core::symbol::CanonicalAccess;
 fn test_ob() -> crate::emacs_core::symbol::Obarray {
     crate::emacs_core::symbol::Obarray::new()
 }
@@ -488,7 +490,7 @@ fn stale_preloaded_face_doc_ref_restore_is_idempotent() {
 }
 
 fn load_neomacs_gui_term_layer_for_test(eval: &mut Context) {
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     for library in ["term/common-win", "term/neo-win"] {
         let path = find_file_in_load_path(library, &load_path)
             .unwrap_or_else(|| panic!("find {library} in load-path"));
@@ -1059,7 +1061,7 @@ fn gnu_subr_x_string_chop_newline_loads_without_rust_builtin() {
         "load-path",
         Value::list(bootstrap_load_path_entries(&lisp_dir)),
     );
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let bindings_path =
         bootstrap_fixture_path(&load_path, "bindings", true).expect("bindings fixture path");
     load_file(&mut eval, &bindings_path).unwrap_or_else(|err| {
@@ -1078,8 +1080,11 @@ fn gnu_subr_x_string_chop_newline_loads_without_rust_builtin() {
         bootstrap_fixture_path(&load_path, "emacs-lisp/subr-x", false).expect("subr-x path");
     let subr_x_source =
         fs::read_to_string(&subr_x_path).unwrap_or_else(|err| panic!("read subr-x.el: {err}"));
-    let subr_x_forms = crate::emacs_core::value_reader::read_all(&subr_x_source, &test_ob())
-        .expect("parse subr-x.el");
+    let subr_x_forms = crate::emacs_core::value_reader::read_all(
+        &subr_x_source,
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse subr-x.el");
     let roots = eval.save_specpdl_roots();
     for form in &subr_x_forms {
         eval.push_specpdl_root(*form);
@@ -1132,7 +1137,7 @@ fn load_bindings_source_survives_gc_stress_after_custom_runtime() {
     eval.gc_stress = true;
     eval.tagged_heap.set_gc_threshold(1);
 
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let bindings_path =
         bootstrap_fixture_path(&load_path, "bindings", false).expect("bindings.el fixture path");
     load_file(&mut eval, &bindings_path).unwrap_or_else(|err| {
@@ -1210,8 +1215,11 @@ fn bindings_split_source_survives_gc_stress_after_help_runtime() {
 
     let path = source_bootstrap_path("bindings.el");
     let content = std::fs::read_to_string(&path).expect("read bindings.el");
-    let forms =
-        crate::emacs_core::value_reader::read_all(&content, &test_ob()).expect("parse bindings.el");
+    let forms = crate::emacs_core::value_reader::read_all(
+        &content,
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse bindings.el");
 
     let split_at = forms.len().saturating_sub(16);
     let prefix_source = format!(
@@ -1285,7 +1293,7 @@ fn load_subr_survives_exact_post_form_gc_after_byte_run() {
     eval.set_variable("purify-flag", Value::NIL);
     eval.set_variable("max-lisp-eval-depth", Value::fixnum(1600));
 
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     for name in &[
         "emacs-lisp/debug-early",
         "emacs-lisp/byte-run",
@@ -1592,7 +1600,7 @@ fn after_pdump_load_hook_runs_after_finalize_and_only_once() {
                     (setq compat-pdump-hook-fired t)
                     (setq compat-pdump-hook-saw-load-path
                           (consp load-path))))))",
-        &test_ob(),
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
     )
     .unwrap();
     eval.eval_sub(setup[0]).expect("setup hook should evaluate");
@@ -2085,7 +2093,7 @@ fn partial_bootstrap_eval_until(stop_before: &str, prefer_compiled: bool) -> Con
         let _ = eval.eval_str_each(stub);
     }
 
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     for name in BOOTSTRAP_LOAD_SEQUENCE {
         if *name == stop_before {
             break;
@@ -2157,7 +2165,7 @@ fn build_pre_macroexp_reload_eval() -> Context {
         Value::list(vec![Value::symbol("skip")]),
     );
 
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     for name in &[
         "emacs-lisp/debug-early",
         "emacs-lisp/byte-run",
@@ -2191,7 +2199,7 @@ fn build_pre_macroexp_reload_eval() -> Context {
 
 fn minimal_eager_macroexpand_eval() -> Context {
     let mut eval = build_pre_macroexp_reload_eval();
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let macroexp_path = bootstrap_fixture_path(&load_path, "emacs-lisp/macroexp", false)
         .expect("macroexp source fixture path");
     load_file(&mut eval, &macroexp_path).unwrap_or_else(|err| {
@@ -8747,7 +8755,7 @@ fn profile_single_bootstrap_file_load() {
     let lisp_dir = project_root.join("lisp");
 
     let mut eval = partial_bootstrap_eval_until(&stop_before, prefer_compiled);
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let path = bootstrap_fixture_path(&load_path, &target, prefer_compiled)
         .unwrap_or_else(|| panic!("bootstrap file not found: {target}"));
     let path = if std::env::var("NEOVM_PROFILE_BOOTSTRAP_DISABLE_NEOBC").as_deref() == Ok("1") {
@@ -8913,7 +8921,7 @@ fn load_path_extraction() {
             Value::string("/home/user/.emacs.d"),
         ]),
     );
-    let paths = get_load_path(&ob, None);
+    let paths = get_load_path(VariableView::canonical(CanonicalAccess::TEST, &ob), None);
     assert_eq!(
         load_path_runtime_strings(&paths),
         vec![
@@ -8932,7 +8940,7 @@ fn plan_load_accepts_raw_unibyte_filename_values() {
     ob.set_symbol_value("load-path", Value::list(vec![Value::string("/tmp")]));
 
     let plan = plan_load_in_state(
-        &ob,
+        VariableView::canonical(CanonicalAccess::TEST, &ob),
         None,
         Value::heap_string(crate::heap_types::LispString::from_unibyte(vec![0xFF])),
         Some(Value::T),
@@ -8948,7 +8956,14 @@ fn plan_load_accepts_raw_unibyte_filename_values() {
 fn plan_load_missing_uses_gnu_file_missing_condition_data() {
     crate::test_utils::init_test_tracing();
     let ob = super::super::symbol::Obarray::new();
-    let err = match plan_load_in_state(&ob, None, Value::string("nofile"), None, None, None) {
+    let err = match plan_load_in_state(
+        VariableView::canonical(CanonicalAccess::TEST, &ob),
+        None,
+        Value::string("nofile"),
+        None,
+        None,
+        None,
+    ) {
         Ok(_) => panic!("missing load should signal"),
         Err(err) => err,
     };
@@ -8986,8 +9001,12 @@ fn resolve_autoload_load_path_requires_load_suffix_like_gnu() {
         Value::list(vec![Value::heap_string(load_path_lisp_string(&root))]),
     );
     let file = crate::heap_types::LispString::from_utf8("probe");
-    let err = resolve_autoload_load_path_in_state(&ob, None, &file)
-        .expect_err("autoload should not load a bare suffixless file");
+    let err = resolve_autoload_load_path_in_state(
+        VariableView::canonical(CanonicalAccess::TEST, &ob),
+        None,
+        &file,
+    )
+    .expect_err("autoload should not load a bare suffixless file");
     match err.into_kind() {
         crate::emacs_core::error::FlowKind::Signal(sig) => {
             assert_eq!(sig.symbol_name(), "file-missing");
@@ -9001,8 +9020,12 @@ fn resolve_autoload_load_path_requires_load_suffix_like_gnu() {
 
     let suffixed = root.join("probe.el");
     fs::write(&suffixed, "(setq suffixed-probe-loaded t)\n").expect("write .el fixture");
-    let resolved = resolve_autoload_load_path_in_state(&ob, None, &file)
-        .expect("autoload should resolve suffixed load file");
+    let resolved = resolve_autoload_load_path_in_state(
+        VariableView::canonical(CanonicalAccess::TEST, &ob),
+        None,
+        &file,
+    )
+    .expect("autoload should resolve suffixed load file");
     assert_eq!(resolved, suffixed);
 
     let _ = fs::remove_dir_all(&root);
@@ -9458,7 +9481,7 @@ fn collect_loaddefs_autoload_args_preserves_raw_unibyte_file_name() {
         &source,
         false,
         0,
-        &test_ob(),
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
     )
     .expect("parse unibyte autoload form")
     .expect("autoload form should parse")
@@ -10899,7 +10922,10 @@ fn reader_accepts_utf8_emacs_extended_char_literals_from_ethiopic_source() {
 
     let forms = crate::emacs_core::value_reader::read_all_lisp_source(
         &source,
-        &crate::emacs_core::symbol::Obarray::new(),
+        VariableView::canonical(
+            CanonicalAccess::TEST,
+            &crate::emacs_core::symbol::Obarray::new(),
+        ),
     )
     .expect("reader should accept utf-8-emacs extended chars before function quote");
 
@@ -10927,7 +10953,10 @@ fn reader_accepts_utf8_emacs_extended_char_literals_in_full_ethiopic_source() {
 
     let forms = crate::emacs_core::value_reader::read_all_lisp_source(
         &source,
-        &crate::emacs_core::symbol::Obarray::new(),
+        VariableView::canonical(
+            CanonicalAccess::TEST,
+            &crate::emacs_core::symbol::Obarray::new(),
+        ),
     )
     .expect("reader should accept GNU utf-8-emacs source files");
 
@@ -10950,7 +10979,13 @@ fn lisp_source_reader_accepts_utf8_emacs_extended_char_literals_in_full_ethiopic
     let mut pos = 0;
     let mut count = 0;
     while let Some((_form, next_pos)) = source
-        .read_one(pos, &crate::emacs_core::symbol::Obarray::new())
+        .read_one(
+            pos,
+            VariableView::canonical(
+                CanonicalAccess::TEST,
+                &crate::emacs_core::symbol::Obarray::new(),
+            ),
+        )
         .expect("LispReadSource should accept GNU utf-8-emacs source files")
     {
         pos = next_pos;
@@ -11537,7 +11572,7 @@ fn elc_loading_defines_defcustom_variables() {
     let (form0, _next_pos) = crate::emacs_core::value_reader::read_one_from_encoded_file_bytes(
         &raw_bytes[content_start..],
         0,
-        &test_ob(),
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
         None,
     )
     .expect("read first form")
@@ -11592,7 +11627,7 @@ fn source_cl_lib_loads_after_early_gv_without_bootstrap_gv_stubs() {
 fn compiled_cl_preloaded_loads_after_faces() {
     crate::test_utils::init_test_tracing();
     let mut eval = create_bootstrap_evaluator_cached().expect("bootstrap evaluator");
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let path = bootstrap_fixture_path(&load_path, "emacs-lisp/cl-preloaded", true)
         .expect("compiled cl-preloaded fixture path");
 
@@ -11630,11 +11665,14 @@ fn compiled_custom_declare_face_call_before_faces_succeeds() {
 fn source_cycle_spacing_form_loads_after_bootstrap_prefix() {
     crate::test_utils::init_test_tracing();
     let mut eval = partial_bootstrap_eval_until("simple", false);
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let path = bootstrap_fixture_path(&load_path, "simple", false).expect("simple.el path");
     let content = std::fs::read_to_string(&path).expect("read simple.el");
-    let forms =
-        crate::emacs_core::value_reader::read_all(&content, &test_ob()).expect("parse simple.el");
+    let forms = crate::emacs_core::value_reader::read_all(
+        &content,
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse simple.el");
 
     let cycle_spacing_form = forms
         .get(89)
@@ -11902,7 +11940,7 @@ fn partial_bootstrap_looking_back_matches_empty_suffix_at_line_end() {
 fn compiled_characters_loads_after_case_table() {
     crate::test_utils::init_test_tracing();
     let mut eval = partial_bootstrap_eval_until("international/characters", true);
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let path = bootstrap_fixture_path(&load_path, "international/characters", true)
         .expect("compiled international/characters fixture path");
 
@@ -11919,7 +11957,7 @@ fn compiled_characters_loads_after_case_table() {
 fn source_characters_loads_after_generated_charprop() {
     crate::test_utils::init_test_tracing();
     let mut eval = partial_bootstrap_eval_until("international/characters", false);
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let Some(charprop) = bootstrap_fixture_path(&load_path, "international/charprop", false) else {
         return;
     };
@@ -11946,7 +11984,7 @@ fn source_characters_loads_after_generated_charprop() {
 fn set_case_syntax_preserves_outer_lexical_c_after_charprop() {
     crate::test_utils::init_test_tracing();
     let mut eval = partial_bootstrap_eval_until("international/characters", false);
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let Some(charprop) = bootstrap_fixture_path(&load_path, "international/charprop", false) else {
         return;
     };
@@ -11993,7 +12031,7 @@ fn source_chinese_loads_after_composite() {
     crate::test_utils::init_test_tracing();
 
     let mut eval = partial_bootstrap_eval_until("language/chinese", false);
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let path = bootstrap_fixture_path(&load_path, "language/chinese", false)
         .expect("source language/chinese fixture path");
 
@@ -12128,7 +12166,7 @@ fn bootstrap_load_sequence_includes_gnu_x_term_layer_after_tool_bar() {
 fn partial_bootstrap_fill_delete_newlines_matches_gnu_trailing_space_behavior() {
     crate::test_utils::init_test_tracing();
     let mut eval = partial_bootstrap_eval_until("tool-bar", false);
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let fill_path =
         bootstrap_fixture_path(&load_path, "textmodes/fill", false).expect("fill fixture path");
     load_file(&mut eval, &fill_path).unwrap_or_else(|err| {
@@ -12163,7 +12201,7 @@ fn bootstrap_tool_bar_mode_comes_from_gnu_mode_macro_path() {
     tracing::info!("tool-bar probe: begin partial bootstrap");
     let mut eval = partial_bootstrap_eval_until("tool-bar", false);
     tracing::info!("tool-bar probe: partial bootstrap complete");
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let easy_mmode_path = bootstrap_fixture_path(&load_path, "emacs-lisp/easy-mmode", false)
         .expect("easy-mmode fixture path");
     tracing::info!("tool-bar probe: loading {}", easy_mmode_path.display());
@@ -12179,8 +12217,11 @@ fn bootstrap_tool_bar_mode_comes_from_gnu_mode_macro_path() {
         bootstrap_fixture_path(&load_path, "tool-bar", false).expect("tool-bar fixture path");
     tracing::info!("tool-bar probe: loading {}", tool_bar_path.display());
     let source = fs::read_to_string(&tool_bar_path).expect("read tool-bar source");
-    let top_level_forms = crate::emacs_core::value_reader::read_all(&source, &test_ob())
-        .expect("parse tool-bar source");
+    let top_level_forms = crate::emacs_core::value_reader::read_all(
+        &source,
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse tool-bar source");
     // GNU `readevalloop` keeps each form live while it is being expanded and
     // evaluated. This probe pre-parses the whole file, so root those forms
     // across the later bootstrap/helper evaluation that can trigger GC.
@@ -14256,7 +14297,7 @@ fn macroexpand_all_pcase_terminates() {
     eval.set_variable("purify-flag", Value::NIL);
     eval.set_variable("max-lisp-eval-depth", Value::fixnum(1600));
 
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let load_and_report = |eval: &mut crate::emacs_core::eval::Context,
                            name: &str,
                            load_path: &[crate::heap_types::LispString]| {
@@ -14292,11 +14333,14 @@ fn macroexpand_all_pcase_terminates() {
     tracing::debug!("Testing eager expansion on a simple defun with cond...");
     let test_form =
         "(defun test-eager (x) (cond ((= x 1) \"one\") ((= x 2) \"two\") (t \"other\")))";
-    let form_value = crate::emacs_core::value_reader::read_all(test_form, &test_ob())
-        .unwrap()
-        .into_iter()
-        .next()
-        .unwrap();
+    let form_value = crate::emacs_core::value_reader::read_all(
+        test_form,
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .unwrap()
+    .into_iter()
+    .next()
+    .unwrap();
     let mexp_fn = eval
         .obarray()
         .symbol_function("internal-macroexpand-for-load");
@@ -14350,7 +14394,7 @@ fn macroexp_eager_reload_preserves_symbol_identity() {
         Value::list(vec![Value::symbol("skip")]),
     );
 
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let load = |eval: &mut crate::emacs_core::eval::Context, name: &str| {
         let path = find_file_in_load_path(name, &load_path).expect(name);
         load_file(eval, &path).unwrap_or_else(|e| panic!("failed to load {name}: {e:?}"));
@@ -14428,12 +14472,14 @@ fn eager_expand_toplevel_forms_keeps_recursive_progn_forms_alive_under_exact_gc(
     )
     .expect("define progn macro");
 
-    let form_value =
-        crate::emacs_core::value_reader::read_all("(neomacs-test-progn-macro)", &test_ob())
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap();
+    let form_value = crate::emacs_core::value_reader::read_all(
+        "(neomacs-test-progn-macro)",
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .unwrap()
+    .into_iter()
+    .next()
+    .unwrap();
     let macroexpand_fn = get_eager_macroexpand_fn(&eval).expect("eager macroexpand fn");
     let mut expanded = Vec::new();
     eager_expand_toplevel_forms(
@@ -14489,7 +14535,7 @@ fn function_get_only_exposes_cxxr_compiler_macro_on_cxxr_symbols() {
     }
     eval.set_variable("load-path", Value::list(load_path_entries));
 
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     for name in &[
         "emacs-lisp/debug-early",
         "emacs-lisp/byte-run",
@@ -14539,7 +14585,7 @@ fn pcase_integer_literal_pattern() {
     eval.set_variable("purify-flag", Value::NIL);
     eval.set_variable("max-lisp-eval-depth", Value::fixnum(1600));
 
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let load_and_report = |eval: &mut crate::emacs_core::eval::Context,
                            name: &str,
                            load_path: &[crate::heap_types::LispString]| {
@@ -14687,7 +14733,7 @@ fn key_parse_modifier_bits() {
     eval.set_variable("purify-flag", Value::NIL);
 
     // Load the minimum bootstrap: debug-early, byte-run, backquote, subr, keymap
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     for name in &[
         "emacs-lisp/debug-early",
         "emacs-lisp/byte-run",
@@ -14969,7 +15015,7 @@ fn bootstrap_macroexpand_functions_are_compiled() {
 fn bootstrap_load_uniquify_after_float_sup() {
     crate::test_utils::init_test_tracing();
     let mut eval = partial_bootstrap_eval_until("uniquify", true);
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     let path = bootstrap_fixture_path(&load_path, "uniquify", true)
         .expect("bootstrap file not found: uniquify");
     load_file(&mut eval, &path).unwrap_or_else(|err| {

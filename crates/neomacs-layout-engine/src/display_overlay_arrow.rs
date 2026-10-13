@@ -130,10 +130,7 @@ pub(crate) fn draw_overlay_arrows<B: LayoutBufferView>(
 /// The symbols in `overlay-arrow-variable-list`, skipping non-symbols exactly
 /// as GNU's loop does.
 fn arrow_variables(evaluator: &Context) -> Vec<Value> {
-    let Some(list) = evaluator
-        .obarray()
-        .symbol_value_copied("overlay-arrow-variable-list")
-    else {
+    let Some(list) = evaluator.variable_value_by_name("overlay-arrow-variable-list") else {
         return Vec::new();
     };
     let mut vars = Vec::new();
@@ -152,7 +149,7 @@ fn arrow_variables(evaluator: &Context) -> Vec<Value> {
 /// into `buffer_id` (GNU additionally requires `current_buffer`).
 fn arrow_marker_charpos(evaluator: &Context, var: Value, buffer_id: BufferId) -> Option<usize> {
     let sym = var.as_bare_symbol_id()?;
-    let value = evaluator.obarray().symbol_value_id_copied(sym)?;
+    let value = evaluator.variable_value(sym)?;
     let marker = value.as_marker_data()?;
     (marker.buffer == Some(buffer_id)).then_some(marker.charpos)
 }
@@ -179,8 +176,7 @@ fn arrow_string(evaluator: &Context, var: Value) -> Option<String> {
         plist = rest.cons_cdr();
     }
     evaluator
-        .obarray()
-        .symbol_value_copied("overlay-arrow-string")
+        .variable_value_by_name("overlay-arrow-string")
         .and_then(|value| value.as_str_owned())
 }
 

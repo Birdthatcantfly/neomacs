@@ -16,17 +16,17 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     // declaration is what GNU's `boundp', `special-variable-p' and
     // `documentation-property' all answer from.
     obarray.define_special_variable("long-line-threshold", Value::fixnum(50000));
-    obarray.set_symbol_value("kill-buffer-query-functions", Value::NIL);
-    obarray.set_symbol_value("kill-buffer-hook", Value::NIL);
-    obarray.set_symbol_value("buffer-list-update-hook", Value::NIL);
-    obarray.set_symbol_value("change-major-mode-hook", Value::NIL);
-    obarray.set_symbol_value("after-change-major-mode-hook", Value::NIL);
-    obarray.set_symbol_value("first-change-hook", Value::NIL);
-    obarray.set_symbol_value("before-change-functions", Value::NIL);
-    obarray.set_symbol_value("after-change-functions", Value::NIL);
-    obarray.set_symbol_value("combine-after-change-calls", Value::NIL);
+    obarray.seed_value("kill-buffer-query-functions", Value::NIL);
+    obarray.seed_value("kill-buffer-hook", Value::NIL);
+    obarray.seed_value("buffer-list-update-hook", Value::NIL);
+    obarray.seed_value("change-major-mode-hook", Value::NIL);
+    obarray.seed_value("after-change-major-mode-hook", Value::NIL);
+    obarray.seed_value("first-change-hook", Value::NIL);
+    obarray.seed_value("before-change-functions", Value::NIL);
+    obarray.seed_value("after-change-functions", Value::NIL);
+    obarray.seed_value("combine-after-change-calls", Value::NIL);
     // GNU `src/buffer.c` defines this with DEFVAR_LISP and initializes it to nil.
-    obarray.set_symbol_value("inhibit-read-only", Value::NIL);
+    obarray.seed_value("inhibit-read-only", Value::NIL);
     for name in [
         "first-change-hook",
         "before-change-functions",
@@ -59,13 +59,13 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
         "buffer-access-fontify-functions",
         "buffer-access-fontified-property",
     ] {
-        obarray.set_symbol_value(name, Value::NIL);
+        obarray.seed_value(name, Value::NIL);
         obarray.make_special(name);
     }
-    obarray.set_symbol_value("buffer-file-coding-system", Value::NIL);
-    obarray.set_symbol_value("buffer-file-format", Value::NIL);
-    obarray.set_symbol_value("buffer-saved-size", Value::fixnum(0));
-    obarray.set_symbol_value(
+    obarray.seed_value("buffer-file-coding-system", Value::NIL);
+    obarray.seed_value("buffer-file-format", Value::NIL);
+    obarray.seed_value("buffer-saved-size", Value::fixnum(0));
+    obarray.seed_value(
         "buffer-auto-save-file-format",
         Value::list(vec![Value::symbol("t")]),
     );
@@ -74,35 +74,35 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     // #'buffer-stale--default-function ...)` -- and `defvar` only assigns to a
     // *void* symbol, so a nil seed would win permanently and leave every
     // stale-buffer check without the default function GNU gives it.
-    obarray.set_symbol_value("buffer-undo-list", Value::NIL);
-    obarray.set_symbol_value("buffer-display-table", Value::NIL);
-    obarray.set_symbol_value("enable-multibyte-characters", Value::T);
+    obarray.seed_value("buffer-undo-list", Value::NIL);
+    obarray.seed_value("buffer-display-table", Value::NIL);
+    obarray.seed_value("enable-multibyte-characters", Value::T);
     // `default-enable-multibyte-characters' was removed in Emacs 31 (only a
     // comment in mule-cmds.el mentions it); GNU leaves it unbound, so neomacs
     // must not seed it.
-    obarray.set_symbol_value("find-file-hook", Value::NIL);
-    obarray.set_symbol_value("find-file-not-found-functions", Value::NIL);
-    obarray.set_symbol_value("major-mode", Value::symbol("fundamental-mode"));
-    obarray.set_symbol_value("mode-name", Value::string("Fundamental"));
-    obarray.set_symbol_value("local-abbrev-table", Value::NIL);
-    obarray.set_symbol_value("fill-column", Value::fixnum(70));
-    obarray.set_symbol_value("left-margin", Value::fixnum(0));
+    obarray.seed_value("find-file-hook", Value::NIL);
+    obarray.seed_value("find-file-not-found-functions", Value::NIL);
+    obarray.seed_value("major-mode", Value::symbol("fundamental-mode"));
+    obarray.seed_value("mode-name", Value::string("Fundamental"));
+    obarray.seed_value("local-abbrev-table", Value::NIL);
+    obarray.seed_value("fill-column", Value::fixnum(70));
+    obarray.seed_value("left-margin", Value::fixnum(0));
     // tab-width is set by init_indent_vars() with special=true
-    obarray.set_symbol_value("ctl-arrow", Value::T);
-    obarray.set_symbol_value("truncate-lines", Value::NIL);
-    obarray.set_symbol_value("word-wrap", Value::NIL);
+    obarray.seed_value("ctl-arrow", Value::T);
+    obarray.seed_value("truncate-lines", Value::NIL);
+    obarray.seed_value("word-wrap", Value::NIL);
     // GNU `xdisp.c` defines these as nil, buffer-local display variables.
-    obarray.set_symbol_value("wrap-prefix", Value::NIL);
-    obarray.set_symbol_value("line-prefix", Value::NIL);
-    obarray.set_symbol_value("selective-display", Value::NIL);
-    obarray.set_symbol_value("selective-display-ellipses", Value::T);
-    obarray.set_symbol_value("indicate-empty-lines", Value::NIL);
-    obarray.set_symbol_value("indicate-buffer-boundaries", Value::NIL);
-    obarray.set_symbol_value("fringe-indicator-alist", Value::NIL);
-    obarray.set_symbol_value("fringe-cursor-alist", Value::NIL);
-    obarray.set_symbol_value("scroll-up-aggressively", Value::NIL);
-    obarray.set_symbol_value("scroll-down-aggressively", Value::NIL);
-    obarray.set_symbol_value("auto-fill-function", Value::NIL);
-    obarray.set_symbol_value("buffer-display-count", Value::fixnum(0));
-    obarray.set_symbol_value("buffer-display-time", Value::NIL);
+    obarray.seed_value("wrap-prefix", Value::NIL);
+    obarray.seed_value("line-prefix", Value::NIL);
+    obarray.seed_value("selective-display", Value::NIL);
+    obarray.seed_value("selective-display-ellipses", Value::T);
+    obarray.seed_value("indicate-empty-lines", Value::NIL);
+    obarray.seed_value("indicate-buffer-boundaries", Value::NIL);
+    obarray.seed_value("fringe-indicator-alist", Value::NIL);
+    obarray.seed_value("fringe-cursor-alist", Value::NIL);
+    obarray.seed_value("scroll-up-aggressively", Value::NIL);
+    obarray.seed_value("scroll-down-aggressively", Value::NIL);
+    obarray.seed_value("auto-fill-function", Value::NIL);
+    obarray.seed_value("buffer-display-count", Value::fixnum(0));
+    obarray.seed_value("buffer-display-time", Value::NIL);
 }

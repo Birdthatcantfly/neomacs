@@ -4,6 +4,7 @@
 //! the same view of `Context` and the parent's private items (`use super::*`).
 
 use super::*;
+use crate::emacs_core::symbol::CanonicalAccess;
 
 impl Context {
     /// Reconstruct an Context from pdump data.
@@ -43,21 +44,37 @@ impl Context {
         let mut tagged_heap = tagged_heap;
         crate::tagged::gc::set_tagged_heap(&mut tagged_heap);
         let noninteractive = obarray
-            .symbol_value_id_or_nil(core_eval_symbols.noninteractive_symbol)
+            .canonical_value_or_nil(
+                CanonicalAccess::DUMP,
+                core_eval_symbols.noninteractive_symbol,
+            )
             .is_truthy();
         let symbols_with_pos_enabled = obarray
-            .symbol_value_id_or_nil(core_eval_symbols.symbols_with_pos_enabled_symbol)
+            .canonical_value_or_nil(
+                CanonicalAccess::DUMP,
+                core_eval_symbols.symbols_with_pos_enabled_symbol,
+            )
             .is_truthy();
         let print_symbols_bare = obarray
-            .symbol_value_id_or_nil(core_eval_symbols.print_symbols_bare_symbol)
+            .canonical_value_or_nil(
+                CanonicalAccess::DUMP,
+                core_eval_symbols.print_symbols_bare_symbol,
+            )
             .is_truthy();
         let compiler_function_overrides_active = obarray
-            .symbol_value_id_or_nil(core_eval_symbols.compiler_function_overrides_symbol)
+            .canonical_value_or_nil(
+                CanonicalAccess::DUMP,
+                core_eval_symbols.compiler_function_overrides_symbol,
+            )
             .is_cons();
-        let quit_flag = obarray.symbol_value_id_or_nil(core_eval_symbols.quit_flag_symbol);
-        let inhibit_quit = obarray.symbol_value_id_or_nil(core_eval_symbols.inhibit_quit_symbol);
-        let throw_on_input =
-            obarray.symbol_value_id_or_nil(core_eval_symbols.throw_on_input_symbol);
+        let quit_flag = obarray
+            .canonical_value_or_nil(CanonicalAccess::DUMP, core_eval_symbols.quit_flag_symbol);
+        let inhibit_quit = obarray
+            .canonical_value_or_nil(CanonicalAccess::DUMP, core_eval_symbols.inhibit_quit_symbol);
+        let throw_on_input = obarray.canonical_value_or_nil(
+            CanonicalAccess::DUMP,
+            core_eval_symbols.throw_on_input_symbol,
+        );
 
         let world = world::WorldStorageBuilder {
             owned_roots: Default::default(),

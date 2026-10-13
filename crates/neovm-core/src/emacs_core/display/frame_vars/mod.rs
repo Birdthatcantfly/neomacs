@@ -62,12 +62,12 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     // sets it, which is also what GNU answers in `--batch'.
     obarray.define_special_variable("x-resource-name", Value::NIL);
     obarray.define_special_variable("x-resource-class", Value::string("Emacs"));
-    obarray.set_symbol_value("default-frame-alist", Value::NIL);
+    obarray.seed_value("default-frame-alist", Value::NIL);
     // GNU frame.c exposes this as a built-in variable. GUI builds default to a
     // concrete side instead of leaving scroll-bar.el to trip over an unbound var.
     // frame.c:7451 DEFVAR_LISP; GUI toolkit builds (GTK/NS/W32) init Qright.
     obarray.define_special_variable("default-frame-scroll-bars", Value::symbol("right"));
-    obarray.set_symbol_value("initial-frame-alist", Value::NIL);
+    obarray.seed_value("initial-frame-alist", Value::NIL);
     // dispnew.c:7508 DEFVAR_LISP, zero-init nil; startup assigns the real one.
     obarray.define_special_variable("initial-window-system", Value::NIL);
     // `x-display-name' is NOT declared here, and the comment that used to sit
@@ -124,7 +124,7 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     // xdisp.c:38621 / 38629 DEFVAR_LISP -- special like every C DEFVAR.
     obarray.define_special_variable("frame-title-format", title_format);
     obarray.define_special_variable("icon-title-format", title_format);
-    obarray.set_symbol_value("focus-follows-mouse", Value::NIL);
+    obarray.seed_value("focus-follows-mouse", Value::NIL);
     // frame.c:7636 DEFVAR_LISP. GNU's GUI default when the tool bar is drawn
     // by Emacs itself (not an external GTK/NS toolkit bar) is
     // (tab-bar-lines tool-bar-lines): adding/removing those bars does not

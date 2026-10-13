@@ -14,6 +14,7 @@ use super::intern::{SymId, intern};
 use super::value::*;
 use crate::emacs_core::error::LispCondition;
 use crate::emacs_core::error::{expect_args, expect_max_args, expect_min_args};
+use crate::emacs_core::eval::VariableView;
 use crate::tagged::SymbolMode;
 
 // ---------------------------------------------------------------------------
@@ -374,11 +375,7 @@ fn expect_character_code(value: &Value) -> Result<i64, Flow> {
 /// requoting here from the active obarray's `text-quoting-style` rather than
 /// emitting the raw ASCII quotes, so the captured error data matches GNU
 /// byte-for-byte.
-fn invalid_range_error(
-    name: &str,
-    obarray: Option<&super::symbol::Obarray>,
-    mode: SymbolMode,
-) -> Flow {
+fn invalid_range_error(name: &str, obarray: Option<VariableView<'_>>, mode: SymbolMode) -> Flow {
     // GNU resolves `text-quoting-style` from the global environment in `doprnt`.
     // When no obarray is threaded in (internal callers that pass valid ranges
     // and never reach this path, plus tests), fall back to the batch/UTF-8
@@ -794,7 +791,7 @@ pub(crate) fn builtin_char_table_p(args: Vec<Value>) -> EvalResult {
 /// - `t` -- set all character entries while leaving the default slot alone
 pub(crate) fn builtin_set_char_table_range(
     args: Vec<Value>,
-    obarray: Option<&super::symbol::Obarray>,
+    obarray: Option<VariableView<'_>>,
 ) -> EvalResult {
     builtin_set_char_table_range_with_symbols(args, obarray, SymbolMode::Bare)
 }
@@ -803,12 +800,12 @@ pub(crate) fn builtin_set_char_table_range_in_state(
     eval: &mut Context,
     args: Vec<Value>,
 ) -> EvalResult {
-    builtin_set_char_table_range_with_symbols(args, Some(&eval.obarray), eval.symbol_mode())
+    builtin_set_char_table_range_with_symbols(args, Some(eval.variables()), eval.symbol_mode())
 }
 
 pub(crate) fn builtin_set_char_table_range_with_symbols(
     args: Vec<Value>,
-    obarray: Option<&super::symbol::Obarray>,
+    obarray: Option<VariableView<'_>>,
     mode: SymbolMode,
 ) -> EvalResult {
     expect_args("set-char-table-range", &args, 3)?;
@@ -894,7 +891,7 @@ fn ct_lookup_ascii_cached(mut obj: &crate::tagged::header::CharTableObj, ch: i64
 /// - `nil` -- return the default value
 pub(crate) fn builtin_char_table_range(
     args: Vec<Value>,
-    obarray: Option<&super::symbol::Obarray>,
+    obarray: Option<VariableView<'_>>,
 ) -> EvalResult {
     builtin_char_table_range_with_symbols(args, obarray, SymbolMode::Bare)
 }
@@ -903,12 +900,12 @@ pub(crate) fn builtin_char_table_range_in_state(
     eval: &mut Context,
     args: Vec<Value>,
 ) -> EvalResult {
-    builtin_char_table_range_with_symbols(args, Some(&eval.obarray), eval.symbol_mode())
+    builtin_char_table_range_with_symbols(args, Some(eval.variables()), eval.symbol_mode())
 }
 
 pub(crate) fn builtin_char_table_range_with_symbols(
     args: Vec<Value>,
-    obarray: Option<&super::symbol::Obarray>,
+    obarray: Option<VariableView<'_>>,
     mode: SymbolMode,
 ) -> EvalResult {
     expect_args("char-table-range", &args, 2)?;
@@ -2105,8 +2102,7 @@ fn assq_cell_eq(key: Value, list: Value, mode: SymbolMode) -> Result<Value, Flow
 
 fn char_code_property_cell(eval: &Context, prop: Value) -> Result<Value, Flow> {
     let alist = eval
-        .obarray
-        .symbol_value_copied("char-code-property-alist")
+        .variable_value_by_name("char-code-property-alist")
         .unwrap_or(Value::NIL);
     assq_cell_eq(prop, alist, eval.symbol_mode())
 }

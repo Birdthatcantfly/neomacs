@@ -7,6 +7,7 @@ use super::error::{EvalResult, Flow, signal};
 use super::intern::{NIL_SYM_ID, T_SYM_ID};
 use crate::emacs_core::error::LispCondition;
 use crate::emacs_core::error::{expect_max_args, expect_min_args};
+use crate::emacs_core::symbol::CanonicalAccess;
 // storage imports removed — now using emacs_char directly
 use super::symbol::Obarray;
 use super::value::*;
@@ -61,13 +62,18 @@ impl TextPropertyControlVariable {
 
     /// Read this variable for one explicit buffer, falling back to its global
     /// default exactly as GNU's buffer-local value machinery does.
-    pub(crate) fn value_for_buffer(self, obarray: &Obarray, buf: &Buffer) -> Option<Value> {
+    pub(crate) fn value_for_buffer(
+        self,
+        vars: crate::emacs_core::eval::VariableView<'_>,
+        buf: &Buffer,
+    ) -> Option<Value> {
+        let obarray = vars.obarray();
         let symbol_id = self.symbol_id();
         let localized = obarray.is_localized(symbol_id);
         if let Some(binding) = buf.get_buffer_local_binding_by_sym_id_gated(symbol_id, localized) {
             return binding.as_value();
         }
-        obarray.symbol_value_id_copied(symbol_id)
+        vars.value(symbol_id)
     }
 }
 
@@ -109,19 +115,19 @@ pub(crate) fn init_textprop_vars(
     _custom: &mut crate::emacs_core::custom::CustomManager,
 ) {
     let default_properties = TextPropertyControlVariable::DefaultTextProperties;
-    obarray.set_symbol_value(default_properties.name(), Value::NIL);
+    obarray.seed_value(default_properties.name(), Value::NIL);
     obarray.make_special(default_properties.name());
 
     let alias_alist = TextPropertyControlVariable::CharPropertyAliasAlist;
-    obarray.set_symbol_value(alias_alist.name(), Value::NIL);
+    obarray.seed_value(alias_alist.name(), Value::NIL);
     obarray.make_special(alias_alist.name());
 
-    obarray.set_symbol_value("inhibit-point-motion-hooks", Value::T);
+    obarray.seed_value("inhibit-point-motion-hooks", Value::T);
     obarray.make_special("inhibit-point-motion-hooks");
 
     let default_nonsticky = TextPropertyControlVariable::TextPropertyDefaultNonsticky;
     let default_nonsticky_name = default_nonsticky.name();
-    obarray.set_symbol_value(
+    obarray.seed_value(
         default_nonsticky_name,
         default_text_property_nonsticky_alist(),
     );
@@ -134,7 +140,7 @@ pub(crate) fn init_textprop_vars(
     {
         let id = default_nonsticky.symbol_id();
         let default = obarray
-            .find_symbol_value(id)
+            .canonical_find_value(CanonicalAccess::BOOTSTRAP, id)
             .unwrap_or(crate::emacs_core::value::Value::NIL);
         obarray.make_symbol_localized(id, default);
         obarray.set_blv_local_if_set(id, true);
@@ -227,16 +233,16 @@ pub(crate) fn expect_property_key(value: &Value) -> Result<Value, Flow> {
 }
 
 pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray) {
-    obarray.set_symbol_value(
+    obarray.seed_value(
         TextPropertyControlVariable::DefaultTextProperties.name(),
         Value::NIL,
     );
-    obarray.set_symbol_value(
+    obarray.seed_value(
         TextPropertyControlVariable::CharPropertyAliasAlist.name(),
         Value::NIL,
     );
-    obarray.set_symbol_value("inhibit-point-motion-hooks", Value::T);
-    obarray.set_symbol_value(
+    obarray.seed_value("inhibit-point-motion-hooks", Value::T);
+    obarray.seed_value(
         TextPropertyControlVariable::TextPropertyDefaultNonsticky.name(),
         default_text_property_nonsticky_alist(),
     );
@@ -260,10 +266,11 @@ pub(crate) fn default_text_property_nonsticky_alist() -> Value {
 }
 
 fn current_textprop_variable_value(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     variable: TextPropertyControlVariable,
 ) -> Option<Value> {
+    let obarray = vars.obarray();
     // Text-property control vars (char-property-alias-alist, default-text-
     // properties, inhibit-*, ...) are almost always plain globals. A global
     // (non-Localized) symbol can never be in a buffer's local_var_alist, so
@@ -307,7 +314,7 @@ fn current_textprop_variable_value(
         }
         crate::emacs_core::symbol::ValueCell::Alias(_) => {}
     }
-    obarray.symbol_value_id_copied(sym_id)
+    vars.value(sym_id)
 }
 
 fn plist_get_value(plist: Value, prop: Value) -> Option<Value> {
@@ -510,16 +517,21 @@ pub(crate) struct CharPropertyResolver<'a> {
 }
 
 impl<'a> CharPropertyResolver<'a> {
-    pub(crate) fn snapshot(obarray: &'a Obarray, buffers: &BufferManager, prop: Value) -> Self {
+    pub(crate) fn snapshot(
+        vars: crate::emacs_core::eval::VariableView<'a>,
+        buffers: &BufferManager,
+        prop: Value,
+    ) -> Self {
+        let obarray = vars.obarray();
         let aliases = current_textprop_variable_value(
-            obarray,
+            vars,
             buffers,
             TextPropertyControlVariable::CharPropertyAliasAlist,
         )
         .and_then(|value| assq_rest(value, prop))
         .unwrap_or(Value::NIL);
         let default = current_textprop_variable_value(
-            obarray,
+            vars,
             buffers,
             TextPropertyControlVariable::DefaultTextProperties,
         )
@@ -605,7 +617,7 @@ enum CharPropertyCarrier {
 static_assertions::assert_impl_all!(CharPropertyCarrier: Send, Sync);
 
 fn lookup_char_property_from_direct<F>(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     mut direct_get: F,
     prop: Value,
@@ -614,6 +626,7 @@ fn lookup_char_property_from_direct<F>(
 where
     F: FnMut(Value) -> Option<Value>,
 {
+    let obarray = vars.obarray();
     let direct = DirectCharProperties::from_getter(&mut direct_get, prop);
     // GNU `lookup_char_property` (src/intervals.c) scans the interval plist
     // FIRST and returns on a direct hit, reading `char-property-alias-alist`
@@ -625,7 +638,7 @@ where
         return value;
     }
     let mut aliases = current_textprop_variable_value(
-        obarray,
+        vars,
         buffers,
         TextPropertyControlVariable::CharPropertyAliasAlist,
     )
@@ -641,7 +654,7 @@ where
     });
     let default = match carrier {
         CharPropertyCarrier::Text => current_textprop_variable_value(
-            obarray,
+            vars,
             buffers,
             TextPropertyControlVariable::DefaultTextProperties,
         )
@@ -670,13 +683,13 @@ where
 /// `modification-hooks` from text-property intervals so a `category' interval
 /// contributes the category symbol's `modification-hooks' property.
 pub(crate) fn lookup_text_property_from_plist_slice(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     plist: &[(Value, Value)],
     prop: Value,
 ) -> Value {
     lookup_char_property_from_direct(
-        obarray,
+        vars,
         buffers,
         |name| plist_slice_get_value(plist, name),
         prop,
@@ -685,14 +698,14 @@ pub(crate) fn lookup_text_property_from_plist_slice(
 }
 
 fn lookup_string_text_property(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     table: &TextPropertyTable,
     char_pos: usize,
     prop: Value,
 ) -> Value {
     lookup_char_property_from_direct(
-        obarray,
+        vars,
         buffers,
         |name| table.get_property_at_char_pos(string_char_pos(char_pos), name),
         prop,
@@ -701,7 +714,7 @@ fn lookup_string_text_property(
 }
 
 fn lookup_buffer_text_property_at_char_pos(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf: &crate::buffer::buffer::Buffer,
     char_pos: CharPos0,
@@ -714,7 +727,7 @@ fn lookup_buffer_text_property_at_char_pos(
     let no_accessible_text = domain == BufferPropertyLookupDomain::Accessible
         && buf.accessible_emacs_byte_region().range().is_empty();
     lookup_char_property_from_direct(
-        obarray,
+        vars,
         buffers,
         |name| {
             // A name no interval carries answers from the presence set
@@ -735,14 +748,14 @@ fn lookup_buffer_text_property_at_char_pos(
 }
 
 pub(crate) fn lookup_buffer_text_property(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf: &crate::buffer::buffer::Buffer,
     byte_pos: usize,
     prop: Value,
 ) -> Value {
     lookup_buffer_text_property_at_emacs_byte_pos(
-        obarray,
+        vars,
         buffers,
         buf,
         EmacsBytePos::new(byte_pos),
@@ -751,7 +764,7 @@ pub(crate) fn lookup_buffer_text_property(
 }
 
 pub(crate) fn lookup_buffer_text_property_at_emacs_byte_pos(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf: &crate::buffer::buffer::Buffer,
     byte_pos: EmacsBytePos,
@@ -762,7 +775,7 @@ pub(crate) fn lookup_buffer_text_property_at_emacs_byte_pos(
     // without paying the anchored conversion.
     let char_pos = std::cell::OnceCell::new();
     lookup_char_property_from_direct(
-        obarray,
+        vars,
         buffers,
         |name| {
             if buf.text_props_property_name_presence(name)
@@ -779,7 +792,7 @@ pub(crate) fn lookup_buffer_text_property_at_emacs_byte_pos(
 }
 
 pub(crate) fn lookup_overlay_property(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     overlay_val: Value,
     prop: Value,
@@ -788,7 +801,7 @@ pub(crate) fn lookup_overlay_property(
         .as_overlay_data()
         .map_or(Value::NIL, |d| d.plist);
     lookup_char_property_from_direct(
-        obarray,
+        vars,
         buffers,
         |name| plist_get_value(plist, name),
         prop,
@@ -1294,14 +1307,14 @@ fn list_names_for_remove(list: Value) -> Vec<Value> {
 /// `inhibit-read-only` interval property or the dynamic
 /// `inhibit-read-only` variable.
 pub(crate) fn verify_text_read_only_in_state(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf_id: BufferId,
     byte_start: usize,
     byte_end: usize,
 ) -> Result<(), Flow> {
     verify_text_read_only_emacs_byte_range_in_state(
-        obarray,
+        vars,
         buffers,
         buf_id,
         EmacsByteRange::new(EmacsBytePos::new(byte_start), EmacsBytePos::new(byte_end)),
@@ -1309,11 +1322,12 @@ pub(crate) fn verify_text_read_only_in_state(
 }
 
 pub(crate) fn verify_text_read_only_emacs_byte_range_in_state(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf_id: BufferId,
     byte_range: EmacsByteRange,
 ) -> Result<(), Flow> {
+    let obarray = vars.obarray();
     if byte_range.is_empty() {
         return Ok(());
     }
@@ -1329,7 +1343,7 @@ pub(crate) fn verify_text_read_only_emacs_byte_range_in_state(
     let iro = inhibit_read_only_sym();
     let inhibit = buf
         .get_buffer_local_by_sym_id_gated(iro, obarray.is_localized(iro))
-        .unwrap_or_else(|| obarray.symbol_value_id_copied(iro).unwrap_or(Value::NIL));
+        .unwrap_or_else(|| vars.value(iro).unwrap_or(Value::NIL));
     // INTERVAL_GENERALLY_WRITABLE_P: when inhibit-read-only is non-nil
     // and not a list, every interval is writable regardless of its
     // read-only property.  GNU intervals.h:210.
@@ -1345,14 +1359,14 @@ pub(crate) fn verify_text_read_only_emacs_byte_range_in_state(
     // per interval it dominated large-range `put-text-property` (25% of the
     // 20k-interval bench).
     let read_only_aliases = current_textprop_variable_value(
-        obarray,
+        vars,
         buffers,
         TextPropertyControlVariable::CharPropertyAliasAlist,
     )
     .and_then(|value| assq_rest(value, read_only_sym))
     .unwrap_or(Value::NIL);
     let read_only_default = current_textprop_variable_value(
-        obarray,
+        vars,
         buffers,
         TextPropertyControlVariable::DefaultTextProperties,
     )
@@ -1449,18 +1463,19 @@ fn text_read_only_flow(read_only: Value) -> Flow {
 /// insertion right after it, while inserting before it stays allowed). This is
 /// what lets minibuffer input through: the prompt is `rear-nonsticky t`.
 pub(crate) fn verify_text_read_only_for_insert_in_state(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf_id: BufferId,
     byte_pos: EmacsBytePos,
 ) -> Result<(), Flow> {
+    let obarray = vars.obarray();
     let Some(buf) = buffers.get(buf_id) else {
         return Ok(());
     };
     let iro = inhibit_read_only_sym();
     let inhibit = buf
         .get_buffer_local_by_sym_id_gated(iro, obarray.is_localized(iro))
-        .unwrap_or_else(|| obarray.symbol_value_id_copied(iro).unwrap_or(Value::NIL));
+        .unwrap_or_else(|| vars.value(iro).unwrap_or(Value::NIL));
     // inhibit-read-only non-nil and not a list: every modification is allowed.
     if !inhibit.is_nil() && !inhibit.is_cons() {
         return Ok(());
@@ -1483,7 +1498,7 @@ pub(crate) fn verify_text_read_only_for_insert_in_state(
     // front-sticky there.
     if pos < zv {
         let after = lookup_buffer_text_property_at_emacs_byte_pos(
-            obarray,
+            vars,
             buffers,
             buf,
             byte_pos,
@@ -1491,7 +1506,7 @@ pub(crate) fn verify_text_read_only_for_insert_in_state(
         );
         if !after.is_nil() && !read_only_silenced(after, inhibit) {
             let front_sticky = lookup_buffer_text_property_at_emacs_byte_pos(
-                obarray,
+                vars,
                 buffers,
                 buf,
                 byte_pos,
@@ -1508,7 +1523,7 @@ pub(crate) fn verify_text_read_only_for_insert_in_state(
     if pos > begv {
         let before_byte = EmacsBytePos::new(pos - 1);
         let before = lookup_buffer_text_property_at_emacs_byte_pos(
-            obarray,
+            vars,
             buffers,
             buf,
             before_byte,
@@ -1516,7 +1531,7 @@ pub(crate) fn verify_text_read_only_for_insert_in_state(
         );
         if !before.is_nil() && !read_only_silenced(before, inhibit) {
             let rear_nonsticky = lookup_buffer_text_property_at_emacs_byte_pos(
-                obarray,
+                vars,
                 buffers,
                 buf,
                 before_byte,
@@ -1560,7 +1575,7 @@ fn verify_property_change_read_only(
         range
     };
     verify_text_read_only_emacs_byte_range_in_state(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         buf_id,
         byte_range,
@@ -1696,7 +1711,7 @@ pub(crate) fn prepare_interval_modification_for_change(
     }
 
     let (lisp_start, lisp_end, hook_lists) = {
-        let obarray = &eval.obarray;
+        let vars = eval.variables();
         let buffers = &eval.buffers;
         let Some(buf) = buffers.get(buf_id) else {
             return Ok(());
@@ -1716,7 +1731,7 @@ pub(crate) fn prepare_interval_modification_for_change(
             |_range, plist| {
                 // GNU `verify_interval_modification` reads `modification-hooks'
                 // via `textget`, which resolves through a `category' symbol.
-                let mh = lookup_text_property_from_plist_slice(obarray, buffers, plist, mod_sym);
+                let mh = lookup_text_property_from_plist_slice(vars, buffers, plist, mod_sym);
                 if mh.is_nil() {
                     return Ok::<(), ()>(());
                 }
@@ -1934,11 +1949,11 @@ pub(crate) fn builtin_get_text_property_3(
     object: Value,
 ) -> EvalResult {
     let args: [Value; 3] = [position, prop, object];
-    builtin_get_text_property_in_state(&eval.obarray, &eval.buffers, &args)
+    builtin_get_text_property_in_state(eval.variables(), &eval.buffers, &args)
 }
 
 pub(crate) fn builtin_get_text_property_in_state(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     args: &[Value],
 ) -> EvalResult {
@@ -1957,7 +1972,7 @@ pub(crate) fn builtin_get_text_property_in_state(
         let char_pos = validate_string_char_pos_raw(s, pos, args[0])?;
         if let Some(table) = borrow_string_text_properties_table_for_value(str_val) {
             return Ok(lookup_string_text_property(
-                obarray,
+                vars,
                 buffers,
                 table,
                 char_pos.get(),
@@ -1965,7 +1980,7 @@ pub(crate) fn builtin_get_text_property_in_state(
             ));
         }
         return Ok(lookup_char_property_from_direct(
-            obarray,
+            vars,
             buffers,
             |_| None,
             prop,
@@ -1980,7 +1995,7 @@ pub(crate) fn builtin_get_text_property_in_state(
 
     let char_pos = validate_buffer_property_point_char_pos_raw(buf, pos, args[0])?;
     Ok(lookup_buffer_text_property_at_char_pos(
-        obarray,
+        vars,
         buffers,
         buf,
         char_pos,
@@ -1990,7 +2005,7 @@ pub(crate) fn builtin_get_text_property_in_state(
 }
 
 pub(crate) fn buffer_overlay_property_at_byte_pos(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf: &crate::buffer::buffer::Buffer,
     byte_pos: usize,
@@ -1998,7 +2013,7 @@ pub(crate) fn buffer_overlay_property_at_byte_pos(
     window_id: Option<WindowId>,
 ) -> Option<(Value, Value)> {
     let value_of = |overlay: Value, property: Value| {
-        Some(lookup_overlay_property(obarray, buffers, overlay, property))
+        Some(lookup_overlay_property(vars, buffers, overlay, property))
     };
     buf.overlays
         .property_winner_at_emacs_byte_pos_with(
@@ -2011,7 +2026,7 @@ pub(crate) fn buffer_overlay_property_at_byte_pos(
 }
 
 pub(crate) fn buffer_overlay_property_for_inserted_char_at_byte_pos(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf: &crate::buffer::buffer::Buffer,
     byte_pos: usize,
@@ -2021,7 +2036,7 @@ pub(crate) fn buffer_overlay_property_for_inserted_char_at_byte_pos(
     // goes through `Foverlay_get', so an overlay carrying only a `category'
     // contributes that symbol's properties, as it does in GNU.
     let value_of = |overlay: Value, property: Value| {
-        Some(lookup_overlay_property(obarray, buffers, overlay, property))
+        Some(lookup_overlay_property(vars, buffers, overlay, property))
     };
     let overlay_id = buf
         .overlays
@@ -2074,14 +2089,14 @@ impl BufferPropertyLookupDomain {
 }
 
 pub(crate) fn buffer_pos_property_at_accessible_lisp_pos(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf: &Buffer,
     pos: i64,
     prop: Value,
 ) -> Result<Value, Flow> {
     buffer_pos_property_in_domain(
-        obarray,
+        vars,
         buffers,
         buf,
         pos,
@@ -2094,7 +2109,7 @@ pub(crate) fn buffer_pos_property_at_accessible_lisp_pos(
 /// `Fget_pos_property`. This entry point exposes only that internal policy;
 /// ordinary Lisp property primitives retain accessible-range validation.
 pub(crate) fn buffer_pos_property_at_full_lisp_pos(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf: &Buffer,
     pos: LispCharPos1,
@@ -2102,7 +2117,7 @@ pub(crate) fn buffer_pos_property_at_full_lisp_pos(
 ) -> Result<Value, Flow> {
     debug_assert!(buf.full_lisp_char_region().contains(pos));
     buffer_pos_property_in_domain(
-        obarray,
+        vars,
         buffers,
         buf,
         pos.as_i64(),
@@ -2112,7 +2127,7 @@ pub(crate) fn buffer_pos_property_at_full_lisp_pos(
 }
 
 fn buffer_pos_property_in_domain(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf: &Buffer,
     pos: i64,
@@ -2121,7 +2136,7 @@ fn buffer_pos_property_in_domain(
 ) -> Result<Value, Flow> {
     let byte_pos = buf.lisp_pos_to_emacs_byte_pos(LispCharPos1::new(pos)).get();
     if let Some((value, _overlay_id)) =
-        buffer_overlay_property_for_inserted_char_at_byte_pos(obarray, buffers, buf, byte_pos, prop)
+        buffer_overlay_property_for_inserted_char_at_byte_pos(vars, buffers, buf, byte_pos, prop)
     {
         return Ok(value);
     }
@@ -2129,9 +2144,9 @@ fn buffer_pos_property_in_domain(
     // GNU src/editfns.c:339-349. The lower-bound guard must use the selected
     // domain: after `get_local_map` widens, a value immediately before the old
     // BEGV can be inherited at the clipped position.
-    match text_property_stickiness_in_domain(obarray, buffers, buf, pos, prop, domain)? {
+    match text_property_stickiness_in_domain(vars, buffers, buf, pos, prop, domain)? {
         PropertyStickiness::FromFollowing => Ok(text_property_value_at_char_pos(
-            obarray,
+            vars,
             buffers,
             buf,
             LispCharPos1::new(pos),
@@ -2140,7 +2155,7 @@ fn buffer_pos_property_in_domain(
         )),
         PropertyStickiness::FromPreceding if pos > domain.beginning(buf).as_i64() => {
             Ok(text_property_value_at_char_pos(
-                obarray,
+                vars,
                 buffers,
                 buf,
                 LispCharPos1::new(pos - 1),
@@ -2156,7 +2171,7 @@ fn buffer_pos_property_in_domain(
 /// delegated property read. The lookup domain makes the exceptional widened
 /// caller explicit instead of weakening the Lisp-visible primitive.
 fn text_property_stickiness_in_domain(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf: &Buffer,
     pos: i64,
@@ -2165,7 +2180,7 @@ fn text_property_stickiness_in_domain(
 ) -> Result<PropertyStickiness, Flow> {
     let ignore_previous_character = pos <= domain.beginning(buf).as_i64();
     let default_nonsticky =
-        TextPropertyControlVariable::TextPropertyDefaultNonsticky.value_for_buffer(obarray, buf);
+        TextPropertyControlVariable::TextPropertyDefaultNonsticky.value_for_buffer(vars, buf);
     let mut rear_sticky = !(ignore_previous_character
         || default_nonsticky
             .and_then(|value| assq_cdr_eq(&value, prop))
@@ -2173,7 +2188,7 @@ fn text_property_stickiness_in_domain(
 
     if rear_sticky && !ignore_previous_character {
         let previous_props = get_text_property_at_validated_char_pos(
-            obarray,
+            vars,
             buffers,
             buf,
             pos - 1,
@@ -2187,7 +2202,7 @@ fn text_property_stickiness_in_domain(
 
     let front_sticky = front_sticky_matches(
         get_text_property_at_validated_char_pos(
-            obarray,
+            vars,
             buffers,
             buf,
             pos,
@@ -2204,7 +2219,7 @@ fn text_property_stickiness_in_domain(
         (true, true) => {
             if ignore_previous_character
                 || get_text_property_at_validated_char_pos(
-                    obarray,
+                    vars,
                     buffers,
                     buf,
                     pos - 1,
@@ -2222,7 +2237,7 @@ fn text_property_stickiness_in_domain(
 }
 
 fn get_text_property_at_validated_char_pos(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf: &Buffer,
     pos: i64,
@@ -2237,19 +2252,19 @@ fn get_text_property_at_validated_char_pos(
         ));
     }
     Ok(text_property_value_at_char_pos(
-        obarray, buffers, buf, pos, prop, domain,
+        vars, buffers, buf, pos, prop, domain,
     ))
 }
 
 fn text_property_value_at_char_pos(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf: &Buffer,
     pos: LispCharPos1,
     prop: Value,
     domain: BufferPropertyLookupDomain,
 ) -> Value {
-    lookup_buffer_text_property_at_char_pos(obarray, buffers, buf, pos.to_char_pos(), prop, domain)
+    lookup_buffer_text_property_at_char_pos(vars, buffers, buf, pos.to_char_pos(), prop, domain)
 }
 
 fn front_sticky_matches(value: Value, prop: Value) -> bool {
@@ -2309,15 +2324,20 @@ pub(crate) fn builtin_get_char_property_3(
     object: Value,
 ) -> EvalResult {
     let args: [Value; 3] = [position, prop, object];
-    builtin_get_char_property_with_frames(&eval.obarray, &eval.buffers, Some(&eval.frames), &args)
+    builtin_get_char_property_with_frames(
+        eval.variables(),
+        &eval.buffers,
+        Some(&eval.frames),
+        &args,
+    )
 }
 
 pub(crate) fn builtin_get_char_property_in_state(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     args: Vec<Value>,
 ) -> EvalResult {
-    builtin_get_char_property_with_frames(obarray, buffers, None, &args)
+    builtin_get_char_property_with_frames(vars, buffers, None, &args)
 }
 
 /// Read a character property at a position already proven to be in the
@@ -2328,7 +2348,7 @@ pub(crate) fn builtin_get_char_property_in_state(
 /// a named internal entry point prevents ordinary Lisp property primitives
 /// from accidentally losing their `BEGV..ZV` validation.
 pub(crate) fn buffer_char_property_at_full_lisp_pos(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf: &crate::buffer::buffer::Buffer,
     pos: LispCharPos1,
@@ -2339,13 +2359,13 @@ pub(crate) fn buffer_char_property_at_full_lisp_pos(
     if !buf.overlays.is_empty() {
         let byte_pos = buf.lisp_pos_to_emacs_byte_pos(pos);
         if let Some((value, _overlay_id)) =
-            buffer_overlay_property_at_byte_pos(obarray, buffers, buf, byte_pos.get(), prop, None)
+            buffer_overlay_property_at_byte_pos(vars, buffers, buf, byte_pos.get(), prop, None)
         {
             return value;
         }
     }
     lookup_buffer_text_property_at_char_pos(
-        obarray,
+        vars,
         buffers,
         buf,
         char_pos,
@@ -2355,7 +2375,7 @@ pub(crate) fn buffer_char_property_at_full_lisp_pos(
 }
 
 pub(crate) fn builtin_get_char_property_with_frames(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     frames: Option<&FrameManager>,
     args: &[Value],
@@ -2366,7 +2386,7 @@ pub(crate) fn builtin_get_char_property_with_frames(
     let prop = expect_property_key(&args[1])?;
 
     if is_string_object(args.get(2)).is_some() {
-        return builtin_get_text_property_in_state(obarray, buffers, args);
+        return builtin_get_text_property_in_state(vars, buffers, args);
     }
 
     let (buf_id, window_id) = resolve_char_property_target_in_state(frames, buffers, args.get(2))?;
@@ -2379,7 +2399,7 @@ pub(crate) fn builtin_get_char_property_with_frames(
     if buf.overlays.is_empty() {
         let char_pos = validate_buffer_point_char_pos_raw(buf, pos, args[0])?;
         return Ok(lookup_buffer_text_property_at_char_pos(
-            obarray,
+            vars,
             buffers,
             buf,
             char_pos,
@@ -2390,13 +2410,13 @@ pub(crate) fn builtin_get_char_property_with_frames(
     let byte_pos = validate_buffer_point_emacs_byte_pos_raw(buf, pos, args[0])?;
 
     if let Some((value, _overlay_id)) =
-        buffer_overlay_property_at_byte_pos(obarray, buffers, buf, byte_pos.get(), prop, window_id)
+        buffer_overlay_property_at_byte_pos(vars, buffers, buf, byte_pos.get(), prop, window_id)
     {
         return Ok(value);
     }
 
     Ok(lookup_buffer_text_property_at_char_pos(
-        obarray,
+        vars,
         buffers,
         buf,
         validated_lisp_char_pos(pos).to_char_pos(),
@@ -3110,11 +3130,11 @@ pub(crate) fn builtin_next_single_property_change_4(
     limit: Value,
 ) -> EvalResult {
     let args: [Value; 4] = [position, prop, object, limit];
-    builtin_next_single_property_change_in_state(&eval.obarray, &eval.buffers, &args)
+    builtin_next_single_property_change_in_state(eval.variables(), &eval.buffers, &args)
 }
 
 pub(crate) fn builtin_next_single_property_change_in_state(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     args: &[Value],
 ) -> EvalResult {
@@ -3132,7 +3152,7 @@ pub(crate) fn builtin_next_single_property_change_in_state(
     // (`char-property-alias-alist` / `default-text-properties` read once, not
     // per interval), the intervals are walked in tree order without a
     // per-step descent, and positions are converted once at the ends.
-    let resolver = CharPropertyResolver::snapshot(obarray, buffers, prop);
+    let resolver = CharPropertyResolver::snapshot(vars, buffers, prop);
     if let Some(str_val) = is_string_object(args.get(2)) {
         let s = str_val
             .as_lisp_string()
@@ -3295,11 +3315,11 @@ pub(crate) fn builtin_previous_single_property_change_4(
     limit: Value,
 ) -> EvalResult {
     let args: [Value; 4] = [position, prop, object, limit];
-    builtin_previous_single_property_change_in_state(&eval.obarray, &eval.buffers, &args)
+    builtin_previous_single_property_change_in_state(eval.variables(), &eval.buffers, &args)
 }
 
 pub(crate) fn builtin_previous_single_property_change_in_state(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     args: &[Value],
 ) -> EvalResult {
@@ -3329,8 +3349,7 @@ pub(crate) fn builtin_previous_single_property_change_in_state(
             _ => (None, None),
         };
         let ref_char = char_pos.saturating_sub_len(CharLen::new(1));
-        let current_val =
-            lookup_string_text_property(obarray, buffers, &table, ref_char.get(), prop);
+        let current_val = lookup_string_text_property(vars, buffers, &table, ref_char.get(), prop);
         let mut cursor = char_pos;
         while let Some(prev) = table.previous_interval_boundary_before_char_pos(cursor) {
             if let Some(lim) = limit_pos
@@ -3342,7 +3361,7 @@ pub(crate) fn builtin_previous_single_property_change_in_state(
                 });
             }
             let check = prev.saturating_sub_len(CharLen::new(1));
-            let new_val = lookup_string_text_property(obarray, buffers, &table, check.get(), prop);
+            let new_val = lookup_string_text_property(vars, buffers, &table, check.get(), prop);
             let changed = !eq_value(&current_val, &new_val);
             if changed {
                 return Ok(Value::fixnum(string_char_to_elisp_pos(s, prev)));
@@ -3378,7 +3397,7 @@ pub(crate) fn builtin_previous_single_property_change_in_state(
     };
 
     let ref_byte = emacs_byte_pos_of_preceding_char(buf, byte_pos);
-    let current_val = lookup_buffer_text_property(obarray, buffers, buf, ref_byte.get(), prop);
+    let current_val = lookup_buffer_text_property(vars, buffers, buf, ref_byte.get(), prop);
     let mut cursor = byte_pos;
 
     while let Some(prev) = buf.text_props_previous_interval_boundary_before_emacs_byte_pos(cursor) {
@@ -3391,7 +3410,7 @@ pub(crate) fn builtin_previous_single_property_change_in_state(
             });
         }
         let check = emacs_byte_pos_of_preceding_char(buf, prev);
-        let new_val = lookup_buffer_text_property(obarray, buffers, buf, check.get(), prop);
+        let new_val = lookup_buffer_text_property(vars, buffers, buf, check.get(), prop);
         let changed = !eq_value(&current_val, &new_val);
         if changed {
             return Ok(Value::fixnum(byte_to_elisp_pos(buf, prev)));
@@ -3532,11 +3551,11 @@ pub(crate) fn builtin_text_property_any(
     eval: &mut super::eval::Context,
     args: Vec<Value>,
 ) -> EvalResult {
-    builtin_text_property_any_in_state(&eval.obarray, &eval.buffers, args)
+    builtin_text_property_any_in_state(eval.variables(), &eval.buffers, args)
 }
 
 pub(crate) fn builtin_text_property_any_in_state(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     args: Vec<Value>,
 ) -> EvalResult {
@@ -3570,7 +3589,7 @@ pub(crate) fn builtin_text_property_any_in_state(
         if val.is_nil() {
             let mut cursor = char_beg;
             while cursor < char_end {
-                let found = lookup_string_text_property(obarray, buffers, &table, cursor, prop);
+                let found = lookup_string_text_property(vars, buffers, &table, cursor, prop);
                 if found.is_nil() {
                     return Ok(Value::fixnum(string_char_to_elisp_pos(
                         s,
@@ -3586,7 +3605,7 @@ pub(crate) fn builtin_text_property_any_in_state(
         }
         let mut cursor = char_beg;
         while cursor < char_end {
-            let found = lookup_string_text_property(obarray, buffers, &table, cursor, prop);
+            let found = lookup_string_text_property(vars, buffers, &table, cursor, prop);
             if eq_value(&found, val) {
                 return Ok(Value::fixnum(string_char_to_elisp_pos(
                     s,
@@ -3630,7 +3649,7 @@ pub(crate) fn builtin_text_property_any_in_state(
         let mut cursor = byte_beg;
         while cursor < byte_end {
             let found =
-                lookup_buffer_text_property_at_emacs_byte_pos(obarray, buffers, buf, cursor, prop);
+                lookup_buffer_text_property_at_emacs_byte_pos(vars, buffers, buf, cursor, prop);
             if found.is_nil() {
                 return Ok(Value::fixnum(byte_to_elisp_pos(buf, cursor)));
             }
@@ -3645,8 +3664,7 @@ pub(crate) fn builtin_text_property_any_in_state(
     }
     let mut cursor = byte_beg;
     while cursor < byte_end {
-        let found =
-            lookup_buffer_text_property_at_emacs_byte_pos(obarray, buffers, buf, cursor, prop);
+        let found = lookup_buffer_text_property_at_emacs_byte_pos(vars, buffers, buf, cursor, prop);
         if eq_value(&found, val) {
             return Ok(Value::fixnum(byte_to_elisp_pos(buf, cursor)));
         }
@@ -3680,11 +3698,11 @@ pub(crate) fn builtin_text_property_not_all_5(
     object: Value,
 ) -> EvalResult {
     let args: [Value; 5] = [start, end, property, value, object];
-    builtin_text_property_not_all_in_state(&eval.obarray, &eval.buffers, &args)
+    builtin_text_property_not_all_in_state(eval.variables(), &eval.buffers, &args)
 }
 
 pub(crate) fn builtin_text_property_not_all_in_state(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     args: &[Value],
 ) -> EvalResult {
@@ -3715,7 +3733,7 @@ pub(crate) fn builtin_text_property_not_all_in_state(
         };
         let mut cursor = char_beg;
         while cursor < char_end {
-            let found = lookup_string_text_property(obarray, buffers, &table, cursor, prop);
+            let found = lookup_string_text_property(vars, buffers, &table, cursor, prop);
             let matches = eq_value(&found, val);
             if !matches {
                 return Ok(Value::fixnum(string_char_to_elisp_pos(
@@ -3760,7 +3778,7 @@ pub(crate) fn builtin_text_property_not_all_in_state(
     // byte->char conversion, a descent and a change search per interval.
     let first = buf.text_props_first_char_pos_where_in_emacs_byte_range(byte_range, |plist| {
         let found = lookup_char_property_from_direct(
-            obarray,
+            vars,
             buffers,
             // The reads `get-text-property` and `text-property-any` make: a
             // name the table's presence set has never seen answers nil there
@@ -3790,7 +3808,7 @@ pub(crate) fn builtin_get_char_property_and_overlay(
     args: Vec<Value>,
 ) -> EvalResult {
     builtin_get_char_property_and_overlay_with_frames(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         Some(&eval.frames),
         args,
@@ -3798,15 +3816,15 @@ pub(crate) fn builtin_get_char_property_and_overlay(
 }
 
 pub(crate) fn builtin_get_char_property_and_overlay_in_state(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     args: Vec<Value>,
 ) -> EvalResult {
-    builtin_get_char_property_and_overlay_with_frames(obarray, buffers, None, args)
+    builtin_get_char_property_and_overlay_with_frames(vars, buffers, None, args)
 }
 
 fn builtin_get_char_property_and_overlay_with_frames(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     frames: Option<&FrameManager>,
     args: Vec<Value>,
@@ -3818,7 +3836,7 @@ fn builtin_get_char_property_and_overlay_with_frames(
 
     // For strings, no overlays — just return (text-prop-value . nil)
     if is_string_object(args.get(2)).is_some() {
-        let value = builtin_get_text_property_in_state(obarray, buffers, &args)?;
+        let value = builtin_get_text_property_in_state(vars, buffers, &args)?;
         return Ok(Value::cons(value, Value::NIL));
     }
 
@@ -3826,19 +3844,14 @@ fn builtin_get_char_property_and_overlay_with_frames(
 
     if let Some(buf) = buffers.get(buf_id) {
         let byte_pos = validate_buffer_point_emacs_byte_pos_raw(buf, pos, args[0])?;
-        if let Some((value, ov_val)) = buffer_overlay_property_at_byte_pos(
-            obarray,
-            buffers,
-            buf,
-            byte_pos.get(),
-            prop,
-            window_id,
-        ) {
+        if let Some((value, ov_val)) =
+            buffer_overlay_property_at_byte_pos(vars, buffers, buf, byte_pos.get(), prop, window_id)
+        {
             return Ok(Value::cons(value, ov_val));
         }
     }
 
-    let value = builtin_get_char_property_in_state(obarray, buffers, args)?;
+    let value = builtin_get_char_property_in_state(vars, buffers, args)?;
     Ok(Value::cons(value, Value::NIL))
 }
 
@@ -3847,11 +3860,11 @@ pub(crate) fn builtin_get_display_property(
     eval: &mut super::eval::Context,
     args: Vec<Value>,
 ) -> EvalResult {
-    builtin_get_display_property_in_state(&eval.obarray, &eval.buffers, args)
+    builtin_get_display_property_in_state(eval.variables(), &eval.buffers, args)
 }
 
 pub(crate) fn builtin_get_display_property_in_state(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     args: Vec<Value>,
 ) -> EvalResult {
@@ -3865,7 +3878,7 @@ pub(crate) fn builtin_get_display_property_in_state(
     if let Some(object) = args.get(2) {
         forwarded.push(*object);
     }
-    builtin_get_char_property_in_state(obarray, buffers, forwarded)
+    builtin_get_char_property_in_state(vars, buffers, forwarded)
 }
 
 // ===========================================================================

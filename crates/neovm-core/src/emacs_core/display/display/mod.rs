@@ -14,6 +14,7 @@ use super::value::*;
 use super::{Context, PopupMenuEntry, PopupMenuRequest};
 use crate::emacs_core::error::LispCondition;
 pub(crate) use crate::emacs_core::error::{expect_args, expect_args_range, expect_max_args};
+use crate::emacs_core::eval::VariableView;
 use crate::window::{FrameId, WindowId};
 use strum::{EnumString, IntoStaticStr};
 
@@ -87,11 +88,11 @@ fn dynamic_or_global_symbol_value(eval: &super::eval::Context, name: &str) -> Op
 }
 
 fn dynamic_or_global_symbol_value_in_state(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     _dynamic: &[crate::emacs_core::value::OrderedRuntimeBindingMap],
     name: &str,
 ) -> Option<Value> {
-    obarray.symbol_value_copied(name)
+    vars.value_by_name(name)
 }
 
 fn display_string_text(value: &Value) -> Option<String> {
@@ -108,12 +109,12 @@ fn global_window_system_symbol(eval: &super::eval::Context) -> Option<Value> {
 }
 
 fn global_window_system_symbol_in_state(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     dynamic: &[crate::emacs_core::value::OrderedRuntimeBindingMap],
 ) -> Option<Value> {
-    dynamic_or_global_symbol_value_in_state(obarray, dynamic, "initial-window-system")
+    dynamic_or_global_symbol_value_in_state(vars, dynamic, "initial-window-system")
         .filter(|value| !value.is_nil())
-        .or_else(|| dynamic_or_global_symbol_value_in_state(obarray, dynamic, "window-system"))
+        .or_else(|| dynamic_or_global_symbol_value_in_state(vars, dynamic, "window-system"))
 }
 
 fn selected_frame_window_system_symbol(eval: &super::eval::Context) -> Option<Value> {
@@ -378,10 +379,10 @@ pub(crate) fn x_window_system_active(eval: &super::eval::Context) -> bool {
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
 pub(crate) fn x_window_system_active_in_state(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     dynamic: &[crate::emacs_core::value::OrderedRuntimeBindingMap],
 ) -> bool {
-    let host_window_system = global_window_system_symbol_in_state(obarray, dynamic);
+    let host_window_system = global_window_system_symbol_in_state(vars, dynamic);
     host_window_system.is_some_and(gui_window_system_active_value)
 }
 
@@ -430,19 +431,19 @@ fn frame_window_system_symbol_read_only_in_state(
 
 pub(crate) fn display_window_system_symbol_in_state(
     frames: &crate::window::FrameManager,
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     dynamic: &[crate::emacs_core::value::OrderedRuntimeBindingMap],
     display: Option<&Value>,
 ) -> Result<Option<Value>, Flow> {
     match display {
         None => Ok(
             frame_window_system_symbol_read_only_in_state(frames, display)?
-                .or_else(|| global_window_system_symbol_in_state(obarray, dynamic)),
+                .or_else(|| global_window_system_symbol_in_state(vars, dynamic)),
         ),
         Some(d) if d.is_nil() => Ok(frame_window_system_symbol_read_only_in_state(
             frames, display,
         )?
-        .or_else(|| global_window_system_symbol_in_state(obarray, dynamic))),
+        .or_else(|| global_window_system_symbol_in_state(vars, dynamic))),
         Some(d) if terminal_designator_p(d) => Ok(None),
         Some(d) if live_frame_designator_p_in_state(frames, d) => {
             frame_window_system_symbol_read_only_in_state(frames, Some(d))
@@ -874,7 +875,7 @@ pub(crate) fn builtin_window_system(
         return Ok(Value::NIL);
     }
     Ok(
-        dynamic_or_global_symbol_value_in_state(&eval.obarray, &[], "window-system")
+        dynamic_or_global_symbol_value_in_state(eval.variables(), &[], "window-system")
             .unwrap_or(Value::NIL),
     )
 }
@@ -2056,8 +2057,7 @@ fn x_popup_menu_interactive_loop(
             // swallowing it would leave the runtime waiting for contents that
             // will never be requested. Keep its pending native anchor intact.
             let mut unread = ctx
-                .obarray
-                .symbol_value_copied("unread-command-events")
+                .variable_value_by_name("unread-command-events")
                 .unwrap_or(Value::NIL);
             for key in keys.iter().rev() {
                 unread = Value::cons(*key, unread);

@@ -123,8 +123,8 @@ fn collect_hook_functions_impl(
                 if pair_car.is_t() {
                     if inherit_global {
                         let global_value = ctx
-                            .obarray
-                            .default_value_id_copied(hook_sym)
+                            .variables()
+                            .default_value(hook_sym)
                             .unwrap_or(Value::NIL);
                         collect_hook_functions_impl(ctx, hook_sym, global_value, false, out);
                     }
@@ -214,8 +214,8 @@ fn remove_hook_function_after_error_in_context(
     }
 
     let default_value = ctx
-        .obarray
-        .default_value_id_copied(hook_sym)
+        .variables()
+        .default_value(hook_sym)
         .unwrap_or(Value::NIL);
     if let Some(new_value) = remove_eq_from_hook_list(default_value, function) {
         let symbol = Value::from_sym_id(hook_sym);

@@ -569,7 +569,7 @@ fn directory_files_and_attributes_from_reader(
             if let Some(pattern) = match_regexp.as_ref() {
                 let matched = syntax
                     .search(
-                        &ctx.obarray,
+                        ctx.variables(),
                         &ctx.buffers,
                         pattern,
                         &name,
@@ -665,7 +665,7 @@ pub(crate) fn builtin_file_name_completion(eval: &mut Context, args: Vec<Value>)
         args.get(2).copied().unwrap_or(Value::NIL),
     ];
     let syntax = super::builtins::search::FastStringMatchSyntax::for_current_buffer(eval);
-    let plan = if super::minibuffer::completion_ignore_case(&eval.obarray, &eval.buffers)
+    let plan = if super::minibuffer::completion_ignore_case(eval.variables(), &eval.buffers)
         && super::fns::compare_strings_parity_enabled()
     {
         prepare_file_name_completion_with_case_table(eval, &args, syntax)?
@@ -707,8 +707,8 @@ pub(crate) fn builtin_file_name_all_completions(
     if file.as_bytes().contains(&b'/') {
         return Ok(Value::NIL);
     }
-    let ignore_case = super::minibuffer::completion_ignore_case(&eval.obarray, &eval.buffers);
-    let regexps = super::minibuffer::completion_regexp_lisp_list(&eval.obarray, &eval.buffers);
+    let ignore_case = super::minibuffer::completion_ignore_case(eval.variables(), &eval.buffers);
+    let regexps = super::minibuffer::completion_regexp_lisp_list(eval.variables(), &eval.buffers);
     // GNU Emacs: file-name-all-completions does NOT filter by
     // completion-ignored-extensions (the "all_flag" path).
     let syntax = super::builtins::search::FastStringMatchSyntax::for_current_buffer(eval);
@@ -726,7 +726,7 @@ pub(crate) fn builtin_file_name_all_completions(
     };
     let completions = filter_by_completion_regexps(
         syntax,
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         raw,
         &regexps,
@@ -930,10 +930,10 @@ fn prepare_file_name_completion_with_case_table(
         Vec::new()
     } else {
         let raw = collect_file_name_completions_with_parity(ctx, &file, &directory, false, true)?;
-        let extensions = get_ignored_extensions(&ctx.obarray);
+        let extensions = get_ignored_extensions(ctx.variables());
         let raw = filter_ignored_extensions_with_case_table(ctx, &file, raw, &extensions)?;
-        let regexps = super::minibuffer::completion_regexp_lisp_list(&ctx.obarray, &ctx.buffers);
-        filter_by_completion_regexps(syntax, &ctx.obarray, &ctx.buffers, raw, &regexps, true)?
+        let regexps = super::minibuffer::completion_regexp_lisp_list(ctx.variables(), &ctx.buffers);
+        filter_by_completion_regexps(syntax, ctx.variables(), &ctx.buffers, raw, &regexps, true)?
     };
     Ok(FileNameCompletionPlan {
         file,
@@ -986,7 +986,7 @@ fn filter_ignored_extensions_with_case_table(
 
 fn filter_by_completion_regexps(
     syntax: super::builtins::search::FastStringMatchSyntax,
-    obarray: &super::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &crate::buffer::BufferManager,
     completions: Vec<LispString>,
     regexps: &[LispString],
@@ -1007,7 +1007,7 @@ fn filter_by_completion_regexps(
         };
         if super::minibuffer::lisp_string_matches_completion_regexps(
             syntax,
-            obarray,
+            vars,
             buffers,
             &candidate,
             regexps,
@@ -1020,8 +1020,8 @@ fn filter_by_completion_regexps(
 }
 
 /// Extract the list of ignored extensions from the `completion-ignored-extensions` variable.
-fn get_ignored_extensions(obarray: &super::symbol::Obarray) -> Vec<LispString> {
-    let Some(val) = obarray.symbol_value_copied("completion-ignored-extensions") else {
+fn get_ignored_extensions(vars: crate::emacs_core::eval::VariableView<'_>) -> Vec<LispString> {
+    let Some(val) = vars.value_by_name("completion-ignored-extensions") else {
         return Vec::new();
     };
     let Some(items) = list_to_vec(&val) else {
@@ -1155,14 +1155,14 @@ pub(crate) fn prepare_file_name_completion_in_state(
     let file = expect_lisp_string("file-name-completion", &args[0])?;
     let directory_arg = expect_lisp_string("file-name-completion", &args[1])?;
     let directory = super::fileio::resolve_filename_lisp_in_state(
-        &ctx.obarray,
+        ctx.variables(),
         &[],
         &ctx.buffers,
         &directory_arg,
     );
-    let ignore_case = super::minibuffer::completion_ignore_case(&ctx.obarray, &ctx.buffers);
-    let ignored_extensions = get_ignored_extensions(&ctx.obarray);
-    let regexps = super::minibuffer::completion_regexp_lisp_list(&ctx.obarray, &ctx.buffers);
+    let ignore_case = super::minibuffer::completion_ignore_case(ctx.variables(), &ctx.buffers);
+    let ignored_extensions = get_ignored_extensions(ctx.variables());
+    let regexps = super::minibuffer::completion_regexp_lisp_list(ctx.variables(), &ctx.buffers);
     let completions = if file.as_bytes().contains(&b'/') {
         Vec::new()
     } else {
@@ -1179,7 +1179,7 @@ pub(crate) fn prepare_file_name_completion_in_state(
         let filtered = filter_by_ignored_extensions(&file, raw, &ignored_extensions, ignore_case);
         filter_by_completion_regexps(
             syntax,
-            &ctx.obarray,
+            ctx.variables(),
             &ctx.buffers,
             filtered,
             &regexps,
@@ -1626,7 +1626,7 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     // lexically, and callees like `completion-pcm--filename-try-filter' keep
     // reading the global list — file-name completion then quietly ignores the
     // caller's rebinding.
-    obarray.set_symbol_value("completion-ignored-extensions", Value::NIL);
+    obarray.seed_value("completion-ignored-extensions", Value::NIL);
     obarray.make_special("completion-ignored-extensions");
 }
 

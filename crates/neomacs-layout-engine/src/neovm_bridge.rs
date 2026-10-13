@@ -12,6 +12,7 @@
 //! only the initialized numeric mode; each scan borrows its own backend view
 //! and creates no buffer-specific or Lisp-state cache.
 
+use neovm_core::emacs_core::eval::VariableView;
 use std::cmp::Ordering;
 
 mod borrowed_buffer;
@@ -49,7 +50,6 @@ use neovm_core::emacs_core::effect_profile::{
 use neovm_core::emacs_core::image_catalog::image_scale_environment;
 use neovm_core::emacs_core::invisibility::{Invisibility, text_prop_means_invisible};
 use neovm_core::emacs_core::plist::plist_get;
-use neovm_core::emacs_core::symbol::Obarray;
 use neovm_core::emacs_core::textprop::{DirectCharProperties, resolve_effective_char_property};
 use neovm_core::emacs_core::value::{ValueKind, eq_value, list_to_vec};
 use neovm_core::emacs_core::{Context, Value};
@@ -281,7 +281,7 @@ pub(crate) fn window_string_composition_rules(
         .buffer_id()?;
     capture_string_composition_rules(
         evaluator.buffer_manager().get(buffer_id)?,
-        evaluator.obarray(),
+        evaluator.variables(),
         evaluator.symbol_mode(),
     )
 }
@@ -291,7 +291,7 @@ pub(crate) fn current_string_composition_rules(
 ) -> Option<neovm_core::emacs_core::composite::AutomaticCompositionRules> {
     capture_string_composition_rules(
         evaluator.buffer_manager().current_buffer()?,
-        evaluator.obarray(),
+        evaluator.variables(),
         evaluator.symbol_mode(),
     )
 }
@@ -457,10 +457,14 @@ pub(crate) fn buffer_local_value<B: LayoutBufferView + ?Sized>(
     buffer.layout_buffer_local_value(var)
 }
 
-fn effective_buffer_value(buffer: &Buffer, obarray: &Obarray, var: LayoutVar) -> Option<Value> {
+fn effective_buffer_value(
+    buffer: &Buffer,
+    vars: VariableView<'_>,
+    var: LayoutVar,
+) -> Option<Value> {
     buffer
         .buffer_local_value_id(var.sym_id())
-        .or_else(|| obarray.symbol_value_id_copied(var.sym_id()))
+        .or_else(|| vars.value(var.sym_id()))
 }
 
 fn frame_parameter_int(frame: &Frame, name: &str, default: i64) -> i64 {
@@ -502,7 +506,7 @@ fn face_bg_pixel(face_table: &FaceTable, name: &str, fallback: u32) -> u32 {
 pub fn frame_params_from_neovm(
     frame: &Frame,
     face_table: &FaceTable,
-    obarray: &Obarray,
+    vars: VariableView<'_>,
 ) -> FrameParams {
     // Read default face background from face table
     let default_face = face_table.get("default");
@@ -525,7 +529,7 @@ pub fn frame_params_from_neovm(
         char_width: frame.char_width,
         char_height: frame.char_height,
         font_pixel_size: frame.font_pixel_size,
-        image_scale_environment: image_scale_environment(frame, obarray),
+        image_scale_environment: image_scale_environment(frame, vars),
         window_system: frame.effective_window_system().is_some(),
         background: bg,
         vertical_border_fg: face_fg_pixel(face_table, "vertical-border", fg),
@@ -556,8 +560,13 @@ pub(crate) fn buffer_local_int<B: LayoutBufferView>(
     }
 }
 
-fn effective_buffer_int(buffer: &Buffer, obarray: &Obarray, var: LayoutVar, default: i64) -> i64 {
-    match effective_buffer_value(buffer, obarray, var) {
+fn effective_buffer_int(
+    buffer: &Buffer,
+    vars: VariableView<'_>,
+    var: LayoutVar,
+    default: i64,
+) -> i64 {
+    match effective_buffer_value(buffer, vars, var) {
         Some(v) if v.is_fixnum() => v.as_fixnum().unwrap(),
         _ => default,
     }
@@ -572,8 +581,8 @@ pub(crate) fn buffer_local_bool<B: LayoutBufferView>(buffer: &B, var: LayoutVar)
     }
 }
 
-fn effective_buffer_bool(buffer: &Buffer, obarray: &Obarray, var: LayoutVar) -> bool {
-    match effective_buffer_value(buffer, obarray, var) {
+fn effective_buffer_bool(buffer: &Buffer, vars: VariableView<'_>, var: LayoutVar) -> bool {
+    match effective_buffer_value(buffer, vars, var) {
         Some(v) if v.is_nil() => false,
         None => false,
         Some(_) => true,
@@ -588,21 +597,20 @@ pub(crate) fn window_parameter_by_name(window: &Window, name: &str) -> Option<Va
         .map(|(_, value)| *value)
 }
 
-fn global_bool(obarray: &Obarray, name: &str) -> bool {
-    obarray
-        .symbol_value_copied(name)
+fn global_bool(vars: VariableView<'_>, name: &str) -> bool {
+    vars.value_by_name(name)
         .is_some_and(|value| !value.is_nil())
 }
 
-fn effective_nobreak_char_display(buffer: &Buffer, obarray: &Obarray) -> NobreakDisplayMode {
+fn effective_nobreak_char_display(buffer: &Buffer, vars: VariableView<'_>) -> NobreakDisplayMode {
     // `nobreak-char-display` is a `DEFVAR_LISP`, but GNU reads `Vnobreak_char_display`
     // while displaying buffer text (xdisp.c:8522, with the window's buffer current),
     // so a buffer-local binding takes effect. Read buffer-local-then-global, not the
     // raw global.
-    match effective_buffer_value(buffer, obarray, LayoutVar::NobreakCharDisplay) {
+    match effective_buffer_value(buffer, vars, LayoutVar::NobreakCharDisplay) {
         Some(value) if value.is_nil() => NobreakDisplayMode::Literal,
         Some(value) if value.is_t() => {
-            if global_bool(obarray, "nobreak-char-ascii-display") {
+            if global_bool(vars, "nobreak-char-ascii-display") {
                 NobreakDisplayMode::HighlightAscii
             } else {
                 NobreakDisplayMode::HighlightOriginal
@@ -633,10 +641,10 @@ fn effective_wrap_mode(
     window: &Window,
     buffer: &Buffer,
     frame: &Frame,
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     hscroll: usize,
 ) -> LineWrapMode {
-    if effective_buffer_bool(buffer, obarray, LayoutVar::TruncateLines) {
+    if effective_buffer_bool(buffer, vars, LayoutVar::TruncateLines) {
         return LineWrapMode::Truncate;
     }
 
@@ -654,7 +662,7 @@ fn effective_wrap_mode(
     }
 
     let truncate =
-        match effective_buffer_value(buffer, obarray, LayoutVar::TruncatePartialWidthWindows) {
+        match effective_buffer_value(buffer, vars, LayoutVar::TruncatePartialWidthWindows) {
             Some(value) if value.is_nil() => false,
             Some(value) if value.is_fixnum() => total_cols < value.as_fixnum().unwrap(),
             Some(_) => true,
@@ -837,7 +845,7 @@ pub(crate) fn buffer_display_line_numbers_mode<B: LayoutBufferView>(
     ))
 }
 
-fn buffer_fill_column_indicator(buffer: &Buffer, obarray: &Obarray) -> Option<(i32, char)> {
+fn buffer_fill_column_indicator(buffer: &Buffer, vars: VariableView<'_>) -> Option<(i32, char)> {
     // GNU `fill_column_indicator_column` in xdisp.c enables the indicator only
     // when `display-fill-column-indicator` is non-nil, the indicator character
     // satisfies CHARACTERP, and the effective column is a nonnegative integer.
@@ -845,30 +853,24 @@ fn buffer_fill_column_indicator(buffer: &Buffer, obarray: &Obarray) -> Option<(i
     // `display-fill-column-indicator-column` in particular defaults to `t` (use
     // fill-column) and is rarely set locally, so a buffer-local-only read returns
     // None and disables the indicator even when the mode is on.
-    if !effective_buffer_bool(buffer, obarray, LayoutVar::DisplayFillColumnIndicator) {
+    if !effective_buffer_bool(buffer, vars, LayoutVar::DisplayFillColumnIndicator) {
         return None;
     }
 
-    let character_value = effective_buffer_value(
-        buffer,
-        obarray,
-        LayoutVar::DisplayFillColumnIndicatorCharacter,
-    )?;
+    let character_value =
+        effective_buffer_value(buffer, vars, LayoutVar::DisplayFillColumnIndicatorCharacter)?;
     if !character_value.is_char() {
         return None;
     }
     let character = character_value.as_char()?;
 
-    let column_value = match effective_buffer_value(
-        buffer,
-        obarray,
-        LayoutVar::DisplayFillColumnIndicatorColumn,
-    ) {
-        Some(value) if value.bits() == Value::T.bits() => {
-            effective_buffer_value(buffer, obarray, LayoutVar::FillColumn)
-        }
-        value => value,
-    }?;
+    let column_value =
+        match effective_buffer_value(buffer, vars, LayoutVar::DisplayFillColumnIndicatorColumn) {
+            Some(value) if value.bits() == Value::T.bits() => {
+                effective_buffer_value(buffer, vars, LayoutVar::FillColumn)
+            }
+            value => value,
+        }?;
     let column = column_value.as_fixnum()?;
     if column < 0 || column > i32::MAX as i64 {
         return None;
@@ -1217,11 +1219,14 @@ fn frame_cursor_color_pixel(frame: &Frame, face_table: &FaceTable) -> u32 {
     frame_foreground_color_pixel(frame, face_table)
 }
 
-fn frame_cursor_foreground_pixel(frame: &Frame, face_table: &FaceTable, obarray: &Obarray) -> u32 {
+fn frame_cursor_foreground_pixel(
+    frame: &Frame,
+    face_table: &FaceTable,
+    vars: VariableView<'_>,
+) -> u32 {
     // GNU's Vx_cursor_fore_pixel is a color-name string when explicitly set;
     // otherwise x_set_cursor_color uses FRAME_BACKGROUND_PIXEL.
-    obarray
-        .symbol_value_copied("x-cursor-fore-pixel")
+    vars.value_by_name("x-cursor-fore-pixel")
         .and_then(|value| parse_color_pixel(&value))
         .unwrap_or_else(|| frame_background_color_pixel(frame, face_table))
 }
@@ -1391,7 +1396,7 @@ pub fn window_params_from_neovm(
     window: &Window,
     buffer: &Buffer,
     frame: &Frame,
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     face_table: &FaceTable,
     default_font_ascent: Option<f32>,
     is_selected: bool,
@@ -1403,7 +1408,7 @@ pub fn window_params_from_neovm(
         window,
         buffer,
         frame,
-        obarray,
+        vars,
         face_table,
         default_font_ascent,
         WindowDisplayRole {
@@ -1439,7 +1444,7 @@ pub fn window_params_from_neovm_with_font_sizing(
     window: &Window,
     buffer: &Buffer,
     frame: &Frame,
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     face_table: &FaceTable,
     default_font_ascent: Option<f32>,
     display_role: WindowDisplayRole,
@@ -1581,12 +1586,12 @@ pub fn window_params_from_neovm_with_font_sizing(
     };
 
     // Read buffer-local variables.
-    let wrap_mode = effective_wrap_mode(window, buffer, frame, obarray, hscroll);
-    let word_wrap = effective_buffer_bool(buffer, obarray, LayoutVar::WordWrap);
-    let tab_width = effective_buffer_int(buffer, obarray, LayoutVar::TabWidth, 8) as i32;
+    let wrap_mode = effective_wrap_mode(window, buffer, frame, vars, hscroll);
+    let word_wrap = effective_buffer_bool(buffer, vars, LayoutVar::WordWrap);
+    let tab_width = effective_buffer_int(buffer, vars, LayoutVar::TabWidth, 8) as i32;
     let display_line_numbers = DisplayLineNumbersMode::from_lisp_value(effective_buffer_value(
         buffer,
-        obarray,
+        vars,
         LayoutVar::DisplayLineNumbers,
     ))
     .for_window_kind(window_kind);
@@ -1594,12 +1599,12 @@ pub fn window_params_from_neovm_with_font_sizing(
     // (buffer-local with a global fallback) to choose between minimal scrolling
     // and recentering point when point jumps off-screen (src/xdisp.c).
     let scroll_conservatively =
-        effective_buffer_int(buffer, obarray, LayoutVar::ScrollConservatively, 0);
-    let scroll_step = effective_buffer_int(buffer, obarray, LayoutVar::ScrollStep, 0);
-    let scroll_minibuffer_conservatively = obarray
-        .symbol_value_copied("scroll-minibuffer-conservatively")
+        effective_buffer_int(buffer, vars, LayoutVar::ScrollConservatively, 0);
+    let scroll_step = effective_buffer_int(buffer, vars, LayoutVar::ScrollStep, 0);
+    let scroll_minibuffer_conservatively = vars
+        .value_by_name("scroll-minibuffer-conservatively")
         .is_none_or(|value| !value.is_nil());
-    let scroll_margin = effective_buffer_int(buffer, obarray, LayoutVar::ScrollMargin, 0);
+    let scroll_margin = effective_buffer_int(buffer, vars, LayoutVar::ScrollMargin, 0);
 
     // GNU window.c gates chrome reservation through window_wants_*:
     // a mode/header/tab line is shown only for leaf non-minibuffer
@@ -1652,14 +1657,14 @@ pub fn window_params_from_neovm_with_font_sizing(
         bar_width: CursorBarWidth::DEFAULT,
     });
     let cursor_color = frame_cursor_color_pixel(frame, face_table);
-    let cursor_foreground = frame_cursor_foreground_pixel(frame, face_table, obarray);
+    let cursor_foreground = frame_cursor_foreground_pixel(frame, face_table, vars);
     let cursor_effects = parse_cursor_effect_profile(window_cursor_effect).or_else(|| {
         buffer_local_value(buffer, LayoutVar::NeomacsCursorEffect)
             .and_then(parse_cursor_effect_profile)
     });
     let visual_cursors = parse_visual_cursors(buffer, cursor_color);
-    let x_stretch_cursor = global_bool(obarray, "x-stretch-cursor");
-    let fill_column_indicator = buffer_fill_column_indicator(buffer, obarray);
+    let x_stretch_cursor = global_bool(vars, "x-stretch-cursor");
+    let fill_column_indicator = buffer_fill_column_indicator(buffer, vars);
 
     let header_line_height = if wants_header_line {
         chrome_face_pixel_height(
@@ -1769,7 +1774,7 @@ pub fn window_params_from_neovm_with_font_sizing(
         char_height,
         window_system: is_window_system,
         font_pixel_size: frame.font_pixel_size,
-        image_scale_environment: image_scale_environment(frame, obarray),
+        image_scale_environment: image_scale_environment(frame, vars),
         font_ascent: if is_window_system {
             default_font_ascent
                 .filter(|ascent| *ascent > 0.0)
@@ -1800,18 +1805,15 @@ pub fn window_params_from_neovm_with_font_sizing(
         // them in every buffer that has no local override. Read the EFFECTIVE
         // value (buffer-local, else global/default) — `buffer_local_bool` sees
         // only an explicit local binding and so silently ignored `setq-default`.
-        indicate_empty_lines: if effective_buffer_bool(
-            buffer,
-            obarray,
-            LayoutVar::IndicateEmptyLines,
-        ) {
+        indicate_empty_lines: if effective_buffer_bool(buffer, vars, LayoutVar::IndicateEmptyLines)
+        {
             1
         } else {
             0
         },
         show_trailing_whitespace: effective_buffer_bool(
             buffer,
-            obarray,
+            vars,
             LayoutVar::ShowTrailingWhitespace,
         ),
         trailing_ws_bg: face_bg_pixel(face_table, "trailing-whitespace", 0),
@@ -1829,7 +1831,7 @@ pub fn window_params_from_neovm_with_font_sizing(
         },
         selective_display: buffer_selective_display(buffer),
         escape_glyph_fg: face_fg_pixel(face_table, "escape-glyph", 0),
-        nobreak_char_display: effective_nobreak_char_display(buffer, obarray),
+        nobreak_char_display: effective_nobreak_char_display(buffer, vars),
         // GNU merges `nobreak-space` for non-ASCII spaces (and `nobreak-hyphen`
         // for hyphens) in highlight mode; `nobreak-space` inherits `escape-glyph`,
         // so `resolve` yields the escape-glyph color when nobreak-space itself
@@ -1929,7 +1931,8 @@ pub fn collect_layout_params_with_font_sizing(
         .is_some_and(|selected| selected.id == frame_id);
     let minibuffer_caller = evaluator.minibuffer_selected_window_id();
     let cursor_target = redisplay_cursor_target(evaluator, frame_id);
-    let frame_params = frame_params_from_neovm(frame, evaluator.face_table(), evaluator.obarray());
+    let frame_params =
+        frame_params_from_neovm(frame, evaluator.face_table(), evaluator.variables());
 
     let mut window_params = Vec::new();
 
@@ -1959,7 +1962,7 @@ pub fn collect_layout_params_with_font_sizing(
             window,
             buffer,
             frame,
-            evaluator.obarray(),
+            evaluator.variables(),
             evaluator.face_table(),
             default_font_ascent,
             WindowDisplayRole {
@@ -2012,7 +2015,7 @@ pub fn collect_layout_params_with_font_sizing(
                 mini_leaf,
                 buffer,
                 frame,
-                evaluator.obarray(),
+                evaluator.variables(),
                 evaluator.face_table(),
                 default_font_ascent,
                 WindowDisplayRole {

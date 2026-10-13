@@ -2480,7 +2480,10 @@ fn completing_read_minibuffer_args_choose_completion_keymap_by_require_match() {
     );
 
     let default_args = completing_read_minibuffer_args(
-        eval.obarray(),
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            eval.obarray(),
+        ),
         &[
             Value::string("Prompt: "),
             Value::list(vec![Value::string("alpha")]),
@@ -2506,7 +2509,10 @@ fn completing_read_minibuffer_args_choose_completion_keymap_by_require_match() {
     );
 
     let must_match_args = completing_read_minibuffer_args(
-        eval.obarray(),
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            eval.obarray(),
+        ),
         &[
             Value::string("Prompt: "),
             Value::list(vec![Value::string("alpha")]),

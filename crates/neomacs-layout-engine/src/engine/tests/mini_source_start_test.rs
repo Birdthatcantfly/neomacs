@@ -9,10 +9,8 @@ use neovm_core::window::WindowLayoutQueryScope;
 
 fn canonical_rows(content: &str, presentation: bool) -> (WindowDisplaySnapshot, LispCharPos1, i64) {
     let mut eval = Context::new();
-    eval.obarray_mut()
-        .set_symbol_value("resize-mini-windows", Value::T);
-    eval.obarray_mut()
-        .set_symbol_value("max-mini-window-height", Value::fixnum(3));
+    eval.store_variable_by_name("resize-mini-windows", Value::T);
+    eval.store_variable_by_name("max-mini-window-height", Value::fixnum(3));
     let root = eval
         .buffer_manager()
         .current_buffer()

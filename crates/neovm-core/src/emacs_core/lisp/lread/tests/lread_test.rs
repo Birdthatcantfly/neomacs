@@ -1323,7 +1323,7 @@ fn get_load_suffixes_returns_list() {
     // GNU `Fget_load_suffixes` cross-products `load-suffixes` with
     // `load-file-rep-suffixes`.  The empty representation suffix extends each
     // load suffix; it is not returned as its own suffix.
-    let result = builtin_get_load_suffixes(&ev.obarray, vec![]).unwrap();
+    let result = builtin_get_load_suffixes(ev.variables(), vec![]).unwrap();
     let items = list_to_vec(&result).unwrap();
     assert_eq!(items.len(), 3);
     assert_eq!(items[0].as_utf8_str(), Some(module_file_suffix()));
@@ -1344,7 +1344,7 @@ fn get_load_suffixes_cross_products_rep_suffixes() {
         Value::list(vec![Value::string(".gz")]),
     );
 
-    let result = builtin_get_load_suffixes(&ev.obarray, vec![]).unwrap();
+    let result = builtin_get_load_suffixes(ev.variables(), vec![]).unwrap();
     let rendered = list_to_vec(&result)
         .unwrap()
         .into_iter()
@@ -1363,7 +1363,7 @@ fn get_load_suffixes_returns_nil_when_representation_suffixes_are_nil() {
     ev.obarray
         .set_symbol_value("load-file-rep-suffixes", Value::NIL);
 
-    let result = builtin_get_load_suffixes(&ev.obarray, vec![]).unwrap();
+    let result = builtin_get_load_suffixes(ev.variables(), vec![]).unwrap();
 
     assert!(result.is_nil());
 }
@@ -1383,7 +1383,7 @@ fn get_load_suffixes_ignores_irrelevant_non_string_jka_members() {
         Value::list(vec![Value::symbol("not-a-string")]),
     );
 
-    let result = builtin_get_load_suffixes(&ev.obarray, vec![])
+    let result = builtin_get_load_suffixes(ev.variables(), vec![])
         .expect("GNU only consults jka members for represented module suffixes");
 
     assert_eq!(
@@ -1400,7 +1400,7 @@ fn get_load_suffixes_ignores_irrelevant_non_string_jka_members() {
 fn get_load_suffixes_rejects_over_arity() {
     crate::test_utils::init_test_tracing();
     let ev = Context::new();
-    let result = builtin_get_load_suffixes(&ev.obarray, vec![Value::NIL]);
+    let result = builtin_get_load_suffixes(ev.variables(), vec![Value::NIL]);
     assert!(if matches!(
         result.kinded_ref(),
         Err(FlowRef::Signal(sig)) if sig.symbol_name() == "wrong-number-of-arguments"

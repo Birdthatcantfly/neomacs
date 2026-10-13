@@ -631,13 +631,23 @@ fn get_char_property_same_range_overlays_use_gnu_identity_tiebreaker() {
     )
     .unwrap();
     assert_eq!(
-        lookup_overlay_property(&eval.obarray, &eval.buffers, first, Value::symbol("face"))
-            .as_bare_symbol_name(),
+        lookup_overlay_property(
+            eval.variables(),
+            &eval.buffers,
+            first,
+            Value::symbol("face")
+        )
+        .as_bare_symbol_name(),
         Some("first")
     );
     assert_eq!(
-        lookup_overlay_property(&eval.obarray, &eval.buffers, second, Value::symbol("face"))
-            .as_bare_symbol_name(),
+        lookup_overlay_property(
+            eval.variables(),
+            &eval.buffers,
+            second,
+            Value::symbol("face")
+        )
+        .as_bare_symbol_name(),
         Some("second")
     );
     let raw = builtin_overlays_at(&mut eval, vec![Value::fixnum(2)]).unwrap();

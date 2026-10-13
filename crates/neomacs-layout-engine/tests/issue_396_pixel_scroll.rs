@@ -24,8 +24,7 @@ fn lisp_precision_scroll_survives_redisplay_in_both_directions() {
         .unwrap()
         .window_system = Some(Value::symbol("neo"));
     let window = eval.frame_manager().get(frame).unwrap().selected_window;
-    eval.obarray_mut()
-        .set_symbol_value("precision-scroll-frame", Value::make_frame(frame.0));
+    eval.store_variable_by_name("precision-scroll-frame", Value::make_frame(frame.0));
     let mut query = WindowLayoutQueryEngine::new_without_font_metrics();
     eval.install_window_layout_query(move |eval, frame, window, scope| {
         match query.query_window_layout(eval, frame, window, scope) {

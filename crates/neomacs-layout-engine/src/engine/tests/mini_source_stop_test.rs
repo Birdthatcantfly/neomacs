@@ -25,10 +25,8 @@ fn measure(
     let _policy = neovm_core::emacs_core::eval::RedisplayHookPolicyGuard::gnu();
     let mut eval = Context::new();
     assert!(eval.gnu_redisplay_hooks_policy_enabled());
-    eval.obarray_mut()
-        .set_symbol_value("resize-mini-windows", Value::T);
-    eval.obarray_mut()
-        .set_symbol_value("max-mini-window-height", Value::fixnum(3));
+    eval.store_variable_by_name("resize-mini-windows", Value::T);
+    eval.store_variable_by_name("max-mini-window-height", Value::fixnum(3));
     eval.eval_str("(setq d5-mini-condition-count 0)")
         .expect("condition counter");
     let root = eval

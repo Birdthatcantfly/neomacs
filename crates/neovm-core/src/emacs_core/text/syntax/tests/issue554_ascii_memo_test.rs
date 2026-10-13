@@ -97,8 +97,12 @@ fn issue554_ascii_syntax_properties_override_a_warm_table_memo() {
     let word = flat_ascii_syntax_entry(&table, b'a');
     assert_eq!(word.class, SyntaxClass::Word);
     for mode in [SymbolMode::Bare, SymbolMode::Positioned] {
-        let properties =
-            SyntaxProperties::for_scan_with_symbols(true, &context.obarray, &context.buffers, mode);
+        let properties = SyntaxProperties::for_scan_with_symbols(
+            true,
+            context.variables(),
+            &context.buffers,
+            mode,
+        );
         let bytes = SyntaxPropByteRun::new(properties);
         let chars = SyntaxPropRange::new(properties);
         bytes.ascii[b'a' as usize].set(Some(word));

@@ -2,6 +2,7 @@ use super::builtins::*;
 use crate::emacs_core::error::{
     expect_args, expect_args_range, expect_fixnum, expect_max_args, expect_min_args,
 };
+use crate::emacs_core::eval::VariableView;
 
 // ===========================================================================
 // Buffer operations (require evaluator for BufferManager access)
@@ -338,7 +339,6 @@ pub(crate) fn builtin_get_buffer(eval: &mut super::eval::Context, args: Vec<Valu
 
 pub(crate) fn builtin_find_buffer(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {
     let symbol_mode = eval.symbol_mode();
-    let obarray = eval.obarray();
     let dynamic: &[OrderedRuntimeBindingMap] = &[];
     let buffers = &eval.buffers;
     expect_args("find-buffer", &args, 2)?;
@@ -355,7 +355,7 @@ pub(crate) fn builtin_find_buffer(eval: &mut super::eval::Context, args: Vec<Val
         .iter()
         .rev()
         .find_map(|frame| frame.get(&name_id).cloned())
-        .or_else(|| obarray.symbol_value_copied(name))
+        .or_else(|| eval.variable_value_by_name(name))
         .ok_or_else(|| signal(LispCondition::VoidVariable, vec![Value::symbol(name)]))?;
 
     let mut scan_order = Vec::new();
@@ -470,7 +470,7 @@ pub(crate) fn builtin_get_file_buffer(
 ) -> EvalResult {
     expect_args("get-file-buffer", &args, 1)?;
     let resolved = super::fileio::resolve_filename_lisp_in_state(
-        &eval.obarray,
+        eval.variables(),
         &[],
         &eval.buffers,
         expect_lisp_string(&args[0])?,
@@ -487,7 +487,7 @@ pub(crate) fn builtin_get_file_buffer(
         };
 
         let candidate = super::fileio::resolve_filename_lisp_in_state(
-            &eval.obarray,
+            eval.variables(),
             &[],
             &eval.buffers,
             file_name,
@@ -1929,7 +1929,7 @@ pub(crate) fn builtin_replace_region_contents(
     eval.push_specpdl_root(source_value);
 
     let read_only_buffer_name = eval.buffers.current_buffer().and_then(|buf| {
-        if super::editfns::buffer_read_only_active_in_state(&eval.obarray, &[], buf) {
+        if super::editfns::buffer_read_only_active_in_state(eval.variables(), &[], buf) {
             Some(buf.name_value())
         } else {
             None
@@ -2821,7 +2821,7 @@ pub(crate) fn builtin_constrain_to_field_5(
         let field = Value::from_sym_id(constrain_to_field_syms().field);
         let has_field = |eval: &super::eval::Context, pos: i64| -> Result<bool, Flow> {
             Ok(
-                !char_property_in_current_buffer(&eval.obarray, &eval.buffers, pos, field)?
+                !char_property_in_current_buffer(eval.variables(), &eval.buffers, pos, field)?
                     .is_nil(),
             )
         };
@@ -2833,7 +2833,7 @@ pub(crate) fn builtin_constrain_to_field_5(
 
     if constrain && let Some(capture_prop) = args.get(4).filter(|value| !value.is_nil()) {
         let old_capture = crate::emacs_core::builtins::misc_eval::builtin_get_pos_property_impl(
-            &eval.obarray,
+            eval.variables(),
             &[],
             None,
             &eval.buffers,
@@ -2842,14 +2842,14 @@ pub(crate) fn builtin_constrain_to_field_5(
         constrain = old_capture.is_nil()
             && (old_pos <= point_min
                 || char_property_in_current_buffer(
-                    &eval.obarray,
+                    eval.variables(),
                     &eval.buffers,
                     old_pos,
                     *capture_prop,
                 )?
                 .is_nil()
                 || char_property_in_current_buffer(
-                    &eval.obarray,
+                    eval.variables(),
                     &eval.buffers,
                     old_pos - 1,
                     *capture_prop,
@@ -2912,13 +2912,13 @@ pub(crate) fn builtin_constrain_to_field_5(
 }
 
 fn char_property_in_current_buffer(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     buffers: &BufferManager,
     pos: i64,
     property: Value,
 ) -> Result<Value, Flow> {
     crate::emacs_core::textprop::builtin_get_char_property_in_state(
-        obarray,
+        vars,
         buffers,
         vec![Value::fixnum(pos), property],
     )
@@ -2968,12 +2968,12 @@ fn resolve_field_position_in_buffers(
 }
 
 fn field_property_after_char_in_buffers(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     buffers: &BufferManager,
     pos: i64,
 ) -> Result<Value, Flow> {
     let value = crate::emacs_core::textprop::builtin_get_char_property_and_overlay_in_state(
-        obarray,
+        vars,
         buffers,
         vec![Value::fixnum(pos), Value::symbol("field")],
     )?;
@@ -2984,13 +2984,13 @@ fn field_property_after_char_in_buffers(
 }
 
 fn field_property_at_position_in_state(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     dynamic: &[OrderedRuntimeBindingMap],
     buffers: &BufferManager,
     pos: i64,
 ) -> Result<Value, Flow> {
     crate::emacs_core::builtins::misc_eval::builtin_get_pos_property_impl(
-        obarray,
+        vars,
         dynamic,
         None,
         buffers,
@@ -2999,7 +2999,7 @@ fn field_property_at_position_in_state(
 }
 
 fn previous_field_change_in_buffers(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     buffers: &BufferManager,
     pos: i64,
     limit: Option<i64>,
@@ -3011,13 +3011,13 @@ fn previous_field_change_in_buffers(
     }
     expect_int(
         &crate::emacs_core::builtins::misc_eval::builtin_previous_single_char_property_change_in_buffers(
-            obarray, None, buffers, args,
+            vars, None, buffers, args,
         )?,
     )
 }
 
 fn next_field_change_in_buffers(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     buffers: &BufferManager,
     pos: i64,
     limit: Option<i64>,
@@ -3029,12 +3029,12 @@ fn next_field_change_in_buffers(
     }
     expect_int(
         &crate::emacs_core::builtins::misc_eval::builtin_next_single_char_property_change_in_buffers(
-            obarray, None, buffers, &args)?,
+            vars, None, buffers, &args)?,
     )
 }
 
 pub(crate) fn find_field_bounds_in_state(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     dynamic: &[OrderedRuntimeBindingMap],
     buffers: &BufferManager,
     position_value: Option<&Value>,
@@ -3043,9 +3043,9 @@ pub(crate) fn find_field_bounds_in_state(
     end_limit: Option<i64>,
 ) -> Result<(i64, i64), Flow> {
     let (pos, point_min, _point_max) = resolve_field_position_in_buffers(buffers, position_value)?;
-    let after_field = field_property_after_char_in_buffers(obarray, buffers, pos)?;
+    let after_field = field_property_after_char_in_buffers(vars, buffers, pos)?;
     let before_field = if pos > point_min {
-        field_property_after_char_in_buffers(obarray, buffers, pos - 1)?
+        field_property_after_char_in_buffers(vars, buffers, pos - 1)?
     } else {
         after_field
     };
@@ -3053,7 +3053,7 @@ pub(crate) fn find_field_bounds_in_state(
     let mut at_field_start = false;
     let mut at_field_end = false;
     if !merge_at_boundary {
-        let field = field_property_at_position_in_state(obarray, dynamic, buffers, pos)?;
+        let field = field_property_at_position_in_state(vars, dynamic, buffers, pos)?;
         if !eq_value(&field, &after_field) {
             at_field_end = true;
         }
@@ -3072,18 +3072,18 @@ pub(crate) fn find_field_bounds_in_state(
     } else {
         let mut cursor = pos;
         if merge_at_boundary && eq_value(&before_field, &boundary) {
-            cursor = previous_field_change_in_buffers(obarray, buffers, cursor, beg_limit)?;
+            cursor = previous_field_change_in_buffers(vars, buffers, cursor, beg_limit)?;
         }
-        previous_field_change_in_buffers(obarray, buffers, cursor, beg_limit)?
+        previous_field_change_in_buffers(vars, buffers, cursor, beg_limit)?
     };
     let end = if at_field_end {
         pos
     } else {
         let mut cursor = pos;
         if merge_at_boundary && eq_value(&after_field, &boundary) {
-            cursor = next_field_change_in_buffers(obarray, buffers, cursor, end_limit)?;
+            cursor = next_field_change_in_buffers(vars, buffers, cursor, end_limit)?;
         }
-        next_field_change_in_buffers(obarray, buffers, cursor, end_limit)?
+        next_field_change_in_buffers(vars, buffers, cursor, end_limit)?
     };
 
     Ok((beg, end))
@@ -3108,7 +3108,7 @@ pub(crate) fn builtin_field_beginning(
         _ => None,
     };
     let (beg, _) = find_field_bounds_in_state(
-        &eval.obarray,
+        eval.variables(),
         &[],
         &eval.buffers,
         args.first(),
@@ -3129,7 +3129,7 @@ pub(crate) fn builtin_field_end(eval: &mut super::eval::Context, args: Vec<Value
         _ => None,
     };
     let (_, end) = find_field_bounds_in_state(
-        &eval.obarray,
+        eval.variables(),
         &[],
         &eval.buffers,
         args.first(),
@@ -3146,7 +3146,7 @@ pub(crate) fn builtin_field_string(
 ) -> EvalResult {
     expect_max_args("field-string", &args, 1)?;
     let (beg, end) = find_field_bounds_in_state(
-        &eval.obarray,
+        eval.variables(),
         &[],
         &eval.buffers,
         args.first(),
@@ -3163,7 +3163,7 @@ pub(crate) fn builtin_field_string_no_properties(
 ) -> EvalResult {
     expect_max_args("field-string-no-properties", &args, 1)?;
     let (beg, end) = find_field_bounds_in_state(
-        &eval.obarray,
+        eval.variables(),
         &[],
         &eval.buffers,
         args.first(),
@@ -3183,7 +3183,7 @@ pub(crate) fn builtin_delete_field(
 ) -> EvalResult {
     expect_max_args("delete-field", &args, 1)?;
     let (beg, end) = find_field_bounds_in_state(
-        &eval.obarray,
+        eval.variables(),
         &[],
         &eval.buffers,
         args.first(),
@@ -3735,7 +3735,7 @@ fn insert_piece_from_char_arg(
 }
 
 pub(crate) fn apply_inherited_text_properties(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     dynamic: &[OrderedRuntimeBindingMap],
     buffers: &mut BufferManager,
     current_id: BufferId,
@@ -3751,7 +3751,7 @@ pub(crate) fn apply_inherited_text_properties(
         .get(current_id)
         .map(|buf| {
             super::builtins::misc_eval::inherited_text_properties_for_inserted_range_in_state(
-                obarray, dynamic, buffers, buf, old_pt, text_len, mode,
+                vars, dynamic, buffers, buf, old_pt, text_len, mode,
             )
         })
         .unwrap_or_default();
@@ -3986,7 +3986,7 @@ fn insert_one_pending(
     )?;
     let mode = eval.symbol_mode();
     insert_pieces_in_state(
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &[],
         &mut eval.buffers,
         pieces,
@@ -4045,7 +4045,7 @@ pub(crate) fn builtin_insert_before_markers_and_inherit(
 }
 
 fn insert_pieces_in_state(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     dynamic: &[OrderedRuntimeBindingMap],
     buffers: &mut BufferManager,
     pieces: Vec<InsertPiece>,
@@ -4062,7 +4062,7 @@ fn insert_pieces_in_state(
         .ok_or_else(|| signal("error", vec![Value::string("No current buffer")]))?;
     if buffers
         .get(current_id)
-        .is_some_and(|buf| super::editfns::buffer_read_only_active_in_state(obarray, dynamic, buf))
+        .is_some_and(|buf| super::editfns::buffer_read_only_active_in_state(vars, dynamic, buf))
     {
         return Err(signal(
             LispCondition::BufferReadOnly,
@@ -4099,7 +4099,7 @@ fn insert_pieces_in_state(
         }
         if property_mode == InsertPiecePropertyMode::InheritAdjoining {
             apply_inherited_text_properties(
-                obarray,
+                vars,
                 dynamic,
                 buffers,
                 current_id,
@@ -4127,7 +4127,7 @@ fn insert_pieces_in_state(
 }
 
 pub(crate) fn insert_string_value_in_current_buffer(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     dynamic: &[OrderedRuntimeBindingMap],
     buffers: &mut BufferManager,
     value: Value,
@@ -4138,7 +4138,7 @@ pub(crate) fn insert_string_value_in_current_buffer(
     let target_multibyte = current_buffer_multibyte(buffers)?;
     let piece = buffer_insert_piece_from_string(value, target_multibyte)?;
     insert_pieces_in_state(
-        obarray,
+        vars,
         dynamic,
         buffers,
         vec![piece],
@@ -4203,7 +4203,7 @@ pub(crate) fn builtin_insert_char(eval: &mut super::eval::Context, args: Vec<Val
         .current_buffer_id()
         .ok_or_else(|| signal("error", vec![Value::string("No current buffer")]))?;
     if eval.buffers.get(current_id).is_some_and(|buf| {
-        super::editfns::buffer_read_only_active_in_state(&eval.obarray, &[], buf)
+        super::editfns::buffer_read_only_active_in_state(eval.variables(), &[], buf)
     }) {
         return Err(signal(
             LispCondition::BufferReadOnly,
@@ -4231,7 +4231,7 @@ pub(crate) fn builtin_insert_char(eval: &mut super::eval::Context, args: Vec<Val
     if args.get(2).is_some_and(|value| value.is_truthy()) {
         let mode = eval.symbol_mode();
         apply_inherited_text_properties(
-            &eval.obarray,
+            VariableView::new(&eval.obarray, &eval.owner),
             &[],
             &mut eval.buffers,
             current_id,
@@ -4272,7 +4272,7 @@ pub(crate) fn builtin_insert_byte(eval: &mut super::eval::Context, args: Vec<Val
         .ok_or_else(|| signal("error", vec![Value::string("No current buffer")]))?
         .get_multibyte();
     if eval.buffers.get(current_id).is_some_and(|buf| {
-        super::editfns::buffer_read_only_active_in_state(&eval.obarray, &[], buf)
+        super::editfns::buffer_read_only_active_in_state(eval.variables(), &[], buf)
     }) {
         return Err(signal(
             LispCondition::BufferReadOnly,
@@ -4327,7 +4327,7 @@ pub(crate) fn builtin_insert_byte(eval: &mut super::eval::Context, args: Vec<Val
     if args.get(2).is_some_and(|value| value.is_truthy()) {
         let mode = eval.symbol_mode();
         apply_inherited_text_properties(
-            &eval.obarray,
+            VariableView::new(&eval.obarray, &eval.owner),
             &[],
             &mut eval.buffers,
             current_id,
@@ -4443,7 +4443,7 @@ pub(crate) fn builtin_subst_char_in_region(
     };
 
     if eval.buffers.get(current_id).is_some_and(|buf| {
-        super::editfns::buffer_read_only_active_in_state(&eval.obarray, &[], buf)
+        super::editfns::buffer_read_only_active_in_state(eval.variables(), &[], buf)
     }) {
         return Err(signal(
             LispCondition::BufferReadOnly,
@@ -5484,7 +5484,10 @@ pub(crate) fn buffer_local_value_in(
         None if resolved_id == intern("nil") => Ok(Value::NIL),
         None if resolved_id == intern("t") => Ok(Value::T),
         None if resolve_sym(resolved_id).starts_with(':') => Ok(Value::from_sym_id(resolved_id)),
-        None => match eval.obarray().find_symbol_value(resolved_id) {
+        None => match eval.obarray().canonical_find_value(
+            crate::emacs_core::symbol::CanonicalAccess::STORAGE,
+            resolved_id,
+        ) {
             // Only a thread projection's per-buffer header reads UNBOUND
             // here: the variable it projects answers its default.
             Some(value) if value.is_unbound() => {
@@ -5735,7 +5738,7 @@ pub(crate) fn builtin_overlay_get(eval: &mut super::eval::Context, args: Vec<Val
     expect_args("overlay-get", &args, 2)?;
     let overlay = expect_overlay(&args[0])?;
     Ok(lookup_overlay_property(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         overlay,
         args[1],
@@ -5777,7 +5780,7 @@ pub(crate) fn builtin_overlays_at(eval: &mut super::eval::Context, args: Vec<Val
         if let Some(target_window_id) = sorted.as_window_id() {
             let window_sym = Value::symbol("window");
             ids.retain(|ov| {
-                super::textprop::lookup_overlay_property(&eval.obarray, buffers, *ov, window_sym)
+                super::textprop::lookup_overlay_property(eval.variables(), buffers, *ov, window_sym)
                     .as_window_id()
                     .is_none_or(|wid| wid == target_window_id)
             });
@@ -5788,7 +5791,7 @@ pub(crate) fn builtin_overlays_at(eval: &mut super::eval::Context, args: Vec<Val
         buf.overlays
             .sort_overlay_ids_by_priority_desc_with(&mut ids, &|overlay| {
                 Some(super::textprop::lookup_overlay_property(
-                    &eval.obarray,
+                    eval.variables(),
                     buffers,
                     overlay,
                     priority,

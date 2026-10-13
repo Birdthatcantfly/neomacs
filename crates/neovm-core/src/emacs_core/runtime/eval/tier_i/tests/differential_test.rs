@@ -20,8 +20,8 @@ fn run_with(mode: TierIMode, lazy_frames: bool, src: &str) -> (Vec<String>, Cont
     eval.tier_i.set_threshold(1);
     eval.tier_i.set_lazy_frames(lazy_frames);
     eval.tier_i.clear_for_test();
-    let forms =
-        crate::emacs_core::value_reader::read_all(src, &eval.obarray).expect("parse the program");
+    let forms = crate::emacs_core::value_reader::read_all(src, eval.variables())
+        .expect("parse the program");
     let roots = eval.save_specpdl_roots();
     for form in &forms {
         eval.push_specpdl_root(*form);

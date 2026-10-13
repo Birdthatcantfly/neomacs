@@ -120,7 +120,7 @@ fn supplied_boundary_converts_current_once_before_previous_logical_lookup() {
     let result = crate::emacs_core::regex::with_string_syntax_lookup(
         Some(base),
         StringSyntaxPositionSource::try_from(&source).expect("validated test source"),
-        SyntaxProperties::for_scan(true, &context.obarray, &context.buffers),
+        SyntaxProperties::for_scan(true, context.variables(), &context.buffers),
         |lookup| {
             crate::emacs_core::string_pos_cache::reset_string_pos_cache();
             lookup.boundary_syntax_at(request(SyntaxAssertion::WordBoundary, 'c', 'd'));
@@ -159,7 +159,7 @@ fn supplied_symbol_beginning_skips_invalid_previous_after_nonword_current() {
     let classes = crate::emacs_core::regex::with_string_syntax_lookup(
         Some(base),
         StringSyntaxPositionSource::try_from(&source).expect("validated test source"),
-        SyntaxProperties::for_scan(true, &context.obarray, &context.buffers),
+        SyntaxProperties::for_scan(true, context.variables(), &context.buffers),
         |lookup| {
             crate::emacs_core::string_pos_cache::reset_string_pos_cache();
             lookup.boundary_syntax_at(request(SyntaxAssertion::SymbolBeginning, 'c', '!'))

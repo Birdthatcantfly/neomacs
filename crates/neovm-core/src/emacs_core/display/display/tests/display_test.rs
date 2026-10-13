@@ -362,7 +362,7 @@ fn x_window_system_active_falls_back_to_window_system_when_initial_is_nil() {
     eval.set_variable("window-system", Value::symbol(gui_window_system_symbol()));
 
     assert!(x_window_system_active(&eval));
-    assert!(x_window_system_active_in_state(&eval.obarray, &[]));
+    assert!(x_window_system_active_in_state(eval.variables(), &[]));
 }
 
 #[test]

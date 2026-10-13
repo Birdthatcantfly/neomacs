@@ -3,6 +3,7 @@ use crate::buffer::{
     BufferId, CharLen, CharPos0, CharRange, EmacsBytePos, EmacsByteRange, LispCharPos1,
 };
 use crate::emacs_core::error::{expect_args, expect_args_range, expect_fixnum, expect_min_args};
+use crate::emacs_core::eval::VariableView;
 use crate::emacs_core::regex::{
     BufferRegexpMatchContext, BufferRegexpSyntaxProperties, MatchDataSource, MatchGroup,
     char_pos_to_byte, char_pos_to_byte_lisp_string,
@@ -118,7 +119,7 @@ pub(crate) fn current_word_boundary_lookup(
 /// Snapshot the match-time state, borrowing only the obarray so the caller can
 /// still take `&mut eval.buffers` for the search itself.
 fn current_buffer_regexp_match_context<'a>(
-    obarray: &'a crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'a>,
     buffers: &crate::buffer::BufferManager,
     word_boundary: crate::emacs_core::regex_emacs::WordBoundaryLookup,
     syntax_properties: BufferRegexpSyntaxProperties,
@@ -126,7 +127,7 @@ fn current_buffer_regexp_match_context<'a>(
     BufferRegexpMatchContext::new(
         crate::emacs_core::syntax::SyntaxProperties::for_scan_with_symbols(
             syntax_properties.is_honor(),
-            obarray,
+            vars,
             buffers,
             word_boundary.symbol_mode(),
         ),
@@ -278,7 +279,7 @@ impl FastStringMatchSyntax {
     #[allow(clippy::too_many_arguments)] // matching options stay explicit at the GNU-regexp boundary
     pub(crate) fn search(
         &self,
-        obarray: &crate::emacs_core::symbol::Obarray,
+        vars: VariableView<'_>,
         buffers: &crate::buffer::BufferManager,
         pattern: &crate::heap_types::LispString,
         string: &crate::heap_types::LispString,
@@ -300,7 +301,7 @@ impl FastStringMatchSyntax {
             && (!string.intervals().is_empty() || supplied_nonidentity_syntax_positions(string));
         let properties = crate::emacs_core::syntax::SyntaxProperties::for_scan_with_symbols(
             honor,
-            obarray,
+            vars,
             buffers,
             self.base.map_or(crate::tagged::SymbolMode::Bare, |base| {
                 base.word_boundary.symbol_mode()
@@ -346,7 +347,7 @@ fn supplied_nonidentity_syntax_positions(string: &crate::heap_types::LispString)
 /// snapshot behind it.
 pub(crate) fn current_string_match_syntax_properties<'a>(
     eval: &super::eval::Context,
-    obarray: &'a crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'a>,
     buffers: &crate::buffer::BufferManager,
     searched: Option<&Value>,
 ) -> crate::emacs_core::syntax::SyntaxProperties<'a> {
@@ -358,7 +359,7 @@ pub(crate) fn current_string_match_syntax_properties<'a>(
     }) && crate::emacs_core::syntax::parse_sexp_lookup_properties_enabled(eval);
     crate::emacs_core::syntax::SyntaxProperties::for_scan_with_symbols(
         honor,
-        obarray,
+        vars,
         buffers,
         eval.symbol_mode(),
     )
@@ -1181,7 +1182,7 @@ fn propertize_window_for_forward_regexp(
             return Ok(());
         }
         let match_context = current_buffer_regexp_match_context(
-            &eval.obarray,
+            VariableView::new(&eval.obarray, &eval.owner),
             &eval.buffers,
             current_word_boundary_lookup(eval),
             syntax_properties,
@@ -1392,7 +1393,7 @@ pub(crate) fn builtin_re_search_forward_4(
             .with_symbol_mode(eval.symbol_mode())
     };
     let match_context = current_buffer_regexp_match_context(
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &eval.buffers,
         word_boundary,
         ready.syntax_properties,
@@ -1680,7 +1681,7 @@ fn buffer_regexp_search_fast(
         BufferRegexpSyntaxProperties::Ignore
     };
     let match_context = current_buffer_regexp_match_context(
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &eval.buffers,
         word_boundary,
         syntax_properties,
@@ -1732,7 +1733,7 @@ pub(crate) fn builtin_re_search_backward(
         current_word_boundary_lookup(eval)
     };
     let match_context = current_buffer_regexp_match_context(
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &eval.buffers,
         word_boundary,
         ready.syntax_properties,
@@ -1815,7 +1816,7 @@ pub(crate) fn builtin_posix_search_forward(
         current_word_boundary_lookup(eval)
     };
     let match_context = current_buffer_regexp_match_context(
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &eval.buffers,
         word_boundary,
         ready.syntax_properties,
@@ -1862,7 +1863,7 @@ pub(crate) fn builtin_posix_search_backward(
         current_word_boundary_lookup(eval)
     };
     let match_context = current_buffer_regexp_match_context(
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &eval.buffers,
         word_boundary,
         ready.syntax_properties,
@@ -1933,7 +1934,7 @@ pub(crate) fn builtin_looking_at_2(
                 .with_symbol_mode(eval.symbol_mode())
         };
         let mut match_context = current_buffer_regexp_match_context(
-            &eval.obarray,
+            VariableView::new(&eval.obarray, &eval.owner),
             &eval.buffers,
             word_boundary,
             syntax_properties,
@@ -2002,7 +2003,7 @@ fn looking_at_fast(
             .with_symbol_mode(eval.symbol_mode())
     };
     let match_context = current_buffer_regexp_match_context(
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &eval.buffers,
         word_boundary,
         BufferRegexpSyntaxProperties::Ignore,
@@ -2087,7 +2088,7 @@ pub(crate) fn builtin_looking_at_p(
             }
         });
         let mut match_context = current_buffer_regexp_match_context(
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             current_word_boundary_lookup(eval),
             syntax_properties,
@@ -2172,7 +2173,7 @@ pub(crate) fn builtin_posix_looking_at(
             }
         });
         let mut match_context = current_buffer_regexp_match_context(
-            &eval.obarray,
+            VariableView::new(&eval.obarray, &eval.owner),
             &eval.buffers,
             current_word_boundary_lookup(eval),
             syntax_properties,
@@ -2355,8 +2356,12 @@ pub(crate) fn builtin_string_match_slice(
         Some(crate::emacs_core::category::active_category_table_for_buffer(current_buffer)?);
     let word_boundary = current_word_boundary_lookup(eval);
     let inhibit_changing = read_inhibit_changing_match_data(eval);
-    let syntax_properties =
-        current_string_match_syntax_properties(eval, &eval.obarray, &eval.buffers, args.get(1));
+    let syntax_properties = current_string_match_syntax_properties(
+        eval,
+        VariableView::new(&eval.obarray, &eval.owner),
+        &eval.buffers,
+        args.get(1),
+    );
     let match_data = (!inhibit_changing).then_some(&mut eval.match_data);
     let result = builtin_string_match_with_state(
         case_fold,
@@ -2458,7 +2463,12 @@ fn string_match_fast(
     let (word_boundary, syntax_properties) = if compiled.uses_syntax {
         (
             current_word_boundary_lookup(eval),
-            current_string_match_syntax_properties(eval, &eval.obarray, &eval.buffers, args.get(1)),
+            current_string_match_syntax_properties(
+                eval,
+                eval.variables(),
+                &eval.buffers,
+                args.get(1),
+            ),
         )
     } else {
         (
@@ -2659,8 +2669,12 @@ pub(crate) fn builtin_posix_string_match(
         Some(crate::emacs_core::category::active_category_table_for_buffer(current_buffer)?);
     let word_boundary = current_word_boundary_lookup(eval);
     let inhibit_changing = read_inhibit_changing_match_data(eval);
-    let syntax_properties =
-        current_string_match_syntax_properties(eval, &eval.obarray, &eval.buffers, args.get(1));
+    let syntax_properties = current_string_match_syntax_properties(
+        eval,
+        VariableView::new(&eval.obarray, &eval.owner),
+        &eval.buffers,
+        args.get(1),
+    );
     let match_data = (!inhibit_changing).then_some(&mut eval.match_data);
     builtin_posix_string_match_with_state(
         case_fold,
@@ -3415,9 +3429,10 @@ fn replace_match_declared_string(
     args: &[Value],
     md: &super::regex::MatchData,
     subexp: usize,
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     mode: SymbolMode,
 ) -> EvalResult {
+    let obarray = vars.obarray();
     let source = args.get(3).copied().unwrap_or(Value::NIL);
     let string = source.as_lisp_string().ok_or_else(|| {
         signal(
@@ -3556,7 +3571,7 @@ fn replace_match_declared_string(
                 continue;
             }
             if byte == bytes.len() {
-                let style = crate::emacs_core::coding::effective_text_quoting_style(obarray, mode);
+                let style = crate::emacs_core::coding::effective_text_quoting_style(vars, mode);
                 return Err(signal(
                     LispCondition::Error,
                     vec![Value::string(
@@ -3607,8 +3622,7 @@ fn replace_match_declared_string(
                 }
                 code if code == u32::from(b'?') => {} // GNU's string-path exception
                 _ => {
-                    let style =
-                        crate::emacs_core::coding::effective_text_quoting_style(obarray, mode);
+                    let style = crate::emacs_core::coding::effective_text_quoting_style(vars, mode);
                     return Err(signal(
                         LispCondition::Error,
                         vec![Value::string(
@@ -3640,7 +3654,7 @@ fn replace_match_declared_string(
 /// `replace-match` with FIXEDCASE=nil. Audit findings #14/#20 in
 /// `drafts/regex-search-audit.md`.
 pub(crate) fn builtin_replace_match_with_state_and_flags(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     buffers: &mut crate::buffer::BufferManager,
     match_data: &mut Option<super::regex::MatchData>,
     args: &[Value],
@@ -3701,7 +3715,7 @@ pub(crate) fn builtin_replace_match_with_state_and_flags(
     };
     // C-level `error()' messages are requoted via `text-quoting-style' by
     // GNU's doprnt (e.g. "Invalid use of `\\' ..." -> curly quotes).
-    let quoting_style = crate::emacs_core::coding::effective_text_quoting_style(obarray, mode);
+    let quoting_style = crate::emacs_core::coding::effective_text_quoting_style(vars, mode);
     let c_error = |msg: String| {
         signal(
             "error",
@@ -3736,7 +3750,7 @@ pub(crate) fn builtin_replace_match_with_state_and_flags(
                 && (0..md.group_count())
                     .any(|index| md.lisp_group(index).is_some() && md.group(index).is_none());
             if declared_source || unchecked_subexp || unchecked_backref {
-                return replace_match_declared_string(args, md, subexp, obarray, mode);
+                return replace_match_declared_string(args, md, subexp, vars, mode);
             }
         }
         let string_md_snapshot = md_snapshot.as_ref().map(match_data_for_explicit_string_arg);
@@ -3974,7 +3988,7 @@ pub(crate) fn builtin_replace_match(
                 Ok(n) if n >= 0 => n as usize,
                 _ => {
                     return builtin_replace_match_with_state_and_flags(
-                        &eval.obarray,
+                        VariableView::new(&eval.obarray, &eval.owner),
                         &mut eval.buffers,
                         &mut eval.match_data,
                         &args,
@@ -3998,7 +4012,7 @@ pub(crate) fn builtin_replace_match(
             // C-level `error()' messages are requoted via
             // `text-quoting-style' by GNU's doprnt.
             let quoting_style = crate::emacs_core::coding::effective_text_quoting_style(
-                &eval.obarray,
+                eval.variables(),
                 eval.symbol_mode(),
             );
             let change = {
@@ -4076,7 +4090,7 @@ pub(crate) fn builtin_replace_match(
             };
             let symbol_mode = eval.symbol_mode();
             let result = builtin_replace_match_with_state_and_flags(
-                &eval.obarray,
+                VariableView::new(&eval.obarray, &eval.owner),
                 &mut eval.buffers,
                 &mut eval.match_data,
                 &args,
@@ -4114,7 +4128,7 @@ pub(crate) fn builtin_replace_match(
 
     // Fallback: string replacement or no match data — no buffer hooks needed.
     builtin_replace_match_with_state_and_flags(
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &mut eval.buffers,
         &mut eval.match_data,
         &args,

@@ -9589,8 +9589,7 @@ fn inactive_echo_area_owns_cursor_at_message_end_when_requested() {
         .get(frame_id)
         .expect("frame")
         .selected_window;
-    eval.obarray_mut()
-        .set_symbol_value("cursor-in-echo-area", Value::T);
+    eval.store_variable_by_name("cursor-in-echo-area", Value::T);
     eval.set_current_message(Some(LispString::from_utf8("prompt")));
 
     let mut engine = LayoutEngine::new();
@@ -9627,10 +9626,8 @@ fn inactive_echo_area_owns_cursor_at_message_end_when_requested() {
 #[test]
 fn inactive_echo_area_grows_to_contain_tall_display_image() {
     let mut eval = Context::new();
-    eval.obarray_mut()
-        .set_symbol_value("resize-mini-windows", Value::symbol("grow-only"));
-    eval.obarray_mut()
-        .set_symbol_value("max-mini-window-height", Value::fixnum(10));
+    eval.store_variable_by_name("resize-mini-windows", Value::symbol("grow-only"));
+    eval.store_variable_by_name("max-mini-window-height", Value::fixnum(10));
     let requests = Arc::new(Mutex::new(Vec::new()));
     eval.set_display_host(Box::new(RecordingImageDisplayHost {
         requests: Arc::clone(&requests),
@@ -12400,10 +12397,8 @@ fn layout_frame_rust_remaps_named_faces_on_line_and_wrap_prefix_strings() {
 #[test]
 fn layout_frame_rust_preserves_nobreak_chars_when_ascii_display_is_disabled() {
     let mut eval = Context::new();
-    eval.obarray_mut()
-        .set_symbol_value("nobreak-char-display", Value::T);
-    eval.obarray_mut()
-        .set_symbol_value("nobreak-char-ascii-display", Value::NIL);
+    eval.store_variable_by_name("nobreak-char-display", Value::T);
+    eval.store_variable_by_name("nobreak-char-ascii-display", Value::NIL);
     let buf_id = eval
         .buffer_manager()
         .current_buffer()
@@ -12451,10 +12446,8 @@ fn layout_frame_rust_preserves_nobreak_chars_when_ascii_display_is_disabled() {
 #[test]
 fn layout_frame_rust_uses_ascii_nobreak_glyphs_when_explicitly_enabled() {
     let mut eval = Context::new();
-    eval.obarray_mut()
-        .set_symbol_value("nobreak-char-display", Value::T);
-    eval.obarray_mut()
-        .set_symbol_value("nobreak-char-ascii-display", Value::T);
+    eval.store_variable_by_name("nobreak-char-display", Value::T);
+    eval.store_variable_by_name("nobreak-char-ascii-display", Value::T);
     let buf_id = eval
         .buffer_manager()
         .current_buffer()
@@ -12498,8 +12491,7 @@ fn layout_frame_rust_uses_ascii_nobreak_glyphs_when_explicitly_enabled() {
 #[test]
 fn layout_frame_rust_renders_nobreak_chars_in_escape_mode_as_mapped_text() {
     let mut eval = Context::new();
-    eval.obarray_mut()
-        .set_symbol_value("nobreak-char-display", Value::fixnum(2));
+    eval.store_variable_by_name("nobreak-char-display", Value::fixnum(2));
     let buf_id = eval
         .buffer_manager()
         .current_buffer()
@@ -23502,7 +23494,7 @@ fn engine_face_resolver_for_frame(
 ) -> FaceResolver {
     let frame = eval.frame_manager().get(frame_id).expect("frame");
     let bootstrap =
-        crate::neovm_bridge::frame_params_from_neovm(frame, eval.face_table(), eval.obarray());
+        crate::neovm_bridge::frame_params_from_neovm(frame, eval.face_table(), eval.variables());
     let window_system = frame
         .effective_window_system()
         .and_then(|v| v.as_bare_symbol_name().map(|s| s.to_string()));
@@ -24301,7 +24293,7 @@ fn plain_route_refuses_zwj_emoji_row_and_pipeline_composes() {
     let (eval, buf_id, _, rows, char_width, _char_height) =
         layout_main_text_rows_with(text, |eval, _| crate::test_composition::install_rules(eval));
     let buffer = eval.buffer_manager().get(buf_id).expect("buffer");
-    let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(buffer, eval.obarray());
+    let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(buffer, eval.variables());
     assert_eq!(
         plain_route_classification(
             &snapshot,
@@ -28874,10 +28866,8 @@ fn layout_frame_rust_grows_minibuffer_for_eob_before_string_like_gnu() {
     // to display it. With the unclamped walk measurement (no estimator), the
     // minibuffer grows and renders the overlay's `before-string` lines.
     let mut eval = Context::new();
-    eval.obarray_mut()
-        .set_symbol_value("resize-mini-windows", Value::symbol("grow-only"));
-    eval.obarray_mut()
-        .set_symbol_value("max-mini-window-height", Value::fixnum(10));
+    eval.store_variable_by_name("resize-mini-windows", Value::symbol("grow-only"));
+    eval.store_variable_by_name("max-mini-window-height", Value::fixnum(10));
 
     let root_buf_id = eval
         .buffer_manager()
@@ -28976,10 +28966,8 @@ fn layout_active_minibuffer_rows(
     use_gui_metrics: bool,
 ) -> Vec<String> {
     let mut eval = Context::new();
-    eval.obarray_mut()
-        .set_symbol_value("resize-mini-windows", Value::symbol("grow-only"));
-    eval.obarray_mut()
-        .set_symbol_value("max-mini-window-height", Value::fixnum(max_mini_lines));
+    eval.store_variable_by_name("resize-mini-windows", Value::symbol("grow-only"));
+    eval.store_variable_by_name("max-mini-window-height", Value::fixnum(max_mini_lines));
 
     let root_buf_id = eval
         .buffer_manager()
@@ -29509,10 +29497,8 @@ fn active_minibuffer_grows_for_multiline_content_gui() {
 #[test]
 fn active_minibuffer_that_grows_to_fit_resets_start_to_point_min() {
     let mut eval = Context::new();
-    eval.obarray_mut()
-        .set_symbol_value("resize-mini-windows", Value::symbol("grow-only"));
-    eval.obarray_mut()
-        .set_symbol_value("max-mini-window-height", Value::make_float(0.25));
+    eval.store_variable_by_name("resize-mini-windows", Value::symbol("grow-only"));
+    eval.store_variable_by_name("max-mini-window-height", Value::make_float(0.25));
 
     let root_buffer = eval
         .buffer_manager()
@@ -29575,10 +29561,8 @@ fn active_minibuffer_that_grows_to_fit_resets_start_to_point_min() {
 #[test]
 fn minibuffer_relayout_discards_fast_path_classification_from_rejected_attempt() {
     let mut eval = Context::new();
-    eval.obarray_mut()
-        .set_symbol_value("resize-mini-windows", Value::symbol("grow-only"));
-    eval.obarray_mut()
-        .set_symbol_value("max-mini-window-height", Value::fixnum(10));
+    eval.store_variable_by_name("resize-mini-windows", Value::symbol("grow-only"));
+    eval.store_variable_by_name("max-mini-window-height", Value::fixnum(10));
 
     let root_buffer = eval
         .buffer_manager()
@@ -29648,10 +29632,8 @@ fn resetting_speculative_frame_output_discards_fast_path_classification() {
 #[test]
 fn active_minibuffer_resize_uses_buffer_local_max_mini_window_height() {
     let mut eval = Context::new();
-    eval.obarray_mut()
-        .set_symbol_value("resize-mini-windows", Value::symbol("grow-only"));
-    eval.obarray_mut()
-        .set_symbol_value("max-mini-window-height", Value::fixnum(10));
+    eval.store_variable_by_name("resize-mini-windows", Value::symbol("grow-only"));
+    eval.store_variable_by_name("max-mini-window-height", Value::fixnum(10));
 
     let root_buf_id = eval
         .buffer_manager()
@@ -29786,8 +29768,7 @@ fn build_tab_bar_display_roots_transient_string_across_gc() {
     let frame_id = eval
         .frame_manager_mut()
         .create_frame("layout-tab-bar-gc", 1600, 160, buf_id);
-    eval.obarray_mut()
-        .set_symbol_value("layout-target-frame", Value::make_frame(frame_id.0));
+    eval.store_variable_by_name("layout-target-frame", Value::make_frame(frame_id.0));
     eval.eval_str(
         r#"
           (require 'tab-bar)
@@ -29860,8 +29841,7 @@ fn layout_frame_rust_renders_tab_bar_text_from_lisp_tab_bar_keymap() {
     let frame_id = eval
         .frame_manager_mut()
         .create_frame("layout-tab-bar", 1600, 160, buf_id);
-    eval.obarray_mut()
-        .set_symbol_value("layout-target-frame", Value::make_frame(frame_id.0));
+    eval.store_variable_by_name("layout-target-frame", Value::make_frame(frame_id.0));
     eval.eval_str(
         r#"
           (require 'tab-bar)
@@ -30189,8 +30169,7 @@ fn layout_frame_rust_publishes_authoritative_frame_chrome() {
     let frame_id =
         eval.frame_manager_mut()
             .create_frame("authoritative-frame-chrome", 640, 180, buf_id);
-    eval.obarray_mut()
-        .set_symbol_value("layout-target-frame", Value::make_frame(frame_id.0));
+    eval.store_variable_by_name("layout-target-frame", Value::make_frame(frame_id.0));
     eval.eval_str(
         r#"
           (require 'tab-bar)
@@ -30273,8 +30252,7 @@ fn layout_frame_rust_tab_bar_does_not_record_buffer_selection() {
         let frame = eval.frame_manager_mut().get_mut(frame_id).expect("frame");
         frame.tab_bar_height = 17;
     }
-    eval.obarray_mut()
-        .set_symbol_value("layout-target-frame", Value::make_frame(frame_id.0));
+    eval.store_variable_by_name("layout-target-frame", Value::make_frame(frame_id.0));
     eval.eval_str(
         r#"
           (require 'tab-bar)
@@ -30364,8 +30342,7 @@ fn layout_frame_rust_installs_frame_tab_bar_image_media() {
         let frame = eval.frame_manager_mut().get_mut(frame_id).expect("frame");
         frame.tab_bar_height = 17;
     }
-    eval.obarray_mut()
-        .set_symbol_value("layout-target-frame", Value::make_frame(frame_id.0));
+    eval.store_variable_by_name("layout-target-frame", Value::make_frame(frame_id.0));
     eval.eval_str(
         r#"
           (require 'tab-bar)
@@ -30459,8 +30436,7 @@ fn layout_frame_rust_shrinks_frame_tab_bar_from_stale_reserved_height() {
         frame.tab_bar_height = 120;
         frame.sync_window_area_bounds();
     }
-    eval.obarray_mut()
-        .set_symbol_value("layout-target-frame", Value::make_frame(frame_id.0));
+    eval.store_variable_by_name("layout-target-frame", Value::make_frame(frame_id.0));
     eval.eval_str(
         r#"
           (require 'tab-bar)
@@ -36063,10 +36039,8 @@ fn redisplay_fontifies_visible_text_after_a_large_invisible_span() {
 #[test]
 fn inactive_echo_area_grows_a_sub_line_mini_window_to_one_line_of_the_font() {
     let mut eval = Context::new();
-    eval.obarray_mut()
-        .set_symbol_value("resize-mini-windows", Value::symbol("grow-only"));
-    eval.obarray_mut()
-        .set_symbol_value("max-mini-window-height", Value::fixnum(10));
+    eval.store_variable_by_name("resize-mini-windows", Value::symbol("grow-only"));
+    eval.store_variable_by_name("max-mini-window-height", Value::fixnum(10));
     let root = eval
         .buffer_manager()
         .current_buffer()
@@ -36814,12 +36788,12 @@ fn borrowed_and_snapshot_views_agree_on_composition_span_queries() {
     .expect("composition rule on x");
 
     let buffer = eval.buffer_manager().get(buf_id).expect("buffer");
-    let obarray = eval.obarray();
+    let vars = eval.variables();
     let target = crate::display_property::DisplayPropertyTarget::Graphical;
-    let snapshot = LayoutBufferSnapshot::from_buffer_for_window(buffer, obarray, None, target);
+    let snapshot = LayoutBufferSnapshot::from_buffer_for_window(buffer, vars, None, target);
     let borrowed = crate::neovm_bridge::BorrowedLayoutBuffer::for_window(
         buffer,
-        obarray,
+        vars,
         CharPos0::new(0),
         usize::MAX,
         target,

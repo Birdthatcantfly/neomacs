@@ -611,23 +611,23 @@ pub(crate) fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::O
     // half of the semantics is a known gap, not something a nil default hides.
     obarray.define_special_variable("system-key-alist", Value::NIL);
     // GNU `src/keyboard.c` defines these with DEFVAR_LISP.
-    obarray.set_symbol_value("help-char", Value::fixnum(8));
+    obarray.seed_value("help-char", Value::fixnum(8));
     obarray.make_special("help-char");
-    obarray.set_symbol_value("help-form", Value::NIL);
+    obarray.seed_value("help-form", Value::NIL);
     obarray.make_special("help-form");
-    obarray.set_symbol_value("help-event-list", Value::NIL);
+    obarray.seed_value("help-event-list", Value::NIL);
     obarray.make_special("help-event-list");
-    obarray.set_symbol_value("suggest-key-bindings", Value::T);
+    obarray.seed_value("suggest-key-bindings", Value::T);
     // keyboard.c:14228 / 14224 -- DEFVAR_LISP, init nil.
     obarray.define_special_variable("timer-idle-list", Value::NIL);
     obarray.define_special_variable("timer-list", Value::NIL);
-    obarray.set_symbol_value("input-method-previous-message", Value::NIL);
+    obarray.seed_value("input-method-previous-message", Value::NIL);
     obarray.make_special("input-method-previous-message");
     // keyboard.c:13841 DEFVAR_INT, init 300.
     obarray.define_int_variable("auto-save-interval", 300);
     // keyboard.c:13850 DEFVAR_LISP, XSETFASTINT 30.
     obarray.define_special_variable("auto-save-timeout", Value::fixnum(30));
-    obarray.set_symbol_value("echo-keystrokes", Value::fixnum(1));
+    obarray.seed_value("echo-keystrokes", Value::fixnum(1));
     obarray.make_special("echo-keystrokes");
     // keyboard.c:13869 DEFVAR_LISP, make_float (2.0) -- a float, not a fixnum.
     obarray.define_special_variable("polling-period", Value::make_float(2.0));
@@ -648,7 +648,7 @@ pub(crate) fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::O
     // terminal GNU reads nil, so a seeded 0 is a value it never has, and
     // `normal-erase-is-backspace-setup-frame' (lisp/simple.el) compares it
     // against ?\^H. The live value is supplied by the tty init path.
-    obarray.set_symbol_value("tty-erase-char", Value::NIL);
+    obarray.seed_value("tty-erase-char", Value::NIL);
     obarray.make_special("tty-erase-char");
     // keyboard.c:13993 DEFVAR_INT, init 0.
     obarray.define_int_variable("extra-keyboard-modifiers", 0);
@@ -661,7 +661,7 @@ pub(crate) fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::O
     // keyboard.c:14319 DEFVAR_LISP, init nil.
     obarray.define_special_variable("enable-disabled-menus-and-buttons", Value::NIL);
     // GNU `src/keyboard.c` defines this with DEFVAR_LISP and initializes it to Qt.
-    obarray.set_symbol_value("select-active-regions", Value::T);
+    obarray.seed_value("select-active-regions", Value::T);
     obarray.make_special("select-active-regions");
     // keyboard.c:14340 DEFVAR_LISP, init nil.
     obarray.define_special_variable("saved-region-selection", Value::NIL);
@@ -686,16 +686,16 @@ pub(crate) fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::O
     obarray.define_special_variable("defining-kbd-macro", Value::NIL);
     obarray.define_special_variable("last-kbd-macro", Value::NIL);
     // GNU `src/keyboard.c` initializes this to nil and makes it buffer-local-on-set.
-    obarray.set_symbol_value("deactivate-mark", Value::NIL);
+    obarray.seed_value("deactivate-mark", Value::NIL);
     obarray.make_special("deactivate-mark");
     obarray.make_buffer_local("deactivate-mark", true);
-    obarray.set_symbol_value("input-method-function", Value::symbol("list"));
+    obarray.seed_value("input-method-function", Value::symbol("list"));
     obarray.make_special("input-method-function");
-    obarray.set_symbol_value("tab-bar-separator-image-expression", Value::NIL);
+    obarray.seed_value("tab-bar-separator-image-expression", Value::NIL);
     obarray.make_special("tab-bar-separator-image-expression");
-    obarray.set_symbol_value("tool-bar-separator-image-expression", Value::NIL);
+    obarray.seed_value("tool-bar-separator-image-expression", Value::NIL);
     obarray.make_special("tool-bar-separator-image-expression");
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "selection-inhibit-update-commands",
         Value::list(vec![
             Value::symbol("handle-switch-frame"),
@@ -704,11 +704,11 @@ pub(crate) fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::O
             Value::symbol("handle-focus-out"),
         ]),
     );
-    obarray.set_symbol_value("minor-mode-map-alist", Value::NIL);
+    obarray.seed_value("minor-mode-map-alist", Value::NIL);
     obarray.make_special("minor-mode-map-alist");
-    obarray.set_symbol_value("minor-mode-overriding-map-alist", Value::NIL);
+    obarray.seed_value("minor-mode-overriding-map-alist", Value::NIL);
     obarray.make_special("minor-mode-overriding-map-alist");
-    obarray.set_symbol_value("emulation-mode-map-alists", Value::NIL);
+    obarray.seed_value("emulation-mode-map-alists", Value::NIL);
     obarray.make_special("emulation-mode-map-alists");
 }
 #[cfg(test)]

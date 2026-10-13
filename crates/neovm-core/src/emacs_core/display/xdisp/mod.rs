@@ -34,6 +34,7 @@ pub fn mode_line_flow_enabled() -> bool {
     mode_line_flow_policy::enabled()
 }
 mod text_measurement;
+use crate::emacs_core::eval::VariableView;
 use text_measurement::TextMeasurement;
 mod mode_line_gc;
 mod mode_line_numeric_padding;
@@ -145,7 +146,7 @@ impl super::eval::Context {
         self.buffers
             .get(buffer_id)
             .and_then(|buffer| buffer.buffer_local_value("window-scroll-functions"))
-            .or_else(|| self.obarray.symbol_value_copied("window-scroll-functions"))
+            .or_else(|| self.variable_value_by_name("window-scroll-functions"))
             .is_some_and(|hook| !hook.is_nil())
     }
 
@@ -1470,7 +1471,7 @@ fn display_element_run(
 
     // GNU consults overlays and text properties (get_char_property_and_overlay).
     let (display, overlay) = super::textprop::buffer_overlay_property_at_byte_pos(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         buf,
         pos,
@@ -1480,7 +1481,7 @@ fn display_element_run(
     .map(|(v, ov)| (v, Some(ov)))
     .or_else(|| {
         let v = super::textprop::builtin_get_text_property_in_state(
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             &[Value::fixnum(charpos1), *display_sym],
         )
@@ -1515,7 +1516,7 @@ fn display_element_run(
             .unwrap_or(region_end)
     } else {
         let run_end_char1 = super::textprop::builtin_next_single_property_change_in_state(
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             &[Value::fixnum(charpos1), *display_sym],
         )
@@ -1552,7 +1553,7 @@ fn image_element_extent(
         live_frame.char_height,
         live_frame.font_cell_ascent(),
     );
-    let environment = super::image_catalog::image_scale_environment(live_frame, &eval.obarray);
+    let environment = super::image_catalog::image_scale_environment(live_frame, eval.variables());
     let request = super::image::image_resolve_request_from_spec(
         &spec,
         environment,
@@ -1822,7 +1823,7 @@ fn string_display_element_run(
 ) -> Option<(DisplayElement, usize)> {
     // `get-text-property` on a string takes a 0-based char position.
     let display = super::textprop::builtin_get_text_property_in_state(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         &[Value::fixnum(char_index as i64), *display_sym, string],
     )
@@ -1845,7 +1846,7 @@ fn string_display_element_run(
 
     let schars = string.as_lisp_string().map(|s| s.schars()).unwrap_or(0);
     let run_end_char = super::textprop::builtin_next_single_property_change_in_state(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         &[Value::fixnum(char_index as i64), *display_sym, string],
     )
@@ -1943,7 +1944,7 @@ pub(crate) fn builtin_format_mode_line(args: Vec<Value>) -> EvalResult {
 /// and conditional cons cells).
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
 pub(crate) fn format_mode_line_from_state(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     dynamic: &[OrderedRuntimeBindingMap],
     frames: &crate::window::FrameManager,
     buffers: &mut crate::buffer::BufferManager,
@@ -1973,10 +1974,10 @@ pub(crate) fn format_mode_line_from_state(
 
     let format_val = args[0];
     let face_spec = resolve_mode_line_face_spec(&args);
-    let pctx = build_mode_line_percent_context(frames, &*buffers, None, obarray, args.get(2));
+    let pctx = build_mode_line_percent_context(frames, &*buffers, None, vars, args.get(2));
     let mut result = ModeLineRendered::default();
     let needs_eval = format_mode_line_recursive_in_state(
-        obarray,
+        vars,
         dynamic,
         &*buffers,
         processes,
@@ -2211,7 +2212,7 @@ fn try_format_mode_line_display(
             &eval.frames,
             &eval.buffers,
             Some(&eval.coding_systems),
-            &eval.obarray,
+            eval.variables(),
             args.get(2),
         );
         pctx.target = ModeLineTarget::Display {
@@ -2301,7 +2302,7 @@ pub(crate) fn finish_format_mode_line_in_eval(
                 &eval.frames,
                 &eval.buffers,
                 Some(&eval.coding_systems),
-                &eval.obarray,
+                eval.variables(),
                 args.get(2),
             );
             let mut result = ModeLineRendered::default();
@@ -2345,7 +2346,7 @@ pub(crate) fn finish_format_mode_line_in_eval(
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
 pub(crate) fn finish_format_mode_line_in_state_with_eval(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     dynamic: &[OrderedRuntimeBindingMap],
     frames: &crate::window::FrameManager,
     buffers: &mut crate::buffer::BufferManager,
@@ -2380,7 +2381,7 @@ pub(crate) fn finish_format_mode_line_in_state_with_eval(
     } else {
         let format_val = args[0];
         let face_spec = resolve_mode_line_face_spec(args);
-        let pctx = build_mode_line_percent_context(frames, &*buffers, None, obarray, args.get(2));
+        let pctx = build_mode_line_percent_context(frames, &*buffers, None, vars, args.get(2));
         if let Some(face) = face_spec.face {
             roots.pin(face);
         }
@@ -2389,7 +2390,7 @@ pub(crate) fn finish_format_mode_line_in_state_with_eval(
         }
         let mut result = ModeLineRendered::default();
         format_mode_line_recursive_in_state_with_eval_rooted(
-            obarray,
+            vars,
             dynamic,
             &*buffers,
             processes,
@@ -2415,11 +2416,12 @@ pub(crate) fn finish_format_mode_line_in_state_with_eval(
 }
 
 fn mode_line_symbol_value_in_state(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     _dynamic: &[OrderedRuntimeBindingMap],
     buffers: &crate::buffer::BufferManager,
     name: &str,
 ) -> Option<Value> {
+    let obarray = vars.obarray();
     let sym = crate::emacs_core::intern::intern(name);
     if let Some(buf) = buffers.current_buffer()
         && let Some(value) = buf.get_buffer_local_by_sym_id_gated(sym, obarray.is_localized(sym))
@@ -2427,7 +2429,7 @@ fn mode_line_symbol_value_in_state(
         return Some(value);
     }
 
-    obarray.symbol_value_copied(name)
+    vars.value_by_name(name)
 }
 
 fn mode_line_human_readable_size(mut quotient: usize) -> String {
@@ -2631,7 +2633,7 @@ fn build_mode_line_percent_context(
     frames: &crate::window::FrameManager,
     buffers: &crate::buffer::BufferManager,
     coding_systems: Option<&crate::emacs_core::coding::CodingSystemManager>,
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     window_arg: Option<&Value>,
 ) -> ModeLinePercentContext {
     let mut ctx = ModeLinePercentContext {
@@ -2714,7 +2716,7 @@ fn build_mode_line_percent_context(
         }
     };
     if let Some(name) = cs_name {
-        ctx.eol_indicator = coding_system_eol_indicator_value(obarray, name);
+        ctx.eol_indicator = coding_system_eol_indicator_value(vars, name);
     }
 
     // --- Terminal and keyboard coding mnemonics (TTY only) ---
@@ -2735,11 +2737,11 @@ fn build_mode_line_percent_context(
                 ),
             )
         } else {
-            let term_cs = obarray
-                .symbol_value_copied("terminal-coding-system")
+            let term_cs = vars
+                .value_by_name("terminal-coding-system")
                 .and_then(|v| v.as_bare_symbol_id());
-            let kbd_cs = obarray
-                .symbol_value_copied("keyboard-coding-system")
+            let kbd_cs = vars
+                .value_by_name("keyboard-coding-system")
                 .and_then(|v| v.as_bare_symbol_id());
             (
                 kbd_cs
@@ -2844,7 +2846,7 @@ fn coding_system_mnemonic_char(
 /// Derive EOL type indicator from coding system name, using the
 /// `eol-mnemonic-*` variables from the obarray (matches GNU semantics).
 fn coding_system_eol_indicator_value(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     cs_name: crate::emacs_core::intern::SymId,
 ) -> Option<Value> {
     let cs_name = crate::emacs_core::intern::resolve_sym(cs_name);
@@ -2857,8 +2859,7 @@ fn coding_system_eol_indicator_value(
     } else {
         "eol-mnemonic-undecided"
     };
-    obarray
-        .symbol_value_copied(var_name)
+    vars.value_by_name(var_name)
         .filter(|value| value.is_string() || value.as_char().is_some())
 }
 
@@ -4034,7 +4035,7 @@ fn append_mode_line_percent_lisp_text_spec(
 
 #[allow(clippy::too_many_arguments)] // split evaluator state avoids aliasing the full Context
 fn append_mode_line_string_in_state(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     dynamic: &[OrderedRuntimeBindingMap],
     buffers: &crate::buffer::BufferManager,
     processes: &crate::emacs_core::process::ProcessManager,
@@ -4058,7 +4059,7 @@ fn append_mode_line_string_in_state(
         result.append_string_value_preserving_props(value);
     } else {
         expand_mode_line_percent_in_state(
-            obarray,
+            vars,
             dynamic,
             buffers,
             processes,
@@ -4149,7 +4150,7 @@ fn format_mode_line_recursive_rooted(
         ValueKind::Nil => {}
 
         ValueKind::String => append_mode_line_string_in_state(
-            &eval.obarray,
+            eval.variables(),
             &[],
             &eval.buffers,
             &eval.processes,
@@ -4175,12 +4176,12 @@ fn format_mode_line_recursive_rooted(
             // dash-fill construct that bindings.el installs on TTY.
             if let Some(name) = format.as_symbol_name(symbol_mode)
                 && let Some(val) =
-                    mode_line_symbol_value_in_state(&eval.obarray, &[], &eval.buffers, name)
+                    mode_line_symbol_value_in_state(eval.variables(), &[], &eval.buffers, name)
                 && !val.is_nil()
             {
                 if val.is_string() {
                     append_mode_line_string_in_state(
-                        &eval.obarray,
+                        eval.variables(),
                         &[],
                         &eval.buffers,
                         &eval.processes,
@@ -4281,8 +4282,13 @@ fn format_mode_line_recursive_rooted(
 
             if car.is_symbol(symbol_mode) && !car.is_symbol_named("t", symbol_mode) {
                 if let Some(sym_name) = car.as_symbol_name(symbol_mode)
-                    && mode_line_symbol_value_in_state(&eval.obarray, &[], &eval.buffers, sym_name)
-                        .is_some_and(|value| value.is_truthy())
+                    && mode_line_symbol_value_in_state(
+                        eval.variables(),
+                        &[],
+                        &eval.buffers,
+                        sym_name,
+                    )
+                    .is_some_and(|value| value.is_truthy())
                     && let Some(branch) = mode_line_conditional_branch(cdr, true)
                 {
                     format_mode_line_recursive(
@@ -4344,7 +4350,7 @@ fn format_mode_line_recursive_rooted(
 
 #[allow(dead_code, clippy::too_many_arguments)] // split-state mode-line compatibility seam
 fn format_mode_line_recursive_in_state(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     dynamic: &[OrderedRuntimeBindingMap],
     buffers: &crate::buffer::BufferManager,
     processes: &crate::emacs_core::process::ProcessManager,
@@ -4354,6 +4360,7 @@ fn format_mode_line_recursive_in_state(
     depth: usize,
     risky: bool,
 ) -> bool {
+    let obarray = vars.obarray();
     if depth > 20 {
         return false;
     }
@@ -4362,7 +4369,7 @@ fn format_mode_line_recursive_in_state(
         ValueKind::Nil => {}
 
         ValueKind::String => append_mode_line_string_in_state(
-            obarray, dynamic, buffers, processes, 0, pctx, result, format, false,
+            vars, dynamic, buffers, processes, 0, pctx, result, format, false,
         ),
 
         ValueKind::Fixnum(_) => {}
@@ -4373,15 +4380,15 @@ fn format_mode_line_recursive_in_state(
             // mode-line-end-spaces; see the note on the equivalent
             // branch in `format_mode_line_recursive`.
             if let Some(name) = format.as_bare_symbol_name()
-                && let Some(val) = mode_line_symbol_value_in_state(obarray, dynamic, buffers, name)
+                && let Some(val) = mode_line_symbol_value_in_state(vars, dynamic, buffers, name)
                 && !val.is_nil()
             {
                 if val.is_string() {
                     append_mode_line_string_in_state(
-                        obarray, dynamic, buffers, processes, 0, pctx, result, &val, true,
+                        vars, dynamic, buffers, processes, 0, pctx, result, &val, true,
                     );
                 } else if format_mode_line_recursive_in_state(
-                    obarray,
+                    vars,
                     dynamic,
                     buffers,
                     processes,
@@ -4415,7 +4422,7 @@ fn format_mode_line_recursive_in_state(
                     let elt = cdr.cons_car();
                     let mut nested = ModeLineRendered::default();
                     let needs_eval = format_mode_line_recursive_in_state(
-                        obarray,
+                        vars,
                         dynamic,
                         buffers,
                         processes,
@@ -4435,7 +4442,7 @@ fn format_mode_line_recursive_in_state(
             if let Some(lim) = car.as_fixnum() {
                 let mut nested = ModeLineRendered::default();
                 let needs_eval = format_mode_line_recursive_in_state(
-                    obarray,
+                    vars,
                     dynamic,
                     buffers,
                     processes,
@@ -4456,7 +4463,7 @@ fn format_mode_line_recursive_in_state(
 
             if car.is_bare_symbol() && !car.is_bare_symbol_named("t") {
                 let branch = if let Some(sym_name) = car.as_bare_symbol_name()
-                    && mode_line_symbol_value_in_state(obarray, dynamic, buffers, sym_name)
+                    && mode_line_symbol_value_in_state(vars, dynamic, buffers, sym_name)
                         .is_some_and(|value| value.is_truthy())
                 {
                     mode_line_conditional_branch(cdr, true)
@@ -4465,7 +4472,7 @@ fn format_mode_line_recursive_in_state(
                 };
                 if let Some(branch) = branch {
                     return format_mode_line_recursive_in_state(
-                        obarray,
+                        vars,
                         dynamic,
                         buffers,
                         processes,
@@ -4484,7 +4491,7 @@ fn format_mode_line_recursive_in_state(
             while tail.is_cons() {
                 let element = tail.cons_car();
                 if format_mode_line_recursive_in_state(
-                    obarray,
+                    vars,
                     dynamic,
                     buffers,
                     processes,
@@ -4513,7 +4520,7 @@ fn format_mode_line_recursive_in_state(
 
 #[allow(clippy::too_many_arguments)] // split-state mode-line compatibility seam
 fn format_mode_line_recursive_in_state_with_eval_rooted(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     dynamic: &[OrderedRuntimeBindingMap],
     buffers: &crate::buffer::BufferManager,
     processes: &crate::emacs_core::process::ProcessManager,
@@ -4525,6 +4532,7 @@ fn format_mode_line_recursive_in_state_with_eval_rooted(
     eval_form: &mut impl FnMut(&Value, &crate::buffer::BufferManager) -> Result<Value, Flow>,
     roots: &mode_line_gc::ScratchRoots,
 ) -> Result<(), Flow> {
+    let obarray = vars.obarray();
     if depth > 20 {
         return Ok(());
     }
@@ -4535,7 +4543,7 @@ fn format_mode_line_recursive_in_state_with_eval_rooted(
         ValueKind::Nil => {}
 
         ValueKind::String => append_mode_line_string_in_state(
-            obarray, dynamic, buffers, processes, 0, pctx, result, format, false,
+            vars, dynamic, buffers, processes, 0, pctx, result, format, false,
         ),
 
         ValueKind::Fixnum(_) => {}
@@ -4546,16 +4554,16 @@ fn format_mode_line_recursive_in_state_with_eval_rooted(
             // mode-line-end-spaces; they are ordinary symbols whose
             // value must be resolved and recursed on.
             if let Some(name) = format.as_bare_symbol_name()
-                && let Some(val) = mode_line_symbol_value_in_state(obarray, dynamic, buffers, name)
+                && let Some(val) = mode_line_symbol_value_in_state(vars, dynamic, buffers, name)
                 && !val.is_nil()
             {
                 if val.is_string() {
                     append_mode_line_string_in_state(
-                        obarray, dynamic, buffers, processes, 0, pctx, result, &val, true,
+                        vars, dynamic, buffers, processes, 0, pctx, result, &val, true,
                     );
                 } else {
                     format_mode_line_recursive_in_state_with_eval_rooted(
-                        obarray,
+                        vars,
                         dynamic,
                         buffers,
                         processes,
@@ -4589,7 +4597,7 @@ fn format_mode_line_recursive_in_state_with_eval_rooted(
                         eval_form(&form_val, buffers),
                     )?;
                     format_mode_line_recursive_in_state_with_eval_rooted(
-                        obarray,
+                        vars,
                         dynamic,
                         buffers,
                         processes,
@@ -4613,7 +4621,7 @@ fn format_mode_line_recursive_in_state_with_eval_rooted(
                     let elt = cdr.cons_car();
                     let mut nested = ModeLineRendered::default();
                     format_mode_line_recursive_in_state_with_eval_rooted(
-                        obarray,
+                        vars,
                         dynamic,
                         buffers,
                         processes,
@@ -4634,7 +4642,7 @@ fn format_mode_line_recursive_in_state_with_eval_rooted(
             if let Some(lim) = car.as_fixnum() {
                 let mut nested = ModeLineRendered::default();
                 format_mode_line_recursive_in_state_with_eval_rooted(
-                    obarray,
+                    vars,
                     dynamic,
                     buffers,
                     processes,
@@ -4657,7 +4665,7 @@ fn format_mode_line_recursive_in_state_with_eval_rooted(
 
             if car.is_bare_symbol() && !car.is_bare_symbol_named("t") {
                 let branch = if let Some(sym_name) = car.as_bare_symbol_name()
-                    && mode_line_symbol_value_in_state(obarray, dynamic, buffers, sym_name)
+                    && mode_line_symbol_value_in_state(vars, dynamic, buffers, sym_name)
                         .is_some_and(|value| value.is_truthy())
                 {
                     mode_line_conditional_branch(cdr, true)
@@ -4666,7 +4674,7 @@ fn format_mode_line_recursive_in_state_with_eval_rooted(
                 };
                 if let Some(branch) = branch {
                     format_mode_line_recursive_in_state_with_eval_rooted(
-                        obarray,
+                        vars,
                         dynamic,
                         buffers,
                         processes,
@@ -4689,7 +4697,7 @@ fn format_mode_line_recursive_in_state_with_eval_rooted(
             while tail.is_cons() {
                 let element = tail.cons_car();
                 format_mode_line_recursive_in_state_with_eval_rooted(
-                    obarray,
+                    vars,
                     dynamic,
                     buffers,
                     processes,
@@ -4719,7 +4727,7 @@ fn format_mode_line_recursive_in_state_with_eval_rooted(
 
 #[allow(clippy::too_many_arguments)] // split evaluator state avoids aliasing the full Context
 fn expand_mode_line_percent_in_state(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     dynamic: &[OrderedRuntimeBindingMap],
     buffers: &crate::buffer::BufferManager,
     processes: &crate::emacs_core::process::ProcessManager,
@@ -4748,7 +4756,7 @@ fn expand_mode_line_percent_in_state(
     let file_name = file_name_storage.as_deref().unwrap_or("");
     let modified = buf.map(|b| b.is_modified()).unwrap_or(false);
     let read_only = buf.is_some_and(|b| {
-        crate::emacs_core::editfns::buffer_read_only_active_in_state(obarray, dynamic, b)
+        crate::emacs_core::editfns::buffer_read_only_active_in_state(vars, dynamic, b)
     });
     let narrowed = buf.is_some_and(|b| b.is_narrowed());
 
@@ -5000,7 +5008,7 @@ fn expand_mode_line_percent_in_state(
             Some('m') => {
                 // GNU: major mode name from buffer-local `mode-name`.
                 if let Some(mode_name) =
-                    mode_line_symbol_value_in_state(obarray, dynamic, buffers, "mode-name")
+                    mode_line_symbol_value_in_state(vars, dynamic, buffers, "mode-name")
                         .filter(|value| value.is_string())
                 {
                     append_mode_line_percent_lisp_text_spec(
@@ -5157,7 +5165,7 @@ fn expand_mode_line_percent_in_state(
             Some('@') => {
                 // GNU xdisp.c:29477 — "@" if default-directory is remote, "-" otherwise.
                 let remote =
-                    mode_line_symbol_value_in_state(obarray, dynamic, buffers, "default-directory")
+                    mode_line_symbol_value_in_state(vars, dynamic, buffers, "default-directory")
                         .and_then(|v| mode_line_runtime_string(&v))
                         .map(|dir| is_remote_directory(&dir))
                         .unwrap_or(false);
@@ -6566,7 +6574,7 @@ fn bidi_buffer_var(ctx: &super::eval::Context, buf_id: BufferId, name: &str) -> 
             return value;
         }
     }
-    ctx.obarray.symbol_value_copied(name).unwrap_or(Value::NIL)
+    ctx.variable_value_by_name(name).unwrap_or(Value::NIL)
 }
 
 pub(crate) fn builtin_current_bidi_paragraph_direction(
@@ -9412,7 +9420,7 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
         obarray.define_lisp_variable(name, default, LispVariableLocality::BufferLocalIfSet);
     }
 
-    obarray.set_symbol_value("inhibit-redisplay", Value::NIL);
+    obarray.seed_value("inhibit-redisplay", Value::NIL);
     obarray.make_special("inhibit-redisplay");
     // The five `syms_of_xdisp' DEFVAR_LISPs entry 173's sweep found this port
     // short of.  Each carries GNU's own initializer; none is a nil placeholder
@@ -9446,14 +9454,14 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     // international/characters.el populates it and the redisplay bidi path reads
     // it via CHAR_TABLE_REF. New in 31.0.90 (absent from the 705c0e3 base), so
     // it must be defined for characters.el to load.
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "special-mirror-table",
         Value::make_char_table(Value::NIL, Value::NIL, 0),
     );
     obarray.make_special("special-mirror-table");
-    obarray.set_symbol_value("blink-matching-delay", Value::fixnum(1));
-    obarray.set_symbol_value("blink-matching-paren", Value::T);
-    obarray.set_symbol_value("mouse-autoselect-window", Value::NIL);
+    obarray.seed_value("blink-matching-delay", Value::fixnum(1));
+    obarray.seed_value("blink-matching-paren", Value::T);
+    obarray.seed_value("mouse-autoselect-window", Value::NIL);
     // xdisp.c:38695-38795 tab/tool bar DEFVARs (values are GNU's C inits:
     // DEFAULT_TAB_BAR_BUTTON_MARGIN 1 / _RELIEF 1, DEFAULT_TOOL_BAR_BUTTON_MARGIN 4
     // / _RELIEF 1, DEFAULT_TOOL_BAR_LABEL_SIZE 14 -- dispextern.h:3419-3499).
@@ -9466,8 +9474,8 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     obarray.define_special_variable("tool-bar-button-margin", Value::fixnum(4));
     obarray.define_int_variable("tool-bar-button-relief", 1);
     obarray.define_int_variable("tool-bar-max-label-size", 14);
-    obarray.set_symbol_value("tool-bar-style", Value::NIL);
-    obarray.set_symbol_value("global-font-lock-mode", Value::NIL);
+    obarray.seed_value("tool-bar-style", Value::NIL);
+    obarray.seed_value("global-font-lock-mode", Value::NIL);
     // GNU xdisp.c registers these as DEFVAR_LISP/INT/BOOL variables and
     // calls Fmake_variable_buffer_local for the variables documented as
     // buffer-local. In particular, `display-line-numbers-mode' relies on
@@ -9477,7 +9485,7 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     defvar_buffer_local(obarray, "line-prefix", Value::NIL);
     defvar_buffer_local(obarray, "display-line-numbers", Value::NIL);
     defvar_buffer_local(obarray, "display-line-numbers-width", Value::NIL);
-    obarray.set_symbol_value("display-line-numbers-current-absolute", Value::T);
+    obarray.seed_value("display-line-numbers-current-absolute", Value::T);
     obarray.make_special("display-line-numbers-current-absolute");
     defvar_buffer_local(obarray, "display-line-numbers-widen", Value::NIL);
     // `display-line-numbers-offset' is BOTH, and in this order
@@ -9501,7 +9509,7 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     );
     // xdisp.c:38558 DEFVAR_LISP, make_fixnum (50).
     obarray.define_special_variable("truncate-partial-width-windows", Value::fixnum(50));
-    obarray.set_symbol_value("line-number-display-limit", Value::NIL);
+    obarray.seed_value("line-number-display-limit", Value::NIL);
     // xdisp.c:38514 / 38521 DEFVAR_INT, init 0.
     obarray.define_int_variable("scroll-step", 0);
     obarray.define_int_variable("scroll-conservatively", 0);
@@ -9513,13 +9521,13 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     obarray.define_int_variable("hscroll-margin", 5);
     // xdisp.c:38880 DEFVAR_LISP, make_fixnum (0).
     obarray.define_special_variable("hscroll-step", Value::fixnum(0));
-    obarray.set_symbol_value("auto-hscroll-mode", Value::T);
+    obarray.seed_value("auto-hscroll-mode", Value::T);
     // xdisp.c:38479 DEFVAR_LISP, init Qarrow.
     obarray.define_special_variable("void-text-area-pointer", Value::symbol("arrow"));
     // `inhibit-message' and every other GNU `DEFVAR_BOOL' variable are
     // registered from `defvar_bool::GNU_BOOL_VARIABLES', which is where the
     // declaration's `byte-boolean-vars' visibility lives too.
-    obarray.set_symbol_value("make-cursor-line-fully-visible", Value::T);
+    obarray.seed_value("make-cursor-line-fully-visible", Value::T);
     // GNU `src/xdisp.c:38708` (`DEFVAR_BOOL ("inhibit-try-cursor-movement", ...)`)
     // controls the `try_cursor_movement` redisplay optimization. neomacs has
     // no equivalent optimization (the layout engine recomputes per frame),
@@ -9528,7 +9536,7 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     // `(setq inhibit-try-cursor-movement ...)` does not raise void-variable.
     // Cursor audit Finding 7 in `drafts/cursor-audit.md`.
     obarray.define_special_variable("inhibit-try-cursor-movement", Value::NIL);
-    obarray.set_symbol_value("show-trailing-whitespace", Value::NIL);
+    obarray.seed_value("show-trailing-whitespace", Value::NIL);
     obarray.make_special("show-trailing-whitespace");
     obarray.make_buffer_local("show-trailing-whitespace", true);
     // `syms_of_xdisp` calls `Fmake_variable_buffer_local' on this one right
@@ -9536,7 +9544,7 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     // itself lives in `defvar_bool::GNU_BOOL_VARIABLES', which has already
     // run, so the BLV inherits the Boolean forwarder the way `make_blv' does.
     obarray.make_buffer_local("make-window-start-visible", true);
-    obarray.set_symbol_value("show-paren-context-when-offscreen", Value::NIL);
+    obarray.seed_value("show-paren-context-when-offscreen", Value::NIL);
     // xdisp.c:38443 DEFVAR_LISP, init Qt.
     obarray.define_special_variable("nobreak-char-display", Value::T);
     // GNU inits this to `(overlay-arrow-position)` (xdisp.c: `Voverlay_arrow_variable_list
@@ -9601,7 +9609,7 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     obarray
         .put_property("syntax-table", "char-table-extra-slots", Value::fixnum(0))
         .expect("char-table-extra-slots plist should always be valid during init");
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "char-script-table",
         make_char_table_with_extra_slots(Value::symbol("char-script-table"), Value::NIL, 1),
     );
@@ -9646,7 +9654,7 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     // `jit-lock.el` installs `jit-lock-function` here buffer-locally.
     {
         let id = intern("fontification-functions");
-        obarray.set_symbol_value("fontification-functions", Value::NIL);
+        obarray.seed_value("fontification-functions", Value::NIL);
         obarray.make_special("fontification-functions");
         obarray.make_symbol_localized(id, Value::NIL);
         obarray.set_blv_local_if_set(id, true);
@@ -9667,14 +9675,14 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     // char-width-table: a char-table for character display widths.
     // GNU character.c:1112-1119 seeds default 1 plus C1/raw-byte width 4.
     // Include characters.el Unicode ranges for contexts before Lisp bootstrap.
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "char-width-table",
         crate::encoding::default_char_width_table(),
     );
 
     // translation-table-vector: vector recording all translation tables.
     // Official Emacs (character.c) creates a 16-element nil vector.
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "translation-table-vector",
         Value::vector(vec![Value::NIL; 16]),
     );
@@ -9685,7 +9693,7 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
 
     // printable-chars: a char-table of printable characters.
     // Official Emacs (character.c) creates it with default t.
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "printable-chars",
         make_char_table_value(Value::symbol("printable-chars"), Value::T),
     );
@@ -9696,7 +9704,7 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
 
     // ambiguous-width-chars: char-table for characters whose width can be 1 or 2.
     // Official Emacs (character.c) creates empty char-table; populated by characters.el.
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "ambiguous-width-chars",
         make_char_table_value(Value::NIL, Value::NIL),
     );
@@ -9704,7 +9712,7 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     // text-property-default-nonsticky: alist of properties vs non-stickiness.
     // The effective GNU default is assembled by two C files, so it is kept in
     // one place -- see `default_text_property_nonsticky_alist'.
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "text-property-default-nonsticky",
         crate::emacs_core::textprop::default_text_property_nonsticky_alist(),
     );

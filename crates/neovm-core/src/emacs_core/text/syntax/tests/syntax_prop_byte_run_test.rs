@@ -90,7 +90,7 @@ fn the_byte_run_cache_answers_like_a_fresh_lookup_in_any_order() {
     let mut checked = 0;
     for round in 0..300 {
         random_buffer(&mut eval, &mut rng, round % 3 != 0);
-        let props = SyntaxProperties::for_scan(true, &eval.obarray, &eval.buffers);
+        let props = SyntaxProperties::for_scan(true, eval.variables(), &eval.buffers);
         let buf = eval.buffers.current_buffer().expect("buffer");
         let starts = char_starts(buf);
         let mut orders: Vec<Vec<EmacsBytePos>> = vec![starts.clone()];
@@ -129,7 +129,7 @@ fn a_backward_walk_refills_once_per_run() {
         "(progn (erase-buffer) (insert (make-string 200 ?a))
                 (put-text-property 1 2 'syntax-table '(1)))",
     );
-    let props = SyntaxProperties::for_scan(true, &eval.obarray, &eval.buffers);
+    let props = SyntaxProperties::for_scan(true, eval.variables(), &eval.buffers);
     let buf = eval.buffers.current_buffer().expect("buffer");
     let cache = SyntaxPropByteRun::new(props);
     SYNTAX_BYTE_RUN_REFILLS.with(|c| c.set(0));

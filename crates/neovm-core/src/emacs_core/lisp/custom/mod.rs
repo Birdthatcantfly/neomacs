@@ -125,7 +125,12 @@ pub(crate) fn builtin_make_variable_buffer_local_with_state(
     // it does not intern by name.  This matters for `(make-symbol ...)`
     // variables, whose value cells and BLVs are independent from any
     // interned symbol with the same print name.
-    let default_value = obarray.find_symbol_value(resolved_id).unwrap_or(Value::NIL);
+    let default_value = obarray
+        .canonical_find_value(
+            crate::emacs_core::symbol::CanonicalAccess::STORAGE,
+            resolved_id,
+        )
+        .unwrap_or(Value::NIL);
     obarray.make_symbol_localized(resolved_id, default_value);
     obarray.set_blv_local_if_set(resolved_id, true);
     Ok((args[0], resolved_id))
@@ -246,7 +251,10 @@ pub(crate) fn builtin_make_local_variable(
     // `(variable . Qunbound)` when the symbol has no value.
     let default_value = ctx
         .obarray
-        .find_symbol_value(resolved)
+        .canonical_find_value(
+            crate::emacs_core::symbol::CanonicalAccess::STORAGE,
+            resolved,
+        )
         .unwrap_or(Value::UNBOUND);
     ctx.obarray.make_symbol_localized(resolved, default_value);
     ctx.mark_user_test_gc_settings_volatile_if_gc_symbol(resolved);

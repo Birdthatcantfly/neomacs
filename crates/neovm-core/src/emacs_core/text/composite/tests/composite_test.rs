@@ -366,7 +366,7 @@ fn find_composition_internal_finds_automatic_combining_sequence_in_string() {
             Value::fixnum(0x0301),
             Value::list(vec![combining_rule]),
         ],
-        Some(&eval.obarray),
+        Some(eval.variables()),
     )
     .expect("install combining composition rule");
     let string = Value::string("e\u{0301}");
@@ -414,7 +414,7 @@ fn automatic_composition_spans_honor_rule_lookback_and_match_extent() {
     ]);
     crate::emacs_core::chartable::builtin_set_char_table_range(
         vec![table, Value::fixnum(0xA9B6), Value::list(vec![rule])],
-        Some(&eval.obarray),
+        Some(eval.variables()),
     )
     .expect("install Javanese composition rule");
 
@@ -449,7 +449,7 @@ fn automatic_composition_spans_match_default_base_mark_category_rule() {
             Value::fixnum(0x1733),
             Value::list(vec![base_and_marks, orphan_mark]),
         ],
-        Some(&eval.obarray),
+        Some(eval.variables()),
     )
     .expect("install GNU's default combining-mark rules");
     let category_table = crate::emacs_core::category::builtin_make_category_table(vec![])
@@ -497,7 +497,7 @@ fn automatic_composition_spans_keep_tai_tham_syllable_whole() {
     ]);
     crate::emacs_core::chartable::builtin_set_char_table_range(
         vec![table, Value::char('ᩈ'), Value::list(vec![rule])],
-        Some(&eval.obarray),
+        Some(eval.variables()),
     )
     .expect("install reduced GNU Tai Tham composition rule");
 
@@ -536,7 +536,7 @@ fn automatic_composition_spans_match_gnu_tai_tham_hello_samples() {
             Value::cons(Value::fixnum(0x1A20), Value::fixnum(0x1A54)),
             Value::list(vec![rule]),
         ],
-        Some(&eval.obarray),
+        Some(eval.variables()),
     )
     .expect("install GNU Tai Tham composition rule");
 
@@ -1191,7 +1191,7 @@ fn bounded_scan_finds_the_same_spans_as_the_whole_text_scan() {
     ]);
     crate::emacs_core::chartable::builtin_set_char_table_range(
         vec![table, Value::fixnum(0xA9B6), Value::list(vec![rule])],
-        Some(&eval.obarray),
+        Some(eval.variables()),
     )
     .expect("install Javanese composition rule");
     let buffer = eval.buffers.current_buffer().expect("current buffer");
@@ -1238,7 +1238,7 @@ fn visible_scan_fast_path_matches_the_full_scan() {
     ]);
     crate::emacs_core::chartable::builtin_set_char_table_range(
         vec![table, Value::fixnum(0xA9B6), Value::list(vec![javanese])],
-        Some(&eval.obarray),
+        Some(eval.variables()),
     )
     .expect("install Javanese composition rule");
     let buffer_id = eval.buffers.current_buffer().expect("current buffer").id();
@@ -1293,7 +1293,7 @@ fn visible_scan_fast_path_matches_the_full_scan() {
             Value::fixnum('>' as i64),
             Value::list(vec![ligature]),
         ],
-        Some(&eval.obarray),
+        Some(eval.variables()),
     )
     .expect("install an ASCII ligature rule");
     check(&eval, "ascii rule, before the arrow");
@@ -1326,7 +1326,7 @@ fn visible_scan_fast_path_matches_the_full_scan() {
     // char-table write.
     crate::emacs_core::chartable::builtin_set_char_table_range(
         vec![table, Value::fixnum('>' as i64), Value::NIL],
-        Some(&eval.obarray),
+        Some(eval.variables()),
     )
     .expect("remove the ASCII ligature rule");
     check(&eval, "ascii rule removed");

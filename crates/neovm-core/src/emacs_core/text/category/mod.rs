@@ -27,9 +27,9 @@ thread_local! {
 /// lexical-binding `let` of them lands in the lexenv, invisible to the
 /// internal `find_symbol_value` reads the regexp matcher performs.
 pub fn register_bootstrap_vars(obarray: &mut super::symbol::Obarray) {
-    obarray.set_symbol_value("word-combining-categories", Value::NIL);
+    obarray.seed_value("word-combining-categories", Value::NIL);
     obarray.make_special("word-combining-categories");
-    obarray.set_symbol_value("word-separating-categories", Value::NIL);
+    obarray.seed_value("word-separating-categories", Value::NIL);
     obarray.make_special("word-separating-categories");
 }
 

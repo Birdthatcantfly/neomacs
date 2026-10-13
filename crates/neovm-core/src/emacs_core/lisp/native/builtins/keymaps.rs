@@ -232,14 +232,15 @@ pub(super) fn builtin_accessible_keymaps(
     args: Vec<Value>,
 ) -> EvalResult {
     let symbol_mode = eval.symbol_mode();
-    builtin_accessible_keymaps_impl(eval.obarray(), &args, symbol_mode)
+    builtin_accessible_keymaps_impl(eval.variables(), &args, symbol_mode)
 }
 
 pub(crate) fn builtin_accessible_keymaps_impl(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     args: &[Value],
     symbol_mode: SymbolMode,
 ) -> EvalResult {
+    let obarray = vars.obarray();
     use crate::emacs_core::value::{ValueKind, VecLikeType};
 
     expect_min_args("accessible-keymaps", args, 1)?;
@@ -276,7 +277,7 @@ pub(crate) fn builtin_accessible_keymaps_impl(
     list_keymap_accessible(
         keymap,
         &prefix_events,
-        Some(obarray),
+        Some(vars),
         &mut all_out,
         symbol_mode,
     );
@@ -353,7 +354,7 @@ pub(super) fn builtin_define_key(eval: &mut super::eval::Context, args: Vec<Valu
     // Expand meta-prefixed events to ESC + base, matching GNU Emacs
     // Fdefine_key's metized handling.
     if let Some(expanded) =
-        expand_meta_prefix_char_events_in_obarray(eval.obarray(), &events, symbol_mode)
+        expand_meta_prefix_char_events_in_obarray(eval.variables(), &events, symbol_mode)
     {
         events = expanded;
     }
@@ -832,8 +833,7 @@ pub(super) fn builtin_help_describe_vector(
         // A range is only honest if every key in it is shadowed the same way, so
         // GNU truncates it at the first member that is not (bug#9293).
         let check_ranges = eval
-            .obarray
-            .symbol_value_copied("describe-bindings-check-shadowing-in-ranges")
+            .variable_value_by_name("describe-bindings-check-shadowing-in-ranges")
             .unwrap_or(Value::NIL);
         let skip_self_insert = check_ranges.as_symbol_name(symbol_mode)
             == Some("ignore-self-insert")
@@ -977,8 +977,7 @@ fn describe_buffer_binding_sections(
     let symbol_mode = eval.symbol_mode();
     let mut sections = Vec::new();
     let named_map = |name: &str| -> Option<Value> {
-        eval.obarray
-            .symbol_value_copied(name)
+        eval.variable_value_by_name(name)
             .filter(|map| !map.is_nil())
     };
 
@@ -1004,7 +1003,7 @@ fn describe_buffer_binding_sections(
         });
     } else {
         let keymap_property = crate::emacs_core::keymap::local_map_property_at_buffer_point(
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             buffer,
             buffer_point,
@@ -1023,7 +1022,7 @@ fn describe_buffer_binding_sections(
         }
 
         for (mode, keymap) in collect_minor_mode_map_entries_in_state(
-            &eval.obarray,
+            eval.variables(),
             &[],
             &eval.buffers,
             Some(buffer_id),
@@ -1039,7 +1038,7 @@ fn describe_buffer_binding_sections(
         }
 
         let local_map = crate::emacs_core::keymap::local_map_property_at_buffer_point(
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             buffer,
             buffer_point,
@@ -1126,7 +1125,7 @@ pub(crate) fn builtin_current_minor_mode_maps_impl(
     let symbol_mode = ctx.symbol_mode();
     expect_args("current-minor-mode-maps", args, 0)?;
     let maps = collect_minor_mode_maps_in_state(
-        &ctx.obarray,
+        ctx.variables(),
         &[],
         &ctx.buffers,
         ctx.buffers.current_buffer_id(),

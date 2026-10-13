@@ -156,7 +156,7 @@ fn eval_forms_from_lisp_source_streaming(
                 .expect("load-read cursor present during readevalloop")
                 .pos;
             let read_result = read_source
-                .read_one(pos, &eval.obarray)
+                .read_one(pos, eval.variables())
                 .map_err(|error| signal_reader_error_for_eval_source(error, eof_source))?;
             let Some((form, next_pos)) = read_result else {
                 break;
@@ -250,8 +250,7 @@ fn eval_buffer_filename_in_state(
 fn record_eval_buffer_load_history(eval: &mut super::eval::Context, filename: &LispString) {
     let entry = Value::cons(Value::heap_string(filename.clone()), Value::NIL);
     let history = eval
-        .obarray()
-        .symbol_value_copied("load-history")
+        .variable_value_by_name("load-history")
         .unwrap_or(Value::NIL);
     let filtered_history = Value::list(
         list_to_vec(&history)
@@ -540,8 +539,7 @@ impl FormReader {
             return Self::Lisp(read_function);
         }
         match eval
-            .obarray
-            .symbol_value_copied("load-read-function")
+            .variable_value_by_name("load-read-function")
             .filter(|hook| !hook.is_nil() && !hook.is_symbol_named("read", symbol_mode))
         {
             Some(hook) => Self::Lisp(hook),
@@ -1001,12 +999,12 @@ pub(crate) fn builtin_read_char_exclusive_in_runtime(
 /// Return a list of suffixes that `load` tries when searching for files.
 /// GNU lread.c: combines `load-suffixes` with `load-file-rep-suffixes`.
 pub(crate) fn builtin_get_load_suffixes(
-    obarray: &super::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     args: Vec<Value>,
 ) -> EvalResult {
     expect_max_args("get-load-suffixes", &args, 0)?;
     Ok(Value::list(
-        super::load::LoadSuffixPlan::from_obarray(obarray)?.required_values(),
+        super::load::LoadSuffixPlan::from_obarray(vars)?.required_values(),
     ))
 }
 

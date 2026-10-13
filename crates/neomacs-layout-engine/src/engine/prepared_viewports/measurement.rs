@@ -39,11 +39,7 @@ impl PreparedViewports {
         // paint alone does not certify that those callbacks have happened.
         let fontification = buffer
             .buffer_local_value("fontification-functions")
-            .or_else(|| {
-                evaluator
-                    .obarray()
-                    .symbol_value_copied("fontification-functions")
-            });
+            .or_else(|| evaluator.variable_value_by_name("fontification-functions"));
         if fontification.is_some_and(|value| !value.is_nil()) {
             return None;
         }

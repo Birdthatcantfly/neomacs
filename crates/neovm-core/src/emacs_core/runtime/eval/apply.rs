@@ -3640,7 +3640,7 @@ impl Context {
         }
 
         let target = if let Some(func) =
-            compiler_function_override_in_obarray(&self.obarray, sym_id, self.symbol_mode())
+            compiler_function_override_in_obarray(self.variables(), sym_id, self.symbol_mode())
         {
             NamedCallTarget::Obarray(func)
         } else if let Some(func) = self.obarray.symbol_function_id(sym_id) {

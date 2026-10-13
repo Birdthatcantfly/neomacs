@@ -132,8 +132,8 @@ impl Context {
         if !self.obarray.is_localized(max_lisp_eval_depth_symbol()) {
             return None;
         }
-        self.obarray
-            .value_in_buffer(self.buffers.current_buffer(), "max-lisp-eval-depth")
+        self.variables()
+            .value_in_buffer_by_name(self.buffers.current_buffer(), "max-lisp-eval-depth")
             .and_then(|value| value.as_fixnum())
             // GNU raises a limit below 100 before it signals
             // (`src/eval.c:2587-2588`) so a handler has room to run.
@@ -175,9 +175,7 @@ impl Context {
         // passes the cached limit -- which is every entry once Lisp raises
         // `max-lisp-eval-depth`, not the rare event the shape suggests.
         if self.depth > self.max_depth
-            && let Some(v) = self
-                .obarray
-                .symbol_value_id_copied(max_lisp_eval_depth_symbol())
+            && let Some(v) = self.variable_value(max_lisp_eval_depth_symbol())
             && let Some(n) = v.as_fixnum()
         {
             let new_max = n.max(100) as usize;
@@ -452,7 +450,11 @@ impl Context {
             if let Some(override_func) = self
                 .compiler_function_overrides_active()
                 .then(|| {
-                    compiler_function_override_in_obarray(&self.obarray, sym_id, self.symbol_mode())
+                    compiler_function_override_in_obarray(
+                        self.variables(),
+                        sym_id,
+                        self.symbol_mode(),
+                    )
                 })
                 .flatten()
             {

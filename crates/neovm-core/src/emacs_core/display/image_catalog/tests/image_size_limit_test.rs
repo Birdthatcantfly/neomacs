@@ -19,7 +19,7 @@ fn frame_environment(width: u32, height: u32, device_scale: f64) -> Context {
 
 fn limit_of(eval: &Context, frame: crate::window::FrameId) -> ImageSizeLimit {
     let frame = eval.frame_manager().get(frame).expect("frame");
-    image_size_limit(frame, eval.obarray())
+    image_size_limit(frame, eval.variables())
 }
 
 fn frame_id(eval: &Context) -> crate::window::FrameId {
@@ -124,7 +124,7 @@ fn the_frame_environment_carries_the_same_limit() {
 
     let environment = {
         let frame = eval.frame_manager().get(frame).expect("frame");
-        image_scale_environment(frame, eval.obarray())
+        image_scale_environment(frame, eval.variables())
     };
 
     assert_eq!(environment.size_limit().maximum().dimensions(), (64, 64));

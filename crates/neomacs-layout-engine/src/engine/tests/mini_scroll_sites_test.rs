@@ -22,10 +22,8 @@ fn real_mini_scroll_log(case: MiniScrollCase) -> String {
     let mut eval = neovm_core::emacs_core::load::create_runtime_startup_evaluator_cached()
         .expect("real runtime startup includes GNU window sizing Lisp");
     // Exercise the live display entry, not native test batch suppression.
-    eval.obarray_mut()
-        .set_symbol_value("noninteractive", Value::NIL);
-    eval.obarray_mut()
-        .set_symbol_value("inhibit-redisplay", Value::NIL);
+    eval.store_variable_by_name("noninteractive", Value::NIL);
+    eval.store_variable_by_name("inhibit-redisplay", Value::NIL);
     assert!(eval.gnu_redisplay_hooks_policy_enabled());
     let root = eval
         .buffer_manager()

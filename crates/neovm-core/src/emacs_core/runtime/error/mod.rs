@@ -1445,59 +1445,58 @@ fn format_window_handle_in_state(
 /// With specbind, dynamic let-bindings are written directly to the obarray,
 /// so this correctly handles (let ((print-escape-newlines t)) (format "%S" ...)).
 pub(crate) fn print_options_from_state(
-    obarray: &super::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buf: Option<&crate::buffer::Buffer>,
 ) -> PrintOptions {
-    let print_gensym = obarray
-        .value_in_buffer(buf, "print-gensym")
+    let print_gensym = vars
+        .value_in_buffer_by_name(buf, "print-gensym")
         .is_some_and(|v| v.is_truthy());
-    let print_circle = obarray
-        .value_in_buffer(buf, "print-circle")
+    let print_circle = vars
+        .value_in_buffer_by_name(buf, "print-circle")
         .is_some_and(|v| v.is_truthy());
-    let print_quoted = obarray
-        .value_in_buffer(buf, "print-quoted")
+    let print_quoted = vars
+        .value_in_buffer_by_name(buf, "print-quoted")
         .is_none_or(|v| v.is_truthy());
-    let print_symbols_bare = obarray
-        .value_in_buffer(buf, "print-symbols-bare")
+    let print_symbols_bare = vars
+        .value_in_buffer_by_name(buf, "print-symbols-bare")
         .is_some_and(|v| v.is_truthy());
-    let print_escape_newlines = obarray
-        .value_in_buffer(buf, "print-escape-newlines")
+    let print_escape_newlines = vars
+        .value_in_buffer_by_name(buf, "print-escape-newlines")
         .is_some_and(|v| v.is_truthy());
-    let print_level = obarray
-        .value_in_buffer(buf, "print-level")
+    let print_level = vars
+        .value_in_buffer_by_name(buf, "print-level")
         .and_then(|v| v.as_fixnum());
-    let print_length = obarray
-        .value_in_buffer(buf, "print-length")
+    let print_length = vars
+        .value_in_buffer_by_name(buf, "print-length")
         .and_then(|v| v.as_fixnum())
         .filter(|&n| n >= 0);
-    let print_escape_nonascii = obarray
-        .value_in_buffer(buf, "print-escape-nonascii")
+    let print_escape_nonascii = vars
+        .value_in_buffer_by_name(buf, "print-escape-nonascii")
         .is_some_and(|v| v.is_truthy());
-    let print_escape_multibyte = obarray
-        .value_in_buffer(buf, "print-escape-multibyte")
+    let print_escape_multibyte = vars
+        .value_in_buffer_by_name(buf, "print-escape-multibyte")
         .is_some_and(|v| v.is_truthy());
-    let print_escape_control_characters = obarray
-        .value_in_buffer(buf, "print-escape-control-characters")
+    let print_escape_control_characters = vars
+        .value_in_buffer_by_name(buf, "print-escape-control-characters")
         .is_some_and(|v| v.is_truthy());
-    let print_integers_as_characters = obarray
-        .value_in_buffer(buf, "print-integers-as-characters")
+    let print_integers_as_characters = vars
+        .value_in_buffer_by_name(buf, "print-integers-as-characters")
         .is_some_and(|v| v.is_truthy());
-    let print_continuous_numbering = obarray
-        .value_in_buffer(buf, "print-continuous-numbering")
+    let print_continuous_numbering = vars
+        .value_in_buffer_by_name(buf, "print-continuous-numbering")
         .is_some_and(|v| v.is_truthy());
     let print_number_table = if print_circle {
-        obarray
-            .value_in_buffer(buf, "print-number-table")
+        vars.value_in_buffer_by_name(buf, "print-number-table")
             .filter(|v| v.is_hash_table())
     } else {
         None
     };
     let mut opts = PrintOptions::new(print_gensym, print_circle, print_level, print_length);
-    opts.charset_text_property = obarray
-        .value_in_buffer(buf, "print-charset-text-property")
+    opts.charset_text_property = vars
+        .value_in_buffer_by_name(buf, "print-charset-text-property")
         .map_or(super::print::CharsetTextProperty::Guessable, Into::into);
-    opts.unreadable_function = obarray
-        .value_in_buffer(buf, "print-unreadable-function")
+    opts.unreadable_function = vars
+        .value_in_buffer_by_name(buf, "print-unreadable-function")
         .filter(|v| !v.is_nil());
     opts.print_quoted = print_quoted;
     opts.print_symbols_bare = print_symbols_bare;
@@ -1508,8 +1507,8 @@ pub(crate) fn print_options_from_state(
     opts.print_integers_as_characters = print_integers_as_characters;
     opts.print_continuous_numbering = print_continuous_numbering;
     opts.print_number_table = print_number_table;
-    opts.float_output_format = obarray
-        .value_in_buffer(buf, "float-output-format")
+    opts.float_output_format = vars
+        .value_in_buffer_by_name(buf, "float-output-format")
         .filter(|v| v.is_string());
     opts
 }
@@ -1522,7 +1521,7 @@ pub(crate) fn print_value_in_state(
     // does: through `Vprin1_to_string_buffer` (`src/print.c:1058`).  That is a
     // buffer stream, so `PRINTPREPARE` makes it current and the caller's
     // buffer-local `print-level` / `print-length` are swapped out. Ledger 196.
-    print_value_in_state_with_options(ctx, value, print_options_from_state(&ctx.obarray, None))
+    print_value_in_state_with_options(ctx, value, print_options_from_state(ctx.variables(), None))
 }
 
 pub(crate) fn print_value_in_state_with_options(
@@ -1868,12 +1867,13 @@ fn format_cons_in_state(
 }
 
 pub(crate) fn print_value_bytes_in_state(
-    obarray: &super::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &crate::buffer::BufferManager,
     frames: &crate::window::FrameManager,
     threads: &super::threads::ThreadManager,
     value: &Value,
 ) -> Vec<u8> {
+    let obarray = vars.obarray();
     if let Some(handle) = format_opaque_handle_in_state(buffers, frames, threads, value) {
         return handle.into_bytes();
     }
@@ -1884,7 +1884,7 @@ pub(crate) fn print_value_bytes_in_state(
         threads,
         value,
         // Same `Vprin1_to_string_buffer` stream as `print_value_in_state`.
-        print_options_from_state(obarray, None),
+        print_options_from_state(vars, None),
     )
 }
 
@@ -2233,7 +2233,7 @@ pub fn print_value_with_eval(eval: &super::eval::Context, value: &Value) -> Stri
 /// Render a value as bytes with evaluator-context-aware opaque handle formatting.
 pub fn print_value_bytes_with_eval(eval: &super::eval::Context, value: &Value) -> Vec<u8> {
     print_value_bytes_in_state(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         &eval.frames,
         &eval.threads,
@@ -2252,7 +2252,7 @@ pub fn print_value_bytes_escaped_with_eval(eval: &super::eval::Context, value: &
     {
         return handle.into_bytes();
     }
-    let mut options = print_options_from_state(&eval.obarray, None);
+    let mut options = print_options_from_state(eval.variables(), None);
     options.print_escape_nonascii = true;
     format_value_bytes_in_state_with_options(
         &eval.obarray,
@@ -2553,8 +2553,8 @@ impl super::eval::Context {
         // (`src/keyboard.c:1041-1042`), which the swap-in keeps equal to the
         // current buffer's binding; `lisp/simple.el` localises it. Ledger 196.
         let handler = self
-            .obarray
-            .value_in_buffer(self.buffers.current_buffer(), "command-error-function")
+            .variables()
+            .value_in_buffer_by_name(self.buffers.current_buffer(), "command-error-function")
             .unwrap_or(Value::NIL);
         let context_value = Value::string(context);
         // GNU's variable defaults to the C function itself, so its handler is

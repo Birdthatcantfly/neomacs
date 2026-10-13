@@ -245,12 +245,12 @@ pub(crate) fn init_font_vars(obarray: &mut super::symbol::Obarray) {
         ("font-slant-table", font_style_table(FONT_SLANT_STYLE_TABLE)),
         ("font-width-table", font_style_table(FONT_WIDTH_STYLE_TABLE)),
     ] {
-        obarray.set_symbol_value(name, value);
+        obarray.seed_value(name, value);
         obarray.make_special(name);
         obarray.set_constant(name);
     }
 
-    obarray.set_symbol_value("font-log", Value::T);
+    obarray.seed_value("font-log", Value::T);
     obarray.make_special("font-log");
 }
 
@@ -2695,7 +2695,7 @@ fn face_remapping_value_for_buffer(eval: &super::eval::Context, buffer: &Buffer)
     // Buffer-local binding takes priority
     buffer
         .get_buffer_local("face-remapping-alist")
-        .or_else(|| eval.obarray().symbol_value_copied("face-remapping-alist"))
+        .or_else(|| eval.variable_value_by_name("face-remapping-alist"))
         .unwrap_or(Value::NIL)
 }
 
@@ -2719,8 +2719,8 @@ fn face_remapping_value_for_current_buffer(eval: &super::eval::Context) -> Value
             // ever read during redisplay, with the window's buffer current. So
             // the localized arm is accepted here on purpose: there is no buffer
             // to ask. Ledger 196.
-            eval.obarray()
-                .value_without_buffer("face-remapping-alist")
+            eval.variables()
+                .value_without_buffer_by_name("face-remapping-alist")
                 .any_arm()
                 .unwrap_or(Value::NIL)
         })

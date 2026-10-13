@@ -16,9 +16,16 @@ fn eval_first_form_after_marker(eval: &mut Context, source: &str, marker: &str) 
     let start = source
         .find(marker)
         .unwrap_or_else(|| panic!("missing GNU simple.el marker: {marker}"));
-    let (form, _) = crate::emacs_core::value_reader::read_one(&source[start..], 0, &test_ob())
-        .unwrap_or_else(|err| panic!("parse GNU simple.el from {marker} failed: {:?}", err))
-        .unwrap_or_else(|| panic!("no GNU simple.el form found after marker: {marker}"));
+    let (form, _) = crate::emacs_core::value_reader::read_one(
+        &source[start..],
+        0,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
+    )
+    .unwrap_or_else(|err| panic!("parse GNU simple.el from {marker} failed: {:?}", err))
+    .unwrap_or_else(|| panic!("no GNU simple.el form found after marker: {marker}"));
     eval.eval_form(form)
         .unwrap_or_else(|err| panic!("evaluate GNU simple.el form {marker} failed: {:?}", err));
 }

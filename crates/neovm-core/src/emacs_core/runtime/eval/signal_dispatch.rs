@@ -372,8 +372,7 @@ impl Context {
         }
 
         let hook = self
-            .obarray
-            .symbol_value_copied("signal-hook-function")
+            .variable_value_by_name("signal-hook-function")
             .unwrap_or(Value::NIL);
         if hook.is_nil() {
             return Ok(());
@@ -444,16 +443,14 @@ impl Context {
             | super::super::error::SignalDelivery::HookSuppressed => {}
         }
         if self
-            .obarray
-            .symbol_value_copied("inhibit-debugger")
+            .variable_value_by_name("inhibit-debugger")
             .is_some_and(|value| !value.is_nil())
         {
             return Ok(());
         }
 
         let debug_on_signal = self
-            .obarray
-            .symbol_value_copied("debug-on-signal")
+            .variable_value_by_name("debug-on-signal")
             .is_some_and(|value| !value.is_nil());
         let should_consider_debugger = debug_on_signal
             || matched_clause.is_none()
@@ -469,12 +466,10 @@ impl Context {
             &Value::from_sym_id(quit_symbol()),
             self.symbol_mode(),
         ) {
-            self.obarray
-                .symbol_value_copied("debug-on-quit")
+            self.variable_value_by_name("debug-on-quit")
                 .unwrap_or(Value::NIL)
         } else {
-            self.obarray
-                .symbol_value_copied("debug-on-error")
+            self.variable_value_by_name("debug-on-error")
                 .unwrap_or(Value::NIL)
         };
         if !wants_debugger(&debug_setting, &conditions, self.symbol_mode()) {
@@ -512,8 +507,7 @@ impl Context {
         conditions: &Value,
     ) -> Result<bool, Flow> {
         let ignored = self
-            .obarray
-            .symbol_value_copied("debug-ignored-errors")
+            .variable_value_by_name("debug-ignored-errors")
             .unwrap_or(Value::NIL);
         let Some(entries) = list_to_vec(&ignored) else {
             return Ok(false);
@@ -548,7 +542,7 @@ impl Context {
                 let word_boundary = builtins::search::current_word_boundary_lookup(self);
                 let syntax_properties = builtins::search::current_string_match_syntax_properties(
                     self,
-                    &self.obarray,
+                    self.variables(),
                     &self.buffers,
                     Some(&message),
                 );

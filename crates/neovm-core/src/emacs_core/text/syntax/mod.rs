@@ -6,6 +6,8 @@
 
 use crate::emacs_core::emacs_char::EmacsChar;
 use crate::emacs_core::error::LispCondition;
+use crate::emacs_core::eval::VariableView;
+use crate::emacs_core::symbol::CanonicalAccess;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
 
@@ -13,7 +15,6 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use strum::{EnumString, IntoStaticStr};
 
 use super::error::{EvalResult, Flow, signal};
-use super::symbol::Obarray;
 use super::textprop::CharPropertyResolver;
 use super::value::{Value, ValueKind, list_to_vec};
 use crate::buffer::{
@@ -340,11 +341,11 @@ pub fn init_syntax_vars(
     _custom: &mut super::custom::CustomManager,
 ) {
     obarray.define_int_variable("syntax-propertize--done", -1);
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "find-word-boundary-function-table",
         super::chartable::make_char_table_value(Value::NIL, Value::NIL),
     );
-    obarray.set_symbol_value("forward-comment-function", Value::NIL);
+    obarray.seed_value("forward-comment-function", Value::NIL);
 
     for name in &[
         "parse-sexp-ignore-comments",
@@ -368,7 +369,7 @@ pub fn init_syntax_vars(
     for name in ["syntax-propertize--done", "comment-end-can-be-escaped"] {
         let id = crate::emacs_core::intern::intern(name);
         let default = obarray
-            .find_symbol_value(id)
+            .canonical_find_value(CanonicalAccess::BOOTSTRAP, id)
             .unwrap_or(crate::emacs_core::value::Value::NIL);
         obarray.make_symbol_localized(id, default);
         obarray.set_blv_local_if_set(id, true);
@@ -1557,7 +1558,7 @@ fn word_motion_with_table(
         let probe = {
             let props = SyntaxProperties::for_scan_with_symbols(
                 honor,
-                &eval.obarray,
+                eval.variables(),
                 &eval.buffers,
                 eval.symbol_mode(),
             );
@@ -1675,7 +1676,7 @@ fn word_motion_with_table(
             let (byte, ok) = {
                 let props = SyntaxProperties::for_scan_with_symbols(
                     honor,
-                    &eval.obarray,
+                    eval.variables(),
                     &eval.buffers,
                     eval.symbol_mode(),
                 );
@@ -1731,7 +1732,7 @@ pub(crate) fn forward_word_destination(
         };
         let props = SyntaxProperties::for_scan_with_symbols(
             honor,
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             eval.symbol_mode(),
         );
@@ -3433,10 +3434,10 @@ impl<'a> SyntaxProperties<'a> {
     /// Snapshot the property source for one scan. `honor` is the value of
     /// `parse-sexp-lookup-properties`, read (and any `syntax-propertize` run)
     /// by the caller before this point, since Lisp must not run afterwards.
-    pub(crate) fn for_scan(honor: bool, obarray: &'a Obarray, buffers: &BufferManager) -> Self {
+    pub(crate) fn for_scan(honor: bool, vars: VariableView<'a>, buffers: &BufferManager) -> Self {
         if honor {
             Self::Honor(CharPropertyResolver::snapshot(
-                obarray,
+                vars,
                 buffers,
                 syntax_table_prop_symbol(),
             ))
@@ -5173,7 +5174,7 @@ pub(crate) fn builtin_syntax_after(
     args: Vec<Value>,
 ) -> EvalResult {
     builtin_syntax_after_in_buffers_with_symbols(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         args,
         eval.symbol_mode(),
@@ -5182,12 +5183,12 @@ pub(crate) fn builtin_syntax_after(
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
 pub(crate) fn builtin_syntax_after_in_buffers(
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     buffers: &BufferManager,
     args: Vec<Value>,
 ) -> EvalResult {
     builtin_syntax_after_in_buffers_with_symbols(
-        obarray,
+        vars,
         buffers,
         args,
         crate::tagged::SymbolMode::Bare,
@@ -5195,7 +5196,7 @@ pub(crate) fn builtin_syntax_after_in_buffers(
 }
 
 pub(crate) fn builtin_syntax_after_in_buffers_with_symbols(
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     buffers: &BufferManager,
     args: Vec<Value>,
     mode: crate::tagged::SymbolMode,
@@ -5241,7 +5242,7 @@ pub(crate) fn builtin_syntax_after_in_buffers_with_symbols(
         unit.ch,
         byte_index,
         &SyntaxPropByteRun::new(SyntaxProperties::for_scan_with_symbols(
-            true, obarray, buffers, mode,
+            true, vars, buffers, mode,
         )),
     );
     Ok(syntax_entry_to_value(&entry))
@@ -5311,7 +5312,7 @@ pub(crate) fn builtin_forward_comment(
             let policy = SexpScanPolicy::for_context(eval);
             let props = SyntaxProperties::for_scan_with_symbols(
                 honor,
-                &eval.obarray,
+                eval.variables(),
                 &eval.buffers,
                 eval.symbol_mode(),
             );
@@ -5357,7 +5358,7 @@ pub(crate) fn builtin_forward_comment(
     let policy = SexpScanPolicy::for_context(eval);
     let props = SyntaxProperties::for_scan_with_symbols(
         honor,
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &eval.buffers,
         eval.symbol_mode(),
     );
@@ -6458,7 +6459,7 @@ pub(crate) fn builtin_backward_prefix_chars(
     let honor = parse_sexp_lookup_properties_enabled(eval);
     let props = SyntaxProperties::for_scan_with_symbols(
         honor,
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &eval.buffers,
         eval.symbol_mode(),
     );
@@ -6557,7 +6558,7 @@ pub(crate) fn builtin_forward_word(
     } else {
         let props = SyntaxProperties::for_scan_with_symbols(
             honor,
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             eval.symbol_mode(),
         );
@@ -6666,7 +6667,7 @@ fn scan_sexps_lazily(
     let run = |eval: &mut super::eval::Context| -> Result<Option<usize>, Flow> {
         let props = SyntaxProperties::for_scan_with_symbols(
             honor,
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             eval.symbol_mode(),
         );
@@ -6907,7 +6908,7 @@ pub(crate) fn builtin_scan_lists_3(
     let mut scan = |ctx: &mut super::eval::Context| {
         let props = SyntaxProperties::for_scan_with_symbols(
             honor,
-            &ctx.obarray,
+            ctx.variables(),
             &ctx.buffers,
             ctx.symbol_mode(),
         );
@@ -7892,7 +7893,7 @@ pub(crate) fn builtin_parse_partial_sexp_6(
     }
     let props = SyntaxProperties::for_scan_with_symbols(
         honor,
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         eval.symbol_mode(),
     );
@@ -8026,7 +8027,7 @@ pub(crate) fn builtin_skip_syntax_forward_2(
             // changed a category symbol's plist or the control variables.
             let props = SyntaxProperties::for_scan_with_symbols(
                 honor,
-                &eval.obarray,
+                eval.variables(),
                 &eval.buffers,
                 eval.symbol_mode(),
             );
@@ -8112,7 +8113,7 @@ pub(crate) fn builtin_skip_syntax_backward_2(
 
     let props = SyntaxProperties::for_scan_with_symbols(
         honor,
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         eval.symbol_mode(),
     );

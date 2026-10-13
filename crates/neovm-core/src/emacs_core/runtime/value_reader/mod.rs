@@ -67,8 +67,11 @@ fn plist_get(plist: &[Value], key: HashTableLiteralKey) -> Option<Value> {
 // ---------------------------------------------------------------------------
 
 /// Read all top-level forms from `input`, returning them as `Value`.
-pub fn read_all(input: &str, obarray: &super::symbol::Obarray) -> Result<Vec<Value>, ReadError> {
-    read_all_with_source_multibyte(input, true, obarray)
+pub fn read_all(
+    input: &str,
+    vars: crate::emacs_core::eval::VariableView<'_>,
+) -> Result<Vec<Value>, ReadError> {
+    read_all_with_source_multibyte(input, true, vars)
 }
 
 /// Read all top-level forms from `input`, preserving the source string's
@@ -76,12 +79,12 @@ pub fn read_all(input: &str, obarray: &super::symbol::Obarray) -> Result<Vec<Val
 pub fn read_all_with_source_multibyte(
     input: &str,
     source_multibyte: bool,
-    obarray: &super::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
 ) -> Result<Vec<Value>, ReadError> {
     let mut reader = Reader::new(
         input,
         ReaderSourceSemantics::for_lisp_object(source_multibyte),
-        obarray,
+        vars,
     );
     let mut forms = Vec::new();
     while reader.skip_ws_and_comments() {
@@ -97,11 +100,11 @@ pub fn read_all_with_source_multibyte(
 /// form (issue #131).
 pub fn read_all_lisp_source(
     input: &crate::heap_types::LispString,
-    obarray: &super::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
 ) -> Result<Vec<Value>, ReadError> {
     let range = CharRange::from_start_len(CharPos0::new(0), CharLen::new(input.schars()));
     let range = CharacterReadRange::for_source(input, range, EmacsBytePos::ZERO)?;
-    let mut reader = Reader::new_lisp_string(input, LispReaderRange::Characters(range), obarray);
+    let mut reader = Reader::new_lisp_string(input, LispReaderRange::Characters(range), vars);
     let mut forms = Vec::new();
     while reader.skip_ws_and_comments() {
         // GNU resets read_objects_map for every read; labels never cross forms.
@@ -119,9 +122,9 @@ pub fn read_all_lisp_source(
 pub fn read_one(
     input: &str,
     start: usize,
-    obarray: &super::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
 ) -> Result<Option<(Value, usize)>, ReadError> {
-    read_one_with_source_multibyte(input, true, start, obarray)
+    read_one_with_source_multibyte(input, true, start, vars)
 }
 
 /// Read a single form from `input`, preserving whether the original source was
@@ -130,12 +133,12 @@ pub fn read_one_with_source_multibyte(
     input: &str,
     source_multibyte: bool,
     start: usize,
-    obarray: &super::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
 ) -> Result<Option<(Value, usize)>, ReadError> {
     let mut reader = Reader::new(
         input,
         ReaderSourceSemantics::for_lisp_object(source_multibyte),
-        obarray,
+        vars,
     );
     reader.advance_raw_to(EmacsBytePos::new(start));
     if !reader.skip_ws_and_comments() {
@@ -152,10 +155,10 @@ pub fn read_one_with_source_multibyte(
 pub(crate) fn read_one_from_encoded_file_bytes(
     input: &[u8],
     start: usize,
-    obarray: &super::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     shorthands: Option<&ReadSymbolShorthands>,
 ) -> Result<Option<(Value, usize)>, ReadError> {
-    let mut reader = Reader::new_file_bytes(input, obarray);
+    let mut reader = Reader::new_file_bytes(input, vars);
     reader.shorthands = shorthands.into();
     reader.advance_raw_to(EmacsBytePos::new(start));
     if !reader.skip_ws_and_comments() {
@@ -173,14 +176,14 @@ pub fn read_one_with_locate_syms(
     source_multibyte: bool,
     start: usize,
     locate_syms: bool,
-    obarray: &super::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
 ) -> Result<Option<(Value, usize)>, ReadError> {
     read_one_with_locate_syms_with_symbols(
         input,
         source_multibyte,
         start,
         locate_syms,
-        obarray,
+        vars,
         SymbolMode::Bare,
     )
 }
@@ -190,13 +193,13 @@ pub fn read_one_with_locate_syms_with_symbols(
     source_multibyte: bool,
     start: usize,
     locate_syms: bool,
-    obarray: &super::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     mode: SymbolMode,
 ) -> Result<Option<(Value, usize)>, ReadError> {
     let mut reader = Reader::new(
         input,
         ReaderSourceSemantics::for_lisp_object(source_multibyte),
-        obarray,
+        vars,
     );
     reader.advance_raw_to(EmacsBytePos::new(start));
     reader.readchar_offset_origin = ReadcharOffsetOrigin::RelativeToSourceByte(start);
@@ -225,11 +228,11 @@ pub(crate) fn read_one_from_buffer_with_locate_syms_with_symbols(
     range: EmacsByteRange,
     readchar_offset_origin: BufferReadcharOffsetOrigin,
     symbol_position_mode: SymbolPositionMode,
-    obarray: &super::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     shorthands: Option<&ReadSymbolShorthands>,
     mode: SymbolMode,
 ) -> Result<(Option<Value>, EmacsBytePos), ReadError> {
-    let mut reader = Reader::new_buffer(buffer, range, readchar_offset_origin, obarray);
+    let mut reader = Reader::new_buffer(buffer, range, readchar_offset_origin, vars);
     reader.symbol_position_mode = symbol_position_mode;
     reader.symbol_mode = mode;
     reader.shorthands = shorthands.into();
@@ -290,15 +293,15 @@ impl<'a> LispReadSource<'a> {
     pub fn read_one(
         &self,
         start: usize,
-        obarray: &super::symbol::Obarray,
+        vars: crate::emacs_core::eval::VariableView<'_>,
     ) -> Result<Option<(Value, usize)>, ReadError> {
-        self.read_one_range(start, self.logical_len(), obarray)
+        self.read_one_range(start, self.logical_len(), vars)
     }
 
     pub(crate) fn read_one_with_shorthands(
         &self,
         start: usize,
-        obarray: &super::symbol::Obarray,
+        vars: crate::emacs_core::eval::VariableView<'_>,
         shorthands: Option<&ReadSymbolShorthands>,
     ) -> Result<Option<(Value, usize)>, ReadError> {
         let mut reader = Reader::new_lisp_string(
@@ -307,7 +310,7 @@ impl<'a> LispReadSource<'a> {
                 EmacsBytePos::new(start),
                 EmacsBytePos::new(self.logical_len()),
             )),
-            obarray,
+            vars,
         );
         reader.shorthands = shorthands.into();
         if !reader.skip_ws_and_comments() {
@@ -321,7 +324,7 @@ impl<'a> LispReadSource<'a> {
         &self,
         start: usize,
         end: usize,
-        obarray: &super::symbol::Obarray,
+        vars: crate::emacs_core::eval::VariableView<'_>,
     ) -> Result<Option<(Value, usize)>, ReadError> {
         let mut reader = Reader::new_lisp_string(
             self.input,
@@ -329,7 +332,7 @@ impl<'a> LispReadSource<'a> {
                 EmacsBytePos::new(start),
                 EmacsBytePos::new(end),
             )),
-            obarray,
+            vars,
         );
         if !reader.skip_ws_and_comments() {
             return Ok(None);
@@ -342,23 +345,23 @@ impl<'a> LispReadSource<'a> {
         &self,
         start: usize,
         locate_syms: bool,
-        obarray: &super::symbol::Obarray,
+        vars: crate::emacs_core::eval::VariableView<'_>,
     ) -> Result<Option<(Value, usize)>, ReadError> {
-        self.read_one_with_locate_syms_with_symbols(start, locate_syms, obarray, SymbolMode::Bare)
+        self.read_one_with_locate_syms_with_symbols(start, locate_syms, vars, SymbolMode::Bare)
     }
 
     pub fn read_one_with_locate_syms_with_symbols(
         &self,
         start: usize,
         locate_syms: bool,
-        obarray: &super::symbol::Obarray,
+        vars: crate::emacs_core::eval::VariableView<'_>,
         mode: SymbolMode,
     ) -> Result<Option<(Value, usize)>, ReadError> {
         self.read_one_range_with_locate_syms_with_symbols(
             start,
             self.logical_len(),
             SymbolPositionMode::from(locate_syms),
-            obarray,
+            vars,
             None,
             mode,
         )
@@ -368,13 +371,13 @@ impl<'a> LispReadSource<'a> {
         &self,
         range: CharacterReadRange<'a>,
         symbol_position_mode: SymbolPositionMode,
-        obarray: &super::symbol::Obarray,
+        vars: crate::emacs_core::eval::VariableView<'_>,
         shorthands: ReadSymbolShorthandBinding<'_>,
     ) -> Result<Option<(Value, CharPos0)>, ReadError> {
         self.read_one_character_range_with_locate_syms_with_symbols(
             range,
             symbol_position_mode,
-            obarray,
+            vars,
             shorthands,
             SymbolMode::Bare,
         )
@@ -385,12 +388,12 @@ impl<'a> LispReadSource<'a> {
         &self,
         range: CharacterReadRange<'a>,
         symbol_position_mode: SymbolPositionMode,
-        obarray: &super::symbol::Obarray,
+        vars: crate::emacs_core::eval::VariableView<'_>,
         shorthands: ReadSymbolShorthandBinding<'_>,
         mode: SymbolMode,
     ) -> Result<Option<(Value, CharPos0)>, ReadError> {
         let mut reader =
-            Reader::new_lisp_string(self.input, LispReaderRange::Characters(range), obarray);
+            Reader::new_lisp_string(self.input, LispReaderRange::Characters(range), vars);
         reader.symbol_position_mode = symbol_position_mode;
         reader.symbol_mode = mode;
         reader.shorthands = match shorthands {
@@ -413,7 +416,7 @@ impl<'a> LispReadSource<'a> {
         start: usize,
         end: usize,
         symbol_position_mode: SymbolPositionMode,
-        obarray: &super::symbol::Obarray,
+        vars: crate::emacs_core::eval::VariableView<'_>,
         shorthands: Option<&ReadSymbolShorthands>,
         mode: SymbolMode,
     ) -> Result<Option<(Value, usize)>, ReadError> {
@@ -423,7 +426,7 @@ impl<'a> LispReadSource<'a> {
                 EmacsBytePos::new(start),
                 EmacsBytePos::new(end),
             )),
-            obarray,
+            vars,
         );
         reader.symbol_position_mode = symbol_position_mode;
         reader.symbol_mode = mode;
@@ -657,14 +660,14 @@ impl ReaderSourceSemantics {
 /// borrows never span callbacks; its Context is borrowed for each funcall.
 #[derive(Clone, Copy, Debug)]
 enum ReaderEnvironment<'a> {
-    Obarray(&'a super::symbol::Obarray),
+    Variables(crate::emacs_core::eval::VariableView<'a>),
     Callable(&'a callable::CallableSource<'a>),
 }
 
 impl ReaderEnvironment<'_> {
     fn value(self, name: &str) -> Option<Value> {
         match self {
-            Self::Obarray(obarray) => obarray.symbol_value_copied(name),
+            Self::Variables(vars) => vars.value_by_name(name),
             Self::Callable(source) => source.variable(name),
         }
     }
@@ -1045,7 +1048,7 @@ struct Reader<'a> {
     /// character counter to the absolute point for buffer streams and zero
     /// for strings, markers, functions, and files.
     readchar_offset_origin: ReadcharOffsetOrigin,
-    /// The active obarray, for resolving `#$` to the current value of
+    /// The variables the reader sees, for resolving `#$` to the current value of
     /// `load-file-name` (matching GNU's `Vload_file_name`).
     environment: ReaderEnvironment<'a>,
     /// Active `read-symbol-shorthands`, if any.  GNU's reader rewrites symbol
@@ -1224,7 +1227,7 @@ impl<'a> Reader<'a> {
     /// only at a policy-sensitive semantic boundary.
     fn symbol_mode(&self) -> SymbolMode {
         match self.environment {
-            ReaderEnvironment::Obarray(_) => self.symbol_mode,
+            ReaderEnvironment::Variables(_) => self.symbol_mode,
             ReaderEnvironment::Callable(source) => source.symbol_mode(),
         }
     }
@@ -1232,7 +1235,7 @@ impl<'a> Reader<'a> {
     fn new(
         input: &'a str,
         source_semantics: ReaderSourceSemantics,
-        obarray: &'a super::symbol::Obarray,
+        vars: crate::emacs_core::eval::VariableView<'a>,
     ) -> Self {
         Self {
             source: ReaderSource::Runtime(input),
@@ -1247,7 +1250,7 @@ impl<'a> Reader<'a> {
             symbol_position_mode: SymbolPositionMode::Bare,
             symbol_mode: SymbolMode::Bare,
             readchar_offset_origin: ReadcharOffsetOrigin::RelativeToSourceByte(0),
-            environment: ReaderEnvironment::Obarray(obarray),
+            environment: ReaderEnvironment::Variables(vars),
             shorthands: ReaderShorthands::Unbound,
             step_cache: Cell::new(None),
             dot_syntax: Cell::new(None),
@@ -1258,7 +1261,7 @@ impl<'a> Reader<'a> {
     /// does.  Each byte is its own character, which is exactly what the
     /// Latin-1 envelope used to deliver, so every token, string and escape
     /// path sees the identical code sequence.
-    fn new_file_bytes(input: &'a [u8], obarray: &'a super::symbol::Obarray) -> Self {
+    fn new_file_bytes(input: &'a [u8], vars: crate::emacs_core::eval::VariableView<'a>) -> Self {
         Self {
             source: ReaderSource::FileBytes(input),
             source_semantics: ReaderSourceSemantics::EncodedFileBytes,
@@ -1272,7 +1275,7 @@ impl<'a> Reader<'a> {
             symbol_position_mode: SymbolPositionMode::Bare,
             symbol_mode: SymbolMode::Bare,
             readchar_offset_origin: ReadcharOffsetOrigin::RelativeToSourceByte(0),
-            environment: ReaderEnvironment::Obarray(obarray),
+            environment: ReaderEnvironment::Variables(vars),
             shorthands: ReaderShorthands::Unbound,
             step_cache: Cell::new(None),
             dot_syntax: Cell::new(None),
@@ -1282,7 +1285,7 @@ impl<'a> Reader<'a> {
     fn new_lisp_string(
         input: &'a crate::heap_types::LispString,
         range: LispReaderRange<'a>,
-        obarray: &'a super::symbol::Obarray,
+        vars: crate::emacs_core::eval::VariableView<'a>,
     ) -> Self {
         let (start, end, character_cursor, original_string) = match range {
             LispReaderRange::Bytes(bytes) => (
@@ -1322,7 +1325,7 @@ impl<'a> Reader<'a> {
             symbol_position_mode: SymbolPositionMode::Bare,
             symbol_mode: SymbolMode::Bare,
             readchar_offset_origin: ReadcharOffsetOrigin::RelativeToSourceByte(start),
-            environment: ReaderEnvironment::Obarray(obarray),
+            environment: ReaderEnvironment::Variables(vars),
             shorthands: ReaderShorthands::Unbound,
             step_cache: Cell::new(None),
             dot_syntax: Cell::new(None),
@@ -1333,7 +1336,7 @@ impl<'a> Reader<'a> {
         input: &'a Buffer,
         range: EmacsByteRange,
         readchar_offset_origin: BufferReadcharOffsetOrigin,
-        obarray: &'a super::symbol::Obarray,
+        vars: crate::emacs_core::eval::VariableView<'a>,
     ) -> Self {
         let start = range.start().get();
         let end = range.end().get();
@@ -1363,7 +1366,7 @@ impl<'a> Reader<'a> {
                     ReadcharOffsetOrigin::RelativeToSourceByte(start)
                 }
             },
-            environment: ReaderEnvironment::Obarray(obarray),
+            environment: ReaderEnvironment::Variables(vars),
             shorthands: ReaderShorthands::Unbound,
             step_cache: Cell::new(None),
             dot_syntax: Cell::new(None),

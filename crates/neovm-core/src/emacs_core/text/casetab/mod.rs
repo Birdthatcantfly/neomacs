@@ -413,8 +413,7 @@ pub(crate) fn builtin_set_standard_case_table(
     STANDARD_CASE_TABLE_HEAP.with(|owner| owner.set(ctx.tagged_heap.identity()));
     let table = args[0];
     ensure_case_table_derived_slots_with_symbols(table, mode)?;
-    ctx.obarray
-        .set_symbol_value_id(standard_case_table_object_symbol_id(), table);
+    ctx.store_variable(standard_case_table_object_symbol_id(), table);
     Ok(table)
 }
 
@@ -451,13 +450,19 @@ fn ensure_standard_case_table_object_in_state_with_symbols(
     obarray: &mut super::symbol::Obarray,
     mode: SymbolMode,
 ) -> EvalResult {
-    if let Some(value) = obarray.symbol_value_id_copied(standard_case_table_object_symbol_id())
-        && is_case_table_with_symbols(&value, mode)
+    if let Some(value) = obarray.canonical_value(
+        crate::emacs_core::symbol::CanonicalAccess::STORAGE,
+        standard_case_table_object_symbol_id(),
+    ) && is_case_table_with_symbols(&value, mode)
     {
         return Ok(value);
     }
     let table = make_standard_case_table_value();
-    obarray.set_symbol_value_id(standard_case_table_object_symbol_id(), table);
+    obarray.set_canonical_value(
+        crate::emacs_core::symbol::CanonicalAccess::STORAGE,
+        standard_case_table_object_symbol_id(),
+        table,
+    );
     Ok(table)
 }
 

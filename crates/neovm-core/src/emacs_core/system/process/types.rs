@@ -1505,7 +1505,7 @@ pub(super) fn visible_default_directory_lisp(
     if let Some(string) = visible.as_lisp_string() {
         return Some(string.clone());
     }
-    super::super::fileio::default_directory_lisp_in_state(&eval.obarray, &[], &eval.buffers)
+    super::super::fileio::default_directory_lisp_in_state(eval.variables(), &[], &eval.buffers)
 }
 
 pub(super) fn os_str_to_lisp_string(value: &OsStr) -> LispString {

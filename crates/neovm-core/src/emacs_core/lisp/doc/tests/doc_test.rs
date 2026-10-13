@@ -1981,9 +1981,15 @@ fn every_doc_image_record_round_trips_through_its_position() {
         let Some(id) = crate::emacs_core::intern::lookup_interned(name) else {
             continue;
         };
-        let Some(found) = super::super::var_docs::SnarfedVariable::if_bound_in(obarray, id, name)
-            .and_then(super::super::var_docs::lookup)
-        else {
+        let Some(found) = super::super::var_docs::SnarfedVariable::if_bound_in(
+            crate::emacs_core::eval::VariableView::canonical(
+                crate::emacs_core::symbol::CanonicalAccess::TEST,
+                obarray,
+            ),
+            id,
+            name,
+        )
+        .and_then(super::super::var_docs::lookup) else {
             continue;
         };
         let position = found.position();

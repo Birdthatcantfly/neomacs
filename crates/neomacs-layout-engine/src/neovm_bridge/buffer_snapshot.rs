@@ -10,6 +10,7 @@ use neovm_core::buffer::{
     Buffer, BufferTextSnapshot, CharPos0, CharRange, EmacsByteLen, EmacsBytePos, EmacsByteRange,
     overlay::{OverlayList, OverlaySnapshot},
 };
+use neovm_core::emacs_core::eval::VariableView;
 use neovm_core::emacs_core::plist::plist_get;
 use neovm_core::emacs_core::symbol::Obarray;
 use neovm_core::emacs_core::{SymId, Value};
@@ -70,7 +71,7 @@ impl LayoutBufferSnapshot {
     // Resolve layout variables once, with the caller's global defaults already
     // available. Window snapshots must not build and then replace a complete
     // buffer-local-only variable table on every layout attempt.
-    fn capture_buffer(buffer: &Buffer, obarray: Option<&Obarray>) -> Self {
+    fn capture_buffer(buffer: &Buffer, variables: Option<VariableView<'_>>) -> Self {
         Self {
             display_when: crate::display_when::DisplayWhenConditions::structural(),
             display_target: crate::display_property::DisplayPropertyTarget::Graphical,
@@ -80,7 +81,7 @@ impl LayoutBufferSnapshot {
             accessible_end_emacs_byte: buffer.point_max_emacs_byte_pos(),
             accessible_end_char: buffer.point_max_char_pos(),
             source_context_end: buffer.point_max_char_pos(),
-            vars: resolve_layout_vars(buffer, obarray),
+            vars: resolve_layout_vars(buffer, variables),
             overlays: buffer.overlays().snapshot(),
             category_symbol_plists: FxHashMap::default(),
             automatic_composition_spans: Vec::new(),
@@ -89,10 +90,10 @@ impl LayoutBufferSnapshot {
     }
 
     #[cfg(test)]
-    pub fn from_buffer_with_obarray(buffer: &Buffer, obarray: &Obarray) -> Self {
+    pub fn from_buffer_with_obarray(buffer: &Buffer, vars: VariableView<'_>) -> Self {
         Self::from_buffer_for_window(
             buffer,
-            obarray,
+            vars,
             None,
             crate::display_property::DisplayPropertyTarget::Graphical,
         )
@@ -107,39 +108,29 @@ impl LayoutBufferSnapshot {
     #[cfg(test)]
     pub fn from_buffer_for_window(
         buffer: &Buffer,
-        obarray: &Obarray,
+        vars: VariableView<'_>,
         visible: Option<(usize, usize)>,
         target: crate::display_property::DisplayPropertyTarget,
     ) -> Self {
-        Self::from_buffer_for_window_with_symbols(
-            buffer,
-            obarray,
-            visible,
-            target,
-            SymbolMode::Bare,
-        )
+        Self::from_buffer_for_window_with_symbols(buffer, vars, visible, target, SymbolMode::Bare)
     }
 
     /// Capture the evaluator's symbol policy before the buffer walk starts.
     pub fn from_buffer_for_window_with_symbols(
         buffer: &Buffer,
-        obarray: &Obarray,
+        vars: VariableView<'_>,
         visible: Option<(usize, usize)>,
         target: crate::display_property::DisplayPropertyTarget,
         symbol_mode: SymbolMode,
     ) -> Self {
-        let mut snapshot = Self::capture_buffer(buffer, Some(obarray));
+        let obarray = vars.obarray();
+        let mut snapshot = Self::capture_buffer(buffer, Some(vars));
         snapshot.display_target = target;
         snapshot.category_symbol_plists = capture_layout_category_symbol_plists(buffer, obarray);
-        snapshot.automatic_composition_spans = capture_automatic_composition_spans(
-            buffer,
-            obarray,
-            &snapshot.vars,
-            visible,
-            symbol_mode,
-        );
+        snapshot.automatic_composition_spans =
+            capture_automatic_composition_spans(buffer, vars, &snapshot.vars, visible, symbol_mode);
         snapshot.string_composition_rules =
-            capture_string_composition_rules(buffer, obarray, symbol_mode);
+            capture_string_composition_rules(buffer, vars, symbol_mode);
         SNAPSHOTS_BUILT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         snapshot
     }
@@ -160,7 +151,7 @@ impl LayoutBufferSnapshot {
 
 pub(super) fn capture_automatic_composition_spans(
     buffer: &Buffer,
-    obarray: &Obarray,
+    variables: VariableView<'_>,
     vars: &[Option<Value>; <LayoutVar as strum::EnumCount>::COUNT],
     visible: Option<(usize, usize)>,
     symbol_mode: SymbolMode,
@@ -171,7 +162,7 @@ pub(super) fn capture_automatic_composition_spans(
     let Some(table) = active_composition_table(
         vars[LayoutVar::AutoCompositionMode as usize],
         vars[LayoutVar::AutoCompositionFunction as usize],
-        obarray,
+        variables,
         symbol_mode,
     ) else {
         return Vec::new();
@@ -199,14 +190,14 @@ pub(super) fn capture_automatic_composition_spans(
 /// does. The caller keeps the live Lisp tables rooted during redisplay.
 pub(super) fn capture_string_composition_rules(
     buffer: &Buffer,
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     symbol_mode: SymbolMode,
 ) -> Option<neovm_core::emacs_core::composite::AutomaticCompositionRules> {
-    let value = |var| effective_buffer_value(buffer, obarray, var);
+    let value = |var| effective_buffer_value(buffer, vars, var);
     let table = active_composition_table(
         value(LayoutVar::AutoCompositionMode),
         value(LayoutVar::AutoCompositionFunction),
-        obarray,
+        vars,
         symbol_mode,
     )?;
     neovm_core::emacs_core::composite::AutomaticCompositionRules::new_with_symbols(
@@ -219,7 +210,7 @@ pub(super) fn capture_string_composition_rules(
 fn active_composition_table(
     mode: Option<Value>,
     function: Option<Value>,
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     symbol_mode: SymbolMode,
 ) -> Option<Value> {
     if mode.is_none_or(Value::is_nil)
@@ -227,7 +218,7 @@ fn active_composition_table(
     {
         return None;
     }
-    obarray.symbol_value_copied("composition-function-table")
+    vars.value_by_name("composition-function-table")
 }
 
 fn capture_layout_category_symbol_plists(
@@ -287,7 +278,7 @@ fn capture_layout_category_symbol_plists(
 /// like the old `assq`-then-default sequence.
 pub(super) fn resolve_layout_vars(
     buffer: &Buffer,
-    obarray: Option<&Obarray>,
+    variables: Option<VariableView<'_>>,
 ) -> [Option<Value>; <LayoutVar as strum::EnumCount>::COUNT] {
     use strum::EnumCount;
     use strum::VariantArray;
@@ -307,7 +298,7 @@ pub(super) fn resolve_layout_vars(
         };
         vars[*var as usize] = local.or_else(|| {
             info.captures_default
-                .then(|| obarray?.default_value_id_copied(var.sym_id()))
+                .then(|| variables?.default_value(var.sym_id()))
                 .flatten()
         });
     }

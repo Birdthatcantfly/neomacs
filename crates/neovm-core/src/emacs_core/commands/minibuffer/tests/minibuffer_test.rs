@@ -118,7 +118,7 @@ fn read_buffer_completing_args_use_live_buffer_names_and_normalized_default() {
     let mut eval = crate::emacs_core::eval::Context::new();
     let buf_id = eval.buffers.create_buffer(" target-buffer ");
     let args = read_buffer_completing_args(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         &[
             Value::string("Buffer: "),
@@ -143,7 +143,7 @@ fn read_buffer_completing_args_formats_default_prompt_like_gnu() {
         .set_symbol_value("minibuffer-default-prompt-format", Value::string(" [%s]"));
 
     let with_default = read_buffer_completing_args(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         &[
             Value::string("Switch to buffer: "),
@@ -156,14 +156,14 @@ fn read_buffer_completing_args_formats_default_prompt_like_gnu() {
     );
 
     let without_default = read_buffer_completing_args(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         &[Value::string("Switch to buffer: "), Value::NIL],
     );
     assert_eq!(without_default[0], Value::string("Switch to buffer: "));
 
     let empty_default = read_buffer_completing_args(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         &[Value::string("Switch to buffer: "), Value::string("")],
     );
@@ -1744,16 +1744,16 @@ fn completion_state_reads_use_predeclared_symbols() {
         Value::list(vec![Value::string("neo")]),
     );
 
-    assert!(completion_ignore_case(&eval.obarray, &eval.buffers));
+    assert!(completion_ignore_case(eval.variables(), &eval.buffers));
     assert_eq!(
-        completion_regexp_lisp_list(&eval.obarray, &eval.buffers),
+        completion_regexp_lisp_list(eval.variables(), &eval.buffers),
         vec![LispString::from_unibyte(b"neo".to_vec())]
     );
 
     crate::emacs_core::intern::reset_intern_calls();
-    assert!(completion_ignore_case(&eval.obarray, &eval.buffers));
+    assert!(completion_ignore_case(eval.variables(), &eval.buffers));
     assert_eq!(
-        completion_regexp_lisp_list(&eval.obarray, &eval.buffers),
+        completion_regexp_lisp_list(eval.variables(), &eval.buffers),
         vec![LispString::from_unibyte(b"neo".to_vec())]
     );
     assert_eq!(

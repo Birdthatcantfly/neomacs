@@ -139,7 +139,7 @@ fn dynamic_or_global_symbol_value(eval: &super::eval::Context, name: &str) -> Op
         return Some(v);
     }
 
-    eval.obarray.symbol_value_copied(name)
+    eval.variable_value_by_name(name)
 }
 
 // ---------------------------------------------------------------------------
@@ -260,8 +260,7 @@ pub(crate) fn check_point_motion_hooks(
         return Ok(());
     }
     let inhibit = eval
-        .obarray
-        .symbol_value_id_copied(inhibit_point_motion_hooks_sym())
+        .variable_value(inhibit_point_motion_hooks_sym())
         .unwrap_or(Value::NIL);
     if inhibit.is_truthy() {
         return Ok(());
@@ -278,7 +277,7 @@ pub(crate) fn check_point_motion_hooks(
         let ol = byte_to_char_pos(buf, old_byte);
         let nl = byte_to_char_pos(buf, new_byte);
         let leave_before = point_motion_property(
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             buf,
             old_byte,
@@ -286,7 +285,7 @@ pub(crate) fn check_point_motion_hooks(
             "point-left",
         );
         let leave_after = point_motion_property(
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             buf,
             old_byte,
@@ -294,7 +293,7 @@ pub(crate) fn check_point_motion_hooks(
             "point-left",
         );
         let enter_before = point_motion_property(
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             buf,
             new_byte,
@@ -302,7 +301,7 @@ pub(crate) fn check_point_motion_hooks(
             "point-entered",
         );
         let enter_after = point_motion_property(
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             buf,
             new_byte,
@@ -340,7 +339,7 @@ pub(crate) fn check_point_motion_hooks(
 }
 
 fn point_motion_property(
-    obarray: &super::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf: &crate::buffer::Buffer,
     point_byte: EmacsBytePos,
@@ -353,7 +352,7 @@ fn point_motion_property(
             return Value::NIL;
         }
         lookup_buffer_text_property(
-            obarray,
+            vars,
             buffers,
             buf,
             point_byte.get(),
@@ -364,7 +363,7 @@ fn point_motion_property(
             return Value::NIL;
         }
         lookup_buffer_text_property(
-            obarray,
+            vars,
             buffers,
             buf,
             point_byte.saturating_sub_len(EmacsByteLen::new(1)).get(),
@@ -374,7 +373,7 @@ fn point_motion_property(
 }
 
 fn lookup_buffer_char_property(
-    obarray: &super::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buffers: &BufferManager,
     buf: &crate::buffer::Buffer,
     byte_pos: usize,
@@ -384,11 +383,11 @@ fn lookup_buffer_char_property(
         return Value::NIL;
     }
     if let Some((value, _overlay)) =
-        buffer_overlay_property_at_byte_pos(obarray, buffers, buf, byte_pos, prop, None)
+        buffer_overlay_property_at_byte_pos(vars, buffers, buf, byte_pos, prop, None)
     {
         return value;
     }
-    lookup_buffer_text_property(obarray, buffers, buf, byte_pos, prop)
+    lookup_buffer_text_property(vars, buffers, buf, byte_pos, prop)
 }
 
 fn next_char_property_change(
@@ -435,8 +434,7 @@ pub(crate) fn adjust_for_intangible(
     direction: i32,
 ) -> EmacsBytePos {
     let inhibit = eval
-        .obarray
-        .symbol_value_id_copied(inhibit_point_motion_hooks_sym())
+        .variable_value(inhibit_point_motion_hooks_sym())
         .unwrap_or(Value::NIL);
     if inhibit.is_truthy() {
         return pos;
@@ -451,7 +449,7 @@ pub(crate) fn adjust_for_intangible(
     };
     let accessible = buf.accessible_emacs_byte_region();
     let intangible = lookup_buffer_char_property(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         buf,
         pos.get(),
@@ -466,7 +464,7 @@ pub(crate) fn adjust_for_intangible(
             match next_char_property_change(buf, cursor) {
                 Some(next) => {
                     let prop = lookup_buffer_char_property(
-                        &eval.obarray,
+                        eval.variables(),
                         &eval.buffers,
                         buf,
                         next.get(),
@@ -489,7 +487,7 @@ pub(crate) fn adjust_for_intangible(
                 Some(prev) => {
                     let check = prev.saturating_sub_len(EmacsByteLen::new(1));
                     let prop = lookup_buffer_char_property(
-                        &eval.obarray,
+                        eval.variables(),
                         &eval.buffers,
                         buf,
                         check.get(),

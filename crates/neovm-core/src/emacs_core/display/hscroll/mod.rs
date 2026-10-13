@@ -277,7 +277,7 @@ fn auto_hscroll_mode(ctx: &Context, buffer_id: crate::buffer::BufferId) -> AutoH
     let symbol_mode = ctx.symbol_mode();
     let buf = ctx.buffers.get(buffer_id);
     let value = crate::emacs_core::indent::dynamic_buffer_or_global_symbol_value(
-        &ctx.obarray,
+        ctx.variables(),
         &[],
         buf,
         "auto-hscroll-mode",
@@ -302,7 +302,7 @@ fn line_is_truncated(ctx: &Context, frame: &crate::window::Frame, window: &Windo
     let buf = ctx.buffers.get(buffer_id);
     let read = |name: &str| {
         crate::emacs_core::indent::dynamic_buffer_or_global_symbol_value(
-            &ctx.obarray,
+            ctx.variables(),
             &[],
             buf,
             name,
@@ -351,8 +351,7 @@ fn leaf_hscroll(window: &Window) -> i64 {
 /// GNU `clip_to_bounds(0, hscroll_margin, 1000000)` of the `hscroll-margin`
 /// variable, in columns.
 fn hscroll_margin_cols(ctx: &Context) -> i64 {
-    ctx.obarray
-        .symbol_value_copied("hscroll-margin")
+    ctx.variable_value_by_name("hscroll-margin")
         .and_then(|v| v.as_int())
         .unwrap_or(5)
         .clamp(0, 1_000_000)
@@ -488,7 +487,7 @@ pub(crate) fn update_auto_hscroll_before_redisplay(ctx: &mut Context) {
                     && mode == AutoHscrollMode::CurrentLine,
                 line_truncated,
                 point_at_eol,
-                step: HscrollStep::decode(ctx.obarray.symbol_value_copied("hscroll-step").as_ref()),
+                step: HscrollStep::decode(ctx.variable_value_by_name("hscroll-step").as_ref()),
             });
         }
     }

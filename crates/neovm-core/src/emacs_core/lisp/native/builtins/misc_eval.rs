@@ -4,6 +4,7 @@ use crate::buffer::{CharLen, CharPos0, CharRange, EmacsByteLen, EmacsBytePos, Li
 use crate::emacs_core::error::{
     expect_args, expect_args_range, expect_fixnum, expect_max_args, expect_min_args,
 };
+use crate::emacs_core::eval::VariableView;
 use crate::emacs_core::symbol::Obarray;
 use crate::emacs_core::textprop::{StickinessProperty, TextPropertyControlVariable};
 use crate::tagged::value::SymbolMode;
@@ -26,11 +27,17 @@ pub(crate) fn builtin_get_pos_property_3(
     object: Value,
 ) -> EvalResult {
     let args: [Value; 3] = [position, prop, object];
-    builtin_get_pos_property_impl(&eval.obarray, &[], Some(&eval.frames), &eval.buffers, &args)
+    builtin_get_pos_property_impl(
+        eval.variables(),
+        &[],
+        Some(&eval.frames),
+        &eval.buffers,
+        &args,
+    )
 }
 
 pub(crate) fn builtin_get_pos_property_impl(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     _dynamic: &[OrderedRuntimeBindingMap],
     frames: Option<&crate::window::FrameManager>,
     buffers: &crate::buffer::BufferManager,
@@ -47,7 +54,7 @@ pub(crate) fn builtin_get_pos_property_impl(
         // on the redisplay path.
         if crate::emacs_core::value::string_has_text_properties_for_value(*str_val) {
             return super::textprop::builtin_get_text_property_in_state(
-                obarray,
+                vars,
                 buffers,
                 &[Value::fixnum(pos), prop, *str_val],
             );
@@ -64,7 +71,7 @@ pub(crate) fn builtin_get_pos_property_impl(
         .get(buf_id)
         .ok_or_else(|| signal("error", vec![Value::string("Buffer does not exist")]))?;
 
-    super::textprop::buffer_pos_property_at_accessible_lisp_pos(obarray, buffers, buf, pos, prop)
+    super::textprop::buffer_pos_property_at_accessible_lisp_pos(vars, buffers, buf, pos, prop)
 }
 
 pub(crate) fn builtin_next_char_property_change(
@@ -335,7 +342,7 @@ pub(crate) fn builtin_next_single_char_property_change_4(
 ) -> EvalResult {
     let args: [Value; 4] = [position, prop, object, limit];
     builtin_next_single_char_property_change_in_buffers_with_symbols(
-        &eval.obarray,
+        eval.variables(),
         Some(&eval.frames),
         &eval.buffers,
         &args,
@@ -408,13 +415,13 @@ fn previous_char_property_change_for_buffer(
 }
 
 pub(crate) fn builtin_next_single_char_property_change_in_buffers(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     frames: Option<&crate::window::FrameManager>,
     buffers: &crate::buffer::BufferManager,
     args: &[Value],
 ) -> EvalResult {
     builtin_next_single_char_property_change_in_buffers_with_symbols(
-        obarray,
+        vars,
         frames,
         buffers,
         args,
@@ -423,7 +430,7 @@ pub(crate) fn builtin_next_single_char_property_change_in_buffers(
 }
 
 pub(crate) fn builtin_next_single_char_property_change_in_buffers_with_symbols(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     frames: Option<&crate::window::FrameManager>,
     buffers: &crate::buffer::BufferManager,
     args: &[Value],
@@ -434,7 +441,7 @@ pub(crate) fn builtin_next_single_char_property_change_in_buffers_with_symbols(
 
     if let Some(str_val) = args.get(2).filter(|v| v.is_string()) {
         let result =
-            super::textprop::builtin_next_single_property_change_in_state(obarray, buffers, args)?;
+            super::textprop::builtin_next_single_property_change_in_state(vars, buffers, args)?;
         if !result.is_nil() {
             return Ok(result);
         }
@@ -463,9 +470,8 @@ pub(crate) fn builtin_next_single_char_property_change_in_buffers_with_symbols(
     if let Some(object) = object {
         get_args.push(*object);
     }
-    let initial_value = super::textprop::builtin_get_char_property_with_frames(
-        obarray, buffers, frames, &get_args,
-    )?;
+    let initial_value =
+        super::textprop::builtin_get_char_property_with_frames(vars, buffers, frames, &get_args)?;
     let limit = match args.get(3) {
         Some(v) if !v.is_nil() => {
             crate::emacs_core::buffer::expect_integer_or_marker_in_buffers(buffers, v)?
@@ -489,7 +495,7 @@ pub(crate) fn builtin_next_single_char_property_change_in_buffers_with_symbols(
             value_args.push(*object);
         }
         let value = super::textprop::builtin_get_char_property_with_frames(
-            obarray,
+            vars,
             buffers,
             frames,
             &value_args,
@@ -510,7 +516,7 @@ pub(crate) fn builtin_previous_single_char_property_change(
     args: Vec<Value>,
 ) -> EvalResult {
     builtin_previous_single_char_property_change_in_buffers_with_symbols(
-        &eval.obarray,
+        eval.variables(),
         Some(&eval.frames),
         &eval.buffers,
         args,
@@ -519,13 +525,13 @@ pub(crate) fn builtin_previous_single_char_property_change(
 }
 
 pub(crate) fn builtin_previous_single_char_property_change_in_buffers(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     frames: Option<&crate::window::FrameManager>,
     buffers: &crate::buffer::BufferManager,
     args: Vec<Value>,
 ) -> EvalResult {
     builtin_previous_single_char_property_change_in_buffers_with_symbols(
-        obarray,
+        vars,
         frames,
         buffers,
         args,
@@ -534,7 +540,7 @@ pub(crate) fn builtin_previous_single_char_property_change_in_buffers(
 }
 
 pub(crate) fn builtin_previous_single_char_property_change_in_buffers_with_symbols(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     frames: Option<&crate::window::FrameManager>,
     buffers: &crate::buffer::BufferManager,
     args: Vec<Value>,
@@ -545,7 +551,7 @@ pub(crate) fn builtin_previous_single_char_property_change_in_buffers_with_symbo
 
     if args.get(2).is_some_and(|v| v.is_string()) {
         let result = super::textprop::builtin_previous_single_property_change_in_state(
-            obarray,
+            vars,
             buffers,
             &args.clone(),
         )?;
@@ -586,9 +592,8 @@ pub(crate) fn builtin_previous_single_char_property_change_in_buffers_with_symbo
     if let Some(object) = object {
         get_args.push(*object);
     }
-    let initial_value = super::textprop::builtin_get_char_property_with_frames(
-        obarray, buffers, frames, &get_args,
-    )?;
+    let initial_value =
+        super::textprop::builtin_get_char_property_with_frames(vars, buffers, frames, &get_args)?;
 
     let mut cursor = position;
     loop {
@@ -605,7 +610,7 @@ pub(crate) fn builtin_previous_single_char_property_change_in_buffers_with_symbo
             value_args.push(*object);
         }
         let value = super::textprop::builtin_get_char_property_with_frames(
-            obarray,
+            vars,
             buffers,
             frames,
             &value_args,
@@ -785,7 +790,7 @@ pub(crate) fn builtin_load(eval: &mut super::eval::Context, args: Vec<Value>) ->
         return Ok(result);
     }
     match super::load::plan_load_in_state(
-        &eval.obarray,
+        eval.variables(),
         eval.buffers.current_buffer(),
         args[0],
         args.get(1).copied(),
@@ -870,15 +875,15 @@ pub(crate) fn dynamic_or_global_symbol_value(
 }
 
 pub(super) fn dynamic_or_global_symbol_value_in_state(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     _dynamic: &[OrderedRuntimeBindingMap],
     name: &str,
 ) -> Option<Value> {
-    obarray.symbol_value_copied(name)
+    vars.value_by_name(name)
 }
 
 pub(crate) fn inherited_text_properties_for_inserted_range_in_state(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     _dynamic: &[OrderedRuntimeBindingMap],
     buffers: &crate::buffer::BufferManager,
     buf: &crate::buffer::Buffer,
@@ -886,6 +891,7 @@ pub(crate) fn inherited_text_properties_for_inserted_range_in_state(
     insert_len: usize,
     mode: SymbolMode,
 ) -> Vec<(Value, Value)> {
+    let obarray = vars.obarray();
     let insert_start_char = buf.emacs_byte_pos_to_char_pos_clamped(EmacsBytePos::new(insert_start));
     let left_props = if insert_start_char > buf.point_min_char_pos() {
         // GNU intervals are indexed by character positions (`PT`), not raw
@@ -930,7 +936,7 @@ pub(crate) fn inherited_text_properties_for_inserted_range_in_state(
     // text-property path used by GNU before deciding what padding inherits.
     let effective_stickiness = |props: &[(Value, Value)], property: StickinessProperty| {
         super::textprop::lookup_text_property_from_plist_slice(
-            obarray,
+            vars,
             buffers,
             props,
             property.value(),
@@ -941,7 +947,7 @@ pub(crate) fn inherited_text_properties_for_inserted_range_in_state(
     let right_front = effective_stickiness(&right_props, StickinessProperty::FrontSticky);
     let right_rear = effective_stickiness(&right_props, StickinessProperty::RearNonsticky);
     let default_nonsticky =
-        TextPropertyControlVariable::TextPropertyDefaultNonsticky.value_for_buffer(obarray, buf);
+        TextPropertyControlVariable::TextPropertyDefaultNonsticky.value_for_buffer(vars, buf);
 
     // GNU `adjust_intervals_for_insertion` (src/intervals.c): inserting into the
     // MIDDLE of a single uniform interval extends that interval, so the inserted
@@ -1182,8 +1188,7 @@ pub(super) fn buffer_read_only_active(
     }
 
     if eval
-        .obarray
-        .symbol_value_copied("inhibit-read-only")
+        .variable_value_by_name("inhibit-read-only")
         .is_some_and(|value| value.is_truthy())
     {
         return false;
@@ -1197,8 +1202,7 @@ pub(super) fn buffer_read_only_active(
         return value.is_truthy();
     }
 
-    eval.obarray
-        .symbol_value_copied("buffer-read-only")
+    eval.variable_value_by_name("buffer-read-only")
         .is_some_and(|value| value.is_truthy())
 }
 
@@ -1225,7 +1229,7 @@ pub(crate) fn builtin_barf_if_buffer_read_only_impl(
     };
     let point_min = buf.point_min_lisp_char_pos().as_i64();
     let read_only =
-        crate::emacs_core::editfns::buffer_read_only_active_in_state(&ctx.obarray, &[], buf);
+        crate::emacs_core::editfns::buffer_read_only_active_in_state(ctx.variables(), &[], buf);
     if !read_only {
         return Ok(Value::NIL);
     }
@@ -1308,8 +1312,7 @@ pub(crate) fn resolve_print_target_in_state(
     match printcharfun {
         Some(dest) if !dest.is_nil() => *dest,
         _ => ctx
-            .obarray
-            .symbol_value_copied("standard-output")
+            .variable_value_by_name("standard-output")
             .unwrap_or(Value::T),
     }
 }
@@ -1455,8 +1458,8 @@ fn apply_print_target_escape_bindings(
         ImplicitPrintEscape::Multibyte
     };
     if ctx
-        .obarray
-        .value_in_buffer(ctx.buffers.get(target_id), binding.as_ref())
+        .variables()
+        .value_in_buffer_by_name(ctx.buffers.get(target_id), binding.as_ref())
         .is_some_and(|value| value.is_truthy())
     {
         return Ok(());
@@ -1802,8 +1805,8 @@ pub(crate) fn print_value_princ_bytes_to_multibyte_buffer(
     // so retain the full printer whenever print-circle is enabled.
     if let Some(string) = value.as_lisp_string()
         && !ctx
-            .obarray
-            .value_in_buffer(None, "print-circle")
+            .variables()
+            .value_in_buffer_by_name(None, "print-circle")
             .is_some_and(|setting| setting.is_truthy())
     {
         // With no active circle table, entry resets numbering independently
@@ -1815,7 +1818,7 @@ pub(crate) fn print_value_princ_bytes_to_multibyte_buffer(
         )
         .into_owned();
     }
-    let mut options = super::error::print_options_from_state(&ctx.obarray, None);
+    let mut options = super::error::print_options_from_state(ctx.variables(), None);
     options.print_noescape = true;
     options.print_escape_nonascii = true;
     super::error::print_value_bytes_in_state_with_options(ctx, value, options)
@@ -2095,7 +2098,7 @@ fn prin1_string_options(
     ctx: &crate::emacs_core::eval::Context,
     escaping: ObjectEscaping,
 ) -> super::print::PrintOptions {
-    let mut options = super::error::print_options_from_state(&ctx.obarray, None);
+    let mut options = super::error::print_options_from_state(ctx.variables(), None);
     options.print_noescape = escaping.is_unescaped();
     // GNU's multibyte Vprin1_to_string_buffer implicitly binds this flag to t.
     // Retain the old rendering fallback if a watcher changes the real binding.
@@ -2113,8 +2116,7 @@ fn prepare_prin1_string(
     bind_print_overrides(ctx, overrides)?;
     let escape_nonascii = intern("print-escape-nonascii");
     let needs_binding = !ctx
-        .obarray
-        .symbol_value_id_copied(escape_nonascii)
+        .variable_value(escape_nonascii)
         .is_some_and(|value| value.is_truthy());
 
     if let Some(proof) = CallbackFreePrintLeaf::validate(value, overrides) {
@@ -2223,7 +2225,7 @@ pub(crate) fn builtin_princ(eval: &mut super::eval::Context, args: Vec<Value>) -
         }
 
         let mut options = super::error::print_options_from_state(
-            &eval.obarray,
+            eval.variables(),
             print_target_current_buffer(eval, target),
         );
         options.print_noescape = true;
@@ -2262,7 +2264,7 @@ pub(crate) fn builtin_princ_impl(
         }
         apply_print_target_escape_bindings(ctx, target)?;
         let mut options = super::error::print_options_from_state(
-            &ctx.obarray,
+            ctx.variables(),
             print_target_current_buffer(ctx, target),
         );
         options.print_noescape = true;
@@ -2296,7 +2298,7 @@ pub(crate) fn builtin_prin1(eval: &mut super::eval::Context, args: Vec<Value>) -
         let settings_source = print_settings_source(eval, target);
 
         let options = super::error::print_options_from_state(
-            &eval.obarray,
+            eval.variables(),
             print_target_current_buffer(eval, target),
         );
 
@@ -2336,7 +2338,7 @@ pub(crate) fn builtin_prin1_impl(
         }
         apply_print_target_escape_bindings(ctx, target)?;
         let options = super::error::print_options_from_state(
-            &ctx.obarray,
+            ctx.variables(),
             print_target_current_buffer(ctx, target),
         );
         // GNU `print_prepare' implicitly binds `print-escape-nonascii' /
@@ -2391,7 +2393,7 @@ pub(crate) fn builtin_print(eval: &mut super::eval::Context, args: Vec<Value>) -
         // `print-*` globals with the CALLER's buffer current -- the same rule
         // `builtin_prin1`'s function path follows. Ledger 196.
         let options = super::error::print_options_from_state(
-            &eval.obarray,
+            eval.variables(),
             print_target_current_buffer(eval, target),
         );
         let mut bytes = Vec::new();
@@ -2433,7 +2435,7 @@ pub(crate) fn builtin_print_impl(
         }
         apply_print_target_escape_bindings(ctx, target)?;
         let options = super::error::print_options_from_state(
-            &ctx.obarray,
+            ctx.variables(),
             print_target_current_buffer(ctx, target),
         );
         // Issue #131: emit canonical Emacs bytes (see `builtin_prin1_impl`).

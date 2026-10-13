@@ -3338,7 +3338,7 @@ impl crate::emacs_core::eval::Context {
     }
 
     pub(crate) fn special_event_binding(&self, event: &Value) -> Option<Value> {
-        let special_event_map = self.obarray.symbol_value_copied("special-event-map")?;
+        let special_event_map = self.variable_value_by_name("special-event-map")?;
         // GNU `read_char` calls `access_keymap` on the event head, so a
         // full lispy event like `(focus-in FRAME)` must match a keymap entry
         // stored under just `focus-in`.
@@ -3347,7 +3347,7 @@ impl crate::emacs_core::eval::Context {
             _ => *event,
         };
         let binding = crate::emacs_core::keymap::lookup_key_in_keymaps_in_obarray(
-            self.obarray(),
+            self.variables(),
             &[special_event_map],
             &[lookup_event],
             true,
@@ -6262,7 +6262,7 @@ impl crate::emacs_core::eval::Context {
         let buffer_id = window.buffer_id()?;
 
         let pair = crate::emacs_core::textprop::builtin_get_char_property_and_overlay_in_state(
-            &self.obarray,
+            self.variables(),
             &self.buffers,
             vec![
                 Value::fixnum(buffer_position),
@@ -6444,8 +6444,7 @@ impl crate::emacs_core::eval::Context {
         }
 
         let show_help_function = self
-            .obarray
-            .symbol_value_copied("show-help-function")
+            .variable_value_by_name("show-help-function")
             .unwrap_or(Value::NIL);
         if self.function_value_is_callable(&show_help_function) {
             let _ = self.funcall_general(show_help_function, vec![help])?;
@@ -6499,7 +6498,7 @@ impl crate::emacs_core::eval::Context {
             .is_some_and(|string| string.schars() > 0)
         {
             let inhibit = crate::emacs_core::textprop::builtin_get_text_property_in_state(
-                &self.obarray,
+                self.variables(),
                 &self.buffers,
                 &[
                     Value::fixnum(0),
@@ -6968,8 +6967,8 @@ impl crate::emacs_core::eval::Context {
     }
 
     fn default_tool_bar_map(&self) -> Value {
-        self.obarray()
-            .default_value_id_copied(intern("tool-bar-map"))
+        self.variables()
+            .default_value(intern("tool-bar-map"))
             .unwrap_or(Value::NIL)
     }
 

@@ -1209,8 +1209,7 @@ impl<'a> MiniDisplaySource<'a> {
             }
             self.eval.gnu_redisplay_hooks.windows = self.old_windows_scope;
             self.eval
-                .obarray
-                .set_symbol_value("deactivate-mark", self.deactivate_mark);
+                .store_variable_by_name("deactivate-mark", self.deactivate_mark);
         }
         if let Some(buffer) = self.old_buffer.take() {
             self.eval.restore_current_buffer_if_live(buffer);

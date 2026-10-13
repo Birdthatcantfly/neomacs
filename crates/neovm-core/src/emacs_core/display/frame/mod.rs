@@ -125,8 +125,7 @@ pub(crate) fn sync_gui_frame_alpha(eval: &mut super::eval::Context, frame: Frame
         .map(|frame| frame.frame_alpha)
         .unwrap_or([-1.0; 2]);
     let limit = crate::window::frame_alpha::lower_limit(
-        eval.obarray()
-            .symbol_value_id_copied(intern("frame-alpha-lower-limit"))
+        eval.variable_value(intern("frame-alpha-lower-limit"))
             .unwrap_or(Value::fixnum(20)),
     );
     if let Some(host) = eval.display_host.as_mut() {
@@ -204,8 +203,7 @@ fn iconify_frame_action(
 
     if frame.parent_frame.as_frame_id().is_some() {
         let child_policy = eval
-            .obarray()
-            .symbol_value_copied("iconify-child-frame")
+            .variable_value_by_name("iconify-child-frame")
             .unwrap_or(Value::NIL);
         if child_policy.is_nil() {
             return Ok(IconifyFrameAction::Noop);

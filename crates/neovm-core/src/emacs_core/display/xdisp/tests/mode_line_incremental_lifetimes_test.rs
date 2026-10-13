@@ -247,7 +247,10 @@ fn mode_line_incremental_split_fresh_format_survives_nested_context_gc() {
     let gc = eval.gc_count;
     let mut calls = Vec::new();
     let output = finish_format_mode_line_in_state_with_eval(
-        &obarray,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &obarray,
+        ),
         &[],
         &frames,
         &mut buffers,
@@ -328,7 +331,7 @@ fn mode_line_incremental_split_panic_releases_accumulator_owners() {
     let mut calls = 0;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = finish_format_mode_line_in_state_with_eval(
-            &eval.obarray,
+            crate::emacs_core::eval::VariableView::new(&eval.obarray, &eval.owner),
             &[],
             &eval.frames,
             &mut eval.buffers,

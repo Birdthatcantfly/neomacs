@@ -19,6 +19,7 @@ use crate::emacs_core::error::LispCondition;
 pub(crate) use crate::emacs_core::error::{
     expect_args, expect_args_range, expect_fixnum, expect_max_args, expect_min_args,
 };
+use crate::emacs_core::eval::VariableView;
 use crate::emacs_core::xdisp::LineWrap;
 use crate::emacs_core::xdisp::motion::MotionEngine;
 use crate::window::WindowChromeLine;
@@ -1574,7 +1575,7 @@ pub(crate) fn window_line_wrap(
     let current_buffer = eval.buffers.get(current_buffer_id);
     let read = |name: &str| {
         crate::emacs_core::indent::dynamic_buffer_or_global_symbol_value(
-            &eval.obarray,
+            eval.variables(),
             &[],
             current_buffer,
             name,
@@ -1622,7 +1623,7 @@ pub(crate) fn window_line_wrap(
     let current_buffer = eval.buffers.get(current_buffer_id);
     let partial_width_truncates =
         match crate::emacs_core::indent::dynamic_buffer_or_global_symbol_value(
-            &eval.obarray,
+            eval.variables(),
             &[],
             current_buffer,
             "truncate-partial-width-windows",
@@ -6113,7 +6114,7 @@ fn scroll_down_batch_error() -> Flow {
 }
 
 fn scroll_lines_in_state(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     frames: &mut FrameManager,
     buffers: &mut BufferManager,
     arg: Option<&Value>,
@@ -6127,8 +6128,8 @@ fn scroll_lines_in_state(
                 .ok()
                 .and_then(|v| v.as_fixnum())
                 .unwrap_or(24);
-            let ctx = obarray
-                .symbol_value_copied("next-screen-context-lines")
+            let ctx = vars
+                .value_by_name("next-screen-context-lines")
                 .and_then(|v| v.as_fixnum())
                 .unwrap_or(2);
             return -((wh - ctx).max(1) * direction);
@@ -6145,8 +6146,8 @@ fn scroll_lines_in_state(
         .ok()
         .and_then(|v| v.as_fixnum())
         .unwrap_or(24);
-    let ctx = obarray
-        .symbol_value_copied("next-screen-context-lines")
+    let ctx = vars
+        .value_by_name("next-screen-context-lines")
         .and_then(|v| v.as_fixnum())
         .unwrap_or(2);
     (wh - ctx).max(1) * direction
@@ -6170,7 +6171,7 @@ pub(crate) fn builtin_scroll_up(eval: &mut super::eval::Context, args: Vec<Value
         return Ok(Value::NIL);
     }
     let lines = scroll_lines_in_state(
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &mut eval.frames,
         &mut eval.buffers,
         arg.as_ref(),
@@ -6199,7 +6200,7 @@ pub(crate) fn builtin_scroll_down(eval: &mut super::eval::Context, args: Vec<Val
         return Ok(Value::NIL);
     }
     let lines = scroll_lines_in_state(
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &mut eval.frames,
         &mut eval.buffers,
         arg.as_ref(),
@@ -6617,7 +6618,7 @@ fn recenter_backward_origin(
         } => {
             if buffers.current_buffer_id() != Some(*buffer_id) {
                 let quoting_style = crate::emacs_core::coding::effective_text_quoting_style(
-                    &eval.obarray,
+                    eval.variables(),
                     eval.symbol_mode(),
                 );
                 let message = crate::emacs_core::coding::requote_c_error_message(
@@ -7182,8 +7183,7 @@ pub(crate) fn builtin_x_create_frame(
                 let enabled = explicit.parent_frame.is_none()
                     && explicit.minibuffer != Some(Value::symbol("only"))
                     && eval
-                        .obarray()
-                        .symbol_value_id_copied(intern(mode))
+                        .variable_value(intern(mode))
                         .is_some_and(|value| value.is_truthy());
                 Value::fixnum(i64::from(enabled))
             });
@@ -7868,14 +7868,14 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
         ),
     );
     // window.c:9483 — DEFVAR_LISP
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "window-persistent-parameters",
         Value::list(vec![Value::cons(Value::symbol("clone-of"), Value::T)]),
     );
-    obarray.set_symbol_value("recenter-redisplay", Value::symbol("tty"));
-    obarray.set_symbol_value("window-restore-killed-buffer-windows", Value::NIL);
-    obarray.set_symbol_value("window-combination-resize", Value::NIL);
-    obarray.set_symbol_value("window-combination-limit", Value::symbol("window-size"));
+    obarray.seed_value("recenter-redisplay", Value::symbol("tty"));
+    obarray.seed_value("window-restore-killed-buffer-windows", Value::NIL);
+    obarray.seed_value("window-combination-resize", Value::NIL);
+    obarray.seed_value("window-combination-limit", Value::symbol("window-size"));
     for name in [
         "window-persistent-parameters",
         "recenter-redisplay",
@@ -7907,16 +7907,16 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     if crate::emacs_core::eval::gnu_redisplay_hooks_enabled() {
         obarray.define_special_variable("window-configuration-change-hook", Value::NIL);
     }
-    obarray.set_symbol_value("window-sides-vertical", Value::NIL);
+    obarray.seed_value("window-sides-vertical", Value::NIL);
     // `window-sides-slots` and `fit-frame-to-buffer-sizes` are deliberately NOT
     // seeded.  GNU defines both in Lisp (`window.el`, `frame.el`) with a
     // four-element default -- `(nil nil nil nil)` -- and `defvar` only assigns
     // to a *void* symbol, so a nil seed here wins permanently and leaves the
     // list-shaped value GNU's own code indexes into.  Letting the `.el` define
     // them, as the port must, keeps the value's source identical to GNU's.
-    obarray.set_symbol_value("fit-window-to-buffer-horizontally", Value::NIL);
-    obarray.set_symbol_value("fit-frame-to-buffer", Value::NIL);
-    obarray.set_symbol_value(
+    obarray.seed_value("fit-window-to-buffer-horizontally", Value::NIL);
+    obarray.seed_value("fit-frame-to-buffer", Value::NIL);
+    obarray.seed_value(
         "fit-frame-to-buffer-margins",
         Value::list(vec![
             Value::fixnum(0),
@@ -7925,21 +7925,21 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
             Value::fixnum(0),
         ]),
     );
-    obarray.set_symbol_value("window-min-height", Value::fixnum(4));
-    obarray.set_symbol_value("window-min-width", Value::fixnum(10));
-    obarray.set_symbol_value("window-safe-min-height", Value::fixnum(1));
-    obarray.set_symbol_value("window-safe-min-width", Value::fixnum(2));
-    obarray.set_symbol_value("scroll-preserve-screen-position", Value::NIL);
+    obarray.seed_value("window-min-height", Value::fixnum(4));
+    obarray.seed_value("window-min-width", Value::fixnum(10));
+    obarray.seed_value("window-safe-min-height", Value::fixnum(1));
+    obarray.seed_value("window-safe-min-width", Value::fixnum(2));
+    obarray.seed_value("scroll-preserve-screen-position", Value::NIL);
     // window.c:9270 DEFVAR_LISP, init nil.
     obarray.define_special_variable("window-point-insertion-type", Value::NIL);
     // window.c:9247 DEFVAR_INT, init 2.
     obarray.define_int_variable("next-screen-context-lines", 2);
-    obarray.set_symbol_value("scroll-error-top-bottom", Value::NIL);
-    obarray.set_symbol_value(
+    obarray.seed_value("scroll-error-top-bottom", Value::NIL);
+    obarray.seed_value(
         "temp-buffer-max-height",
         Value::make_float(1.0 / 3.0), // (/ (frame-height) 3) approximation
     );
-    obarray.set_symbol_value("temp-buffer-max-width", Value::NIL);
+    obarray.seed_value("temp-buffer-max-width", Value::NIL);
     // `even-window-sizes' is NOT a C variable in GNU -- it is defined purely by
     // `(defcustom even-window-sizes t)' in window.el. A Rust bootstrap value
     // here would win (defcustom never overwrites an already-bound variable) and

@@ -58,7 +58,7 @@ fn gc_mode_line_split_accumulator_roots_restore_on_throw() {
     let before = save_scratch_gc_roots();
     let tag = Value::symbol("review-mode-line-throw");
     let result = finish_format_mode_line_in_state_with_eval(
-        &eval.obarray,
+        crate::emacs_core::eval::VariableView::new(&eval.obarray, &eval.owner),
         &[],
         &eval.frames,
         &mut eval.buffers,

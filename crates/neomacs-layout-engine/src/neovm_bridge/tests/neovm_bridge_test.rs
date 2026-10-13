@@ -202,36 +202,28 @@ fn collect_layout_params_reads_nobreak_char_display_global() {
         .frame_manager_mut()
         .create_frame("nobreak-frame", 800, 600, buf_id);
 
-    evaluator
-        .obarray_mut()
-        .set_symbol_value("nobreak-char-display", Value::NIL);
+    evaluator.store_variable_by_name("nobreak-char-display", Value::NIL);
     let (_, wps) = collect_layout_params(&evaluator, frame_id, None).expect("layout params");
     assert_eq!(
         wps[0].nobreak_char_display,
         crate::types::NobreakDisplayMode::Literal
     );
 
-    evaluator
-        .obarray_mut()
-        .set_symbol_value("nobreak-char-display", Value::T);
+    evaluator.store_variable_by_name("nobreak-char-display", Value::T);
     let (_, wps) = collect_layout_params(&evaluator, frame_id, None).expect("layout params");
     assert_eq!(
         wps[0].nobreak_char_display,
         crate::types::NobreakDisplayMode::HighlightOriginal
     );
 
-    evaluator
-        .obarray_mut()
-        .set_symbol_value("nobreak-char-ascii-display", Value::T);
+    evaluator.store_variable_by_name("nobreak-char-ascii-display", Value::T);
     let (_, wps) = collect_layout_params(&evaluator, frame_id, None).expect("layout params");
     assert_eq!(
         wps[0].nobreak_char_display,
         crate::types::NobreakDisplayMode::HighlightAscii
     );
 
-    evaluator
-        .obarray_mut()
-        .set_symbol_value("nobreak-char-display", Value::fixnum(2));
+    evaluator.store_variable_by_name("nobreak-char-display", Value::fixnum(2));
     let (_, wps) = collect_layout_params(&evaluator, frame_id, None).expect("layout params");
     assert_eq!(
         wps[0].nobreak_char_display,
@@ -250,7 +242,7 @@ fn test_frame_params_from_neovm() {
     let frame = frame_mgr.get(fid).unwrap();
 
     let face_table = FaceTable::new();
-    let fp = frame_params_from_neovm(frame, &face_table, runtime.obarray());
+    let fp = frame_params_from_neovm(frame, &face_table, runtime.variables());
     assert_eq!(fp.width, 1024.0);
     assert_eq!(fp.height, 768.0);
     assert_eq!(fp.tab_bar_height, 0.0);
@@ -315,7 +307,7 @@ fn window_params_resolve_special_display_face_colors() {
         window,
         buffer,
         frame,
-        evaluator.obarray(),
+        evaluator.variables(),
         evaluator.face_table(),
         None,
         true,
@@ -371,7 +363,7 @@ fn frame_params_from_neovm_uses_effective_gui_divider_widths() {
     let frame = frame_mgr.get(fid).unwrap();
 
     let face_table = FaceTable::new();
-    let fp = frame_params_from_neovm(frame, &face_table, runtime.obarray());
+    let fp = frame_params_from_neovm(frame, &face_table, runtime.variables());
     assert_eq!(fp.right_divider_width, 6);
     assert_eq!(fp.bottom_divider_width, 4);
 }
@@ -392,7 +384,7 @@ fn frame_params_from_neovm_ignores_stored_tty_divider_parameters() {
     let frame = frame_mgr.get(fid).unwrap();
 
     let face_table = FaceTable::new();
-    let fp = frame_params_from_neovm(frame, &face_table, runtime.obarray());
+    let fp = frame_params_from_neovm(frame, &face_table, runtime.variables());
     assert_eq!(fp.right_divider_width, 0);
     assert_eq!(fp.bottom_divider_width, 0);
 }
@@ -484,7 +476,7 @@ fn window_params_default_colors_follow_buffer_default_face_remap() {
         window,
         buffer,
         frame,
-        evaluator.obarray(),
+        evaluator.variables(),
         evaluator.face_table(),
         None,
         true,
@@ -532,7 +524,7 @@ fn test_window_params_from_neovm_internal_returns_none() {
         &internal,
         buf,
         frame,
-        evaluator.obarray(),
+        evaluator.variables(),
         evaluator.face_table(),
         None,
         false,
@@ -578,7 +570,7 @@ fn window_params_from_neovm_uses_default_header_line_and_tab_line_values() {
         window,
         buffer,
         frame,
-        evaluator.obarray(),
+        evaluator.variables(),
         evaluator.face_table(),
         None,
         true,
@@ -605,7 +597,8 @@ fn display_line_numbers_any_non_nil_value_is_absolute_like_gnu() {
         .create_buffer("*line-numbers*");
     let mode_for = |evaluator: &neovm_core::emacs_core::Context| {
         let buffer = evaluator.buffer_manager().get(buf_id).unwrap();
-        let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(buffer, evaluator.obarray());
+        let snapshot =
+            LayoutBufferSnapshot::from_buffer_with_obarray(buffer, evaluator.variables());
         buffer_display_line_numbers_mode(&snapshot)
     };
     let set_local = |evaluator: &mut neovm_core::emacs_core::Context, value: Value| {
@@ -646,7 +639,7 @@ fn layout_snapshot_buffer_local_value_falls_back_to_default_values() {
 
     let snapshot = {
         let buffer = evaluator.buffer_manager().get(buf_id).unwrap();
-        LayoutBufferSnapshot::from_buffer_with_obarray(buffer, evaluator.obarray())
+        LayoutBufferSnapshot::from_buffer_with_obarray(buffer, evaluator.variables())
     };
 
     assert_eq!(
@@ -681,7 +674,7 @@ fn layout_snapshot_compiles_live_lisp_automatic_composition_spans() {
 
     let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(
         evaluator.buffer_manager().get(buffer_id).expect("buffer"),
-        evaluator.obarray(),
+        evaluator.variables(),
     );
 
     assert_eq!(
@@ -728,7 +721,7 @@ fn layout_snapshot_buffer_local_value_prefers_local_binding() {
 
     let snapshot = {
         let buffer = evaluator.buffer_manager().get(buf_id).unwrap();
-        LayoutBufferSnapshot::from_buffer_with_obarray(buffer, evaluator.obarray())
+        LayoutBufferSnapshot::from_buffer_with_obarray(buffer, evaluator.variables())
     };
 
     assert_eq!(
@@ -756,7 +749,7 @@ fn layout_snapshot_sees_display_line_numbers_set_through_lisp() {
             Some(Value::T),
             "the public buffer-local value is the source of truth consumed by redisplay"
         );
-        LayoutBufferSnapshot::from_buffer_with_obarray(buffer, evaluator.obarray())
+        LayoutBufferSnapshot::from_buffer_with_obarray(buffer, evaluator.variables())
     };
 
     assert_eq!(
@@ -819,7 +812,7 @@ fn test_window_params_nonselected_reads_window_point() {
         frame.find_window(selected_window).expect("selected window"),
         buffer,
         frame,
-        evaluator.obarray(),
+        evaluator.variables(),
         evaluator.face_table(),
         None,
         false, // is_selected
@@ -1196,7 +1189,7 @@ fn test_frame_cursor_foreground_defaults_to_frame_background_like_gnu() {
     let frame = evaluator.frame_manager().get(frame_id).unwrap();
 
     assert_eq!(
-        frame_cursor_foreground_pixel(frame, evaluator.face_table(), evaluator.obarray()),
+        frame_cursor_foreground_pixel(frame, evaluator.face_table(), evaluator.variables()),
         0x123456
     );
 }
@@ -1216,7 +1209,7 @@ fn test_frame_cursor_foreground_honors_x_cursor_fore_pixel_like_gnu() {
     let frame = evaluator.frame_manager().get(frame_id).unwrap();
 
     assert_eq!(
-        frame_cursor_foreground_pixel(frame, evaluator.face_table(), evaluator.obarray()),
+        frame_cursor_foreground_pixel(frame, evaluator.face_table(), evaluator.variables()),
         0xabcdef
     );
 }

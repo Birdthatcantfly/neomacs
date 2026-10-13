@@ -117,12 +117,36 @@ fn shared_decoder_preserves_character_and_string_domains() {
     assert_eq!(read1(r"?\M-\101").as_fixnum(), Some(0x8000041));
     assert_eq!(read1(r#""\x41;b""#).as_str_owned().as_deref(), Some("A;b"));
     let ob = crate::emacs_core::symbol::Obarray::new();
-    let error = read_one("?\\\n", 0, &ob).unwrap_err();
+    let error = read_one(
+        "?\\\n",
+        0,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &ob,
+        ),
+    )
+    .unwrap_err();
     assert_eq!(error.kind, ReadErrorKind::Error);
-    let error = read_one(r"?\N{LATIN SMALL LETTER A", 0, &ob).unwrap_err();
+    let error = read_one(
+        r"?\N{LATIN SMALL LETTER A",
+        0,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &ob,
+        ),
+    )
+    .unwrap_err();
     assert_eq!(error.kind, ReadErrorKind::EndOfFile);
     for source in [r"?\Mz", r"?\Nq"] {
-        let error = read_one(source, 0, &ob).unwrap_err();
+        let error = read_one(
+            source,
+            0,
+            crate::emacs_core::eval::VariableView::canonical(
+                crate::emacs_core::symbol::CanonicalAccess::TEST,
+                &ob,
+            ),
+        )
+        .unwrap_err();
         assert_eq!(
             error.position,
             source.len(),

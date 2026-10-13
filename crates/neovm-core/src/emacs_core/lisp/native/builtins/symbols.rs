@@ -10,6 +10,7 @@ use crate::emacs_core::eval::{
 use crate::emacs_core::fontset;
 use crate::emacs_core::intern::{NIL_SYM_ID, T_SYM_ID, intern, is_canonical_id};
 use crate::emacs_core::minibuffer;
+use crate::emacs_core::symbol::CanonicalAccess;
 use crate::emacs_core::symbol::{FunctionCellSnapshot, Obarray, SymbolPlistSnapshot};
 use crate::tagged::SymbolMode;
 use crate::tagged::header::ByteCodeSlotObject;
@@ -484,11 +485,11 @@ pub(crate) fn defvaralias_impl(
     // recorded in ledger 183 rather than added: it calls `display-warning`,
     // which is Lisp, and 141 unit tests reach this primitive on a bare
     // `Context` where no Lisp is loaded.
-    if ctx.obarray.find_symbol_value(old_symbol).is_none()
-        && let Some(alias_value) = ctx.obarray.find_symbol_value(new_symbol)
+    if ctx.variable_value(old_symbol).is_none()
+        && let Some(alias_value) = ctx.variable_value(new_symbol)
     {
         let target = resolve_variable_alias_id_in_obarray(&ctx.obarray, old_symbol)?;
-        ctx.obarray.set_symbol_value_id(target, alias_value);
+        ctx.store_variable(target, alias_value);
         ctx.sync_cached_runtime_binding_by_id(target, alias_value);
         ctx.refresh_gc_runtime_settings_after_change_by_id(target);
     }
@@ -961,7 +962,7 @@ pub(crate) fn symbol_property_get(
     // follows defvaralias and reads the slot `specbind` writes, so a let-bound
     // override is honored.
     let obarray = eval.obarray();
-    let overrides = obarray.symbol_value_id_or_nil(overriding_plist_environment_symbol());
+    let overrides = eval.variable_value_or_nil(overriding_plist_environment_symbol());
     if overrides.is_cons()
         && let Some(plist) = assq_cdr_swp(&symbol_value, overrides, symbols_with_pos_enabled)
         && let Some(propval) =
@@ -1150,11 +1151,11 @@ pub(super) fn builtin_ccl_execute(eval: &mut super::eval::Context, args: Vec<Val
     {
         let mut forced = args.clone();
         forced[0] = Value::fixnum(0);
-        return super::ccl::with_ccl_obarray(obarray, || {
+        return super::ccl::with_ccl_obarray(eval.variables(), || {
             super::ccl::builtin_ccl_execute_impl_with_symbols(forced, symbol_mode)
         });
     }
-    super::ccl::with_ccl_obarray(obarray, || {
+    super::ccl::with_ccl_obarray(eval.variables(), || {
         super::ccl::builtin_ccl_execute_impl_with_symbols(args, symbol_mode)
     })
 }
@@ -1170,11 +1171,11 @@ pub(super) fn builtin_ccl_execute_on_string(
     {
         let mut forced = args.clone();
         forced[0] = Value::fixnum(0);
-        return super::ccl::with_ccl_obarray(obarray, || {
+        return super::ccl::with_ccl_obarray(eval.variables(), || {
             super::ccl::builtin_ccl_execute_on_string_impl_with_symbols(forced, symbol_mode)
         });
     }
-    super::ccl::with_ccl_obarray(obarray, || {
+    super::ccl::with_ccl_obarray(eval.variables(), || {
         super::ccl::builtin_ccl_execute_on_string_impl_with_symbols(args, symbol_mode)
     })
 }
@@ -1787,19 +1788,15 @@ pub(crate) fn is_global_obarray_proxy(eval: &super::eval::Context, value: &Value
             std::sync::OnceLock::new();
         *SYMBOL.get_or_init(|| crate::emacs_core::intern::intern("neovm--obarray-object"))
     }
-    eval.obarray()
-        .symbol_value_id_copied(neovm_obarray_object_sym())
+    eval.variable_value(neovm_obarray_object_sym())
         .is_some_and(|proxy| proxy == *value)
 }
 
 fn current_lisp_obarray_value(eval: &super::eval::Context) -> Value {
-    eval.obarray()
-        .symbol_value_copied("obarray")
-        .unwrap_or_else(|| {
-            eval.obarray()
-                .symbol_value_copied("neovm--obarray-object")
-                .unwrap_or(Value::NIL)
-        })
+    eval.variable_value_by_name("obarray").unwrap_or_else(|| {
+        eval.variable_value_by_name("neovm--obarray-object")
+            .unwrap_or(Value::NIL)
+    })
 }
 
 fn effective_obarray_arg(eval: &super::eval::Context, args: &[Value]) -> Value {
@@ -2733,8 +2730,7 @@ pub(crate) fn menu_bar_top_level_items_for_frame(
         crate::emacs_core::keymap::menu_bar_active_keymaps_for_frame_read_only(eval, frame_id)
     } else {
         let obey_overriding_local_maps = eval
-            .obarray
-            .symbol_value_copied("overriding-local-map-menu-flag")
+            .variable_value_by_name("overriding-local-map-menu-flag")
             .is_some_and(|value| value.is_truthy());
         let mut maps = crate::emacs_core::keymap::current_active_maps_for_position_read_only(
             eval,
@@ -2753,7 +2749,7 @@ pub(crate) fn menu_bar_top_level_items_for_frame(
 }
 
 fn move_menu_bar_final_items(eval: &super::eval::Context, items: &mut Vec<(Value, String)>) {
-    let Some(mut final_items) = eval.obarray().symbol_value_copied("menu-bar-final-items") else {
+    let Some(mut final_items) = eval.variable_value_by_name("menu-bar-final-items") else {
         return;
     };
     while final_items.is_cons() {
@@ -2827,8 +2823,7 @@ fn selected_frame_value(eval: &mut super::eval::Context) -> Value {
 
 fn maybe_transform_mouse_position(eval: &mut super::eval::Context, value: Value) -> EvalResult {
     let transform = eval
-        .obarray
-        .symbol_value_copied("mouse-position-function")
+        .variable_value_by_name("mouse-position-function")
         .unwrap_or(Value::NIL);
     if transform.is_truthy() {
         eval.apply(transform, vec![value])
@@ -2907,23 +2902,22 @@ pub(super) fn fontset_list_value() -> Value {
 }
 
 fn dynamic_or_global_symbol_value_in_state(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     _dynamic: &[OrderedRuntimeBindingMap],
     name: &str,
 ) -> Option<Value> {
-    obarray.symbol_value_copied(name)
+    vars.value_by_name(name)
 }
 
 pub(crate) fn builtin_new_fontset(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {
     expect_args("new-fontset", &args, 2)?;
-    let obarray = eval.obarray();
     let name = expect_string_lossy(&args[0])?;
     let char_script_table =
-        dynamic_or_global_symbol_value_in_state(obarray, &[], "char-script-table");
+        dynamic_or_global_symbol_value_in_state(eval.variables(), &[], "char-script-table");
     let charset_script_alist =
-        dynamic_or_global_symbol_value_in_state(obarray, &[], "charset-script-alist");
+        dynamic_or_global_symbol_value_in_state(eval.variables(), &[], "charset-script-alist");
     let font_encoding_alist =
-        dynamic_or_global_symbol_value_in_state(obarray, &[], "font-encoding-alist");
+        dynamic_or_global_symbol_value_in_state(eval.variables(), &[], "font-encoding-alist");
     let registered = fontset::new_fontset(
         &name,
         &args[1],
@@ -3446,13 +3440,12 @@ pub(crate) fn builtin_set_fontset_font(
     args: Vec<Value>,
 ) -> EvalResult {
     expect_args_range("set-fontset-font", &args, 3, 5)?;
-    let obarray = eval.obarray();
     let char_script_table =
-        dynamic_or_global_symbol_value_in_state(obarray, &[], "char-script-table");
+        dynamic_or_global_symbol_value_in_state(eval.variables(), &[], "char-script-table");
     let charset_script_alist =
-        dynamic_or_global_symbol_value_in_state(obarray, &[], "charset-script-alist");
+        dynamic_or_global_symbol_value_in_state(eval.variables(), &[], "charset-script-alist");
     let font_encoding_alist =
-        dynamic_or_global_symbol_value_in_state(obarray, &[], "font-encoding-alist");
+        dynamic_or_global_symbol_value_in_state(eval.variables(), &[], "font-encoding-alist");
     fontset::set_fontset_font(
         &args[0],
         &args[1],
@@ -3818,7 +3811,7 @@ pub(crate) fn builtin_transpose_regions(
     let changed_end_byte = changed_byte_span.end().get();
 
     let read_only = eval.buffers.get(current_id).is_some_and(|buf| {
-        crate::emacs_core::editfns::buffer_read_only_active_in_state(&eval.obarray, &[], buf)
+        crate::emacs_core::editfns::buffer_read_only_active_in_state(eval.variables(), &[], buf)
     });
     if read_only {
         return Err(signal(
@@ -3827,7 +3820,7 @@ pub(crate) fn builtin_transpose_regions(
         ));
     }
     crate::emacs_core::textprop::verify_text_read_only_in_state(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         current_id,
         changed_start_byte,
@@ -4364,7 +4357,7 @@ pub(crate) fn builtin_xw_display_color_p_ctx(
     }
     if super::super::display::display_window_system_symbol_in_state(
         &ctx.frames,
-        &ctx.obarray,
+        ctx.variables(),
         &[],
         args.first(),
     )?
@@ -5745,8 +5738,12 @@ pub(crate) fn builtin_dump_emacs_portable(
 
     let expanded_lisp = crate::emacs_core::fileio::expand_file_name_lisp(
         expect_lisp_string(&args[0])?,
-        crate::emacs_core::fileio::default_directory_lisp_in_state(&ctx.obarray, &[], &ctx.buffers)
-            .as_ref(),
+        crate::emacs_core::fileio::default_directory_lisp_in_state(
+            ctx.variables(),
+            &[],
+            &ctx.buffers,
+        )
+        .as_ref(),
     );
     let dump_path_buf = crate::emacs_core::fileio::lisp_file_name_to_path_buf(&expanded_lisp);
     let dump_path = dump_path_buf.as_path();
@@ -5761,11 +5758,11 @@ pub(crate) fn builtin_dump_emacs_portable(
     }
     let saved_post_gc_hook = ctx
         .obarray()
-        .symbol_value_copied("post-gc-hook")
+        .canonical_value_by_name(CanonicalAccess::DUMP, "post-gc-hook")
         .unwrap_or(Value::NIL);
     let saved_command_line_processed = ctx
         .obarray()
-        .symbol_value_copied("command-line-processed")
+        .canonical_value_by_name(CanonicalAccess::DUMP, "command-line-processed")
         .unwrap_or(Value::NIL);
     // `process-environment` is a `DEFVAR_LISP` (`src/callproc.c:2144`) that
     // `lisp/eshell/esh-var.el` and `lisp/progmodes/compile.el` localise, so it
@@ -5775,7 +5772,7 @@ pub(crate) fn builtin_dump_emacs_portable(
     // GNU's own `Fdump_emacs_portable` saves nothing of the sort. Ledger 196.
     let saved_process_environment = ctx
         .obarray()
-        .value_without_buffer("process-environment")
+        .canonical_value_without_buffer(CanonicalAccess::DUMP, "process-environment")
         .any_arm()
         .unwrap_or(Value::NIL);
     ctx.set_variable("post-gc-hook", Value::NIL);

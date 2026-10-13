@@ -7166,7 +7166,7 @@ impl<'a> Vm<'a> {
         {
             return binding.as_value().unwrap_or(Value::NIL);
         }
-        if let Some(value) = self.ctx.obarray.symbol_value_copied(name) {
+        if let Some(value) = self.ctx.variable_value_by_name(name) {
             return value;
         }
         if name == "nil" {
@@ -9506,8 +9506,8 @@ impl<'a> Vm<'a> {
             "%%defvar" => {
                 if args.len() >= 2 {
                     let sym_name = args[1].as_bare_symbol_name().unwrap_or("nil").to_string();
-                    if !self.ctx.obarray.boundp(&sym_name) {
-                        self.ctx.obarray.set_symbol_value(&sym_name, args[0]);
+                    if !self.ctx.variables().boundp_by_name(&sym_name) {
+                        self.ctx.store_variable_by_name(&sym_name, args[0]);
                     }
                     self.ctx.obarray.make_special(&sym_name);
                     return Ok(Value::symbol(sym_name));

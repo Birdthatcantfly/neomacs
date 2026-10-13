@@ -6,7 +6,7 @@
 use super::*;
 
 pub fn register_bootstrap_vars(obarray: &mut super::super::symbol::Obarray) {
-    obarray.set_symbol_value("process-connection-type", Value::T);
+    obarray.seed_value("process-connection-type", Value::T);
     obarray.make_special("process-connection-type");
     // GNU `process.c` `syms_of_process` DEFVAR_LISPs
     // `process-adaptive-read-buffering` (default nil); it controls the
@@ -18,19 +18,19 @@ pub fn register_bootstrap_vars(obarray: &mut super::super::symbol::Obarray) {
     // with `(let ((process-adaptive-read-buffering nil)) ...)`.  Without this
     // DEFVAR, code that reads the variable before calling a (non-existent)
     // helper sees `void-variable` instead of reaching the real error.
-    obarray.set_symbol_value("process-adaptive-read-buffering", Value::NIL);
+    obarray.seed_value("process-adaptive-read-buffering", Value::NIL);
     obarray.make_special("process-adaptive-read-buffering");
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "interrupt-process-functions",
         Value::list(vec![Value::symbol("internal-default-interrupt-process")]),
     );
     obarray.make_special("interrupt-process-functions");
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "signal-process-functions",
         Value::list(vec![Value::symbol("internal-default-signal-process")]),
     );
     obarray.make_special("signal-process-functions");
-    obarray.set_symbol_value("internal--daemon-sockname", Value::NIL);
+    obarray.seed_value("internal--daemon-sockname", Value::NIL);
     obarray.make_special("internal--daemon-sockname");
     obarray.define_int_variable("read-process-output-max", 65536);
     obarray.define_int_variable("process-error-pause-time", 1);
@@ -47,7 +47,7 @@ pub fn register_bootstrap_vars(obarray: &mut super::super::symbol::Obarray) {
     // `gnutls-boot` compatibility API over Rust TLS rather than linking
     // libgnutls, so keep the variable bound without pretending to have a
     // libgnutls version.  `nsm.el` reads this during HTTPS package refresh.
-    obarray.set_symbol_value("libgnutls-version", Value::fixnum(-1));
+    obarray.seed_value("libgnutls-version", Value::fixnum(-1));
     obarray.make_special("libgnutls-version");
     for (symbol, code) in [
         ("gnutls-e-interrupted", -52),
@@ -65,8 +65,10 @@ pub fn register_bootstrap_vars(obarray: &mut super::super::symbol::Obarray) {
 ///
 /// GNU Emacs defaults this to `t`, meaning processes should use PTYs.
 /// When nil, pipe-based I/O is used instead.
-pub(super) fn process_connection_type_is_pty(obarray: &super::super::symbol::Obarray) -> bool {
-    match obarray.symbol_value_copied("process-connection-type") {
+pub(super) fn process_connection_type_is_pty(
+    vars: crate::emacs_core::eval::VariableView<'_>,
+) -> bool {
+    match vars.value_by_name("process-connection-type") {
         Some(v) if v.is_nil() => false,
         Some(_) => true,
         // Default is t (PTY) when the variable has not been set.

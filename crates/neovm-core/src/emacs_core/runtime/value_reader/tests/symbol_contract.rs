@@ -5,16 +5,43 @@ use crate::heap_types::LispString;
 fn symbols_contract_delimiters_and_escape_eof() {
     crate::test_utils::init_test_tracing();
     let ob = crate::emacs_core::symbol::Obarray::new();
-    let (value, position) = read_one("gdj-symbol#tail", 0, &ob).unwrap().unwrap();
+    let (value, position) = read_one(
+        "gdj-symbol#tail",
+        0,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &ob,
+        ),
+    )
+    .unwrap()
+    .unwrap();
     assert!(value.is_symbol_named("gdj-symbol", SymbolMode::Bare));
     assert_eq!(position, 10);
     for source in ["a\\", "\\", "#:a\\", "#_a\\"] {
         assert_eq!(
-            read_one(source, 0, &ob).unwrap_err().kind,
+            read_one(
+                source,
+                0,
+                crate::emacs_core::eval::VariableView::canonical(
+                    crate::emacs_core::symbol::CanonicalAccess::TEST,
+                    &ob
+                )
+            )
+            .unwrap_err()
+            .kind,
             ReadErrorKind::EndOfFile
         );
     }
-    let (empty, position) = read_one("#_#_tail", 0, &ob).unwrap().unwrap();
+    let (empty, position) = read_one(
+        "#_#_tail",
+        0,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &ob,
+        ),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(empty.as_bare_symbol_id(), Some(intern("")));
     assert_eq!(position, 2);
     let pairs = Value::list(vec![Value::cons(
@@ -25,7 +52,14 @@ fn symbols_contract_delimiters_and_escape_eof() {
     for source in ["#_", "#_ ", "##"] {
         let source = LispString::from_unibyte(source.as_bytes().to_vec());
         let (symbol, _) = LispReadSource::new(&source)
-            .read_one_with_shorthands(0, &ob, Some(&shorthands))
+            .read_one_with_shorthands(
+                0,
+                crate::emacs_core::eval::VariableView::canonical(
+                    crate::emacs_core::symbol::CanonicalAccess::TEST,
+                    &ob,
+                ),
+                Some(&shorthands),
+            )
             .unwrap()
             .unwrap();
         let name = crate::emacs_core::intern::resolve_lisp_visible_symbol_name(
@@ -45,7 +79,13 @@ fn symbols_contract_source_encoding_is_distinct_from_byte_identity() {
     let ob = crate::emacs_core::symbol::Obarray::new();
     let source = LispString::from_unibyte(b"a\xa0b".to_vec());
     let (symbol, position) = LispReadSource::new(&source)
-        .read_one(0, &ob)
+        .read_one(
+            0,
+            crate::emacs_core::eval::VariableView::canonical(
+                crate::emacs_core::symbol::CanonicalAccess::TEST,
+                &ob,
+            ),
+        )
         .unwrap()
         .unwrap();
     assert_eq!(position, 3);
@@ -56,7 +96,13 @@ fn symbols_contract_source_encoding_is_distinct_from_byte_identity() {
     assert!(!name.text().is_multibyte());
     let source = LispString::from_emacs_bytes(b"gdj-unit-multibyte-new-name".to_vec());
     let (symbol, _) = LispReadSource::new(&source)
-        .read_one(0, &ob)
+        .read_one(
+            0,
+            crate::emacs_core::eval::VariableView::canonical(
+                crate::emacs_core::symbol::CanonicalAccess::TEST,
+                &ob,
+            ),
+        )
         .unwrap()
         .unwrap();
     let name = crate::emacs_core::intern::resolve_lisp_visible_symbol_name(
@@ -76,7 +122,14 @@ fn symbols_contract_shorthands_keep_source_order_and_skip_core_operators() {
     let shorthands = ReadSymbolShorthands::from_lisp_value(pairs).unwrap();
     let source = LispString::from_unibyte(b"s-trim".to_vec());
     let (symbol, _) = LispReadSource::new(&source)
-        .read_one_with_shorthands(0, &ob, Some(&shorthands))
+        .read_one_with_shorthands(
+            0,
+            crate::emacs_core::eval::VariableView::canonical(
+                crate::emacs_core::symbol::CanonicalAccess::TEST,
+                &ob,
+            ),
+            Some(&shorthands),
+        )
         .unwrap()
         .unwrap();
     assert!(symbol.is_symbol_named("string-trim", SymbolMode::Bare));
@@ -87,7 +140,14 @@ fn symbols_contract_shorthands_keep_source_order_and_skip_core_operators() {
     let shorthands = ReadSymbolShorthands::from_lisp_value(pairs).unwrap();
     let source = LispString::from_unibyte(b"<=".to_vec());
     let (symbol, _) = LispReadSource::new(&source)
-        .read_one_with_shorthands(0, &ob, Some(&shorthands))
+        .read_one_with_shorthands(
+            0,
+            crate::emacs_core::eval::VariableView::canonical(
+                crate::emacs_core::symbol::CanonicalAccess::TEST,
+                &ob,
+            ),
+            Some(&shorthands),
+        )
         .unwrap()
         .unwrap();
     assert!(symbol.is_symbol_named("<=", SymbolMode::Bare));

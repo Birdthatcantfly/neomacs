@@ -344,10 +344,11 @@ impl<'a> SnarfedVariable<'a> {
     /// unbound value cell.
     #[inline]
     pub(crate) fn if_bound_in(
-        obarray: &crate::emacs_core::symbol::Obarray,
+        vars: crate::emacs_core::eval::VariableView<'_>,
         id: crate::emacs_core::intern::SymId,
         name: &'a str,
     ) -> Option<Self> {
-        (obarray.boundp_id(id) || obarray.is_constant_id(id)).then_some(Self { name })
+        let obarray = vars.obarray();
+        (vars.boundp(id) || obarray.is_constant_id(id)).then_some(Self { name })
     }
 }

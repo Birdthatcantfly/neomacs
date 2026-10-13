@@ -5,6 +5,7 @@
 
 use crate::emacs_core::error::LispCondition;
 use crate::emacs_core::error::{expect_args, expect_fixnum, expect_max_args, expect_min_args};
+use crate::emacs_core::eval::VariableView;
 use crate::emacs_core::timefns::{TimestampError, UnixTimestamp};
 use std::collections::{HashMap, VecDeque};
 #[cfg(unix)]
@@ -27,7 +28,6 @@ use crate::heap_types::LispString;
 use super::error::{EvalResult, Flow, signal};
 use super::eval::Context;
 use super::intern::{intern, resolve_sym};
-use super::symbol::Obarray;
 use super::value::{
     OrderedRuntimeBindingMap, Value, ValueKind, VecLikeType, eq_value, list_to_vec,
 };
@@ -1608,7 +1608,7 @@ fn directory_files_with_decoder(
         if let Some(pattern) = match_regex {
             let matched = syntax
                 .search(
-                    &ctx.obarray,
+                    ctx.variables(),
                     &ctx.buffers,
                     pattern,
                     &name,
@@ -2345,9 +2345,7 @@ fn validate_file_truename_counter(counter: &Value) -> Result<(), Flow> {
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
 fn temporary_file_directory_for_eval(eval: &Context) -> Option<crate::heap_types::LispString> {
-    let val = eval
-        .obarray
-        .symbol_value_copied("temporary-file-directory")?;
+    let val = eval.variable_value_by_name("temporary-file-directory")?;
     val.as_lisp_string().cloned()
 }
 
@@ -3016,27 +3014,26 @@ pub(crate) fn builtin_substitute_in_file_name(eval: &mut Context, args: Vec<Valu
 /// name is installed as a `LispFwdType::BufferObj` forwarder, whose buffer-less
 /// `load()` is `None` by construction. Ledger 196.
 pub(crate) fn default_directory_lisp_in_state(
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     _dynamic: &[OrderedRuntimeBindingMap],
     buffers: &crate::buffer::BufferManager,
 ) -> Option<crate::heap_types::LispString> {
-    obarray
-        .value_in_buffer(buffers.current_buffer(), "default-directory")
+    vars.value_in_buffer_by_name(buffers.current_buffer(), "default-directory")
         .and_then(|val| val.as_lisp_string().cloned())
 }
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
 fn default_directory_lisp_for_eval(eval: &Context) -> Option<crate::heap_types::LispString> {
-    default_directory_lisp_in_state(&eval.obarray, &[], &eval.buffers)
+    default_directory_lisp_in_state(eval.variables(), &[], &eval.buffers)
 }
 
 fn raw_default_directory_value_for_eval(eval: &Context) -> Option<Value> {
-    eval.obarray
-        .value_in_buffer(eval.buffers.current_buffer(), "default-directory")
+    eval.variables()
+        .value_in_buffer_by_name(eval.buffers.current_buffer(), "default-directory")
 }
 
 fn invocation_directory_absolute_value_for_eval(eval: &Context) -> Option<Value> {
-    let value = eval.obarray.symbol_value_copied("invocation-directory")?;
+    let value = eval.variable_value_by_name("invocation-directory")?;
     let filename = value.as_lisp_string()?;
     if lisp_file_name_absolute_system_p(filename) {
         Some(value)
@@ -3067,7 +3064,7 @@ fn implicit_default_directory_value_for_expand_file_name(eval: &mut Context) -> 
 }
 
 pub(crate) fn resolve_filename_lisp_in_state(
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     dynamic: &[OrderedRuntimeBindingMap],
     buffers: &crate::buffer::BufferManager,
     filename: &crate::heap_types::LispString,
@@ -3075,7 +3072,7 @@ pub(crate) fn resolve_filename_lisp_in_state(
     if lisp_file_name_absolute_system_p(filename) {
         return filename.clone();
     }
-    let default_dir = default_directory_lisp_in_state(obarray, dynamic, buffers)
+    let default_dir = default_directory_lisp_in_state(vars, dynamic, buffers)
         .unwrap_or_else(fallback_root_default_directory);
     expand_file_name_lisp(filename, Some(&default_dir))
 }
@@ -3084,7 +3081,7 @@ pub(crate) fn resolve_filename_lisp_for_eval(
     eval: &Context,
     filename: &crate::heap_types::LispString,
 ) -> crate::heap_types::LispString {
-    resolve_filename_lisp_in_state(&eval.obarray, &[], &eval.buffers, filename)
+    resolve_filename_lisp_in_state(eval.variables(), &[], &eval.buffers, filename)
 }
 
 fn file_error_symbol(kind: ErrorKind) -> &'static str {
@@ -4881,7 +4878,7 @@ pub(crate) fn find_file_name_handler_lisp_for_eval(
     operation: Value,
 ) -> Value {
     find_file_name_handler_lisp_with_values(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         super::builtins::search::FastStringMatchSyntax::for_current_buffer(eval),
         filename,
@@ -4894,7 +4891,7 @@ pub(crate) fn find_file_name_handler_lisp_for_eval(
 
 #[allow(clippy::too_many_arguments)] // match-time state stays explicit at the GNU-regexp boundary
 fn find_file_name_handler_lisp_with_values(
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     buffers: &crate::buffer::BufferManager,
     syntax: super::builtins::search::FastStringMatchSyntax,
     filename: &crate::heap_types::LispString,
@@ -4903,6 +4900,7 @@ fn find_file_name_handler_lisp_with_values(
     inhibit_operation: Option<Value>,
     inhibit_handlers: Option<Value>,
 ) -> Value {
+    let obarray = vars.obarray();
     // Read the alist. If unbound or non-list, no handlers apply.
     let alist = match handler_alist {
         Some(v) if v.is_cons() => v,
@@ -4961,7 +4959,7 @@ fn find_file_name_handler_lisp_with_values(
 
         // Match the regexp against the filename.
         let match_pos = match syntax.search(
-            obarray,
+            vars,
             buffers,
             regexp,
             filename,
@@ -6450,7 +6448,8 @@ pub(crate) fn builtin_insert_file_contents(
                 )],
             ));
         }
-        if crate::emacs_core::editfns::buffer_read_only_active_in_state(&eval.obarray, &[], buf) {
+        if crate::emacs_core::editfns::buffer_read_only_active_in_state(eval.variables(), &[], buf)
+        {
             return Err(signal(
                 LispCondition::BufferReadOnly,
                 vec![Value::make_buffer(current_id)],
@@ -7219,8 +7218,7 @@ pub(crate) fn builtin_do_auto_save(
     eval.safe_run_hook_if_bound("auto-save-hook")?;
 
     let auto_save_visited = eval
-        .obarray
-        .symbol_value_copied("auto-save-visited-file-name")
+        .variable_value_by_name("auto-save-visited-file-name")
         .is_some_and(|v| v.is_truthy());
 
     // Collect buffer ids to process
@@ -7338,12 +7336,12 @@ pub(crate) fn builtin_do_auto_save(
 
 pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray) {
     let temporary_file_directory = std::env::temp_dir().to_string_lossy().to_string();
-    obarray.set_symbol_value("file-name-coding-system", Value::NIL);
+    obarray.seed_value("file-name-coding-system", Value::NIL);
     obarray.make_special("file-name-coding-system");
-    obarray.set_symbol_value("default-file-name-coding-system", Value::NIL);
+    obarray.seed_value("default-file-name-coding-system", Value::NIL);
     obarray.make_special("default-file-name-coding-system");
-    obarray.set_symbol_value("set-auto-coding-for-load", Value::NIL);
-    obarray.set_symbol_value("file-name-handler-alist", Value::NIL);
+    obarray.seed_value("set-auto-coding-for-load", Value::NIL);
+    obarray.seed_value("file-name-handler-alist", Value::NIL);
     obarray.make_special("file-name-handler-alist");
     // fileio.c:6856-6944 DEFVAR_LISP cluster, all initialized to nil.
     obarray.define_special_variable("set-auto-coding-function", Value::NIL);
@@ -7351,32 +7349,32 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     obarray.define_c_hook_variable("write-region-annotate-functions");
     obarray.define_special_variable("write-region-post-annotation-function", Value::NIL);
     obarray.define_special_variable("write-region-annotations-so-far", Value::NIL);
-    obarray.set_symbol_value("inhibit-file-name-handlers", Value::NIL);
+    obarray.seed_value("inhibit-file-name-handlers", Value::NIL);
     obarray.make_special("inhibit-file-name-handlers");
-    obarray.set_symbol_value("inhibit-file-name-operation", Value::NIL);
+    obarray.seed_value("inhibit-file-name-operation", Value::NIL);
     obarray.make_special("inhibit-file-name-operation");
-    obarray.set_symbol_value("directory-abbrev-alist", Value::NIL);
-    obarray.set_symbol_value("auto-save-list-file-name", Value::NIL);
+    obarray.seed_value("directory-abbrev-alist", Value::NIL);
+    obarray.seed_value("auto-save-list-file-name", Value::NIL);
     obarray.make_special("auto-save-list-file-name");
-    obarray.set_symbol_value("auto-save-list-file-prefix", Value::NIL);
-    obarray.set_symbol_value("auto-save-visited-file-name", Value::NIL);
+    obarray.seed_value("auto-save-list-file-prefix", Value::NIL);
+    obarray.seed_value("auto-save-visited-file-name", Value::NIL);
     // fileio.c:6944 DEFVAR_LISP, init nil.
     obarray.define_special_variable("auto-save-include-big-deletions", Value::NIL);
-    obarray.set_symbol_value("small-temporary-file-directory", Value::NIL);
-    obarray.set_symbol_value("auto-save-file-name-transforms", Value::NIL);
-    obarray.set_symbol_value(
+    obarray.seed_value("small-temporary-file-directory", Value::NIL);
+    obarray.seed_value("auto-save-file-name-transforms", Value::NIL);
+    obarray.seed_value(
         "temporary-file-directory",
         Value::string(temporary_file_directory),
     );
     obarray.make_special("temporary-file-directory");
 
     // Backup-related variables
-    obarray.set_symbol_value("make-backup-files", Value::T);
-    obarray.set_symbol_value("backup-inhibited", Value::NIL);
-    obarray.set_symbol_value("version-control", Value::NIL);
-    obarray.set_symbol_value("backup-directory-alist", Value::NIL);
+    obarray.seed_value("make-backup-files", Value::T);
+    obarray.seed_value("backup-inhibited", Value::NIL);
+    obarray.seed_value("version-control", Value::NIL);
+    obarray.seed_value("backup-directory-alist", Value::NIL);
     // files.el: defvar for vc-hooks.el and locate-dominating-file
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "locate-dominating-stop-dir-regexp",
         Value::string(r"\`\(?:[\\/][\\/][^\\/]+[\\/]\|/\(?:net\|afs\|\.\.\.\)/\)\'"),
     );

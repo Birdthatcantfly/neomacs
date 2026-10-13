@@ -211,7 +211,7 @@ fn property_keys_preserve_category_alias_default_nil_overlay_and_extent_order() 
             .overlay_put(overlay, alias, Value::symbol("d5-overlay-face"));
     }
     let buffer = eval.buffer_manager().get(buffer_id).unwrap();
-    let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(buffer, eval.obarray());
+    let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(buffer, eval.variables());
     // A snapshot owns cloned overlays and preserves their precedence serials.
     // Property-source identity must name that snapshot's object.
     let snapshot_overlays = snapshot

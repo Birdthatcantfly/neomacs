@@ -459,7 +459,7 @@ pub(crate) fn builtin_char_equal_2(
         return Ok(Value::bool_val(true));
     }
     let case_fold = super::misc_eval::dynamic_or_global_symbol_value_in_state(
-        &eval.obarray,
+        eval.variables(),
         &[],
         "case-fold-search",
     )

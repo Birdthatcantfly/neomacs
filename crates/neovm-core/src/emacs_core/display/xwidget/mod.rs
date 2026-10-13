@@ -20,6 +20,7 @@ use super::value::{Value, eq_value};
 use crate::emacs_core::display_host::XwidgetScriptRequestId;
 use crate::emacs_core::error::LispCondition;
 use crate::emacs_core::error::expect_args_range;
+use crate::emacs_core::eval::VariableStore;
 use crate::heap_types::LispString;
 use crate::keyboard::{FrontendLoadPhase, FrontendWebValue, FrontendWebViewEvent};
 use neomacs_display_protocol::{WebViewId, XwidgetId};
@@ -364,12 +365,12 @@ impl XwidgetState {
         }
     }
 
-    fn publish(&self, obarray: &mut Obarray) {
-        obarray.set_symbol_value(
+    fn publish(&self, vars: &mut VariableStore<'_>) {
+        vars.store_by_name(
             "xwidget-list",
             shallow_copy_list(self.internal_xwidget_list),
         );
-        obarray.set_symbol_value(
+        vars.store_by_name(
             "xwidget-view-list",
             shallow_copy_list(self.internal_xwidget_view_list),
         );
@@ -419,11 +420,11 @@ impl Context {
 }
 
 pub(crate) fn init_xwidget_variables(obarray: &mut Obarray) {
-    obarray.set_symbol_value("xwidget-list", Value::NIL);
+    obarray.seed_value("xwidget-list", Value::NIL);
     obarray.make_special("xwidget-list");
-    obarray.set_symbol_value("xwidget-view-list", Value::NIL);
+    obarray.seed_value("xwidget-view-list", Value::NIL);
     obarray.make_special("xwidget-view-list");
-    obarray.set_symbol_value("xwidget-webkit-disable-javascript", Value::NIL);
+    obarray.seed_value("xwidget-webkit-disable-javascript", Value::NIL);
     obarray.make_special("xwidget-webkit-disable-javascript");
 }
 
@@ -583,11 +584,14 @@ fn create(eval: &mut Context, args: Vec<Value>) -> EvalResult {
     eval.xwidgets.ensure_webkit_state(webview_id);
     eval.xwidgets.internal_xwidget_list = Value::cons(xwidget, eval.xwidgets.internal_xwidget_list);
     let xwidgets = &eval.xwidgets;
+    let owner = &mut eval.owner;
     // SAFETY: publish only stores xwidget-list value cells; host callbacks run
     // outside this noncalling phase, which cannot change canonical dispatch.
     unsafe {
-        eval.obarray
-            .with_legacy_value_write(|obarray| xwidgets.publish(obarray));
+        eval.obarray.with_legacy_value_write(|obarray| {
+            let mut vars = VariableStore::new(obarray, owner.slab_mut());
+            xwidgets.publish(&mut vars)
+        });
     }
     Ok(xwidget)
 }
@@ -676,11 +680,14 @@ fn delete_view(eval: &mut Context, args: Vec<Value>) -> EvalResult {
     eval.xwidgets.internal_xwidget_view_list =
         delq_from_list(eval.xwidgets.internal_xwidget_view_list, value);
     let xwidgets = &eval.xwidgets;
+    let owner = &mut eval.owner;
     // SAFETY: publish only stores xwidget-list value cells; host callbacks run
     // outside this noncalling phase, which cannot change canonical dispatch.
     unsafe {
-        eval.obarray
-            .with_legacy_value_write(|obarray| xwidgets.publish(obarray));
+        eval.obarray.with_legacy_value_write(|obarray| {
+            let mut vars = VariableStore::new(obarray, owner.slab_mut());
+            xwidgets.publish(&mut vars)
+        });
     }
     Ok(Value::NIL)
 }
@@ -765,11 +772,14 @@ fn kill(eval: &mut Context, args: Vec<Value>) -> EvalResult {
     eval.xwidgets.internal_xwidget_list =
         delq_from_list(eval.xwidgets.internal_xwidget_list, value);
     let xwidgets = &eval.xwidgets;
+    let owner = &mut eval.owner;
     // SAFETY: publish only stores xwidget-list value cells; host callbacks run
     // outside this noncalling phase, which cannot change canonical dispatch.
     unsafe {
-        eval.obarray
-            .with_legacy_value_write(|obarray| xwidgets.publish(obarray));
+        eval.obarray.with_legacy_value_write(|obarray| {
+            let mut vars = VariableStore::new(obarray, owner.slab_mut());
+            xwidgets.publish(&mut vars)
+        });
     }
     if let Some(host) = eval.display_host.as_ref() {
         host.destroy_webkit_xwidget(id)

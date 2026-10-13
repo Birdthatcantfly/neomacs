@@ -229,7 +229,7 @@ fn scan<M: ScanMode>(
     let buf = eval.buffers.current_buffer().expect("current buffer");
     let table = SyntaxTable::for_buffer(buf);
     let honor = parse_sexp_lookup_properties_enabled(eval);
-    let props = SyntaxProperties::for_scan(honor, &eval.obarray, &eval.buffers);
+    let props = SyntaxProperties::for_scan(honor, eval.variables(), &eval.buffers);
     let escape_policy = CommentEndEscapePolicy::for_context(eval);
     run_parse_loop(
         buf,
@@ -261,7 +261,7 @@ fn syntax_at(
     let buf = eval.buffers.current_buffer().expect("current buffer");
     let table = SyntaxTable::for_buffer(buf);
     let honor = parse_sexp_lookup_properties_enabled(eval);
-    let props = SyntaxProperties::for_scan(honor, &eval.obarray, &eval.buffers);
+    let props = SyntaxProperties::for_scan(honor, eval.variables(), &eval.buffers);
     let prop_cache = SyntaxPropRange::new(props);
     let ch = ParseBufferChars::at_emacs_byte(buf, at.byte_pos).peek();
     let entry = effective_syntax_entry_for_abs_char(buf, &table, ch, at.char_pos, &prop_cache);
@@ -318,7 +318,7 @@ fn a_scan_resumed_at_any_loop_top_answers_as_the_uninterrupted_scan() {
                             let buf = eval.buffers.current_buffer().expect("buffer");
                             let table = SyntaxTable::for_buffer(buf);
                             let props =
-                                SyntaxProperties::for_scan(honor, &eval.obarray, &eval.buffers);
+                                SyntaxProperties::for_scan(honor, eval.variables(), &eval.buffers);
                             let policy = CommentEndEscapePolicy::for_context(&eval);
                             let (state, _) = parse_state_from_range_with_options(
                                 buf,

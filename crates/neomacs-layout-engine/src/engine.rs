@@ -328,11 +328,7 @@ fn resize_mini_windows_mode_for_buffer(
         .buffer_manager()
         .get(buffer_id)
         .and_then(|buffer| buffer.buffer_local_value("resize-mini-windows"))
-        .or_else(|| {
-            evaluator
-                .obarray()
-                .symbol_value_copied("resize-mini-windows")
-        });
+        .or_else(|| evaluator.variable_value_by_name("resize-mini-windows"));
     ResizeMiniWindowsMode::from_lisp_value(value.as_ref())
 }
 
@@ -347,9 +343,7 @@ fn uses_adhoc_minibuffer_resize_scroll(
             buffer.buffer_local_value("redisplay-adhoc-scroll-in-resize-mini-windows")
         })
         .or_else(|| {
-            evaluator
-                .obarray()
-                .symbol_value_copied("redisplay-adhoc-scroll-in-resize-mini-windows")
+            evaluator.variable_value_by_name("redisplay-adhoc-scroll-in-resize-mini-windows")
         })
         .is_none_or(|value| !value.is_nil())
 }
@@ -719,11 +713,7 @@ fn window_source_has_fontification_callbacks(
         .buffer_manager()
         .get(neovm_core::buffer::BufferId(buffer_id))
         .and_then(|buffer| buffer.buffer_local_value("fontification-functions"))
-        .or_else(|| {
-            evaluator
-                .obarray()
-                .symbol_value_copied("fontification-functions")
-        })
+        .or_else(|| evaluator.variable_value_by_name("fontification-functions"))
         .is_some_and(|value| !value.is_nil())
 }
 
@@ -813,7 +803,7 @@ fn collect_live_window_layout_inputs(
             live_window,
             buffer,
             live_frame,
-            evaluator.obarray(),
+            evaluator.variables(),
             evaluator.face_table(),
             default_font_ascent,
             super::neovm_bridge::WindowDisplayRole {
@@ -831,7 +821,7 @@ fn collect_live_window_layout_inputs(
             super::neovm_bridge::frame_params_from_neovm(
                 live_frame,
                 evaluator.face_table(),
-                evaluator.obarray(),
+                evaluator.variables(),
             ),
             window,
             root_bounds.y + root_bounds.height,
@@ -867,19 +857,14 @@ fn max_mini_window_lines_for_window(
         .buffer_manager()
         .get(buf_id)
         .and_then(|buffer| buffer.buffer_local_value("max-mini-window-height"))
-        .or_else(|| {
-            evaluator
-                .obarray()
-                .symbol_value_copied("max-mini-window-height")
-        })
+        .or_else(|| evaluator.variable_value_by_name("max-mini-window-height"))
         .unwrap_or_else(|| Value::make_float(0.25));
     max_mini_window_lines_from_value(raw, frame_rows)
 }
 
 fn tab_bar_button_relief_geometry(evaluator: &neovm_core::emacs_core::Context) -> (f32, f32, f32) {
     let margin = evaluator
-        .obarray()
-        .symbol_value_copied("tab-bar-button-margin")
+        .variable_value_by_name("tab-bar-button-margin")
         .unwrap_or_else(|| Value::fixnum(1));
     let (horizontal_margin, vertical_margin) = if let Some(value) = margin.as_int() {
         let value = value.max(0) as f32;
@@ -893,8 +878,7 @@ fn tab_bar_button_relief_geometry(evaluator: &neovm_core::emacs_core::Context) -
         (1.0, 1.0)
     };
     let configured_thickness = evaluator
-        .obarray()
-        .symbol_value_copied("tab-bar-button-relief")
+        .variable_value_by_name("tab-bar-button-relief")
         .and_then(Value::as_int)
         .unwrap_or(1);
     let thickness = if configured_thickness < 0 {
@@ -1857,7 +1841,7 @@ impl LayoutEngine {
             let bootstrap = super::neovm_bridge::frame_params_from_neovm(
                 frame,
                 evaluator.face_table(),
-                evaluator.obarray(),
+                evaluator.variables(),
             );
             let ws = frame
                 .effective_window_system()
@@ -1879,10 +1863,9 @@ impl LayoutEngine {
             font_metrics.set_device_scale(device_scale);
             let font_catalog_changed = font_metrics.synchronize_font_catalog().changed();
             let use_primary_font = evaluator
-                .obarray()
-                .symbol_value_copied("use-default-font-for-symbols")
+                .variable_value_by_name("use-default-font-for-symbols")
                 .is_none_or(|value| !value.is_nil());
-            let char_script_table = evaluator.obarray().symbol_value_copied("char-script-table");
+            let char_script_table = evaluator.variable_value_by_name("char-script-table");
             let symbol_policy_changed = font_metrics
                 .synchronize_symbol_font_policy(use_primary_font, char_script_table)
                 .changed();
@@ -2217,8 +2200,7 @@ impl LayoutEngine {
                         let mut alpha = frame.frame_alpha;
                         let limit = neovm_core::window::frame_alpha::lower_limit(
                             evaluator
-                                .obarray()
-                                .symbol_value_copied("frame-alpha-lower-limit")
+                                .variable_value_by_name("frame-alpha-lower-limit")
                                 .unwrap_or(Value::fixnum(20)),
                         );
                         for value in &mut alpha {
@@ -3281,8 +3263,7 @@ impl LayoutEngine {
             }
         };
         frame_display_state.scroll_input_policy.x11_delta_factor = evaluator
-            .obarray()
-            .symbol_value_copied("x-scroll-event-delta-factor")
+            .variable_value_by_name("x-scroll-event-delta-factor")
             .and_then(|value| value.as_number_f64())
             .filter(|factor| factor.is_finite())
             .unwrap_or(1.0);
@@ -3886,11 +3867,7 @@ impl LayoutEngine {
             .buffer_manager()
             .get(request.buffer)
             .and_then(|buffer| buffer.buffer_local_value("max-mini-window-height"))
-            .or_else(|| {
-                evaluator
-                    .obarray()
-                    .symbol_value_copied("max-mini-window-height")
-            })
+            .or_else(|| evaluator.variable_value_by_name("max-mini-window-height"))
             .unwrap_or_else(|| Value::make_float(0.25));
         let max_lines = max_mini_window_lines_from_value(raw_maximum, frame_rows);
         self.mini_preparation_height = None;
@@ -4789,7 +4766,7 @@ impl LayoutEngine {
             Some(buffer) => {
                 super::neovm_bridge::LayoutBufferSnapshot::from_buffer_for_window_with_symbols(
                     buffer,
-                    evaluator.obarray(),
+                    evaluator.variables(),
                     Some(visible_char_bound(params)),
                     display_target,
                     evaluator.symbol_mode(),

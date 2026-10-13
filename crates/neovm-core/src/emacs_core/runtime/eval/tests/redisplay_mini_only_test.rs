@@ -124,7 +124,7 @@ fn mini_only_fallback_throw_restores_transaction_without_paint() {
     eval.redisplay_fn = Some(Box::new(move |_| observed.set(observed.get() + 1)));
     let form = crate::emacs_core::value_reader::read_all(
         "(let ((resize-mini-frames t)) (redisplay t))",
-        &eval.obarray,
+        eval.variables(),
     )
     .expect("dynamic mini form")
     .pop()

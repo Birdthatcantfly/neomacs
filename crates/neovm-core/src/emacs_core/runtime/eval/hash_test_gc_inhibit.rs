@@ -32,10 +32,7 @@ impl Context {
             entry_percentage_scaled: self.gc_runtime_settings_cache.gc_cons_percentage_scaled,
             threshold_overridden: self.tagged_heap.gc_threshold_is_overridden(),
             memory_full: self.gc_runtime_settings_cache.memory_full.is_full(),
-            startup_ceiling: !self
-                .obarray
-                .symbol_value_id_or_nil(syms.startup_ceiling)
-                .is_nil(),
+            startup_ceiling: !self.variable_value_or_nil(syms.startup_ceiling).is_nil(),
         }
     }
 

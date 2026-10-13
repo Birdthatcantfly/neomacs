@@ -2,7 +2,14 @@ use super::*;
 
 fn read_result(input: &str) -> Result<Option<(Value, usize)>, ReadError> {
     let ob = crate::emacs_core::symbol::Obarray::new();
-    read_one(input, 0, &ob)
+    read_one(
+        input,
+        0,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &ob,
+        ),
+    )
 }
 
 #[test]

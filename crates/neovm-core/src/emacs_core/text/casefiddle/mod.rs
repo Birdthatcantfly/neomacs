@@ -918,7 +918,7 @@ fn casify_replace_current_buffer_region(
                 .emacs_byte_pos_to_lisp_char_pos(byte_range.end())
                 .to_char_pos());
         }
-        if super::editfns::buffer_read_only_active_in_state(&eval.obarray, &[], buf) {
+        if super::editfns::buffer_read_only_active_in_state(eval.variables(), &[], buf) {
             return Err(signal(
                 LispCondition::BufferReadOnly,
                 vec![buf.name_value()],
@@ -927,7 +927,7 @@ fn casify_replace_current_buffer_region(
         (buf.id, byte_range)
     };
     crate::emacs_core::textprop::verify_text_read_only_emacs_byte_range_in_state(
-        &eval.obarray,
+        eval.variables(),
         &eval.buffers,
         buffer_id,
         byte_range,

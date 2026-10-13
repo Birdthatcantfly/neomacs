@@ -4,6 +4,7 @@
 //! the same view of `Context` and the parent's private items (`use super::*`).
 
 use super::*;
+use crate::emacs_core::symbol::CanonicalAccess;
 
 /// Select raw constructor storage BEFORE the World is sealed or callable.
 /// There is no safe replacement of an admitted manager beneath a continuation.
@@ -152,51 +153,51 @@ impl Context {
         // Set up standard global variables
         // Match GNU data.c: DEFVAR_LISP marks these symbols declared-special,
         // then make_symbol_constant installs the SYMBOL_NOWRITE trap.
-        obarray.set_symbol_value("most-positive-fixnum", Value::fixnum(i64::MAX >> 2));
+        obarray.seed_value("most-positive-fixnum", Value::fixnum(i64::MAX >> 2));
         obarray.make_special("most-positive-fixnum");
         obarray.set_constant("most-positive-fixnum");
-        obarray.set_symbol_value("most-negative-fixnum", Value::fixnum(-(i64::MAX >> 2) - 1));
+        obarray.seed_value("most-negative-fixnum", Value::fixnum(-(i64::MAX >> 2) - 1));
         obarray.make_special("most-negative-fixnum");
         obarray.set_constant("most-negative-fixnum");
         // Mathematical constants (defconst in float-sup.el)
-        obarray.set_symbol_value("float-e", Value::make_float(std::f64::consts::E));
-        obarray.set_symbol_value("float-pi", Value::make_float(std::f64::consts::PI));
-        obarray.set_symbol_value("pi", Value::make_float(std::f64::consts::PI));
-        obarray.set_symbol_value("emacs-version", Value::string(crate::GNU_EMACS_VERSION));
+        obarray.seed_value("float-e", Value::make_float(std::f64::consts::E));
+        obarray.seed_value("float-pi", Value::make_float(std::f64::consts::PI));
+        obarray.seed_value("pi", Value::make_float(std::f64::consts::PI));
+        obarray.seed_value("emacs-version", Value::string(crate::GNU_EMACS_VERSION));
         obarray.make_special("emacs-version");
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "emacs-copyright",
             Value::string("Copyright (C) 2026 Free Software Foundation, Inc."),
         );
         obarray.make_special("emacs-copyright");
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "emacs-major-version",
             Value::fixnum(i64::from(crate::GNU_EMACS_MAJOR_VERSION)),
         );
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "emacs-minor-version",
             Value::fixnum(i64::from(crate::GNU_EMACS_MINOR_VERSION)),
         );
-        obarray.set_symbol_value("emacs-build-number", Value::fixnum(1));
-        obarray.set_symbol_value("system-type", Value::symbol(gnu_system_type()));
+        obarray.seed_value("emacs-build-number", Value::fixnum(1));
+        obarray.seed_value("system-type", Value::symbol(gnu_system_type()));
         obarray.make_special("system-type");
         // GNU Emacs uses unibyte for default-directory during dump because
         // the locale isn't set up yet (see init_buffer in buffer.c).
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "default-directory",
             Value::unibyte_string(default_directory.clone()),
         );
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "command-line-default-directory",
             Value::unibyte_string(default_directory),
         );
         let obarray_object = Value::vector(vec![Value::NIL]);
-        obarray.set_symbol_value("obarray", obarray_object);
-        obarray.set_symbol_value("neovm--obarray-object", obarray_object);
+        obarray.seed_value("obarray", obarray_object);
+        obarray.seed_value("neovm--obarray-object", obarray_object);
         obarray.make_special("obarray");
-        obarray.set_symbol_value("standard-input", Value::T);
+        obarray.seed_value("standard-input", Value::T);
         obarray.make_special("standard-input");
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "command-line-args",
             Value::list(vec![
                 Value::string("neovm-worker"),
@@ -204,11 +205,11 @@ impl Context {
             ]),
         );
         obarray.make_special("command-line-args");
-        obarray.set_symbol_value("command-line-args-left", Value::NIL);
-        obarray.set_symbol_value("command-line-functions", Value::NIL);
-        obarray.set_symbol_value("command-line-processed", Value::T);
-        obarray.set_symbol_value("command-switch-alist", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("command-line-args-left", Value::NIL);
+        obarray.seed_value("command-line-functions", Value::NIL);
+        obarray.seed_value("command-line-processed", Value::T);
+        obarray.seed_value("command-switch-alist", Value::NIL);
+        obarray.seed_value(
             "pdumper-fingerprint",
             Value::string(crate::emacs_core::pdump::fingerprint_hex()),
         );
@@ -227,11 +228,11 @@ impl Context {
             .and_then(|p| p.parent())
             .map(|d| format!("{}/", d.to_string_lossy()))
             .unwrap_or_else(|| "./".to_string());
-        obarray.set_symbol_value("invocation-name", Value::string(invocation_name));
+        obarray.seed_value("invocation-name", Value::string(invocation_name));
         obarray.make_special("invocation-name");
-        obarray.set_symbol_value("invocation-directory", Value::string(invocation_directory));
+        obarray.seed_value("invocation-directory", Value::string(invocation_directory));
         obarray.make_special("invocation-directory");
-        obarray.set_symbol_value("installation-directory", Value::NIL);
+        obarray.seed_value("installation-directory", Value::NIL);
         obarray.make_special("installation-directory");
         // GNU `callproc.c` initializes this from the build-time `PATH_INFO`
         // (`epaths.h`, default "/usr/local/share/info"), never nil.  Lisp
@@ -239,18 +240,18 @@ impl Context {
         // `(file-name-as-directory configure-info-directory)`, which errors
         // with `(wrong-type-argument stringp nil)` when nil and breaks
         // `doom sync` (GitHub issue #127).  Mirror GNU's default constant.
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "configure-info-directory",
             Value::string("/usr/local/share/info"),
         );
         // GNU keyboard.c: internal--top-level-message for command loop entry
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "internal--top-level-message",
             Value::string("Back to top level"),
         );
         // charset.c:2426 DEFVAR_LISP, init nil.
         obarray.define_special_variable("charset-map-path", Value::NIL);
-        obarray.set_symbol_value("doc-directory", Value::NIL);
+        obarray.seed_value("doc-directory", Value::NIL);
         // `warning-minimum-level` and `warning-minimum-log-level` are
         // `defcustom`s in `warnings.el` and are deliberately NOT seeded.  GNU
         // leaves both unbound until that file loads, and `defcustom` only
@@ -259,9 +260,9 @@ impl Context {
         // say, while making `boundp` disagree with GNU at the same moment.
         // GNU callproc.c defines these with DEFVAR_LISP, so lexical-binding
         // Lisp must treat them as dynamically scoped special variables.
-        obarray.set_symbol_value("process-environment", Value::NIL);
+        obarray.seed_value("process-environment", Value::NIL);
         obarray.make_special("process-environment");
-        obarray.set_symbol_value("initial-environment", Value::NIL);
+        obarray.seed_value("initial-environment", Value::NIL);
         obarray.make_special("initial-environment");
         // GNU uses "emacsclient" here because the matching client is part of
         // its installation.  Neomacs must advertise the client it owns, so
@@ -275,38 +276,38 @@ impl Context {
             ("ebrowse-program-name", "ebrowse"),
             ("rcs2log-program-name", "rcs2log"),
         ] {
-            obarray.set_symbol_value(name, Value::unibyte_string(program));
+            obarray.seed_value(name, Value::unibyte_string(program));
             obarray.make_special(name);
         }
-        obarray.set_symbol_value("path-separator", Value::string(":"));
+        obarray.seed_value("path-separator", Value::string(":"));
         obarray.make_special("path-separator");
-        obarray.set_symbol_value("shared-game-score-directory", Value::NIL);
-        obarray.set_symbol_value("system-messages-locale", Value::NIL);
+        obarray.seed_value("shared-game-score-directory", Value::NIL);
+        obarray.seed_value("system-messages-locale", Value::NIL);
         obarray.make_special("system-messages-locale");
-        obarray.set_symbol_value("system-time-locale", Value::NIL);
+        obarray.seed_value("system-time-locale", Value::NIL);
         obarray.make_special("system-time-locale");
-        obarray.set_symbol_value("before-init-time", Value::NIL);
+        obarray.seed_value("before-init-time", Value::NIL);
         obarray.make_special("before-init-time");
-        obarray.set_symbol_value("after-init-time", Value::NIL);
+        obarray.seed_value("after-init-time", Value::NIL);
         obarray.make_special("after-init-time");
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "system-configuration",
             super::super::builtins_extra::system_configuration_value(),
         );
         obarray.make_special("system-configuration");
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "system-configuration-options",
             super::super::builtins_extra::system_configuration_options_value(),
         );
         obarray.make_special("system-configuration-options");
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "system-configuration-features",
             super::super::builtins_extra::system_configuration_features_value(),
         );
         obarray.make_special("system-configuration-features");
         // GNU `keyboard.c` defines this with DEFVAR_LISP, so lexical-binding
         // Lisp must treat it as dynamically scoped.
-        obarray.set_symbol_value("delayed-warnings-list", Value::NIL);
+        obarray.seed_value("delayed-warnings-list", Value::NIL);
         obarray.make_special("delayed-warnings-list");
         // `delayed-warnings-hook` is marked special but deliberately NOT given
         // a value.  GNU's `subr.el` defines it as
@@ -323,7 +324,7 @@ impl Context {
         // reader, `command_loop.rs`'s `safe_run_hook_if_bound`, is
         // bound-guarded either way.
         obarray.make_special("delayed-warnings-hook");
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "command-line-ns-option-alist",
             Value::list(vec![Value::list(vec![
                 Value::string("-NSOpen"),
@@ -331,7 +332,7 @@ impl Context {
                 Value::symbol("ns-handle-nxopen"),
             ])]),
         );
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "command-line-x-option-alist",
             Value::list(vec![Value::list(vec![
                 Value::string("-display"),
@@ -339,17 +340,17 @@ impl Context {
                 Value::symbol("x-handle-display"),
             ])]),
         );
-        obarray.set_symbol_value("load-path", Value::NIL);
+        obarray.seed_value("load-path", Value::NIL);
         obarray.make_special("load-path");
-        obarray.set_symbol_value("load-history", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("load-history", Value::NIL);
+        obarray.seed_value(
             "fontset-alias-alist",
             super::super::builtins::symbols::fontset_alias_alist_startup_value(),
         );
         // GNU Emacs with module support includes the module suffixes before
         // compiled and source Lisp suffixes, secondary suffix first -- on darwin
         // `(".so" ".dylib" ".elc" ".el")`, see `load_suffixes_startup_values_for_os`.
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "load-suffixes",
             Value::list(
                 super::super::lread::load_suffixes_startup_values_for_os(std::env::consts::OS)
@@ -359,12 +360,12 @@ impl Context {
             ),
         );
         obarray.make_special("load-suffixes");
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "module-file-suffix",
             Value::make_string(super::super::lread::module_file_suffix()),
         );
         obarray.make_special("module-file-suffix");
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "dynamic-library-suffixes",
             Value::list(
                 super::super::lread::dynamic_library_suffixes_for_os(std::env::consts::OS)
@@ -374,7 +375,7 @@ impl Context {
             ),
         );
         obarray.make_special("dynamic-library-suffixes");
-        obarray.set_symbol_value("dynamic-library-alist", Value::NIL);
+        obarray.seed_value("dynamic-library-alist", Value::NIL);
         obarray.make_special("dynamic-library-alist");
         let dynamic_library_alist = intern("dynamic-library-alist");
         obarray
@@ -386,23 +387,27 @@ impl Context {
             .expect("setting dynamic-library-alist property should not fail");
         // load-file-rep-suffixes: suffixes for alternate representations of
         // the same file (e.g., compressed ".gz").  Default is just ("").
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "load-file-rep-suffixes",
             Value::list(vec![Value::string("")]),
         );
         obarray.make_special("load-file-rep-suffixes");
         // file-coding-system-alist: needed by jka-cmpr-hook.el and others.
-        obarray.set_symbol_value("file-coding-system-alist", Value::NIL);
+        obarray.seed_value("file-coding-system-alist", Value::NIL);
         // GNU fns.c initializes `features' to include `emacs', and
         // thread.c:syms_of_threads provides `threads' when thread builtins
         // are installed.
-        obarray.set_symbol_value("features", initial_features_value());
+        obarray.seed_value("features", initial_features_value());
         super::super::xwidget::init_xwidget_variables(obarray);
-        obarray.set_symbol_value_id(lexical_binding_symbol(), Value::NIL);
-        obarray.set_symbol_value("load-file-name", Value::NIL);
+        obarray.set_canonical_value(
+            CanonicalAccess::BOOTSTRAP,
+            lexical_binding_symbol(),
+            Value::NIL,
+        );
+        obarray.seed_value("load-file-name", Value::NIL);
         obarray.make_special("load-file-name");
-        obarray.set_symbol_value("inhibit-quit", Value::NIL);
-        obarray.set_symbol_value("float-output-format", Value::NIL);
+        obarray.seed_value("inhibit-quit", Value::NIL);
+        obarray.seed_value("float-output-format", Value::NIL);
         obarray.make_special("float-output-format");
         // GNU Emacs print.c: all print-* variables are DEFVAR_BOOL or
         // DEFVAR_LISP, making them dynamically scoped (special).
@@ -418,11 +423,11 @@ impl Context {
             "print-charset-text-property",
             "print-unreadable-function",
         ] {
-            obarray.set_symbol_value(name, Value::NIL);
+            obarray.seed_value(name, Value::NIL);
             obarray.make_special(name);
         }
-        obarray.set_symbol_value("print-charset-text-property", Value::symbol("default"));
-        obarray.set_symbol_value("text-quoting-style", Value::NIL);
+        obarray.seed_value("print-charset-text-property", Value::symbol("default"));
+        obarray.seed_value("text-quoting-style", Value::NIL);
         obarray.make_special("text-quoting-style");
         // GNU DEFVAR_LISP variables needed by loadup.el and early .el files.
         // chartab.c:1375 DEFVAR_LISP, init nil.
@@ -510,7 +515,7 @@ impl Context {
             "x-window-bottom-left-corner-cursor",
             "x-cursor-fore-pixel",
         ] {
-            obarray.set_symbol_value(name, Value::NIL);
+            obarray.seed_value(name, Value::NIL);
             obarray.make_special(name);
         }
         // GNU `frame.c` initializes these global minor-mode variables in C:
@@ -518,8 +523,8 @@ impl Context {
         //   Vtool_bar_mode = Qt   (when built with window-system support)
         // neomacs is a window-system-capable build, so match GNU's defaults
         // instead of starting graphical sessions with both modes forced off.
-        obarray.set_symbol_value("menu-bar-mode", Value::T);
-        obarray.set_symbol_value("tool-bar-mode", Value::T);
+        obarray.seed_value("menu-bar-mode", Value::T);
+        obarray.seed_value("tool-bar-mode", Value::T);
         for name in [
             "auto-hscroll-mode",
             "display-fill-column-indicator-column",
@@ -530,7 +535,7 @@ impl Context {
             "select-active-regions",
             "x-select-enable-clipboard-manager",
         ] {
-            obarray.set_symbol_value(name, Value::T);
+            obarray.seed_value(name, Value::T);
             obarray.make_special(name);
         }
         // auto-save-interval/timeout, double-click-fuzz/time, meta-prefix-char
@@ -540,21 +545,21 @@ impl Context {
         obarray.define_int_variable("display-line-numbers-minor-tick", 0);
         obarray.define_special_variable("echo-keystrokes", Value::fixnum(1));
         obarray.define_int_variable("gc-cons-threshold", 800_000);
-        obarray.set_symbol_value("help-char", Value::fixnum(8));
+        obarray.seed_value("help-char", Value::fixnum(8));
         // hourglass-delay, hscroll-margin/step, line-number-display-limit-width,
         // maximum-scroll-margin, messages-buffer-name, scroll-* and the
         // tool-bar label size are registered (with GNU xdisp.c values and
         // DEFVAR specialness) by xdisp::register_bootstrap_vars.
-        obarray.set_symbol_value("message-log-max", Value::fixnum(1000));
+        obarray.seed_value("message-log-max", Value::fixnum(1000));
         // next-screen-context-lines is registered by
         // window_cmds::register_bootstrap_vars; overline-margin by
         // xdisp::register_bootstrap_vars.
         obarray.define_int_variable("process-error-pause-time", 1);
-        obarray.set_symbol_value("eol-mnemonic-dos", Value::string("\\"));
-        obarray.set_symbol_value("eol-mnemonic-mac", Value::string("/"));
-        obarray.set_symbol_value("eol-mnemonic-undecided", Value::string(":"));
-        obarray.set_symbol_value("eol-mnemonic-unix", Value::string(":"));
-        obarray.set_symbol_value(
+        obarray.seed_value("eol-mnemonic-dos", Value::string("\\"));
+        obarray.seed_value("eol-mnemonic-mac", Value::string("/"));
+        obarray.seed_value("eol-mnemonic-undecided", Value::string(":"));
+        obarray.seed_value("eol-mnemonic-unix", Value::string(":"));
+        obarray.seed_value(
             "report-emacs-bug-address",
             Value::string("bug-gnu-emacs@gnu.org"),
         );
@@ -562,7 +567,7 @@ impl Context {
         // fns.c:6867 DEFVAR_LISP, build_unibyte_string ("(yes or no) ").
         obarray.define_special_variable("yes-or-no-prompt", Value::string("(yes or no) "));
         // Float-valued C variables
-        obarray.set_symbol_value("gc-cons-percentage", Value::make_float(0.1));
+        obarray.seed_value("gc-cons-percentage", Value::make_float(0.1));
         // max-mini-window-height is registered by xdisp::register_bootstrap_vars.
         // `max-image-size', `image-scaling-factor', `image-cache-eviction-delay',
         // `image-types' and `x-bitmap-file-path' are registered by
@@ -575,29 +580,29 @@ impl Context {
         // `(boundp 'fringe-bitmaps)`, and `push`es each bitmap symbol onto it.
         // Binding it here lets fringe.el install those defaults in Lisp (GNU's
         // own path) instead of hardcoding the alists in Rust.
-        obarray.set_symbol_value("fringe-bitmaps", Value::NIL);
+        obarray.seed_value("fringe-bitmaps", Value::NIL);
         obarray.make_special("fringe-bitmaps");
         // File loading C variables (lread.c)
         // Process/daemon C variables (process.c)
-        obarray.set_symbol_value("internal--daemon-sockname", Value::NIL);
+        obarray.seed_value("internal--daemon-sockname", Value::NIL);
         // Other missing C variables cus-start.el checks
-        obarray.set_symbol_value("history-length", Value::fixnum(100));
+        obarray.seed_value("history-length", Value::fixnum(100));
         obarray.make_special("history-length");
         // minibuf.c:2538 DEFVAR_LISP, init Qt.
         obarray.define_special_variable("minibuffer-follows-selected-frame", Value::T);
-        obarray.set_symbol_value("recenter-redisplay", Value::symbol("tty"));
+        obarray.seed_value("recenter-redisplay", Value::symbol("tty"));
         // frame.c:7733 DEFVAR_LISP, init Qiconify_top_level.
         obarray.define_special_variable("iconify-child-frame", Value::symbol("iconify-top-level"));
         // frame-inhibit-implied-resize is registered by
         // frame_vars::register_bootstrap_vars with GNU's GUI default.
-        obarray.set_symbol_value("mark-even-if-inactive", Value::T);
+        obarray.seed_value("mark-even-if-inactive", Value::T);
         // minibuf.c:2533 DEFVAR_LISP, init nil.
         obarray.define_special_variable("read-buffer-function", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "minibuffer-prompt-properties",
             Value::list(vec![Value::symbol("read-only"), Value::T]),
         );
-        obarray.set_symbol_value("help-event-list", Value::NIL);
+        obarray.seed_value("help-event-list", Value::NIL);
         // GNU `keyboard.c:14127`:
         //   DEFVAR_LISP ("prefix-help-command", Vprefix_help_command, ...);
         //   Vprefix_help_command = intern_c_string ("describe-prefix-bindings");
@@ -608,15 +613,15 @@ impl Context {
             "prefix-help-command",
             Value::symbol("describe-prefix-bindings"),
         );
-        obarray.set_symbol_value("debug-ignored-errors", Value::NIL);
+        obarray.seed_value("debug-ignored-errors", Value::NIL);
         // debug-on-event is registered (init sigusr2, keyboard.c:14358) by
         // keyboard::pure::register_bootstrap_vars.
-        obarray.set_symbol_value("debug-on-signal", Value::NIL);
+        obarray.seed_value("debug-on-signal", Value::NIL);
         // Remaining cus-start.el variables (general + platform names).
         // `temporary-file-directory' is not one of the platform names -- GNU
         // declares it in `filelock.c:814' for every build, with the same nil
         // init -- so it keeps its own seed here.
-        obarray.set_symbol_value("temporary-file-directory", Value::NIL);
+        obarray.seed_value("temporary-file-directory", Value::NIL);
         // The 32 names whose C declaration belongs to a platform are a table
         // in `cus_start_platform_vars', and that table seeds NOTHING.  25 of
         // them are ones GNU leaves UNBOUND in a build like this one, so
@@ -632,52 +637,52 @@ impl Context {
         // Keep GNU's exception for `values`: `lread.c` defines it via
         // `DEFVAR_LISP` and then explicitly clears the declared-special bit,
         // so it remains an ordinary variable even under lexical binding.
-        obarray.set_symbol_value("values", Value::NIL);
-        obarray.set_symbol_value("eval-buffer-list", Value::NIL);
+        obarray.seed_value("values", Value::NIL);
+        obarray.seed_value("eval-buffer-list", Value::NIL);
         obarray.make_special("eval-buffer-list");
-        obarray.set_symbol_value("lread--unescaped-character-literals", Value::NIL);
+        obarray.seed_value("lread--unescaped-character-literals", Value::NIL);
         obarray.make_special("lread--unescaped-character-literals");
-        obarray.set_symbol_value("load-read-function", Value::symbol("read"));
+        obarray.seed_value("load-read-function", Value::symbol("read"));
         obarray.make_special("load-read-function");
-        obarray.set_symbol_value("load-source-file-function", Value::NIL);
+        obarray.seed_value("load-source-file-function", Value::NIL);
         obarray.make_special("load-source-file-function");
-        obarray.set_symbol_value("load-true-file-name", Value::NIL);
+        obarray.seed_value("load-true-file-name", Value::NIL);
         obarray.make_special("load-true-file-name");
-        obarray.set_symbol_value("user-init-file", Value::NIL);
+        obarray.seed_value("user-init-file", Value::NIL);
         obarray.make_special("user-init-file");
-        obarray.set_symbol_value("source-directory", Value::NIL);
+        obarray.seed_value("source-directory", Value::NIL);
         obarray.make_special("source-directory");
-        obarray.set_symbol_value("after-load-alist", Value::NIL);
+        obarray.seed_value("after-load-alist", Value::NIL);
         obarray.make_special("after-load-alist");
-        obarray.set_symbol_value("load-history", Value::NIL);
+        obarray.seed_value("load-history", Value::NIL);
         obarray.make_special("load-history");
-        obarray.set_symbol_value("current-load-list", Value::NIL);
+        obarray.seed_value("current-load-list", Value::NIL);
         obarray.make_special("current-load-list");
-        obarray.set_symbol_value("preloaded-file-list", Value::NIL);
+        obarray.seed_value("preloaded-file-list", Value::NIL);
         obarray.make_special("preloaded-file-list");
         // `Obarray::define_bool_variable` conses onto this list, the way GNU's
         // `defvar_bool` does (`src/lread.c:5261`), so only seed the empty list
         // when nothing has registered yet -- otherwise bootstrap ordering would
         // decide whether the registrations survive.
         if obarray
-            .find_symbol_value(intern("byte-boolean-vars"))
+            .canonical_find_value(CanonicalAccess::BOOTSTRAP, intern("byte-boolean-vars"))
             .is_none()
         {
-            obarray.set_symbol_value("byte-boolean-vars", Value::NIL);
+            obarray.seed_value("byte-boolean-vars", Value::NIL);
         }
         obarray.make_special("byte-boolean-vars");
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "bytecomp-version-regexp",
             Value::string(r#"^;;;.\(in Emacs version\|bytecomp version FSF\)"#),
         );
         obarray.make_special("bytecomp-version-regexp");
-        obarray.set_symbol_value("load-path-filter-function", Value::NIL);
+        obarray.seed_value("load-path-filter-function", Value::NIL);
         obarray.make_special("load-path-filter-function");
-        obarray.set_symbol_value("internal--get-default-lexical-binding-function", Value::NIL);
+        obarray.seed_value("internal--get-default-lexical-binding-function", Value::NIL);
         obarray.make_special("internal--get-default-lexical-binding-function");
-        obarray.set_symbol_value("read-symbol-shorthands", Value::NIL);
+        obarray.seed_value("read-symbol-shorthands", Value::NIL);
         obarray.make_special("read-symbol-shorthands");
-        obarray.set_symbol_value("macroexp--dynvars", Value::NIL);
+        obarray.seed_value("macroexp--dynvars", Value::NIL);
         obarray.make_special("macroexp--dynvars");
     }
 
@@ -689,28 +694,28 @@ impl Context {
         standard_syntax_table: Value,
         minibuffer_local_map: Value,
     ) {
-        obarray.set_symbol_value("inhibit-debugger", Value::NIL);
+        obarray.seed_value("inhibit-debugger", Value::NIL);
         obarray.make_special("inhibit-debugger");
-        obarray.set_symbol_value("debug-on-error", Value::NIL);
+        obarray.seed_value("debug-on-error", Value::NIL);
         obarray.make_special("debug-on-error");
-        obarray.set_symbol_value("debug-on-signal", Value::NIL);
+        obarray.seed_value("debug-on-signal", Value::NIL);
         obarray.make_special("debug-on-signal");
-        obarray.set_symbol_value("debug-ignored-errors", Value::NIL);
+        obarray.seed_value("debug-ignored-errors", Value::NIL);
         obarray.make_special("debug-ignored-errors");
         obarray.define_int_variable("internal-when-entered-debugger", -1);
-        obarray.set_symbol_value("signal-hook-function", Value::NIL);
+        obarray.seed_value("signal-hook-function", Value::NIL);
         obarray.make_special("signal-hook-function");
         // GNU `eval.c` defines `internal-interpreter-environment` and then
         // immediately `Funintern`s that symbol, so Lisp-visible lookup sees a
         // separate ordinary symbol while the evaluator keeps a hidden special
         // variable for its own lexical-environment bookkeeping.
-        obarray.set_symbol_value("internal-make-interpreted-closure-function", Value::NIL);
+        obarray.seed_value("internal-make-interpreted-closure-function", Value::NIL);
         obarray.make_special("internal-make-interpreted-closure-function");
         // GNU seeds `debugger` from eval.c before Lisp startup.
         // `eval-expression` relies on it.
-        obarray.set_symbol_value("debugger", Value::symbol("debug-early"));
+        obarray.seed_value("debugger", Value::symbol("debug-early"));
         obarray.make_special("debugger");
-        obarray.set_symbol_value("standard-output", Value::T);
+        obarray.seed_value("standard-output", Value::T);
         // GNU DEFVAR_INT from dispnew.c — used by bytecomp.el
         // `src/dispnew.c:7488' DEFVAR_INT -- declared with NO initializer
         // beside it and no `init_*' that supplies one either, which is the
@@ -723,9 +728,9 @@ impl Context {
         // reports 0 there.  `neomacs-bin' does those two assignments at the
         // same two places; this seed is the zero underneath them.
         obarray.define_int_variable("baud-rate", 0);
-        obarray.set_symbol_value("search-slow-speed", Value::fixnum(1200));
+        obarray.seed_value("search-slow-speed", Value::fixnum(1200));
         // GNU startup.el sets these based on --debug-init
-        obarray.set_symbol_value("init-file-debug", Value::NIL);
+        obarray.seed_value("init-file-debug", Value::NIL);
         // `src/callproc.c:2240-2252' DEFVAR_INT: `sysconf (_SC_ARG_MAX) / 4'
         // where that is available, else 4096.  GNU divides by four "as a crude
         // way to go bytes->characters"; `multiple-command-partition-arguments'
@@ -742,9 +747,9 @@ impl Context {
             .into_iter()
             .map(Value::unibyte_string)
             .collect();
-        obarray.set_symbol_value("exec-path", Value::list(exec_path));
+        obarray.seed_value("exec-path", Value::list(exec_path));
         obarray.make_special("exec-path");
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "exec-directory",
             Value::unibyte_string(
                 std::env::current_exe()
@@ -753,27 +758,27 @@ impl Context {
                     .unwrap_or_else(|| "/usr/bin/".to_string()),
             ),
         );
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "exec-suffixes",
             Value::list(vec![Value::unibyte_string("")]),
         );
         obarray.make_special("exec-suffixes");
-        obarray.set_symbol_value("buffer-read-only", Value::NIL);
-        obarray.set_symbol_value("left-margin-width", Value::NIL);
-        obarray.set_symbol_value("right-margin-width", Value::NIL);
-        obarray.set_symbol_value("left-fringe-width", Value::NIL);
-        obarray.set_symbol_value("right-fringe-width", Value::NIL);
-        obarray.set_symbol_value("fringes-outside-margins", Value::NIL);
-        obarray.set_symbol_value("scroll-bar-width", Value::NIL);
-        obarray.set_symbol_value("scroll-bar-height", Value::NIL);
-        obarray.set_symbol_value("vertical-scroll-bar", Value::T);
-        obarray.set_symbol_value("horizontal-scroll-bar", Value::T);
-        obarray.set_symbol_value("kill-ring", Value::NIL);
-        obarray.set_symbol_value("kill-ring-yank-pointer", Value::NIL);
-        obarray.set_symbol_value("last-command", Value::NIL);
-        obarray.set_symbol_value("current-fill-column--has-warned", Value::NIL);
-        obarray.set_symbol_value("current-input-method", Value::NIL);
-        obarray.set_symbol_value("current-input-method-title", Value::NIL);
+        obarray.seed_value("buffer-read-only", Value::NIL);
+        obarray.seed_value("left-margin-width", Value::NIL);
+        obarray.seed_value("right-margin-width", Value::NIL);
+        obarray.seed_value("left-fringe-width", Value::NIL);
+        obarray.seed_value("right-fringe-width", Value::NIL);
+        obarray.seed_value("fringes-outside-margins", Value::NIL);
+        obarray.seed_value("scroll-bar-width", Value::NIL);
+        obarray.seed_value("scroll-bar-height", Value::NIL);
+        obarray.seed_value("vertical-scroll-bar", Value::T);
+        obarray.seed_value("horizontal-scroll-bar", Value::T);
+        obarray.seed_value("kill-ring", Value::NIL);
+        obarray.seed_value("kill-ring-yank-pointer", Value::NIL);
+        obarray.seed_value("last-command", Value::NIL);
+        obarray.seed_value("current-fill-column--has-warned", Value::NIL);
+        obarray.seed_value("current-input-method", Value::NIL);
+        obarray.seed_value("current-input-method-title", Value::NIL);
         // charset.c:2438 DEFVAR_LISP, init nil.
         obarray.define_special_variable("current-iso639-language", Value::NIL);
         // current-key-remap-sequence is registered by
@@ -786,8 +791,8 @@ impl Context {
         // utf-8-lang.el's `(set-language-info-alist "UTF-8" ...)` reorder the
         // charset priority list at dump time (unicode-bmp/unicode to the front),
         // diverging from GNU's raw definition order.  Match GNU's default.
-        obarray.set_symbol_value("current-language-environment", Value::string("English"));
-        obarray.set_symbol_value(
+        obarray.seed_value("current-language-environment", Value::string("English"));
+        obarray.seed_value(
             "current-load-list",
             Value::list(vec![
                 Value::symbol("comp--no-native-compile"),
@@ -799,56 +804,56 @@ impl Context {
                 Value::symbol("load--bin-dest-dir"),
             ]),
         );
-        obarray.set_symbol_value("current-locale-environment", Value::string("C.UTF-8"));
-        obarray.set_symbol_value("current-minibuffer-command", Value::NIL);
+        obarray.seed_value("current-locale-environment", Value::string("C.UTF-8"));
+        obarray.seed_value("current-minibuffer-command", Value::NIL);
         obarray.make_special("current-minibuffer-command");
-        obarray.set_symbol_value("current-transient-input-method", Value::NIL);
-        obarray.set_symbol_value("real-last-command", Value::NIL);
+        obarray.seed_value("current-transient-input-method", Value::NIL);
+        obarray.seed_value("real-last-command", Value::NIL);
         // last-repeatable-command, this-original-command and defining-kbd-macro
         // are registered by keyboard::pure::register_bootstrap_vars.
-        obarray.set_symbol_value("prefix-arg", Value::NIL);
-        obarray.set_symbol_value("executing-kbd-macro", Value::NIL);
+        obarray.seed_value("prefix-arg", Value::NIL);
+        obarray.seed_value("executing-kbd-macro", Value::NIL);
         obarray.make_special("executing-kbd-macro");
         obarray.define_int_variable("executing-kbd-macro-index", 0);
         obarray.define_c_hook_variable("kbd-macro-termination-hook");
-        obarray.set_symbol_value("command-history", Value::NIL);
+        obarray.seed_value("command-history", Value::NIL);
         obarray.make_special("command-history");
-        obarray.set_symbol_value("extended-command-history", Value::NIL);
-        obarray.set_symbol_value("read-file-name-completion-ignore-case", Value::NIL);
+        obarray.seed_value("extended-command-history", Value::NIL);
+        obarray.seed_value("read-file-name-completion-ignore-case", Value::NIL);
         obarray.make_special("read-file-name-completion-ignore-case");
-        obarray.set_symbol_value("completion-regexp-list", Value::NIL);
+        obarray.seed_value("completion-regexp-list", Value::NIL);
         obarray.make_special("completion-regexp-list");
-        obarray.set_symbol_value("completion--all-sorted-completions-location", Value::NIL);
-        obarray.set_symbol_value("completion--capf-misbehave-funs", Value::NIL);
-        obarray.set_symbol_value("completion--capf-safe-funs", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("completion--all-sorted-completions-location", Value::NIL);
+        obarray.seed_value("completion--capf-misbehave-funs", Value::NIL);
+        obarray.seed_value("completion--capf-safe-funs", Value::NIL);
+        obarray.seed_value(
             "completion--embedded-envvar-re",
             Value::string(
                 "\\(?:^\\|[^$]\\(?:\\$\\$\\)*\\)\\$\\([[:alnum:]_]*\\|{\\([^}]*\\)\\)\\'",
             ),
         );
-        obarray.set_symbol_value("completion--flex-score-last-md", Value::NIL);
-        obarray.set_symbol_value("completion-all-sorted-completions", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("completion--flex-score-last-md", Value::NIL);
+        obarray.seed_value("completion-all-sorted-completions", Value::NIL);
+        obarray.seed_value(
             "completion--cycling-threshold-type",
             Value::list(vec![Value::symbol("choice")]),
         );
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "completion--styles-type",
             Value::list(vec![Value::symbol("repeat")]),
         );
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "completion-at-point-functions",
             Value::list(vec![Value::symbol("tags-completion-at-point-function")]),
         );
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "completion-setup-hook",
             Value::list(vec![Value::symbol("completion-setup-function")]),
         );
-        obarray.set_symbol_value("completion-list-mode-hook", Value::NIL);
+        obarray.seed_value("completion-list-mode-hook", Value::NIL);
         // completion-ignored-extensions is a dired.c DEFVAR_LISP; see
         // `dired::register_bootstrap_vars' below.
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "completion-styles",
             Value::list(vec![
                 Value::symbol("basic"),
@@ -856,7 +861,7 @@ impl Context {
                 Value::symbol("emacs22"),
             ]),
         );
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "completion-category-defaults",
             Value::list(vec![
                 Value::list(vec![
@@ -915,153 +920,153 @@ impl Context {
         // here would shadow the Lisp definition and lose styles
         // like flex — breaking fido-vertical-mode which requires
         // the flex completion style.
-        obarray.set_symbol_value("completion-category-overrides", Value::NIL);
-        obarray.set_symbol_value("completion-cycle-threshold", Value::NIL);
-        obarray.set_symbol_value("completions-detailed", Value::NIL);
-        obarray.set_symbol_value("completions-format", Value::symbol("horizontal"));
-        obarray.set_symbol_value("completions-group", Value::NIL);
+        obarray.seed_value("completion-category-overrides", Value::NIL);
+        obarray.seed_value("completion-cycle-threshold", Value::NIL);
+        obarray.seed_value("completions-detailed", Value::NIL);
+        obarray.seed_value("completions-format", Value::symbol("horizontal"));
+        obarray.seed_value("completions-group", Value::NIL);
         // `completions-group-format` is deliberately NOT seeded: GNU's
         // `lisp/minibuffer.el:1538` defines it with `defcustom` as a `concat` of
         // two `propertize`d strings (`completions-group-separator` and
         // `completions-group-title`), and a plain-string seed would win forever
         // over that `defcustom`, dropping the faces the grouping display needs.
-        obarray.set_symbol_value("completions-group-sort", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("completions-group-sort", Value::NIL);
+        obarray.seed_value(
             "completions-header-format",
             Value::string("%s possible completions:\n"),
         );
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "completions-highlight-face",
             Value::symbol("completions-highlight"),
         );
-        obarray.set_symbol_value("completions-max-height", Value::NIL);
-        obarray.set_symbol_value("completions-sort", Value::symbol("alphabetical"));
-        obarray.set_symbol_value("completion-auto-help", Value::T);
-        obarray.set_symbol_value("completion-auto-deselect", Value::T);
-        obarray.set_symbol_value("completion-auto-select", Value::NIL);
-        obarray.set_symbol_value("completion-auto-wrap", Value::T);
-        obarray.set_symbol_value("completion-base-position", Value::NIL);
-        obarray.set_symbol_value("completion-cycling", Value::NIL);
-        obarray.set_symbol_value("completion-extra-properties", Value::NIL);
-        obarray.set_symbol_value("completion-fail-discreetly", Value::NIL);
-        obarray.set_symbol_value("completion-flex-nospace", Value::NIL);
-        obarray.set_symbol_value("completion-in-region--data", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("completions-max-height", Value::NIL);
+        obarray.seed_value("completions-sort", Value::symbol("alphabetical"));
+        obarray.seed_value("completion-auto-help", Value::T);
+        obarray.seed_value("completion-auto-deselect", Value::T);
+        obarray.seed_value("completion-auto-select", Value::NIL);
+        obarray.seed_value("completion-auto-wrap", Value::T);
+        obarray.seed_value("completion-base-position", Value::NIL);
+        obarray.seed_value("completion-cycling", Value::NIL);
+        obarray.seed_value("completion-extra-properties", Value::NIL);
+        obarray.seed_value("completion-fail-discreetly", Value::NIL);
+        obarray.seed_value("completion-flex-nospace", Value::NIL);
+        obarray.seed_value("completion-in-region--data", Value::NIL);
+        obarray.seed_value(
             "completion-in-region-function",
             Value::symbol("completion--in-region"),
         );
-        obarray.set_symbol_value("completion-in-region-functions", Value::NIL);
-        obarray.set_symbol_value("completion-in-region-mode", Value::NIL);
-        obarray.set_symbol_value("completion-in-region-mode--predicate", Value::NIL);
-        obarray.set_symbol_value("completion-in-region-mode-hook", Value::NIL);
-        obarray.set_symbol_value("completion-in-region-mode-predicate", Value::NIL);
-        obarray.set_symbol_value("completion-show-help", Value::T);
-        obarray.set_symbol_value("completion-show-inline-help", Value::T);
-        obarray.set_symbol_value("completion-lazy-hilit", Value::NIL);
-        obarray.set_symbol_value("completion-lazy-hilit-fn", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("completion-in-region-functions", Value::NIL);
+        obarray.seed_value("completion-in-region-mode", Value::NIL);
+        obarray.seed_value("completion-in-region-mode--predicate", Value::NIL);
+        obarray.seed_value("completion-in-region-mode-hook", Value::NIL);
+        obarray.seed_value("completion-in-region-mode-predicate", Value::NIL);
+        obarray.seed_value("completion-show-help", Value::T);
+        obarray.seed_value("completion-show-inline-help", Value::T);
+        obarray.seed_value("completion-lazy-hilit", Value::NIL);
+        obarray.seed_value("completion-lazy-hilit-fn", Value::NIL);
+        obarray.seed_value(
             "completion-list-insert-choice-function",
             Value::symbol("completion--replace"),
         );
-        obarray.set_symbol_value("completion-no-auto-exit", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("completion-no-auto-exit", Value::NIL);
+        obarray.seed_value(
             "completion-pcm--delim-wild-regex",
             Value::string("[-_./:| *]"),
         );
-        obarray.set_symbol_value("completion-pcm--regexp", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("completion-pcm--regexp", Value::NIL);
+        obarray.seed_value(
             "completion-pcm-complete-word-inserts-delimiters",
             Value::NIL,
         );
-        obarray.set_symbol_value("completion-pcm-word-delimiters", Value::string("-_./:| "));
-        obarray.set_symbol_value("completion-reference-buffer", Value::NIL);
-        obarray.set_symbol_value("completion-tab-width", Value::NIL);
-        obarray.set_symbol_value("history-length", Value::fixnum(100));
+        obarray.seed_value("completion-pcm-word-delimiters", Value::string("-_./:| "));
+        obarray.seed_value("completion-reference-buffer", Value::NIL);
+        obarray.seed_value("completion-tab-width", Value::NIL);
+        obarray.seed_value("history-length", Value::fixnum(100));
         obarray.make_special("history-length");
-        obarray.set_symbol_value("history-add-new-input", Value::T);
+        obarray.seed_value("history-add-new-input", Value::T);
         obarray.make_special("history-add-new-input");
         // read-buffer-function is registered above (minibuf.c:2533).
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "read-file-name-function",
             Value::symbol("read-file-name-default"),
         );
         // minibuf.c:2528 DEFVAR_LISP, init nil.
         obarray.define_special_variable("read-expression-history", Value::NIL);
-        obarray.set_symbol_value("read-number-history", Value::NIL);
-        obarray.set_symbol_value("read-char-history", Value::NIL);
-        obarray.set_symbol_value("read-answer-short", Value::symbol("auto"));
-        obarray.set_symbol_value("read-char-by-name-sort", Value::NIL);
-        obarray.set_symbol_value("read-char-choice-use-read-key", Value::NIL);
-        obarray.set_symbol_value("read-circle", Value::T);
+        obarray.seed_value("read-number-history", Value::NIL);
+        obarray.seed_value("read-char-history", Value::NIL);
+        obarray.seed_value("read-answer-short", Value::symbol("auto"));
+        obarray.seed_value("read-char-by-name-sort", Value::NIL);
+        obarray.seed_value("read-char-choice-use-read-key", Value::NIL);
+        obarray.seed_value("read-circle", Value::T);
         obarray.make_special("read-circle");
-        obarray.set_symbol_value("read-envvar-name-history", Value::NIL);
-        obarray.set_symbol_value("read-face-name-sample-text", Value::string("SAMPLE"));
-        obarray.set_symbol_value("read-key-delay", Value::make_float(0.01));
-        obarray.set_symbol_value(
+        obarray.seed_value("read-envvar-name-history", Value::NIL);
+        obarray.seed_value("read-face-name-sample-text", Value::string("SAMPLE"));
+        obarray.seed_value("read-key-delay", Value::make_float(0.01));
+        obarray.seed_value(
             "read-answer-map--memoize",
             Value::hash_table(HashTableTest::Equal),
         );
-        obarray.set_symbol_value("read-extended-command-mode", Value::NIL);
-        obarray.set_symbol_value("read-extended-command-mode-hook", Value::NIL);
-        obarray.set_symbol_value("read-extended-command-predicate", Value::NIL);
-        obarray.set_symbol_value("read-hide-char", Value::NIL);
-        obarray.set_symbol_value("read-mail-command", Value::symbol("rmail"));
-        obarray.set_symbol_value("read-only-mode-hook", Value::NIL);
+        obarray.seed_value("read-extended-command-mode", Value::NIL);
+        obarray.seed_value("read-extended-command-mode-hook", Value::NIL);
+        obarray.seed_value("read-extended-command-predicate", Value::NIL);
+        obarray.seed_value("read-hide-char", Value::NIL);
+        obarray.seed_value("read-mail-command", Value::symbol("rmail"));
+        obarray.seed_value("read-only-mode-hook", Value::NIL);
         obarray.define_int_variable("read-process-output-max", 65536);
-        obarray.set_symbol_value("read-quoted-char-radix", Value::fixnum(8));
-        obarray.set_symbol_value("read-regexp--case-fold", Value::NIL);
-        obarray.set_symbol_value("read-regexp-defaults-function", Value::NIL);
-        obarray.set_symbol_value("read-symbol-shorthands", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("read-quoted-char-radix", Value::fixnum(8));
+        obarray.seed_value("read-regexp--case-fold", Value::NIL);
+        obarray.seed_value("read-regexp-defaults-function", Value::NIL);
+        obarray.seed_value("read-symbol-shorthands", Value::NIL);
+        obarray.seed_value(
             "minibuffer-frame-alist",
             Value::list(vec![
                 Value::cons(Value::symbol("width"), Value::fixnum(80)),
                 Value::cons(Value::symbol("height"), Value::fixnum(2)),
             ]),
         );
-        obarray.set_symbol_value("minibuffer-inactive-mode-hook", Value::NIL);
-        obarray.set_symbol_value("minibuffer-mode-hook", Value::NIL);
-        obarray.set_symbol_value("minibuffer-local-map", minibuffer_local_map);
-        obarray.set_symbol_value("minibuffer-local-filename-syntax", standard_syntax_table);
-        obarray.set_symbol_value("minibuffer-history", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("minibuffer-inactive-mode-hook", Value::NIL);
+        obarray.seed_value("minibuffer-mode-hook", Value::NIL);
+        obarray.seed_value("minibuffer-local-map", minibuffer_local_map);
+        obarray.seed_value("minibuffer-local-filename-syntax", standard_syntax_table);
+        obarray.seed_value("minibuffer-history", Value::NIL);
+        obarray.seed_value(
             "minibuffer-history-variable",
             Value::symbol("minibuffer-history"),
         );
-        obarray.set_symbol_value("minibuffer-history-position", Value::NIL);
-        obarray.set_symbol_value("minibuffer-history-isearch-message-overlay", Value::NIL);
-        obarray.set_symbol_value("minibuffer-history-search-history", Value::NIL);
-        obarray.set_symbol_value("minibuffer-history-sexp-flag", Value::NIL);
-        obarray.set_symbol_value("minibuffer-default", Value::NIL);
-        obarray.set_symbol_value("minibuffer-default-add-done", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("minibuffer-history-position", Value::NIL);
+        obarray.seed_value("minibuffer-history-isearch-message-overlay", Value::NIL);
+        obarray.seed_value("minibuffer-history-search-history", Value::NIL);
+        obarray.seed_value("minibuffer-history-sexp-flag", Value::NIL);
+        obarray.seed_value("minibuffer-default", Value::NIL);
+        obarray.seed_value("minibuffer-default-add-done", Value::NIL);
+        obarray.seed_value(
             "minibuffer-default-add-function",
             Value::symbol("minibuffer-default-add-completions"),
         );
-        obarray.set_symbol_value("minibuffer--original-buffer", Value::NIL);
-        obarray.set_symbol_value("minibuffer--regexp-primed", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("minibuffer--original-buffer", Value::NIL);
+        obarray.seed_value("minibuffer--regexp-primed", Value::NIL);
+        obarray.seed_value(
             "minibuffer--regexp-prompt-regexp",
             Value::string(
                 "\\(?:Posix search\\|RE search\\|Search for regexp\\|Query replace regexp\\)",
             ),
         );
-        obarray.set_symbol_value("minibuffer--require-match", Value::NIL);
+        obarray.seed_value("minibuffer--require-match", Value::NIL);
         // minibuffer-follows-selected-frame is registered earlier in bootstrap.
         // GNU src/minibuf.c:2557-2559 DEFVARs this hook and sets it to Qnil.
         // minibuffer.el's `minibuffer--regexp-exit', `minibuffer--nonselected-exit'
         // and `minibuffer-exit-on-screen-keyboard', plus `minibuffer-restore-windows',
         // are all put here by `add-hook' while loadup runs.
         obarray.define_c_hook_variable("minibuffer-exit-hook");
-        obarray.set_symbol_value("minibuffer-completion-table", Value::NIL);
-        obarray.set_symbol_value("minibuffer-completion-predicate", Value::NIL);
-        obarray.set_symbol_value("minibuffer-completion-confirm", Value::NIL);
+        obarray.seed_value("minibuffer-completion-table", Value::NIL);
+        obarray.seed_value("minibuffer-completion-predicate", Value::NIL);
+        obarray.seed_value("minibuffer-completion-confirm", Value::NIL);
         // `minibuffer-completion-auto-choose` belongs to minibuffer.el.  Do
         // not pre-bind it here: `defcustom` preserves an existing value, so a
         // Rust seed would override GNU Emacs's Lisp default.
-        obarray.set_symbol_value("minibuffer-completion-base", Value::NIL);
-        obarray.set_symbol_value("minibuffer-help-form", Value::NIL);
-        obarray.set_symbol_value("minibuffer-completing-file-name", Value::NIL);
+        obarray.seed_value("minibuffer-completion-base", Value::NIL);
+        obarray.seed_value("minibuffer-help-form", Value::NIL);
+        obarray.seed_value("minibuffer-completing-file-name", Value::NIL);
         // `minibuffer-regexp-mode` belongs to lisp/minibuffer.el:5641, a global
         // `define-minor-mode` whose `defcustom` is initialized by
         // `custom-initialize-after-file-load`.  That initializer ends in
@@ -1071,8 +1076,8 @@ impl Context {
         // suppresses the `:set` function, so the mode body never runs and the
         // mode never installs `minibuffer--regexp-setup` /
         // `minibuffer--regexp-exit`, while the variable still reads t.
-        obarray.set_symbol_value("minibuffer-regexp-mode-hook", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("minibuffer-regexp-mode-hook", Value::NIL);
+        obarray.seed_value(
             "minibuffer-regexp-prompts",
             Value::list(vec![
                 Value::string("Posix search"),
@@ -1081,14 +1086,14 @@ impl Context {
                 Value::string("Query replace regexp"),
             ]),
         );
-        obarray.set_symbol_value("minibuffer-message-clear-timeout", Value::NIL);
-        obarray.set_symbol_value("minibuffer-message-overlay", Value::NIL);
-        obarray.set_symbol_value("minibuffer-message-properties", Value::NIL);
+        obarray.seed_value("minibuffer-message-clear-timeout", Value::NIL);
+        obarray.seed_value("minibuffer-message-overlay", Value::NIL);
+        obarray.seed_value("minibuffer-message-properties", Value::NIL);
         // minibuffer-message-timeout is registered by
         // keyboard::pure::register_bootstrap_vars.
-        obarray.set_symbol_value("minibuffer-message-timer", Value::NIL);
-        obarray.set_symbol_value("minibuffer-lazy-count-format", Value::string("%s "));
-        obarray.set_symbol_value("minibuffer-text-before-history", Value::NIL);
+        obarray.seed_value("minibuffer-message-timer", Value::NIL);
+        obarray.seed_value("minibuffer-lazy-count-format", Value::string("%s "));
+        obarray.seed_value("minibuffer-text-before-history", Value::NIL);
         // GNU src/minibuf.c declares these with DEFVAR_LISP/DEFVAR_BOOL.
         // They must be special so lexical-binding Lisp sees dynamic
         // minibuffer/completion bindings inside byte-compiled functions.
@@ -1109,27 +1114,27 @@ impl Context {
         ] {
             obarray.make_special(name);
         }
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "minibuffer-prompt-properties",
             Value::list(vec![Value::symbol("read-only"), Value::T]),
         );
-        obarray.set_symbol_value("minibuffer-scroll-window", Value::NIL);
+        obarray.seed_value("minibuffer-scroll-window", Value::NIL);
         obarray.make_special("minibuffer-scroll-window");
-        obarray.set_symbol_value("other-window-scroll-buffer", Value::NIL);
+        obarray.seed_value("other-window-scroll-buffer", Value::NIL);
         obarray.make_special("other-window-scroll-buffer");
-        obarray.set_symbol_value("other-window-scroll-default", Value::NIL);
+        obarray.seed_value("other-window-scroll-default", Value::NIL);
         obarray.make_special("other-window-scroll-default");
-        obarray.set_symbol_value("minibuffer-visible-completions", Value::NIL);
-        obarray.set_symbol_value("minibuffer-visible-completions--always-bind", Value::NIL);
-        obarray.set_symbol_value("minibuffer-depth-indicate-mode", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("minibuffer-visible-completions", Value::NIL);
+        obarray.seed_value("minibuffer-visible-completions--always-bind", Value::NIL);
+        obarray.seed_value("minibuffer-depth-indicate-mode", Value::NIL);
+        obarray.seed_value(
             "minibuffer-default-prompt-format",
             Value::string(" (default %s)"),
         );
-        obarray.set_symbol_value("minibuffer-beginning-of-buffer-movement", Value::NIL);
-        obarray.set_symbol_value("minibuffer-electric-default-mode", Value::NIL);
-        obarray.set_symbol_value("minibuffer-temporary-goal-position", Value::NIL);
-        obarray.set_symbol_value(
+        obarray.seed_value("minibuffer-beginning-of-buffer-movement", Value::NIL);
+        obarray.seed_value("minibuffer-electric-default-mode", Value::NIL);
+        obarray.seed_value("minibuffer-temporary-goal-position", Value::NIL);
+        obarray.seed_value(
             "minibuffer-confirm-exit-commands",
             Value::list(vec![
                 Value::symbol("completion-at-point"),
@@ -1137,47 +1142,47 @@ impl Context {
                 Value::symbol("minibuffer-complete-word"),
             ]),
         );
-        obarray.set_symbol_value("minibuffer-history-case-insensitive-variables", Value::NIL);
-        obarray.set_symbol_value("minibuffer-on-screen-keyboard-displayed", Value::NIL);
-        obarray.set_symbol_value("minibuffer-on-screen-keyboard-timer", Value::NIL);
+        obarray.seed_value("minibuffer-history-case-insensitive-variables", Value::NIL);
+        obarray.seed_value("minibuffer-on-screen-keyboard-displayed", Value::NIL);
+        obarray.seed_value("minibuffer-on-screen-keyboard-timer", Value::NIL);
         // GNU src/minibuf.c:2553-2555 DEFVARs this hook and sets it to Qnil.
         // rfn-eshadow.el, minibuffer.el and simple.el `add-hook' their entries
         // onto it while loadup runs, and `add-hook' conses onto the front, so
         // the resulting order is a record of that preload order.
         obarray.define_c_hook_variable("minibuffer-setup-hook");
-        obarray.set_symbol_value("regexp-search-ring", Value::NIL);
-        obarray.set_symbol_value("regexp-search-ring-max", Value::fixnum(16));
-        obarray.set_symbol_value("regexp-search-ring-yank-pointer", Value::NIL);
-        obarray.set_symbol_value("search-ring", Value::NIL);
-        obarray.set_symbol_value("search-ring-max", Value::fixnum(16));
-        obarray.set_symbol_value("search-ring-update", Value::NIL);
-        obarray.set_symbol_value("search-ring-yank-pointer", Value::NIL);
-        obarray.set_symbol_value("last-abbrev", Value::NIL);
-        obarray.set_symbol_value("last-abbrev-location", Value::fixnum(0));
-        obarray.set_symbol_value("last-abbrev-text", Value::NIL);
-        obarray.set_symbol_value("last-command-event", Value::NIL);
+        obarray.seed_value("regexp-search-ring", Value::NIL);
+        obarray.seed_value("regexp-search-ring-max", Value::fixnum(16));
+        obarray.seed_value("regexp-search-ring-yank-pointer", Value::NIL);
+        obarray.seed_value("search-ring", Value::NIL);
+        obarray.seed_value("search-ring-max", Value::fixnum(16));
+        obarray.seed_value("search-ring-update", Value::NIL);
+        obarray.seed_value("search-ring-yank-pointer", Value::NIL);
+        obarray.seed_value("last-abbrev", Value::NIL);
+        obarray.seed_value("last-abbrev-location", Value::fixnum(0));
+        obarray.seed_value("last-abbrev-text", Value::NIL);
+        obarray.seed_value("last-command-event", Value::NIL);
         // last-event-frame, last-event-device, last-nonmenu-event and
         // last-kbd-macro are registered by keyboard::pure::register_bootstrap_vars.
-        obarray.set_symbol_value("last-input-event", Value::NIL);
-        obarray.set_symbol_value("last-prefix-arg", Value::NIL);
-        obarray.set_symbol_value("last-code-conversion-error", Value::NIL);
-        obarray.set_symbol_value("last-coding-system-specified", Value::NIL);
-        obarray.set_symbol_value("last-coding-system-used", Value::symbol("undecided-unix"));
-        obarray.set_symbol_value("last-next-selection-coding-system", Value::NIL);
-        obarray.set_symbol_value("command-debug-status", Value::NIL);
+        obarray.seed_value("last-input-event", Value::NIL);
+        obarray.seed_value("last-prefix-arg", Value::NIL);
+        obarray.seed_value("last-code-conversion-error", Value::NIL);
+        obarray.seed_value("last-coding-system-specified", Value::NIL);
+        obarray.seed_value("last-coding-system-used", Value::symbol("undecided-unix"));
+        obarray.seed_value("last-next-selection-coding-system", Value::NIL);
+        obarray.seed_value("command-debug-status", Value::NIL);
         obarray.make_special("command-debug-status");
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "command-error-function",
             Value::symbol("help-command-error-confusable-suggestions"),
         );
-        obarray.set_symbol_value("key-substitution-in-progress", Value::NIL);
-        obarray.set_symbol_value("this-command", Value::NIL);
-        obarray.set_symbol_value("real-this-command", Value::NIL);
-        obarray.set_symbol_value("this-command-keys-shift-translated", Value::NIL);
-        obarray.set_symbol_value("current-prefix-arg", Value::NIL);
-        obarray.set_symbol_value("track-mouse", Value::NIL);
+        obarray.seed_value("key-substitution-in-progress", Value::NIL);
+        obarray.seed_value("this-command", Value::NIL);
+        obarray.seed_value("real-this-command", Value::NIL);
+        obarray.seed_value("this-command-keys-shift-translated", Value::NIL);
+        obarray.seed_value("current-prefix-arg", Value::NIL);
+        obarray.seed_value("track-mouse", Value::NIL);
         obarray.make_special("track-mouse");
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "while-no-input-ignore-events",
             // GNU's `init_while_no_input_ignore_events'
             // (src/keyboard.c:13315-13336) builds an eleven-name base list
@@ -1223,39 +1228,39 @@ impl Context {
         obarray.make_special("while-no-input-ignore-events");
         // GNU's nine `dbusbind.c' DEFVARs are installed from
         // `system/dbusbind` when `cfg(neomacs_have_dbus)`.
-        obarray.set_symbol_value("deactivate-mark", Value::NIL);
+        obarray.seed_value("deactivate-mark", Value::NIL);
         obarray.make_special("deactivate-mark");
         obarray.make_buffer_local("deactivate-mark", true);
         // GNU `keyboard.c` DEFVARs.  `command_loop_1` resets
         // `disable-point-adjustment` to nil before each command; commands may
         // set it non-nil to suppress the post-command `adjust_point_for_property`
         // step.  `global-disable-point-adjustment` is the permanent override.
-        obarray.set_symbol_value("disable-point-adjustment", Value::NIL);
+        obarray.seed_value("disable-point-adjustment", Value::NIL);
         obarray.make_special("disable-point-adjustment");
-        obarray.set_symbol_value("global-disable-point-adjustment", Value::NIL);
+        obarray.seed_value("global-disable-point-adjustment", Value::NIL);
         obarray.make_special("global-disable-point-adjustment");
-        obarray.set_symbol_value("mark-active", Value::NIL);
-        obarray.set_symbol_value("mark-even-if-inactive", Value::T);
+        obarray.seed_value("mark-active", Value::NIL);
+        obarray.seed_value("mark-even-if-inactive", Value::T);
         obarray.make_special("mark-even-if-inactive");
-        obarray.set_symbol_value("mark-ring", Value::NIL);
-        obarray.set_symbol_value("mark-ring-max", Value::fixnum(16));
+        obarray.seed_value("mark-ring", Value::NIL);
+        obarray.seed_value("mark-ring-max", Value::fixnum(16));
         // saved-region-selection is set by keyboard::pure::register_bootstrap_vars
-        obarray.set_symbol_value("transient-mark-mode", Value::NIL);
-        obarray.set_symbol_value("transient-mark-mode-hook", Value::NIL);
+        obarray.seed_value("transient-mark-mode", Value::NIL);
+        obarray.seed_value("transient-mark-mode-hook", Value::NIL);
         // post-select-region-hook and display-monitors-changed-functions are
         // registered by keyboard::pure::register_bootstrap_vars.
-        obarray.set_symbol_value("echo-area-clear-hook", Value::NIL);
+        obarray.seed_value("echo-area-clear-hook", Value::NIL);
         // terminal.c:700 / term.c:5233 / term.c:5240 DEFVAR_LISP, init nil.
         obarray.define_c_hook_variable("delete-terminal-functions");
         obarray.define_c_hook_variable("suspend-tty-functions");
         obarray.define_c_hook_variable("resume-tty-functions");
-        obarray.set_symbol_value("overriding-local-map", Value::NIL);
+        obarray.seed_value("overriding-local-map", Value::NIL);
         obarray.make_special("overriding-local-map");
-        obarray.set_symbol_value("overriding-local-map-menu-flag", Value::NIL);
+        obarray.seed_value("overriding-local-map-menu-flag", Value::NIL);
         obarray.make_special("overriding-local-map-menu-flag");
-        obarray.set_symbol_value("overriding-plist-environment", Value::NIL);
+        obarray.seed_value("overriding-plist-environment", Value::NIL);
         obarray.make_special("overriding-plist-environment");
-        obarray.set_symbol_value("overriding-terminal-local-map", Value::NIL);
+        obarray.seed_value("overriding-terminal-local-map", Value::NIL);
         // GNU uses DEFVAR_KBOARD here. NeoVM does not yet split keyboard state
         // per terminal, so model it as a dynamically scoped runtime variable.
         obarray.make_special("overriding-terminal-local-map");
@@ -1268,7 +1273,7 @@ impl Context {
     /// hierarchy and indentation/font variable seeding.
     pub(super) fn seed_core_eval_variables(obarray: &mut Obarray) {
         // Core eval variables (stay in eval.rs)
-        obarray.set_symbol_value("purify-flag", Value::NIL);
+        obarray.seed_value("purify-flag", Value::NIL);
         obarray.make_special("purify-flag");
         obarray.define_int_variable("max-lisp-eval-depth", 1600);
         obarray.define_int_variable("lisp-eval-depth-reserve", 200);
@@ -1278,13 +1283,13 @@ impl Context {
         // hence special: `(let ((standard-display-table ...)) ...)' must bind it
         // dynamically so the `standard-display-*' functions (disp-table.el) see
         // and mutate the binding instead of the global default.
-        obarray.set_symbol_value("standard-display-table", Value::NIL);
+        obarray.seed_value("standard-display-table", Value::NIL);
         obarray.make_special("standard-display-table");
         // `glyph-table' is a DEFVAR_LISP in dispnew.c, default nil. It must be
         // bound (and special) so `boundp'/`special-variable-p' agree with GNU.
-        obarray.set_symbol_value("glyph-table", Value::NIL);
+        obarray.seed_value("glyph-table", Value::NIL);
         obarray.make_special("glyph-table");
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "image-load-path",
             Value::list(vec![
                 Value::string("/usr/share/emacs/30.1/etc/images/"),
@@ -1295,11 +1300,11 @@ impl Context {
         // image::register_bootstrap_vars, GNU's `syms_of_image'.
 
         // User init / startup (C DEFVAR in official Emacs)
-        obarray.set_symbol_value("user-init-file", Value::NIL);
-        obarray.set_symbol_value("user-emacs-directory", Value::string("~/.emacs.d/"));
+        obarray.seed_value("user-init-file", Value::NIL);
+        obarray.seed_value("user-emacs-directory", Value::string("~/.emacs.d/"));
 
         // Frame parameters (C DEFVAR in official Emacs)
-        obarray.set_symbol_value("frame--special-parameters", Value::NIL);
+        obarray.seed_value("frame--special-parameters", Value::NIL);
 
         // Initialize distributed bootstrap variables.
         //
@@ -1332,23 +1337,23 @@ impl Context {
 
         // ---- end C-level bootstrap variables ----
 
-        obarray.set_symbol_value("unread-input-method-events", Value::NIL);
-        obarray.set_symbol_value("unread-post-input-method-events", Value::NIL);
-        obarray.set_symbol_value("input-method-alist", Value::NIL);
-        obarray.set_symbol_value("input-method-activate-hook", Value::NIL);
-        obarray.set_symbol_value("input-method-after-insert-chunk-hook", Value::NIL);
-        obarray.set_symbol_value("input-method-deactivate-hook", Value::NIL);
-        obarray.set_symbol_value("input-method-exit-on-first-char", Value::NIL);
-        obarray.set_symbol_value("input-method-exit-on-invalid-key", Value::NIL);
+        obarray.seed_value("unread-input-method-events", Value::NIL);
+        obarray.seed_value("unread-post-input-method-events", Value::NIL);
+        obarray.seed_value("input-method-alist", Value::NIL);
+        obarray.seed_value("input-method-activate-hook", Value::NIL);
+        obarray.seed_value("input-method-after-insert-chunk-hook", Value::NIL);
+        obarray.seed_value("input-method-deactivate-hook", Value::NIL);
+        obarray.seed_value("input-method-exit-on-first-char", Value::NIL);
+        obarray.seed_value("input-method-exit-on-invalid-key", Value::NIL);
         // GNU `src/keyboard.c` initializes this DEFVAR_LISP to Qlist.
-        obarray.set_symbol_value("input-method-function", Value::symbol("list"));
+        obarray.seed_value("input-method-function", Value::symbol("list"));
         obarray.make_special("input-method-function");
-        obarray.set_symbol_value("input-method-highlight-flag", Value::T);
-        obarray.set_symbol_value("input-method-history", Value::NIL);
+        obarray.seed_value("input-method-highlight-flag", Value::T);
+        obarray.seed_value("input-method-history", Value::NIL);
         // input-method-previous-message is set by keyboard::pure::register_bootstrap_vars
-        obarray.set_symbol_value("input-method-use-echo-area", Value::NIL);
-        obarray.set_symbol_value("input-method-verbose-flag", Value::symbol("default"));
-        obarray.set_symbol_value("unread-command-events", Value::NIL);
+        obarray.seed_value("input-method-use-echo-area", Value::NIL);
+        obarray.seed_value("input-method-verbose-flag", Value::symbol("default"));
+        obarray.seed_value("unread-command-events", Value::NIL);
         // No `variable-documentation` is seeded here, and ledger 178 is why.
         //
         // This used to write one for all 1972 names of two hand-typed tables
@@ -1451,7 +1456,7 @@ impl Context {
         // `BufferLocals::lisp_bindings` fallback. Default is `t`.
         {
             let id = crate::emacs_core::intern::intern("case-fold-search");
-            obarray.set_symbol_value("case-fold-search", Value::T);
+            obarray.seed_value("case-fold-search", Value::T);
             obarray.make_symbol_localized(id, Value::T);
             obarray.set_blv_local_if_set(id, true);
         }
@@ -1475,7 +1480,7 @@ impl Context {
         macro_rules! defvar_per_buffer {
             ($name:expr, $val:expr) => {
                 obarray.make_special($name);
-                obarray.set_symbol_value($name, $val);
+                obarray.seed_value($name, $val);
             };
         }
         {
@@ -1624,7 +1629,7 @@ impl Context {
         // auto-create a buffer-local binding.
         {
             let id = crate::emacs_core::intern::intern("lexical-binding");
-            obarray.set_symbol_value("lexical-binding", Value::NIL);
+            obarray.seed_value("lexical-binding", Value::NIL);
             obarray.make_special("lexical-binding");
             obarray.make_symbol_localized(id, Value::NIL);
             obarray.set_blv_local_if_set(id, true);
@@ -1648,7 +1653,7 @@ impl Context {
         // DEFVAR_LISP, default nil. Let-bound extensively in subr.el,
         // custom.el, widget.el, mule.el, etc. to freeze match data
         // during internal string-match calls.
-        obarray.set_symbol_value("inhibit-changing-match-data", Value::NIL);
+        obarray.seed_value("inhibit-changing-match-data", Value::NIL);
         obarray.make_special("inhibit-changing-match-data");
 
         // --- src/search.c: syms_of_search ---
@@ -1656,7 +1661,7 @@ impl Context {
         // bunches of spaces in a regexp search. Has no elisp defvar (sibling
         // `search-whitespace-regexp` is an isearch.el defcustom), so it must be
         // seeded here; hi-lock.el (highlight-regexp) let-binds it.
-        obarray.set_symbol_value("search-spaces-regexp", Value::NIL);
+        obarray.seed_value("search-spaces-regexp", Value::NIL);
         obarray.make_special("search-spaces-regexp");
 
         // --- src/xdisp.c: syms_of_xdisp ---
@@ -1664,7 +1669,7 @@ impl Context {
         // window with scrolling; neomacs drives it from the explicit
         // run-window-scroll-functions callsites in window_cmds, so seeding the
         // symbol only makes `boundp` true before any setq/let.
-        obarray.set_symbol_value("window-scroll-functions", Value::NIL);
+        obarray.seed_value("window-scroll-functions", Value::NIL);
         obarray.make_special("window-scroll-functions");
 
         // --- src/alloc.c: syms_of_alloc ---
@@ -1688,10 +1693,10 @@ impl Context {
 
         // --- src/frame.c: syms_of_frame ---
         // DEFVAR_LISP, default 20 (minimum frame alpha/opacity).
-        obarray.set_symbol_value("frame-alpha-lower-limit", Value::fixnum(20));
+        obarray.seed_value("frame-alpha-lower-limit", Value::fixnum(20));
         obarray.make_special("frame-alpha-lower-limit");
         // DEFVAR_LISP, default nil (function to adjust reported mouse position).
-        obarray.set_symbol_value("mouse-position-function", Value::NIL);
+        obarray.seed_value("mouse-position-function", Value::NIL);
         obarray.make_special("mouse-position-function");
         //
         // TWO entries found this independently, from two different consumers,
@@ -1720,18 +1725,18 @@ impl Context {
         // `SYMBOL_PLAINVAL` and answers `special-variable-p` nil and
         // `makunbound` yes, where GNU answers t and refuses.  Measured,
         // `-Q --batch`: GNU `(t nil t)`, this port `(t nil nil)` (ledger 183).
-        obarray.set_symbol_value("default-minibuffer-frame", Value::NIL);
+        obarray.seed_value("default-minibuffer-frame", Value::NIL);
         obarray.make_special("default-minibuffer-frame");
 
         // --- src/keymap.c: syms_of_keymap ---
         // DEFVAR_LISP, default nil (preferred modifier for `where-is').
-        obarray.set_symbol_value("where-is-preferred-modifier", Value::NIL);
+        obarray.seed_value("where-is-preferred-modifier", Value::NIL);
         obarray.make_special("where-is-preferred-modifier");
 
         // --- src/coding.c: syms_of_coding ---
         // `coding-category-utf-8' holds the coding system for the UTF-8 detection
         // category; its default is the `utf-8' coding system symbol.
-        obarray.set_symbol_value("coding-category-utf-8", Value::symbol("utf-8"));
+        obarray.seed_value("coding-category-utf-8", Value::symbol("utf-8"));
         obarray.make_special("coding-category-utf-8");
 
         // --- src/charset.c: syms_of_charset ---
@@ -1740,7 +1745,7 @@ impl Context {
         // defines five charsets in C before any Lisp runs, so they sit at the
         // end of its list (newest first); `define-charset-internal' and
         // `define-charset-alias' cons the rest onto the front, as GNU does.
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "charset-list",
             Value::list(vec![
                 Value::symbol("eight-bit"),
@@ -1755,7 +1760,7 @@ impl Context {
         // --- src/minibuf.c: read-buffer history ---
         // `buffer-name-history' is the minibuffer history list for buffer names,
         // default nil.
-        obarray.set_symbol_value("buffer-name-history", Value::NIL);
+        obarray.seed_value("buffer-name-history", Value::NIL);
         obarray.make_special("buffer-name-history");
 
         // --- src/casefiddle.c: syms_of_casefiddle ---
@@ -1777,7 +1782,7 @@ impl Context {
         // DEFVAR_LISP, default nil. `newline' dynamically binds this in
         // simple.el so noninteractive newline insertion runs only its local
         // postprocessor, matching GNU Emacs.
-        obarray.set_symbol_value("post-self-insert-hook", Value::NIL);
+        obarray.seed_value("post-self-insert-hook", Value::NIL);
         obarray.make_special("post-self-insert-hook");
 
         // --- src/buffer.c: syms_of_buffer ---
@@ -1827,9 +1832,9 @@ impl Context {
         // Lisp loadup.  `lisp/loadup.el' deliberately checks only `boundp' for
         // some of them, and `term/x-win.el' mutates `x-keysym-table' while
         // installing the X keysym map.
-        obarray.set_symbol_value("x-keysym-table", Value::hash_table(HashTableTest::Eql));
+        obarray.seed_value("x-keysym-table", Value::hash_table(HashTableTest::Eql));
         obarray.make_special("x-keysym-table");
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "x-toolkit-scroll-bars",
             if cfg!(target_os = "windows") {
                 Value::T
@@ -1874,9 +1879,9 @@ impl Context {
             "x-auto-preserve-selections",
             Value::list(vec![Value::symbol("CLIPBOARD"), Value::symbol("PRIMARY")]),
         );
-        obarray.set_symbol_value("x-session-id", Value::NIL);
+        obarray.seed_value("x-session-id", Value::NIL);
         obarray.make_special("x-session-id");
-        obarray.set_symbol_value("x-session-previous-id", Value::NIL);
+        obarray.seed_value("x-session-previous-id", Value::NIL);
         obarray.make_special("x-session-previous-id");
         for name in [
             "x-ctrl-keysym",
@@ -1885,7 +1890,7 @@ impl Context {
             "x-meta-keysym",
             "x-super-keysym",
         ] {
-            obarray.set_symbol_value(name, Value::NIL);
+            obarray.seed_value(name, Value::NIL);
             obarray.make_special(name);
         }
         // The rest of `syms_of_xterm', entry 173.  This port already declared
@@ -1957,7 +1962,7 @@ impl Context {
             "x-treat-local-requests-remotely",
             "x-selection-alias-alist",
         ] {
-            obarray.set_symbol_value(name, Value::NIL);
+            obarray.seed_value(name, Value::NIL);
             obarray.make_special(name);
         }
         // --- src/xsettings.c: syms_of_xsettings ---
@@ -2133,26 +2138,26 @@ impl Context {
         // Standard keymaps (C creates these in keyboard.c:init_kboard)
         // keyboard.c:14130 DEFVAR_LISP -- special like every C DEFVAR.
         obarray.define_special_variable("special-event-map", special_event_map);
-        obarray.set_symbol_value(
+        obarray.seed_value(
             "mode-line-window-dedicated-keymap",
             mode_line_window_dedicated_keymap,
         );
-        obarray.set_symbol_value("text-mode-map", text_mode_map);
+        obarray.seed_value("text-mode-map", text_mode_map);
         // `indent-rigidly-map` and `image-slice-map` are deliberately NOT
         // seeded, completing the rule stated above this block: GNU defines both
         // with `defvar-keymap` -- `lisp/indent.el:237` (TAB, <left>, <right>,
         // S-<left>, S-<right>) and `lisp/image.el:168` (the image resize
         // bindings) -- and a seeded empty keymap makes those definitions skip
         // installing their bindings, leaving the keys dead.
-        obarray.set_symbol_value("tool-bar-map", tool_bar_map);
+        obarray.seed_value("tool-bar-map", tool_bar_map);
         // keyboard.c:14210 / 14202 DEFVAR_LISP -- special like every C DEFVAR.
         obarray.define_special_variable("key-translation-map", key_translation_map);
         obarray.define_special_variable("function-key-map", function_key_map);
-        obarray.set_symbol_value("input-decode-map", input_decode_map);
+        obarray.seed_value("input-decode-map", input_decode_map);
         obarray.make_special("input-decode-map");
-        obarray.set_symbol_value("local-function-key-map", local_function_key_map);
+        obarray.seed_value("local-function-key-map", local_function_key_map);
         obarray.make_special("local-function-key-map");
-        obarray.set_symbol_value("keyboard-translate-table", Value::NIL);
+        obarray.seed_value("keyboard-translate-table", Value::NIL);
         // GNU uses DEFVAR_KBOARD here. NeoVM does not yet split keyboard state
         // per terminal, so model it as a dynamically scoped runtime variable.
         obarray.make_special("keyboard-translate-table");
@@ -2169,21 +2174,41 @@ impl Context {
             .keyboard
             .set_terminal_translation_maps(input_decode_map, local_function_key_map);
         let noninteractive = obarray
-            .symbol_value_id_or_nil(core_eval_symbols.noninteractive_symbol)
+            .canonical_value_or_nil(
+                CanonicalAccess::BOOTSTRAP,
+                core_eval_symbols.noninteractive_symbol,
+            )
             .is_truthy();
         let symbols_with_pos_enabled = obarray
-            .symbol_value_id_or_nil(core_eval_symbols.symbols_with_pos_enabled_symbol)
+            .canonical_value_or_nil(
+                CanonicalAccess::BOOTSTRAP,
+                core_eval_symbols.symbols_with_pos_enabled_symbol,
+            )
             .is_truthy();
         let print_symbols_bare = obarray
-            .symbol_value_id_or_nil(core_eval_symbols.print_symbols_bare_symbol)
+            .canonical_value_or_nil(
+                CanonicalAccess::BOOTSTRAP,
+                core_eval_symbols.print_symbols_bare_symbol,
+            )
             .is_truthy();
         let compiler_function_overrides_active = obarray
-            .symbol_value_id_or_nil(core_eval_symbols.compiler_function_overrides_symbol)
+            .canonical_value_or_nil(
+                CanonicalAccess::BOOTSTRAP,
+                core_eval_symbols.compiler_function_overrides_symbol,
+            )
             .is_cons();
-        let quit_flag = obarray.symbol_value_id_or_nil(core_eval_symbols.quit_flag_symbol);
-        let inhibit_quit = obarray.symbol_value_id_or_nil(core_eval_symbols.inhibit_quit_symbol);
-        let throw_on_input =
-            obarray.symbol_value_id_or_nil(core_eval_symbols.throw_on_input_symbol);
+        let quit_flag = obarray.canonical_value_or_nil(
+            CanonicalAccess::BOOTSTRAP,
+            core_eval_symbols.quit_flag_symbol,
+        );
+        let inhibit_quit = obarray.canonical_value_or_nil(
+            CanonicalAccess::BOOTSTRAP,
+            core_eval_symbols.inhibit_quit_symbol,
+        );
+        let throw_on_input = obarray.canonical_value_or_nil(
+            CanonicalAccess::BOOTSTRAP,
+            core_eval_symbols.throw_on_input_symbol,
+        );
 
         // Preserve startup allocation order: buffers precede frame Lisp cells.
         let world_buffers = BufferManager::new_world_parts();

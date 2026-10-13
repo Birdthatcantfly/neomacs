@@ -284,8 +284,8 @@ fn run_window_default_hook_value(
         return Ok(Value::NIL);
     }
     let global_hook_value = eval
-        .obarray
-        .default_value_id_copied(hook_sym)
+        .variables()
+        .default_value(hook_sym)
         .unwrap_or(Value::NIL);
     if global_hook_value.is_nil() {
         return Ok(Value::NIL);
@@ -1534,8 +1534,7 @@ pub(crate) fn builtin_current_window_configuration(
         normalize_selected_window_point_in_snapshot(&mut snapshot, &mut eval.buffers);
         save_snapshot_persistent_window_parameters(
             &mut snapshot,
-            eval.obarray
-                .symbol_value_copied("window-persistent-parameters")
+            eval.variable_value_by_name("window-persistent-parameters")
                 .unwrap_or(Value::NIL),
             symbol_mode,
         );
@@ -1957,8 +1956,8 @@ pub(crate) fn builtin_run_window_configuration_change_hook(
 
     let hook_sym = hook_runtime::hook_symbol_by_name(eval, "window-configuration-change-hook");
     let global_hook_value = eval
-        .obarray
-        .default_value_id_copied(hook_sym)
+        .variables()
+        .default_value(hook_sym)
         .unwrap_or(Value::NIL);
     let selected_window = frame_state.selected_window;
     let window_ids = frame_state.window_list();
@@ -2090,8 +2089,7 @@ pub(crate) fn builtin_featurep(eval: &mut super::eval::Context, args: Vec<Value>
     // does. (`features' is not special in GNU, so a lexical `let' of it
     // never reaches here.)
     let features = eval
-        .obarray
-        .symbol_value_id_copied(features_symbol_id())
+        .variable_value(features_symbol_id())
         .unwrap_or(Value::NIL);
     if super::cons_list::builtin_memq_values(feature, features, eval.symbols_with_pos_enabled)?
         .is_nil()

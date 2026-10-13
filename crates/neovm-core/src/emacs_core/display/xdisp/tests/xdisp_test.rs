@@ -4,6 +4,7 @@ use crate::buffer::{BufferTextBackendKind, CharPos0, LispCharPos1};
 use crate::emacs_core::Context;
 use crate::emacs_core::error::FlowKind;
 use crate::emacs_core::eval::DisplayHost;
+use crate::emacs_core::eval::VariableView;
 use crate::emacs_core::image_catalog::{
     ImageCatalog, ImageId, ImageLayoutExtent, ImageLoadAttempt, ImageLoadToken, ImageLookup,
     ImageMaskKind, ImageResolveRequest, ImageSizeLimit, ReadyImage, ResolvedImageMetadata,
@@ -437,7 +438,7 @@ fn test_format_mode_line_in_state_uses_buffer_local_symbols_and_restores_buffer(
         .expect("mode-name local should set");
 
     let rendered = format_mode_line_from_state(
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &[],
         &eval.frames,
         &mut eval.buffers,
@@ -517,7 +518,7 @@ fn test_format_mode_line_in_state_with_eval_keeps_shared_buffer_context_around_e
         .expect("mode-name local should set");
 
     let rendered = finish_format_mode_line_in_state_with_eval(
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &[],
         &eval.frames,
         &mut eval.buffers,
@@ -607,7 +608,7 @@ fn test_format_mode_line_string_valued_symbols_render_literally() {
         .expect("mode-name local should set");
 
     let rendered = format_mode_line_from_state(
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &[],
         &eval.frames,
         &mut eval.buffers,
@@ -632,7 +633,7 @@ fn test_format_mode_line_fixnum_elements_pad_and_truncate_tail() {
     let other_id = eval.buffers.create_buffer("xy");
 
     let rendered = format_mode_line_from_state(
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &[],
         &eval.frames,
         &mut eval.buffers,
@@ -661,7 +662,7 @@ fn test_format_mode_line_percent_specs_keep_gnu_field_width_and_dash_semantics()
     let other_id = eval.buffers.create_buffer("xy");
 
     let rendered = format_mode_line_from_state(
-        &eval.obarray,
+        VariableView::new(&eval.obarray, &eval.owner),
         &[],
         &eval.frames,
         &mut eval.buffers,

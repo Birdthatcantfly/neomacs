@@ -12,7 +12,7 @@ fn reader<'a>(
     identity: &'a Value,
     snapshot: &'a LispString,
     end: usize,
-    obarray: &'a crate::emacs_core::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'a>,
 ) -> Reader<'a> {
     let range = CharacterReadRange::for_original(
         identity,
@@ -20,7 +20,7 @@ fn reader<'a>(
         EmacsBytePos::ZERO,
     )
     .expect("original source range");
-    Reader::new_lisp_string(snapshot, LispReaderRange::Characters(range), obarray)
+    Reader::new_lisp_string(snapshot, LispReaderRange::Characters(range), vars)
 }
 
 #[test]
@@ -33,7 +33,15 @@ fn error_unread_caches_original_identity_and_payload_then_remaps_byte() {
         let payload = identity.as_lisp_string().expect("source");
         let snapshot = payload.clone();
         crate::emacs_core::string_pos_cache::reset_string_pos_cache();
-        let mut parser = reader(&identity, &snapshot, 3, &obarray);
+        let mut parser = reader(
+            &identity,
+            &snapshot,
+            3,
+            crate::emacs_core::eval::VariableView::canonical(
+                crate::emacs_core::symbol::CanonicalAccess::TEST,
+                &obarray,
+            ),
+        );
         assert_eq!(
             parser
                 .read_form()
@@ -90,7 +98,15 @@ fn consumed_label_suffix_does_not_run_string_unget() {
     let payload = identity.as_lisp_string().expect("source");
     let snapshot = payload.clone();
     crate::emacs_core::string_pos_cache::reset_string_pos_cache();
-    let mut parser = reader(&identity, &snapshot, 3, &obarray);
+    let mut parser = reader(
+        &identity,
+        &snapshot,
+        3,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &obarray,
+        ),
+    );
     assert_eq!(parser.read_form().expect_err("label error").message, "#1");
     assert_eq!(parser.pos, 3);
     assert_eq!(parser.character_cursor.position(), Some(CharPos0::new(3)));
@@ -109,7 +125,15 @@ fn radix_digit_span_is_preserved_before_cursor_unread_remaps() {
         let identity = original(prefix, 4);
         let snapshot = identity.as_lisp_string().expect("source").clone();
         crate::emacs_core::string_pos_cache::reset_string_pos_cache();
-        let mut parser = reader(&identity, &snapshot, 4, &obarray);
+        let mut parser = reader(
+            &identity,
+            &snapshot,
+            4,
+            crate::emacs_core::eval::VariableView::canonical(
+                crate::emacs_core::symbol::CanonicalAccess::TEST,
+                &obarray,
+            ),
+        );
         assert_eq!(
             parser.read_form().expect("radix number").as_fixnum(),
             Some(number)
@@ -126,7 +150,15 @@ fn logical_eof_does_not_update_cache_for_unread_minus_one() {
     let obarray = crate::emacs_core::symbol::Obarray::new();
     let identity = original(b"ab", 1);
     let snapshot = identity.as_lisp_string().expect("source").clone();
-    let mut parser = reader(&identity, &snapshot, 1, &obarray);
+    let mut parser = reader(
+        &identity,
+        &snapshot,
+        1,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &obarray,
+        ),
+    );
     let sentinel = original("béaz".as_bytes(), 3);
     let payload = sentinel.as_lisp_string().expect("sentinel");
     crate::emacs_core::string_pos_cache::reset_string_pos_cache();
@@ -154,7 +186,15 @@ fn dot_probe_defers_remapped_cursor_until_period_consumption() {
     let identity = original(b".", 2);
     let snapshot = identity.as_lisp_string().expect("source").clone();
     crate::emacs_core::string_pos_cache::reset_string_pos_cache();
-    let mut parser = reader(&identity, &snapshot, 2, &obarray);
+    let mut parser = reader(
+        &identity,
+        &snapshot,
+        2,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &obarray,
+        ),
+    );
     assert!(parser.is_dot_separator());
     assert_eq!(parser.pos, 0);
     assert_eq!(parser.character_cursor.position(), Some(CharPos0::ZERO));
@@ -175,7 +215,10 @@ fn byte_sources_do_not_bind_original_string_cache() {
             EmacsBytePos::ZERO,
             EmacsBytePos::new(input.sbytes()),
         )),
-        &obarray,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &obarray,
+        ),
     );
     assert!(matches!(
         parser.original_string,

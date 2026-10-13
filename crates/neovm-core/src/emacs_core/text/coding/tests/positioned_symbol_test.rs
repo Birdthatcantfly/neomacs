@@ -210,7 +210,8 @@ fn positioned_coding_definition_resolves_nested_symbol_inputs() {
     // coding metadata values/properties, preserving canonical dispatch state.
     unsafe {
         ctx.obarray.with_legacy_value_write(|obarray| {
-            record_lisp_define_coding_system_internal(obarray, &args, SymbolMode::Positioned);
+            let mut vars = crate::emacs_core::eval::VariableStore::new(obarray, None);
+            record_lisp_define_coding_system_internal(&mut vars, &args, SymbolMode::Positioned);
         });
     }
     let names = ctx

@@ -6325,7 +6325,7 @@ fn builtin_coding_region(
         None => Ok(result),
         Some(None) => {
             crate::emacs_core::editfns::ensure_current_buffer_writable_in_state(
-                &ctx.obarray,
+                ctx.variables(),
                 &[],
                 &ctx.buffers,
             )?;

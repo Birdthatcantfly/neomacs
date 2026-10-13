@@ -12,6 +12,7 @@ use super::symbol::SetInternalBind;
 use super::value::{Value, ValueKind};
 use crate::emacs_core::builtins::from_value::FromValue;
 use crate::emacs_core::error::{LispCondition, expect_args, signal};
+use crate::emacs_core::symbol::CanonicalAccess;
 
 /// GNU `set_default_internal` (`src/data.c`).
 ///
@@ -329,7 +330,8 @@ fn store_default_internal(
         // For PLAINVAL this is the currently installed dynamic value cell; for
         // LOCALIZED it is the BLV default cell; other forwarders store through
         // their descriptor. This is the same storage split as GNU data.c.
-        ctx.obarray_mut().set_symbol_value_id(resolved, stored);
+        ctx.obarray_mut()
+            .set_canonical_value(CanonicalAccess::STORAGE, resolved, stored);
     }
 
     if bindflag == SetInternalBind::Set {
@@ -363,7 +365,9 @@ pub(crate) fn default_boundp(ctx: &mut Context, args: Vec<Value>) -> EvalResult 
         return Ok(Value::bool_val(binding.bound().is_some()));
     }
     Ok(Value::bool_val(
-        ctx.obarray().boundp_id(resolved) || ctx.obarray().is_constant_id(resolved),
+        ctx.obarray()
+            .canonical_boundp_id(CanonicalAccess::STORAGE, resolved)
+            || ctx.obarray().is_constant_id(resolved),
     ))
 }
 
@@ -441,7 +445,7 @@ pub(crate) fn default_value_in_state(
         }
     }
 
-    obarray.default_value_id_copied(resolved)
+    obarray.canonical_default_value(CanonicalAccess::STORAGE, resolved)
 }
 
 #[cfg(test)]

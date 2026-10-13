@@ -268,7 +268,9 @@ fn adopt_one(obarray: &mut Obarray, var: &GnuObjectVariable) -> Adoption {
         }
         SymbolRedirect::Plainval => {}
     }
-    let Some(value) = obarray.find_symbol_value(id) else {
+    let Some(value) =
+        obarray.canonical_find_value(crate::emacs_core::symbol::CanonicalAccess::BOOTSTRAP, id)
+    else {
         return Adoption::Unbound;
     };
     if value == Value::UNBOUND {

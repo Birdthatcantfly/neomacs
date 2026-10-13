@@ -620,7 +620,7 @@ fn defsym(obarray: &mut Obarray, name: &str) {
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
 fn defvar_lisp(obarray: &mut Obarray, name: &str, value: Value) {
-    obarray.set_symbol_value(name, value);
+    obarray.seed_value(name, value);
     obarray.make_special(name);
 }
 

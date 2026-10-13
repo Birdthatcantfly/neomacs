@@ -19,7 +19,7 @@ fn signed_property_coordinate_is_retained_as_a_typed_diagnostic() {
         GnuDeclaredCharacterCount::try_from(1).expect("bounded metadata"),
     );
     with_intervals(&mut string, 1);
-    let props = SyntaxProperties::for_scan(true, &context.obarray, &context.buffers);
+    let props = SyntaxProperties::for_scan(true, context.variables(), &context.buffers);
     let run = StringSyntaxPropByteRun::new(props, &string, string.intervals().as_table());
     assert_eq!(run.position_error(), None);
     assert_eq!(run.syntax_table_prop_at_string_byte(3), None);
@@ -51,7 +51,7 @@ fn positive_property_coordinate_beyond_declared_bounds_is_also_rejected() {
     );
     with_intervals(&mut string, 1);
     let run = StringSyntaxPropByteRun::new(
-        SyntaxProperties::for_scan(true, &context.obarray, &context.buffers),
+        SyntaxProperties::for_scan(true, context.variables(), &context.buffers),
         &string,
         string.intervals().as_table(),
     );
@@ -72,7 +72,7 @@ fn ordinary_property_and_ignore_controls_have_no_coordinate_diagnostic() {
     let mut string = LispString::from_utf8("abécd");
     with_intervals(&mut string, 5);
     let honoring = StringSyntaxPropByteRun::new(
-        SyntaxProperties::for_scan(true, &context.obarray, &context.buffers),
+        SyntaxProperties::for_scan(true, context.variables(), &context.buffers),
         &string,
         string.intervals().as_table(),
     );

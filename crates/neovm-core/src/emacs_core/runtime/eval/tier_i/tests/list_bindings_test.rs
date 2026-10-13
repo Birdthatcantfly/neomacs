@@ -58,7 +58,7 @@ fn circular_lists_tier_i_live_binding_spines_match_gnu() {
         context.tier_i.set_mode(mode);
         context.tier_i.set_threshold(1);
         context.tier_i.clear_for_test();
-        let forms = crate::emacs_core::value_reader::read_all(form, &context.obarray)
+        let forms = crate::emacs_core::value_reader::read_all(form, context.variables())
             .expect("parse GNU-backed tier-I binding form");
         assert_eq!(forms.len(), 1);
         let roots = context.save_specpdl_roots();

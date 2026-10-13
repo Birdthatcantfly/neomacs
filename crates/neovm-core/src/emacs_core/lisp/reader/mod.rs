@@ -8,9 +8,9 @@ use super::intern::{SymId, intern};
 use super::minibuffer::{MinibufferEntryRejection, RecursiveMinibufferPolicy};
 use crate::emacs_core::error::LispCondition;
 use crate::emacs_core::error::{expect_args, expect_max_args, expect_min_args};
+use crate::emacs_core::eval::VariableView;
 use crate::tagged::SymbolMode;
 // storage imports removed — now using emacs_char directly
-use super::symbol::Obarray;
 use super::value::*;
 use super::value_reader::SymbolPositionMode;
 use crate::buffer::{EmacsBytePos, EmacsByteRange, LispCharPos1};
@@ -88,7 +88,7 @@ impl RequireMatchSymbol {
 }
 
 fn minibuffer_text_properties_enabled_in_buffer(
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     buffers: &crate::buffer::BufferManager,
     buffer_id: Option<crate::buffer::BufferId>,
 ) -> bool {
@@ -99,7 +99,7 @@ fn minibuffer_text_properties_enabled_in_buffer(
         // A localized symbol's ordinary value cell may be cached for a
         // different buffer.  The absence of a local binding means its
         // defcell is authoritative, just as GNU's BLV lookup specifies.
-        .or_else(|| obarray.default_value_id_copied(option))
+        .or_else(|| vars.default_value(option))
         .is_some_and(|value| value.is_truthy())
 }
 
@@ -185,10 +185,11 @@ fn initialize_unbound_minibuffer_history(
     Ok(())
 }
 
-fn minibuffer_history_limit(obarray: &Obarray, history_name: SymId) -> Option<usize> {
+fn minibuffer_history_limit(vars: VariableView<'_>, history_name: SymId) -> Option<usize> {
+    let obarray = vars.obarray();
     let configured = obarray
         .get_property_id(history_name, intern("history-length"))
-        .or_else(|| obarray.symbol_value_copied("history-length"));
+        .or_else(|| vars.value_by_name("history-length"));
 
     match configured {
         Some(value) if value == Value::T => None,
@@ -206,7 +207,7 @@ fn minibuffer_history_limit(obarray: &Obarray, history_name: SymId) -> Option<us
 }
 
 fn add_to_minibuffer_history_variable(
-    obarray: &mut Obarray,
+    vars: &mut crate::emacs_core::eval::VariableStore<'_>,
     history_name: SymId,
     value: &crate::heap_types::LispString,
 ) {
@@ -215,7 +216,7 @@ fn add_to_minibuffer_history_variable(
     }
 
     let new_value = Value::heap_string(value.clone());
-    let current = obarray.symbol_value_id_or_nil(history_name);
+    let current = vars.view().value_or_nil(history_name);
     let mut history_items = if current.is_nil() {
         Vec::new()
     } else if let Some(items) = list_to_vec(&current) {
@@ -228,8 +229,9 @@ fn add_to_minibuffer_history_variable(
         return;
     }
 
-    if obarray
-        .symbol_value_copied("history-delete-duplicates")
+    if vars
+        .view()
+        .value_by_name("history-delete-duplicates")
         .is_some_and(|value| value.is_truthy())
     {
         history_items.retain(|entry| *entry != new_value);
@@ -237,18 +239,17 @@ fn add_to_minibuffer_history_variable(
 
     history_items.insert(0, new_value);
 
-    match minibuffer_history_limit(obarray, history_name) {
+    match minibuffer_history_limit(vars.view(), history_name) {
         Some(0) => history_items.clear(),
         Some(max) if history_items.len() > max => history_items.truncate(max),
         _ => {}
     }
 
-    obarray.set_symbol_value_id(history_name, Value::list(history_items));
+    vars.store(history_name, Value::list(history_items));
 }
 
-fn history_add_new_input_enabled(obarray: &Obarray) -> bool {
-    obarray
-        .symbol_value_copied("history-add-new-input")
+fn history_add_new_input_enabled(vars: VariableView<'_>) -> bool {
+    vars.value_by_name("history-add-new-input")
         .is_none_or(|value| value.is_truthy())
 }
 
@@ -292,16 +293,19 @@ fn add_minibuffer_history_after_unwind(
         // bootstrap-safe fallback for deliberately minimal test contexts.
         // SAFETY: the bootstrap helper only reads/stores the history value;
         // it does not call Lisp, alter dispatch metadata, or replace storage.
+        let owner = &mut eval.owner;
         unsafe {
             eval.obarray.with_legacy_value_write(|obarray| {
-                add_to_minibuffer_history_variable(obarray, history_name, entry);
+                let mut vars =
+                    crate::emacs_core::eval::VariableStore::new(obarray, owner.slab_mut());
+                add_to_minibuffer_history_variable(&mut vars, history_name, entry);
             });
         }
     }
 
     if !entry.as_bytes().is_empty() {
         let max_length =
-            minibuffer_history_limit(&eval.obarray, history_name).unwrap_or(usize::MAX);
+            minibuffer_history_limit(eval.variables(), history_name).unwrap_or(usize::MAX);
         eval.minibuffers
             .add_to_history_lisp(history_name, entry.clone(), max_length);
     }
@@ -326,7 +330,7 @@ fn finish_minibuffer_result_after_unwind(
         result
     };
     let read_result =
-        read_from_string_impl(&eval.obarray, vec![Value::heap_string(input.clone())])?;
+        read_from_string_impl(eval.variables(), vec![Value::heap_string(input.clone())])?;
     let value = read_result.cons_car();
     let end_char = read_result.cons_cdr().xfixnum().max(0) as usize;
     let end_byte = if input.is_multibyte() {
@@ -974,18 +978,16 @@ pub(crate) fn unwind_minibuffer_session(
             .map(|active| record_restored_calling_window_selection(shared, active))
             .unwrap_or(Ok(Value::NIL))
     };
-    shared.obarray.set_symbol_value(
+    shared.store_variable_by_name(
         "minibuffer-depth",
         Value::fixnum(shared.minibuffers.depth() as i64),
     );
-    shared
-        .obarray
-        .set_symbol_value("current-prefix-arg", state.saved_current_prefix_arg);
-    shared.obarray.set_symbol_value(
+    shared.store_variable_by_name("current-prefix-arg", state.saved_current_prefix_arg);
+    shared.store_variable_by_name(
         "minibuffer-history-variable",
         state.saved_minibuffer_history_variable,
     );
-    shared.obarray.set_symbol_value(
+    shared.store_variable_by_name(
         "minibuffer-history-position",
         state.saved_minibuffer_history_position,
     );
@@ -1243,7 +1245,7 @@ fn read_from_active_load_cursor(
             pos,
             end,
             symbol_position_mode,
-            &ctx.obarray,
+            ctx.variables(),
             shorthands.as_ref(),
             ctx.symbol_mode(),
         )
@@ -1350,7 +1352,7 @@ pub(crate) fn builtin_read_from_string(
 ) -> EvalResult {
     let shorthands = current_read_symbol_shorthands(ctx);
     let result = read_from_string_impl_inner(
-        &ctx.obarray,
+        ctx.variables(),
         args,
         SymbolPositionMode::Bare,
         shorthands.as_ref(),
@@ -1364,20 +1366,14 @@ pub(crate) fn builtin_read_from_string(
 }
 
 pub(crate) fn read_from_string_impl(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     args: Vec<Value>,
 ) -> EvalResult {
-    read_from_string_impl_inner(
-        obarray,
-        args,
-        SymbolPositionMode::Bare,
-        None,
-        SymbolMode::Bare,
-    )
+    read_from_string_impl_inner(vars, args, SymbolPositionMode::Bare, None, SymbolMode::Bare)
 }
 
 fn read_from_string_impl_inner(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: VariableView<'_>,
     args: Vec<Value>,
     symbol_position_mode: SymbolPositionMode,
     shorthands: Option<&super::value_reader::ReadSymbolShorthands>,
@@ -1469,7 +1465,7 @@ fn read_from_string_impl_inner(
     let read_result = read_source.read_one_character_range_with_locate_syms_with_symbols(
         range,
         symbol_position_mode,
-        obarray,
+        vars,
         shorthands.into(),
         mode,
     );
@@ -1558,8 +1554,7 @@ pub fn builtin_read_impl(
     expect_max_args("read", &args, 1)?;
 
     let stream = if args.is_empty() || args[0].is_nil() {
-        ctx.obarray
-            .symbol_value_copied("standard-input")
+        ctx.variable_value_by_name("standard-input")
             .unwrap_or(Value::NIL)
     } else {
         args[0]
@@ -1577,7 +1572,7 @@ pub fn builtin_read_impl(
         ResolvedReadStream::String(stream) => {
             // Read from string
             let result = read_from_string_impl_inner(
-                &ctx.obarray,
+                ctx.variables(),
                 vec![stream],
                 symbol_position_mode,
                 shorthands.as_ref(),
@@ -1616,7 +1611,7 @@ pub fn builtin_read_impl(
                     EmacsByteRange::new(start, end),
                     super::value_reader::BufferReadcharOffsetOrigin::Zero,
                     symbol_position_mode,
-                    &ctx.obarray,
+                    ctx.variables(),
                     shorthands.as_ref(),
                     ctx.symbol_mode(),
                 ) {
@@ -1683,7 +1678,7 @@ pub fn builtin_read_impl(
                         EmacsByteRange::new(start, end),
                         super::value_reader::BufferReadcharOffsetOrigin::BufferPoint,
                         symbol_position_mode,
-                        &ctx.obarray,
+                        ctx.variables(),
                         shorthands.as_ref(),
                         ctx.symbol_mode(),
                     ) {
@@ -1732,7 +1727,7 @@ pub fn builtin_read_impl(
             let prompt = Value::string("Lisp expression: ");
             let input = builtin_read_from_minibuffer(ctx, vec![prompt])?;
             let result = read_from_string_impl_inner(
-                &ctx.obarray,
+                ctx.variables(),
                 vec![input],
                 symbol_position_mode,
                 shorthands.as_ref(),
@@ -1829,8 +1824,8 @@ struct MinibufferWindowRestorationPlan {
 /// (`src/data.c:1573-1603`) means that global is the *current buffer's*
 /// binding whenever a buffer has localised it (ledger 196).
 pub(crate) fn minibuffer_restore_windows_requested(eval: &super::eval::Context) -> bool {
-    eval.obarray
-        .value_in_buffer(
+    eval.variables()
+        .value_in_buffer_by_name(
             eval.buffers.current_buffer(),
             "read-minibuffer-restore-windows",
         )
@@ -2087,7 +2082,7 @@ pub(crate) fn finish_completing_read_in_eval(
     eval: &mut super::eval::Context,
     args: &[Value],
 ) -> EvalResult {
-    let minibuffer_args = completing_read_minibuffer_args(eval.obarray(), args);
+    let minibuffer_args = completing_read_minibuffer_args(eval.variables(), args);
     let collection = args[1];
     let predicate = args.get(2).copied().unwrap_or(Value::NIL);
     let require_match = args.get(3).copied().unwrap_or(Value::NIL);
@@ -2187,8 +2182,7 @@ fn finish_read_from_minibuffer_in_vm_runtime_interactive(
     // Check inhibit-interaction — GNU Emacs signals an error when any
     // interactive read is attempted while this variable is non-nil.
     if shared
-        .obarray
-        .symbol_value_copied("inhibit-interaction")
+        .variable_value_by_name("inhibit-interaction")
         .is_some_and(|v| v.is_truthy())
     {
         return Err(signal(
@@ -2238,9 +2232,7 @@ fn finish_read_from_minibuffer_in_vm_runtime_interactive(
             });
             restoration.record(shared);
 
-            let recursive_policy = if shared
-                .obarray
-                .symbol_value_copied("enable-recursive-minibuffers")
+            let recursive_policy = if shared.variable_value_by_name("enable-recursive-minibuffers")
                 .is_some_and(|value| value.is_truthy())
             {
                 RecursiveMinibufferPolicy::Allow
@@ -2258,13 +2250,11 @@ fn finish_read_from_minibuffer_in_vm_runtime_interactive(
     // minibuffer commands may clobber it while reading input.
     let saved_buffer_id = shared.buffers.current_buffer().map(|b| b.id);
     let caller_allows_text_properties = minibuffer_text_properties_enabled_in_buffer(
-        &shared.obarray,
+        shared.variables(),
         &shared.buffers,
         saved_buffer_id,
     );
-    let saved_current_prefix_arg = shared
-        .obarray
-        .symbol_value_copied("current-prefix-arg")
+    let saved_current_prefix_arg = shared.variable_value_by_name("current-prefix-arg")
         .unwrap_or(Value::NIL);
     // GNU `read_minibuf` also saves `(this-command-keys-vector)` (minibuf.c:
     // 738-739) and `read_minibuf_unwind` restores it (minibuf.c:1144-1146) so
@@ -2276,13 +2266,9 @@ fn finish_read_from_minibuffer_in_vm_runtime_interactive(
     // idle-timer probe early.
     let saved_command_keys = shared.read_command_keys().to_vec();
     let saved_raw_command_keys = shared.read_raw_command_keys().to_vec();
-    let saved_minibuffer_history_variable = shared
-        .obarray
-        .symbol_value_copied("minibuffer-history-variable")
+    let saved_minibuffer_history_variable = shared.variable_value_by_name("minibuffer-history-variable")
         .unwrap_or(Value::from_sym_id(intern("minibuffer-history")));
-    let saved_minibuffer_history_position = shared
-        .obarray
-        .symbol_value_copied("minibuffer-history-position")
+    let saved_minibuffer_history_position = shared.variable_value_by_name("minibuffer-history-position")
         .unwrap_or(Value::NIL);
     let recursive_depth = shared.recursive_command_loop_depth();
 
@@ -2335,12 +2321,8 @@ fn finish_read_from_minibuffer_in_vm_runtime_interactive(
     if let Some(active_window_state) = active_window_state {
         record_active_minibuffer_selection(shared, active_window_state, minibuf_id)?;
     }
-    shared
-        .obarray
-        .set_symbol_value("minibuffer-history-variable", history_spec.variable_value);
-    shared
-        .obarray
-        .set_symbol_value("minibuffer-history-position", history_spec.position);
+    shared.store_variable_by_name("minibuffer-history-variable", history_spec.variable_value);
+    shared.store_variable_by_name("minibuffer-history-position", history_spec.position);
     run_minibuffer_mode_if_bound(shared, "minibuffer-mode")?;
     install_minibuffer_ambient_directory_in_state(
         &mut shared.buffers,
@@ -2348,9 +2330,7 @@ fn finish_read_from_minibuffer_in_vm_runtime_interactive(
         ambient_directory,
     );
 
-    let prompt_properties = shared
-        .obarray
-        .symbol_value_copied("minibuffer-prompt-properties")
+    let prompt_properties = shared.variable_value_by_name("minibuffer-prompt-properties")
         .unwrap_or(Value::NIL);
     let mini_source_before = super::eval::gnu_redisplay_hooks_enabled().then(||
         shared.buffers.get(minibuf_id).map(|buffer| (buffer.chars_modified_tick(), buffer.props_modified_tick()))
@@ -2407,18 +2387,12 @@ fn finish_read_from_minibuffer_in_vm_runtime_interactive(
     let minibuf_keymap = if !keymap_arg.is_nil() {
         keymap_arg
     } else {
-        shared
-            .obarray
-            .symbol_value_copied("minibuffer-local-map")
+        shared.variable_value_by_name("minibuffer-local-map")
             .unwrap_or(Value::NIL)
     };
     let _ = shared.buffers.set_current_local_map(minibuf_keymap);
-    shared
-        .obarray
-        .set_symbol_value("minibuffer-prompt", Value::heap_string(prompt.clone()));
-    shared
-        .obarray
-        .set_symbol_value("minibuffer-depth", Value::fixnum(minibuf_depth as i64));
+    shared.store_variable_by_name("minibuffer-prompt", Value::heap_string(prompt.clone()));
+    shared.store_variable_by_name("minibuffer-depth", Value::fixnum(minibuf_depth as i64));
     run_before_setup_hook(shared)?;
     shared.run_hook_if_bound("minibuffer-setup-hook")?;
 
@@ -2438,13 +2412,13 @@ fn finish_read_from_minibuffer_in_vm_runtime_interactive(
             let _ = shared.buffers.switch_current_unrecorded(minibuf_id);
             let preserve_text_properties = caller_allows_text_properties
                 || minibuffer_text_properties_enabled_in_buffer(
-                    &shared.obarray,
+                    shared.variables(),
                     &shared.buffers,
                     Some(minibuf_id),
                 );
             Ok(Value::heap_string(
                 super::minibuffer::minibuffer_contents_lisp_string_in_state(
-                    &shared.obarray,
+                    shared.variables(),
                     &shared.buffers,
                     &shared.minibuffers,
                     preserve_text_properties,
@@ -2468,7 +2442,7 @@ fn finish_read_from_minibuffer_in_vm_runtime_interactive(
             .as_lisp_string()
             .expect("an accepted minibuffer command must return its contents")
             .clone();
-        if history_add_new_input_enabled(&shared.obarray)
+        if history_add_new_input_enabled(shared.variables())
             && let Some(history_name) = history_spec.history_name
             && let Some(history_entry) = minibuffer_history_entry(&result_text, default_val)
         {
@@ -2490,7 +2464,7 @@ pub(crate) fn finish_completing_read_in_vm_runtime(
     if let Some(result) = builtin_completing_read_in_runtime(shared, args)? {
         return Ok(result);
     }
-    let minibuffer_args = completing_read_minibuffer_args(&shared.obarray, args);
+    let minibuffer_args = completing_read_minibuffer_args(shared.variables(), args);
     let collection = args[1];
     let predicate = args.get(2).copied().unwrap_or(Value::NIL);
     let require_match = args.get(3).copied().unwrap_or(Value::NIL);
@@ -2562,7 +2536,10 @@ fn install_completing_read_minibuffer_locals(
     }
 }
 
-pub(crate) fn completing_read_minibuffer_args(obarray: &Obarray, args: &[Value]) -> [Value; 7] {
+pub(crate) fn completing_read_minibuffer_args(
+    vars: VariableView<'_>,
+    args: &[Value],
+) -> [Value; 7] {
     let prompt = args[0];
     let require_match = args.get(3).copied().unwrap_or(Value::NIL);
     let initial_input = args.get(4).copied().unwrap_or(Value::NIL);
@@ -2571,12 +2548,10 @@ pub(crate) fn completing_read_minibuffer_args(obarray: &Obarray, args: &[Value])
     let inherit = args.get(7).copied().unwrap_or(Value::NIL);
 
     let keymap = if !require_match.is_nil() {
-        obarray
-            .symbol_value_copied("minibuffer-local-must-match-map")
+        vars.value_by_name("minibuffer-local-must-match-map")
             .unwrap_or(Value::NIL)
     } else {
-        obarray
-            .symbol_value_copied("minibuffer-local-completion-map")
+        vars.value_by_name("minibuffer-local-completion-map")
             .unwrap_or(Value::NIL)
     };
 
@@ -2777,7 +2752,7 @@ impl KeyboardInputRuntime for super::eval::Context {
     }
 
     fn symbol_value_or_nil(&self, name: &str) -> Value {
-        self.obarray.symbol_value_copied(name).unwrap_or(Value::NIL)
+        self.variable_value_by_name(name).unwrap_or(Value::NIL)
     }
 }
 
@@ -3269,8 +3244,7 @@ fn yes_or_no_p_dialog_result(
 }
 
 fn yes_or_no_p_use_short_answers(eval: &super::eval::Context) -> bool {
-    eval.obarray
-        .symbol_value_copied("use-short-answers")
+    eval.variable_value_by_name("use-short-answers")
         .is_some_and(|v| v.is_truthy())
 }
 

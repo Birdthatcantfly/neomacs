@@ -459,7 +459,7 @@ pub(crate) fn composition_width_at(
     charpos1: i64,
 ) -> Option<(i64, i64)> {
     let prop = super::textprop::builtin_get_text_property_in_state(
-        &ctx.obarray,
+        ctx.variables(),
         &ctx.buffers,
         &[Value::fixnum(charpos1), composition_prop_symbol()],
     )
@@ -1238,7 +1238,7 @@ fn has_default_combining_rule(ctx: &super::eval::Context, code: u32) -> bool {
     let table = ctx.visible_variable_value_or_nil("composition-function-table");
     let Ok(rules) = super::chartable::builtin_char_table_range_with_symbols(
         vec![table, Value::fixnum(code as i64)],
-        Some(&ctx.obarray),
+        Some(ctx.variables()),
         symbol_mode,
     ) else {
         return false;
@@ -1717,7 +1717,7 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     // make the name bound where GNU's is not.  The unified-char table this port
     // uses internally is Rust-side storage, not this symbol; nothing reads it.
     // composition-function-table must be a real char-table (composite.c:2289).
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "composition-function-table",
         make_char_table_value(Value::NIL, Value::NIL),
     );

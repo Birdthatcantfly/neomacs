@@ -784,7 +784,7 @@ pub(crate) fn image_scale_environment_for_frame(
     frame_arg: Option<&Value>,
 ) -> Option<ImageScaleEnvironment> {
     let frame = image_frame_for_arg(eval, frame_arg)?;
-    Some(image_scale_environment(frame, eval.obarray()))
+    Some(image_scale_environment(frame, eval.variables()))
 }
 
 /// Resolve FRAME (or the selected frame) for image builtins.
@@ -1918,7 +1918,7 @@ impl Context {
             return;
         }
         let quoting = crate::emacs_core::coding::effective_text_quoting_style(
-            &self.obarray,
+            self.variables(),
             self.symbol_mode(),
         );
         for diagnostic in diagnostics {

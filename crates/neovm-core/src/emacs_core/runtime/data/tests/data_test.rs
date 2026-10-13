@@ -8,7 +8,14 @@ fn test_obarray() -> crate::emacs_core::symbol::Obarray {
 
 fn eval_all(source: &str) -> Vec<String> {
     let mut ctx = Context::new();
-    let forms = crate::emacs_core::value_reader::read_all(source, &test_obarray()).expect("parse");
+    let forms = crate::emacs_core::value_reader::read_all(
+        source,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_obarray(),
+        ),
+    )
+    .expect("parse");
     let roots = ctx.save_specpdl_roots();
     for form in &forms {
         ctx.push_specpdl_root(*form);

@@ -27,11 +27,11 @@ pub fn register_bootstrap_vars(obarray: &mut super::symbol::Obarray) {
     // `--batch' replaces it with nil before anything runs
     // (src/emacs.c:1700-1707).  A bare Context is a batch evaluator, so nil is
     // the default here and the binary raises it for interactive sessions.
-    obarray.set_symbol_value("undo-outer-limit", Value::NIL);
+    obarray.seed_value("undo-outer-limit", Value::NIL);
     obarray.make_special("undo-outer-limit");
     // `undo-outer-limit-function' (src/undo.c:476-485); lisp/simple.el sets it
     // to `undo-outer-limit-truncate' once that file is loaded.
-    obarray.set_symbol_value("undo-outer-limit-function", Value::NIL);
+    obarray.seed_value("undo-outer-limit-function", Value::NIL);
     obarray.make_special("undo-outer-limit-function");
 }
 

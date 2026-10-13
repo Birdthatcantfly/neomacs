@@ -1778,8 +1778,7 @@ fn snapshot_with_aliased_indent_bars_display(
             Value::symbol("display"),
             Value::symbol("indent-bars-display"),
         ])]);
-        eval.obarray_mut()
-            .set_symbol_value("char-property-alias-alist", alias_alist);
+        eval.store_variable_by_name("char-property-alias-alist", alias_alist);
     }
     {
         let buffer = eval
@@ -1802,7 +1801,7 @@ fn snapshot_with_aliased_indent_bars_display(
     }
     let buffer = eval.buffer_manager().get(buffer_id).expect("buffer");
     let end = buffer.total_char_end_pos();
-    let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(buffer, eval.obarray());
+    let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(buffer, eval.variables());
     (buffer_id, snapshot, end)
 }
 
@@ -2074,7 +2073,7 @@ fn an_overlay_category_decides_priority_against_another_overlay() {
         buffer.overlays_mut().insert_overlay(winner);
     }
     let buffer = eval.buffer_manager().get(buffer_id).unwrap();
-    let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(buffer, eval.obarray());
+    let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(buffer, eval.variables());
 
     let faces = crate::neovm_bridge::overlay_faces_at(&snapshot, EmacsBytePos::new(0), None);
 
@@ -2113,7 +2112,7 @@ fn overlay_mouse_face_resolves_through_its_category() {
         buffer.overlays_mut().insert_overlay(overlay);
     }
     let buffer = eval.buffer_manager().get(buffer_id).unwrap();
-    let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(buffer, eval.obarray());
+    let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(buffer, eval.variables());
     let mut source = BufferTextSourceCursor::new(
         buffer_id,
         &snapshot,
@@ -2148,7 +2147,7 @@ fn text_mouse_face_category_is_confined_to_its_effective_property_run() {
         );
     }
     let buffer = eval.buffer_manager().get(buffer_id).unwrap();
-    let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(buffer, eval.obarray());
+    let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(buffer, eval.variables());
     let mut source = BufferTextSourceCursor::new(
         buffer_id,
         &snapshot,
@@ -2177,8 +2176,7 @@ fn text_mouse_face_alias_is_confined_to_its_effective_property_run() {
         Value::symbol("mouse-face"),
         Value::symbol("alternate-mouse-face"),
     ])]);
-    eval.obarray_mut()
-        .set_symbol_value("char-property-alias-alist", alias_alist);
+    eval.store_variable_by_name("char-property-alias-alist", alias_alist);
     let buffer_id = eval.buffer_manager().current_buffer().unwrap().id();
     {
         let buffer = eval.buffer_manager_mut().get_mut(buffer_id).unwrap();
@@ -2190,7 +2188,7 @@ fn text_mouse_face_alias_is_confined_to_its_effective_property_run() {
         );
     }
     let buffer = eval.buffer_manager().get(buffer_id).unwrap();
-    let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(buffer, eval.obarray());
+    let snapshot = LayoutBufferSnapshot::from_buffer_with_obarray(buffer, eval.variables());
     let mut source = BufferTextSourceCursor::new(
         buffer_id,
         &snapshot,

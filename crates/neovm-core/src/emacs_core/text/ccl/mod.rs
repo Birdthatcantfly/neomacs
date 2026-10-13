@@ -134,28 +134,41 @@ impl CclRegistry {
 }
 
 thread_local! {
-    static CCL_OBARRAY: Cell<*const super::symbol::Obarray> = const { Cell::new(std::ptr::null()) };
+    static CCL_VARIABLES: Cell<Option<crate::emacs_core::eval::RawVariableView>> =
+        const { Cell::new(None) };
 }
 
-/// Run `body` while CCL symbol resolution can see this obarray's plists and
-/// the translation vectors `define-translation-hash-table` fills.
-pub(crate) fn with_ccl_obarray<R>(obarray: &super::symbol::Obarray, body: impl FnOnce() -> R) -> R {
-    CCL_OBARRAY.with(|cell| {
-        struct RestoreObarray<'a> {
-            cell: &'a Cell<*const super::symbol::Obarray>,
-            previous: *const super::symbol::Obarray,
+/// Run `body` while CCL symbol resolution can see these variables' obarray
+/// plists and the translation vectors `define-translation-hash-table` fills.
+pub(crate) fn with_ccl_obarray<R>(
+    vars: crate::emacs_core::eval::VariableView<'_>,
+    body: impl FnOnce() -> R,
+) -> R {
+    CCL_VARIABLES.with(|cell| {
+        struct RestoreVariables<'a> {
+            cell: &'a Cell<Option<crate::emacs_core::eval::RawVariableView>>,
+            previous: Option<crate::emacs_core::eval::RawVariableView>,
         }
-        impl Drop for RestoreObarray<'_> {
+        impl Drop for RestoreVariables<'_> {
             fn drop(&mut self) {
                 self.cell.set(self.previous);
             }
         }
-        let _restore = RestoreObarray {
+        let _restore = RestoreVariables {
             cell,
-            previous: cell.replace(obarray as *const super::symbol::Obarray),
+            previous: cell.replace(Some(vars.into_raw())),
         };
         body()
     })
+}
+
+/// The variables [`with_ccl_obarray`] published, for the body it runs.
+fn ccl_variables<'a>() -> Option<crate::emacs_core::eval::VariableView<'a>> {
+    let raw = CCL_VARIABLES.with(|cell| cell.get())?;
+    // SAFETY: with_ccl_obarray keeps the view's borrows alive for the body,
+    // on this thread, and restores the prior view before they end; callers
+    // only copy Values out.
+    Some(unsafe { raw.view() })
 }
 
 thread_local! {
@@ -227,15 +240,11 @@ fn ccl_quit_pending() -> bool {
     if !crate::emacs_core::eval::tls_quit_pending() {
         return false;
     }
-    let obarray = CCL_OBARRAY.with(|cell| cell.get());
-    if obarray.is_null() {
+    let Some(vars) = ccl_variables() else {
         return true;
-    }
-    // SAFETY: with_ccl_obarray keeps this same-thread borrowed obarray alive
-    // for the body, restores the prior pointer before that borrow ends, and
-    // the null pointer was rejected above. This read returns a copied Value.
-    let inhibited = unsafe { &*obarray }
-        .symbol_value_copied("inhibit-quit")
+    };
+    let inhibited = vars
+        .value_by_name("inhibit-quit")
         .is_some_and(|value| !value.is_nil());
     !inhibited
 }
@@ -299,11 +308,8 @@ fn property_symbol(name: &str) -> Option<SymId> {
 }
 
 fn symbol_property_integer(symbol: SymId, property: SymId, mode: SymbolMode) -> Option<i64> {
-    let obarray = CCL_OBARRAY.with(|cell| cell.get());
-    if obarray.is_null() {
-        return None;
-    }
-    let plist = unsafe { &*obarray }.symbol_plist_id(symbol);
+    let vars = ccl_variables()?;
+    let plist = vars.obarray().symbol_plist_id(symbol);
     super::plist::plist_get_swp(
         plist,
         &Value::from_sym_id(property),
@@ -440,15 +446,8 @@ pub(super) fn translation_hash_lookup(id: i64, key: i64) -> TranslationHashLooku
 /// when the variable is unbound or no obarray is attached. A bound vector
 /// outside `[0, len)` yields `Invalid` for the lookup, matching `GET_CCL_RANGE`.
 fn checked_lisp_translation_hash_lookup(id: i64, key: i64) -> Option<TranslationHashLookup> {
-    let obarray = CCL_OBARRAY.with(|cell| cell.get());
-    if obarray.is_null() {
-        return None;
-    }
-    // SAFETY: with_ccl_obarray keeps this same-thread borrowed obarray alive
-    // for the body, restores the prior pointer before that borrow ends, and
-    // the null pointer was rejected above. This read returns a copied Value.
-    let slot_of_vector =
-        unsafe { &*obarray }.symbol_value_copied("translation-hash-table-vector")?;
+    let vars = ccl_variables()?;
+    let slot_of_vector = vars.value_by_name("translation-hash-table-vector")?;
     if !slot_of_vector.is_vector() {
         return Some(TranslationHashLookup::Invalid);
     }
@@ -489,14 +488,8 @@ pub(super) fn translation_table(id: i64) -> Option<Value> {
 }
 
 fn lisp_vector_slot(name: &str, id: i64) -> Option<Value> {
-    let obarray = CCL_OBARRAY.with(|cell| cell.get());
-    if obarray.is_null() {
-        return None;
-    }
-    // SAFETY: with_ccl_obarray keeps this same-thread borrowed obarray alive
-    // for the body, restores the prior pointer before that borrow ends, and
-    // the null pointer was rejected above. This read returns a copied Value.
-    let vector = unsafe { &*obarray }.symbol_value_copied(name)?;
+    let vars = ccl_variables()?;
+    let vector = vars.value_by_name(name)?;
     let data = vector.as_vector_data()?;
     let index = usize::try_from(id).ok()?;
     data.get(index).copied()

@@ -28,7 +28,7 @@ fn gde_char_property_carrier_defaults_only_apply_to_text() {
     // GNU intervals.c:1741-1742 gates default-text-properties on textprop.
     for carrier in CharPropertyCarrier::iter() {
         let actual = lookup_char_property_from_direct(
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             |_| None,
             property,
@@ -53,7 +53,7 @@ fn gde_char_property_carrier_direct_nil_suppresses_fallbacks() {
     for carrier in CharPropertyCarrier::iter() {
         let mut probes = 0;
         let actual = lookup_char_property_from_direct(
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             |name| {
                 probes += 1;
@@ -89,7 +89,7 @@ fn gde_char_property_carrier_category_and_alias_precede_defaults() {
     // GNU intervals.c:1729-1742 shares category/alias precedence across carriers.
     for carrier in CharPropertyCarrier::iter() {
         let actual = lookup_char_property_from_direct(
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             |name| plist_slice_get_value(&plist, name),
             property,
@@ -103,7 +103,7 @@ fn gde_char_property_carrier_category_and_alias_precede_defaults() {
         .expect("updating the valid category plist preserves its shape");
     for carrier in CharPropertyCarrier::iter() {
         let actual = lookup_char_property_from_direct(
-            &eval.obarray,
+            eval.variables(),
             &eval.buffers,
             |name| plist_slice_get_value(&plist, name),
             property,

@@ -51,7 +51,7 @@ fn unseen_row_worker_glyphs_match_canonical_window_body() {
     let start = CharPos0::new(120 * line.len());
     let snapshot = crate::neovm_bridge::BorrowedLayoutBuffer::for_window(
         eval.buffer_manager().get(buffer).unwrap(),
-        eval.obarray(),
+        eval.variables(),
         start,
         128,
         crate::display_property::DisplayPropertyTarget::for_window_system(

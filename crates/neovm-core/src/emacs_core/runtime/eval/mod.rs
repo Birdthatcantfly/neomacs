@@ -42,7 +42,7 @@ use super::process::ProcessManager;
 use super::rect::RectangleState;
 use super::regex::MatchData;
 use super::register::RegisterManager;
-use super::symbol::{ConstantWrite, Obarray};
+use super::symbol::{CanonicalAccess, ConstantWrite, Obarray};
 use super::terminal::pure::TtyFrameHostFactory;
 use super::threads::ThreadManager;
 use super::value::*;
@@ -939,12 +939,12 @@ fn internal_make_interpreted_closure_function_symbol() -> SymId {
 }
 
 pub(crate) fn compiler_function_override_in_obarray(
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     sym_id: SymId,
     mode: crate::tagged::SymbolMode,
 ) -> Option<Value> {
     let overrides_sym = internal_compiler_function_overrides_sym();
-    let mut cursor = obarray.symbol_value_id_or_nil(overrides_sym);
+    let mut cursor = vars.value_or_nil(overrides_sym);
     while cursor.is_cons() {
         let entry = cursor.cons_car();
         cursor = cursor.cons_cdr();
@@ -2011,7 +2011,11 @@ struct CoreEvalSymbols {
 fn install_core_eval_symbols(obarray: &mut Obarray, reset_runtime_values: bool) -> CoreEvalSymbols {
     obarray.intern("internal-interpreter-environment");
     let internal_interpreter_environment_symbol = hidden_internal_interpreter_environment_symbol();
-    obarray.set_symbol_value_id(internal_interpreter_environment_symbol, Value::NIL);
+    obarray.set_canonical_value(
+        CanonicalAccess::BOOTSTRAP,
+        internal_interpreter_environment_symbol,
+        Value::NIL,
+    );
     obarray.make_special_id(internal_interpreter_environment_symbol);
     let load_read_stream_token = hidden_load_read_stream_token();
 
@@ -2019,19 +2023,23 @@ fn install_core_eval_symbols(obarray: &mut Obarray, reset_runtime_values: bool) 
 
     let quit_flag_symbol = intern("quit-flag");
     if reset_runtime_values {
-        obarray.set_symbol_value_id(quit_flag_symbol, Value::NIL);
+        obarray.set_canonical_value(CanonicalAccess::BOOTSTRAP, quit_flag_symbol, Value::NIL);
     }
     obarray.make_special_id(quit_flag_symbol);
 
     let inhibit_quit_symbol = intern("inhibit-quit");
     if reset_runtime_values {
-        obarray.set_symbol_value_id(inhibit_quit_symbol, Value::NIL);
+        obarray.set_canonical_value(CanonicalAccess::BOOTSTRAP, inhibit_quit_symbol, Value::NIL);
     }
     obarray.make_special_id(inhibit_quit_symbol);
 
     let throw_on_input_symbol = intern("throw-on-input");
     if reset_runtime_values {
-        obarray.set_symbol_value_id(throw_on_input_symbol, Value::NIL);
+        obarray.set_canonical_value(
+            CanonicalAccess::BOOTSTRAP,
+            throw_on_input_symbol,
+            Value::NIL,
+        );
     }
     obarray.make_special_id(throw_on_input_symbol);
 
@@ -2104,19 +2112,17 @@ fn let_constant_error_name(obarray: &Obarray, sym_id: SymId, value: Value) -> Op
     }
 }
 
-pub(crate) fn sync_features_variable_in_state(obarray: &mut Obarray, features: &[SymId]) {
+pub(crate) fn sync_features_variable_in_state(vars: &mut VariableStore<'_>, features: &[SymId]) {
     let values: Vec<Value> = features.iter().map(|id| Value::from_sym_id(*id)).collect();
-    obarray.set_symbol_value("features", Value::list(values));
+    vars.store_by_name("features", Value::list(values));
 }
 
 pub(crate) fn refresh_features_from_variable_in_state(
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     features: &mut Vec<SymId>,
     mode: crate::tagged::SymbolMode,
 ) {
-    let current = obarray
-        .symbol_value_copied("features")
-        .unwrap_or(Value::NIL);
+    let current = vars.value_by_name("features").unwrap_or(Value::NIL);
     let mut parsed = Vec::new();
     if let Some(items) = list_to_vec(&current) {
         for item in items {
@@ -2129,60 +2135,58 @@ pub(crate) fn refresh_features_from_variable_in_state(
 }
 
 pub(crate) fn feature_present_in_state(
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     features: &mut Vec<SymId>,
     name: &str,
     mode: crate::tagged::SymbolMode,
 ) -> bool {
-    refresh_features_from_variable_in_state(obarray, features, mode);
+    refresh_features_from_variable_in_state(vars, features, mode);
     let id = intern(name);
     features.contains(&id)
 }
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
 pub(crate) fn add_feature_in_state(
-    obarray: &mut Obarray,
+    vars: &mut VariableStore<'_>,
     features: &mut Vec<SymId>,
     name: &str,
     mode: crate::tagged::SymbolMode,
 ) {
-    refresh_features_from_variable_in_state(obarray, features, mode);
+    refresh_features_from_variable_in_state(vars.view(), features, mode);
     let id = intern(name);
-    add_feature_id_in_state(obarray, features, id, mode);
+    add_feature_id_in_state(vars, features, id, mode);
 }
 
 pub(crate) fn add_feature_id_in_state(
-    obarray: &mut Obarray,
+    vars: &mut VariableStore<'_>,
     features: &mut Vec<SymId>,
     id: SymId,
     mode: crate::tagged::SymbolMode,
 ) {
-    refresh_features_from_variable_in_state(obarray, features, mode);
+    refresh_features_from_variable_in_state(vars.view(), features, mode);
     if features.contains(&id) {
         return;
     }
-    let current = obarray
-        .symbol_value_copied("features")
-        .unwrap_or(Value::NIL);
+    let current = vars.view().value_by_name("features").unwrap_or(Value::NIL);
     // Emacs pushes newly-provided features at the front.
     features.insert(0, id);
-    obarray.set_symbol_value("features", Value::cons(Value::from_sym_id(id), current));
+    vars.store_by_name("features", Value::cons(Value::from_sym_id(id), current));
 }
 
 pub(crate) fn remove_feature_in_state(
-    obarray: &mut Obarray,
+    vars: &mut VariableStore<'_>,
     features: &mut Vec<SymId>,
     name: &str,
     mode: crate::tagged::SymbolMode,
 ) {
-    refresh_features_from_variable_in_state(obarray, features, mode);
+    refresh_features_from_variable_in_state(vars.view(), features, mode);
     let id = intern(name);
     features.retain(|feature| *feature != id);
-    sync_features_variable_in_state(obarray, features);
+    sync_features_variable_in_state(vars, features);
 }
 
 pub(crate) fn provide_value_in_state(
-    obarray: &mut Obarray,
+    vars: &mut VariableStore<'_>,
     features: &mut Vec<SymId>,
     feature: Value,
     subfeatures: Option<Value>,
@@ -2203,30 +2207,29 @@ pub(crate) fn provide_value_in_state(
             ));
         }
         if value.is_nil() {
-            add_feature_value_in_state(obarray, features, sym_id, feature, mode);
+            add_feature_value_in_state(vars, features, sym_id, feature, mode);
             return Ok(feature);
         }
-        obarray.put_property_id(sym_id, intern("subfeatures"), value)?;
+        vars.obarray()
+            .put_property_id(sym_id, intern("subfeatures"), value)?;
     }
-    add_feature_value_in_state(obarray, features, sym_id, feature, mode);
+    add_feature_value_in_state(vars, features, sym_id, feature, mode);
     Ok(feature)
 }
 
 // GNU Fprovide stores the original symbol object after EQ membership checking.
 fn add_feature_value_in_state(
-    obarray: &mut Obarray,
+    vars: &mut VariableStore<'_>,
     features: &mut Vec<SymId>,
     id: SymId,
     original: Value,
     mode: crate::tagged::SymbolMode,
 ) {
-    refresh_features_from_variable_in_state(obarray, features, mode);
+    refresh_features_from_variable_in_state(vars.view(), features, mode);
     if !features.contains(&id) {
         features.insert(0, id);
-        let current = obarray
-            .symbol_value_copied("features")
-            .unwrap_or(Value::NIL);
-        obarray.set_symbol_value("features", Value::cons(original, current));
+        let current = vars.view().value_by_name("features").unwrap_or(Value::NIL);
+        vars.store_by_name("features", Value::cons(original, current));
     }
 }
 
@@ -3897,7 +3900,7 @@ pub(crate) enum RequirePlan {
 }
 
 pub(crate) fn plan_require_in_state(
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     buf: Option<&crate::buffer::Buffer>,
     features: &mut Vec<SymId>,
     require_stack: &[SymId],
@@ -3906,7 +3909,7 @@ pub(crate) fn plan_require_in_state(
     noerror: Option<Value>,
     mode: crate::tagged::SymbolMode,
 ) -> Result<RequirePlan, Flow> {
-    refresh_features_from_variable_in_state(obarray, features, mode);
+    refresh_features_from_variable_in_state(vars, features, mode);
     // Use symbol_id to transparently handle symbol-with-pos wrappers.
     let sym_id = super::builtins::symbols::symbol_id(&feature, mode).ok_or_else(|| {
         signal(
@@ -3962,7 +3965,7 @@ pub(crate) fn plan_require_in_state(
     // which otherwise shadowed org's `org-capture.el` and was read as Lisp.
     let requirement = super::load::LoadSuffixRequirement::for_require(filename_given);
     let filename = crate::heap_types::LispString::from_utf8(&filename);
-    match super::load::resolve_load_path_file_in_state(obarray, buf, &filename, requirement)? {
+    match super::load::resolve_load_path_file_in_state(vars, buf, &filename, requirement)? {
         Some(path) => Ok(RequirePlan::Load {
             sym_id,
             name,
@@ -4039,9 +4042,8 @@ pub(crate) fn parse_eval_lexical_arg(arg: Option<Value>) -> Result<(bool, Option
     Ok((true, Some(arg)))
 }
 
-fn lexical_binding_in_obarray(obarray: &Obarray) -> bool {
-    obarray
-        .symbol_value_id_copied(lexical_binding_symbol())
+fn lexical_binding_in_obarray(vars: VariableView<'_>) -> bool {
+    vars.value(lexical_binding_symbol())
         .is_some_and(|v| v.is_truthy())
 }
 
@@ -4753,12 +4755,10 @@ impl Context {
 
     pub(crate) fn sync_keyboard_runtime_from_obarray(&mut self) {
         let input_decode_map = self
-            .obarray
-            .symbol_value_copied("input-decode-map")
+            .variable_value_by_name("input-decode-map")
             .unwrap_or(Value::NIL);
         let local_function_key_map = self
-            .obarray
-            .symbol_value_copied("local-function-key-map")
+            .variable_value_by_name("local-function-key-map")
             .unwrap_or(Value::NIL);
         self.command_loop
             .keyboard
@@ -4904,7 +4904,7 @@ impl Context {
     /// evaluator is reused.
     pub(crate) fn clear_top_level_eval_state(&mut self) {
         self.unbind_to(0);
-        self.lexenv = if lexical_binding_in_obarray(&self.obarray) {
+        self.lexenv = if lexical_binding_in_obarray(self.variables()) {
             top_level_lexenv_sentinel()
         } else {
             Value::NIL
@@ -5014,13 +5014,22 @@ impl Context {
 
     pub(crate) fn refresh_features_from_variable(&mut self) {
         let mode = self.symbol_mode();
-        refresh_features_from_variable_in_state(&self.obarray, &mut self.features, mode);
+        refresh_features_from_variable_in_state(
+            VariableView::new(&self.obarray, &self.owner),
+            &mut self.features,
+            mode,
+        );
     }
 
     fn has_feature(&mut self, name: &str) -> bool {
         {
             let mode = self.symbol_mode();
-            feature_present_in_state(&self.obarray, &mut self.features, name, mode)
+            feature_present_in_state(
+                VariableView::new(&self.obarray, &self.owner),
+                &mut self.features,
+                name,
+                mode,
+            )
         }
     }
 
@@ -5031,7 +5040,8 @@ impl Context {
         // it preserves function cells, canonical descriptors and manager identity.
         unsafe {
             self.obarray.with_legacy_value_write(|obarray| {
-                add_feature_in_state(obarray, &mut self.features, name, mode);
+                let mut vars = VariableStore::new(obarray, self.owner.slab_mut());
+                add_feature_in_state(&mut vars, &mut self.features, name, mode);
             });
         }
     }
@@ -5047,7 +5057,8 @@ impl Context {
         // no dispatch metadata or manager authority leaves the phase.
         unsafe {
             self.obarray.with_legacy_value_write(|obarray| {
-                remove_feature_in_state(obarray, &mut self.features, name, mode);
+                let mut vars = VariableStore::new(obarray, self.owner.slab_mut());
+                remove_feature_in_state(&mut vars, &mut self.features, name, mode);
             });
         }
     }
@@ -5100,7 +5111,7 @@ impl Context {
         if let Some(info) = crate::buffer::buffer::lookup_buffer_slot(name) {
             return Some(self.buffers.buffer_defaults[info.offset.index()]);
         }
-        self.obarray.symbol_value_copied(name)
+        self.variable_value_by_name(name)
     }
 
     /// Seed the 24 GNU standard built-in fringe bitmaps into the registry and
@@ -5788,8 +5799,7 @@ impl Context {
             .set_internal_last_event_frame(frame_id);
 
         let frame_value = Value::make_frame(frame_id.0);
-        self.obarray
-            .set_symbol_value("last-event-frame", frame_value);
+        self.store_variable_by_name("last-event-frame", frame_value);
         if switching || self.command_loop.keyboard.has_unread_selection_event() {
             self.command_loop
                 .keyboard
@@ -5849,7 +5859,7 @@ impl Context {
     /// Reads via the Value-native reader and evaluates via eval_sub.
     pub fn eval_str(&mut self, source: &str) -> Result<Value, EvalError> {
         self.setup_thread_locals();
-        let forms = super::value_reader::read_all(source, &self.obarray).map_err(|e| {
+        let forms = super::value_reader::read_all(source, self.variables()).map_err(|e| {
             EvalError::signal(
                 crate::emacs_core::intern::intern("error"),
                 vec![Value::string(format!("Read error: {}", e.message))],
@@ -5916,7 +5926,7 @@ impl Context {
     /// Uses the Value-native reader.
     pub fn eval_str_each(&mut self, source: &str) -> Vec<Result<Value, EvalError>> {
         self.setup_thread_locals();
-        let forms = match super::value_reader::read_all(source, &self.obarray) {
+        let forms = match super::value_reader::read_all(source, self.variables()) {
             Ok(f) => f,
             Err(e) => {
                 return vec![Err(EvalError::signal(
@@ -5975,7 +5985,7 @@ impl Context {
                 return;
             }
         }
-        self.obarray.set_symbol_value(name, value);
+        self.store_variable_by_name(name, value);
         self.sync_cached_runtime_binding_by_id(sym_id, value);
         self.refresh_gc_runtime_settings_after_change_by_id(sym_id);
         self.mark_redisplay_dirty_if_display_var(sym_id);
@@ -6105,7 +6115,7 @@ impl Context {
         }) {
             let default = self
                 .obarray
-                .find_symbol_value(resolved)
+                .canonical_find_value(CanonicalAccess::STORAGE, resolved)
                 .unwrap_or(Value::UNBOUND);
             self.obarray.make_symbol_localized(resolved, default);
         }
@@ -6285,7 +6295,10 @@ impl Context {
         // legacy `symbol_value_id`) so FORWARDED reads land on the
         // forwarder descriptor's default rather than returning None
         // and signalling void-variable.
-        if let Some(value) = self.obarray.find_symbol_value(resolved) {
+        if let Some(value) = self
+            .obarray
+            .canonical_find_value(CanonicalAccess::STORAGE, resolved)
+        {
             return Ok(SymbolValueLookup::Bound(value));
         }
 
@@ -6917,7 +6930,7 @@ pub(super) fn store_runtime_binding(
         return Some(current_id);
     }
 
-    obarray.set_symbol_value_id(sym_id, value);
+    obarray.set_canonical_value(CanonicalAccess::STORAGE, sym_id, value);
     None
 }
 
@@ -7415,8 +7428,9 @@ impl Context {
         // Obarray's P6.1 CellWrite seam and its seqlock/SATB protocol. It cannot
         // change dispatch metadata or leak a manager or symbol reference.
         unsafe {
-            self.obarray
-                .with_legacy_value_write(|obarray| obarray.makunbound_id(sym_id));
+            self.obarray.with_legacy_value_write(|obarray| {
+                obarray.makunbound_canonical(CanonicalAccess::STORAGE, sym_id)
+            });
         }
         self.sync_cached_runtime_binding_by_id(sym_id, Value::NIL);
         self.sync_keyboard_runtime_binding_by_id(sym_id, Value::NIL);
@@ -7537,7 +7551,10 @@ impl Context {
             return binding.as_value();
         }
 
-        if let Some(value) = self.obarray.symbol_value_id_copied(resolved) {
+        if let Some(value) = self
+            .obarray
+            .canonical_value(CanonicalAccess::STORAGE, resolved)
+        {
             return Some(value);
         }
 

@@ -24,14 +24,14 @@ impl<'a> BorrowedLayoutBuffer<'a> {
     #[cfg(test)]
     pub(crate) fn for_window(
         buffer: &'a Buffer,
-        obarray: &'a Obarray,
+        variables: neovm_core::emacs_core::eval::VariableView<'a>,
         start: CharPos0,
         max_chars: usize,
         target: crate::display_property::DisplayPropertyTarget,
     ) -> Self {
         Self::for_window_with_symbols(
             buffer,
-            obarray,
+            variables,
             start,
             max_chars,
             target,
@@ -41,16 +41,17 @@ impl<'a> BorrowedLayoutBuffer<'a> {
 
     pub(crate) fn for_window_with_symbols(
         buffer: &'a Buffer,
-        obarray: &'a Obarray,
+        variables: neovm_core::emacs_core::eval::VariableView<'a>,
         start: CharPos0,
         max_chars: usize,
         target: crate::display_property::DisplayPropertyTarget,
         symbol_mode: neovm_core::tagged::SymbolMode,
     ) -> Self {
-        let vars = resolve_layout_vars(buffer, Some(obarray));
+        let obarray = variables.obarray();
+        let vars = resolve_layout_vars(buffer, Some(variables));
         let spans = capture_automatic_composition_spans(
             buffer,
-            obarray,
+            variables,
             &vars,
             Some((start.get(), max_chars)),
             symbol_mode,
@@ -61,7 +62,7 @@ impl<'a> BorrowedLayoutBuffer<'a> {
             target,
             vars,
             spans,
-            string_rules: capture_string_composition_rules(buffer, obarray, symbol_mode),
+            string_rules: capture_string_composition_rules(buffer, variables, symbol_mode),
         }
     }
 }

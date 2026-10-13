@@ -25,8 +25,7 @@ use neovm_core::window::{FrameId, WindowId};
 /// admission because custom marker variables need not bump display ticks.
 pub(super) fn inactive_overlay_arrows(evaluator: &neovm_core::emacs_core::Context) -> bool {
     let mut tail = evaluator
-        .obarray()
-        .symbol_value_copied("overlay-arrow-variable-list")
+        .variable_value_by_name("overlay-arrow-variable-list")
         .unwrap_or(Value::NIL);
     for _ in 0..32 {
         if !tail.is_cons() {
@@ -34,8 +33,7 @@ pub(super) fn inactive_overlay_arrows(evaluator: &neovm_core::emacs_core::Contex
         }
         if let Some(sym) = tail.cons_car().as_bare_symbol_id()
             && evaluator
-                .obarray()
-                .symbol_value_id_copied(sym)
+                .variable_value(sym)
                 .is_some_and(|value| !value.is_nil())
         {
             return false;
@@ -1094,7 +1092,7 @@ impl LayoutEngine {
         let bootstrap = crate::neovm_bridge::frame_params_from_neovm(
             frame_data,
             evaluator.face_table(),
-            evaluator.obarray(),
+            evaluator.variables(),
         );
         let resolver = crate::neovm_bridge::FaceResolver::new_with_font_sizing(
             evaluator.face_table(),
@@ -1154,7 +1152,7 @@ impl LayoutEngine {
         }
         let view = BorrowedLayoutBuffer::for_window_with_symbols(
             buffer,
-            evaluator.obarray(),
+            evaluator.variables(),
             capture.position,
             128,
             crate::display_property::DisplayPropertyTarget::Graphical,

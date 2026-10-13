@@ -58,7 +58,7 @@ pub(crate) fn builtin_zlib_decompress_region(
     }
 
     // Check read-only.
-    if buffer_read_only_active_in_state(&ctx.obarray, &[], buf) {
+    if buffer_read_only_active_in_state(ctx.variables(), &[], buf) {
         return Err(signal(
             LispCondition::BufferReadOnly,
             vec![Value::make_buffer(buf.id)],

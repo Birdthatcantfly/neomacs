@@ -7,7 +7,14 @@ use crate::test_utils::{runtime_startup_context, runtime_startup_eval_all};
 
 fn eval_all(src: &str) -> Vec<String> {
     let mut ev = Context::new();
-    let forms = crate::emacs_core::value_reader::read_all(src, &test_ob()).expect("parse");
+    let forms = crate::emacs_core::value_reader::read_all(
+        src,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
+    )
+    .expect("parse");
     // Root all parsed forms across the eval loop. Same GC hazard
     // as eval_test::eval_all: the Vec<Value> lives on the malloc
     // heap and is invisible to conservative stack scanning.

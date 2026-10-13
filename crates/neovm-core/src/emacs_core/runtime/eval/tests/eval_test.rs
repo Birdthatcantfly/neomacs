@@ -1,4 +1,6 @@
 use super::*;
+use crate::emacs_core::eval::VariableView;
+use crate::emacs_core::symbol::CanonicalAccess;
 
 #[cfg(test)]
 #[path = "input_wait.rs"]
@@ -190,7 +192,11 @@ fn sort_signals_circular_list_like_gnu() {
 
 fn eval_all(src: &str) -> Vec<String> {
     let mut ev = Context::new();
-    let forms = crate::emacs_core::value_reader::read_all(src, &test_ob()).expect("parse");
+    let forms = crate::emacs_core::value_reader::read_all(
+        src,
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse");
     // Root all parsed forms across the eval loop. Without rooting,
     // any intervening GC reclaims the cons cells in the unrooted
     // `forms` Vec<Value> (malloc heap, invisible to conservative
@@ -1006,7 +1012,7 @@ fn recursive_edit_without_input_receiver_still_runs_noninteractive_top_level() {
     ev.set_variable("noninteractive", Value::T);
     let top_level = crate::emacs_core::value_reader::read_all(
         "(progn (setq neomacs--batch-no-input-probe 42) nil)",
-        &test_ob(),
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
     )
     .expect("parse top-level form")
     .into_iter()
@@ -1056,7 +1062,7 @@ fn outer_command_loop_leaves_exit_unmatched_inside_keyboard_macro() {
                (execute-kbd-macro "a")
                (setq neo-continued-after-macro t))
              nil)"#,
-        &test_ob(),
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
     )
     .expect("parse top-level form")
     .into_iter()
@@ -4242,28 +4248,28 @@ fn special_event_map_bootstraps_delete_frame_and_focus_handlers() {
         .expect("special-event-map should be bound");
 
     let delete_frame = crate::emacs_core::keymap::lookup_key_in_keymaps_in_obarray(
-        ev.obarray(),
+        VariableView::canonical(CanonicalAccess::TEST, ev.obarray()),
         &[special_event_map],
         &[Value::symbol("delete-frame")],
         true,
         crate::tagged::SymbolMode::Bare,
     );
     let focus_in = crate::emacs_core::keymap::lookup_key_in_keymaps_in_obarray(
-        ev.obarray(),
+        VariableView::canonical(CanonicalAccess::TEST, ev.obarray()),
         &[special_event_map],
         &[Value::symbol("focus-in")],
         true,
         crate::tagged::SymbolMode::Bare,
     );
     let focus_out = crate::emacs_core::keymap::lookup_key_in_keymaps_in_obarray(
-        ev.obarray(),
+        VariableView::canonical(CanonicalAccess::TEST, ev.obarray()),
         &[special_event_map],
         &[Value::symbol("focus-out")],
         true,
         crate::tagged::SymbolMode::Bare,
     );
     let file_notify = crate::emacs_core::keymap::lookup_key_in_keymaps_in_obarray(
-        ev.obarray(),
+        VariableView::canonical(CanonicalAccess::TEST, ev.obarray()),
         &[special_event_map],
         &[Value::symbol("file-notify")],
         true,
@@ -8496,11 +8502,14 @@ fn watched_variables_carry_gnu_trapped_write_on_their_symbol() {
             .unwrap_or(SymbolTrappedWrite::Untrapped)
     };
     let run = |ev: &mut Context, src: &str| {
-        let form = crate::emacs_core::value_reader::read_all(src, &test_ob())
-            .expect("parse")
-            .into_iter()
-            .next()
-            .expect("one form");
+        let form = crate::emacs_core::value_reader::read_all(
+            src,
+            VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+        )
+        .expect("parse")
+        .into_iter()
+        .next()
+        .expect("one form");
         ev.eval_form(form).expect("eval");
     };
     run(&mut ev, "(defvar tw-target 1)");
@@ -22423,7 +22432,11 @@ fn gc_safe_point_runs_post_gc_hook_when_incremental_collection_finishes() {
 
 fn eval_stress(src: &str) -> Vec<String> {
     let mut ev = Context::new();
-    let forms = crate::emacs_core::value_reader::read_all(src, &test_ob()).expect("parse");
+    let forms = crate::emacs_core::value_reader::read_all(
+        src,
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse");
     ev.gc_stress = true;
     // Force very low threshold so gc_safe_point triggers on every call
     ev.tagged_heap.set_gc_threshold(1);
@@ -25968,11 +25981,14 @@ fn plain_let_takes_one_obarray_visit_per_bind_and_pop() {
     // The counter is the claim: one obarray slot visit for the bind, one for
     // the pop, on a plain unwatched variable.
     let mut ev = Context::new();
-    let form = crate::emacs_core::value_reader::read_all("(defvar neo-visit-var 1)", &test_ob())
-        .expect("parse")
-        .into_iter()
-        .next()
-        .expect("one form");
+    let form = crate::emacs_core::value_reader::read_all(
+        "(defvar neo-visit-var 1)",
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse")
+    .into_iter()
+    .next()
+    .expect("one form");
     ev.eval_form(form).expect("defvar");
     let sym = intern("neo-visit-var");
     let base = ev.specpdl.len();

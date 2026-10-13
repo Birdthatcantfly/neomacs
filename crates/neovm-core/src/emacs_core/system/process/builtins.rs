@@ -573,24 +573,21 @@ pub(crate) fn builtin_print_preprocess(
 
     // GNU: does nothing if `print-circle' is nil.
     let print_circle = eval
-        .obarray
-        .symbol_value_copied("print-circle")
+        .variable_value_by_name("print-circle")
         .is_some_and(|v| v.is_truthy());
     if !print_circle {
         return Ok(Value::NIL);
     }
 
     let print_gensym = eval
-        .obarray
-        .symbol_value_copied("print-gensym")
+        .variable_value_by_name("print-gensym")
         .is_some_and(|v| v.is_truthy());
     let print_continuous_numbering = eval
-        .obarray
-        .symbol_value_copied("print-continuous-numbering")
+        .variable_value_by_name("print-continuous-numbering")
         .is_some_and(|v| v.is_truthy());
 
     // GNU: `if (!HASH_TABLE_P (Vprint_number_table)) Vprint_number_table = make-hash-table :test eq`.
-    let table_value = match eval.obarray.symbol_value_copied("print-number-table") {
+    let table_value = match eval.variable_value_by_name("print-number-table") {
         Some(v) if v.is_hash_table() => v,
         _ => {
             let table = Value::hash_table(super::super::value::HashTableTest::Eq);
@@ -4091,7 +4088,7 @@ pub(crate) fn builtin_make_process(
         }
     }
 
-    let use_pty = process_connection_type_is_pty(&eval.obarray);
+    let use_pty = process_connection_type_is_pty(eval.variables());
     let executable_search = ExecutableSearch::capture(eval);
     let subprocess_cwd = super::super::callproc::subprocess_default_directory(eval);
     let child_environment = Some(super::super::environment::ChildEnvironment::materialize(

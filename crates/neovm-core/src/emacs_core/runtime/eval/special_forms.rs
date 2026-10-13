@@ -1498,12 +1498,14 @@ impl Context {
         self.note_macro_expansion_mutation();
         let mode = self.symbol_mode();
         let features = &mut self.features;
+        let owner = &mut self.owner;
         // SAFETY: provide_value_in_state only publishes feature values and
         // properties. Its Lisp after-load hooks run below, after this loan;
         // no canonical function/debugger metadata or storage identity changes.
         unsafe {
             self.obarray.with_legacy_value_write(|obarray| {
-                provide_value_in_state(obarray, features, feature, subfeatures, mode)
+                let mut vars = VariableStore::new(obarray, owner.slab_mut());
+                provide_value_in_state(&mut vars, features, feature, subfeatures, mode)
             })
         }?;
         self.record_load_history_entry(LoadHistoryEntry::ProvidedFeature(feature));
@@ -1524,8 +1526,7 @@ impl Context {
     /// `Fprovide` behavior: `(mapc #'funcall (cdr (assq feature after-load-alist)))`.
     pub(super) fn run_after_load_hooks_for_feature(&mut self, feature: Value) -> Result<(), Flow> {
         let after_load_alist = self
-            .obarray
-            .symbol_value_copied("after-load-alist")
+            .variable_value_by_name("after-load-alist")
             .unwrap_or(Value::NIL);
         if after_load_alist.is_nil() {
             return Ok(());
@@ -1595,7 +1596,7 @@ impl Context {
         });
         let symbol_mode = self.symbol_mode();
         match plan_require_in_state(
-            &self.obarray,
+            VariableView::new(&self.obarray, &self.owner),
             self.buffers.current_buffer(),
             &mut self.features,
             &self.require_stack,

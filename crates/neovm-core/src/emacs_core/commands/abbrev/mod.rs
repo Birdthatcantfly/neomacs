@@ -539,8 +539,7 @@ pub(crate) fn builtin_make_abbrev_table(
 
     let header = obarray_intern(table, ABBREV_TABLE_HEADER_NAME);
     let header_id = symbol_id(header, symbol_mode).expect("abbrev-table header should be a symbol");
-    eval.obarray_mut()
-        .set_symbol_value_id(header_id, Value::NIL);
+    eval.store_variable(header_id, Value::NIL);
     eval.obarray_mut().put_property_id(
         header_id,
         intern(":abbrev-table-modiff"),
@@ -631,7 +630,7 @@ pub(crate) fn builtin_define_abbrev(
     let sym = obarray_intern(vec_val, &name);
     let sym_id = symbol_id(sym, symbol_mode).expect("abbrev symbol should be a symbol");
 
-    let existing_expansion = eval.obarray().symbol_value_id_copied(sym_id);
+    let existing_expansion = eval.variable_value(sym_id);
     let existing_hook = eval.obarray().symbol_function_id(sym_id);
     let existing_system = eval
         .obarray()
@@ -649,7 +648,7 @@ pub(crate) fn builtin_define_abbrev(
 
     // Set symbol-value to expansion (the expansion string or nil)
     let expansion = args[2];
-    eval.obarray_mut().set_symbol_value_id(sym_id, expansion);
+    eval.store_variable(sym_id, expansion);
 
     // Set symbol-function to hook (4th arg), or nil
     let hook = if args.len() > 3 { args[3] } else { Value::NIL };
@@ -671,8 +670,7 @@ pub(crate) fn builtin_define_abbrev(
 
     let changed = existing_expansion != Some(expansion) || existing_hook != Some(hook);
     if changed && system_setting.marks_abbrevs_changed() {
-        eval.obarray_mut()
-            .set_symbol_value("abbrevs-changed", Value::T);
+        eval.store_variable_by_name("abbrevs-changed", Value::T);
     }
     increment_table_modiff(eval, vec_val);
 
@@ -704,8 +702,7 @@ pub(crate) fn builtin_abbrev_symbol(
 
     // Fall back to global-abbrev-table
     let global_table = eval
-        .obarray()
-        .symbol_value_copied("global-abbrev-table")
+        .variable_value_by_name("global-abbrev-table")
         .unwrap_or(Value::NIL);
     if expect_abbrev_table(eval, &global_table).is_ok()
         && let Some(sym) = find_abbrev_symbol_in_table(eval, &name, global_table)
@@ -735,27 +732,20 @@ pub(crate) fn builtin_abbrev_expansion(
         if let Some(sym) = find_abbrev_symbol_in_table(eval, &name, vec_val)
             && let Some(sym_id) = symbol_id(sym, symbol_mode)
         {
-            return Ok(eval
-                .obarray()
-                .symbol_value_id_copied(sym_id)
-                .unwrap_or(Value::NIL));
+            return Ok(eval.variable_value(sym_id).unwrap_or(Value::NIL));
         }
         return Ok(Value::NIL);
     }
 
     // Fall back to global-abbrev-table
     let global_table = eval
-        .obarray()
-        .symbol_value_copied("global-abbrev-table")
+        .variable_value_by_name("global-abbrev-table")
         .unwrap_or(Value::NIL);
     if expect_abbrev_table(eval, &global_table).is_ok()
         && let Some(sym) = find_abbrev_symbol_in_table(eval, &name, global_table)
         && let Some(sym_id) = symbol_id(sym, symbol_mode)
     {
-        return Ok(eval
-            .obarray()
-            .symbol_value_id_copied(sym_id)
-            .unwrap_or(Value::NIL));
+        return Ok(eval.variable_value(sym_id).unwrap_or(Value::NIL));
     }
     Ok(Value::NIL)
 }
@@ -779,8 +769,7 @@ pub(crate) fn builtin_clear_abbrev_table(
     let _ = vec_val.with_obarray_mut(|obj| obj.count = 0);
     obarray_insert_symbol(vec_val, header);
     if let Some(header_id) = symbol_id(header, symbol_mode) {
-        eval.obarray_mut()
-            .set_symbol_value_id(header_id, Value::NIL);
+        eval.store_variable(header_id, Value::NIL);
     }
     increment_table_modiff(eval, vec_val);
 
@@ -854,8 +843,7 @@ fn find_abbrev_symbol_in_table(
     if let Some(sym) = direct.or(folded)
         && let Some(sym_id) = symbol_id(sym, symbol_mode)
         && eval
-            .obarray()
-            .symbol_value_id_copied(sym_id)
+            .variable_value(sym_id)
             .is_some_and(|value| !value.is_nil())
     {
         return Some(sym);
@@ -897,7 +885,7 @@ pub(crate) fn builtin_define_abbrev_table(
     })?;
 
     // Check if table already exists
-    let table = if let Some(existing) = eval.obarray().symbol_value_copied(name) {
+    let table = if let Some(existing) = eval.variable_value_by_name(name) {
         if is_abbrev_table(eval, &existing) {
             existing
         } else {
@@ -913,13 +901,12 @@ pub(crate) fn builtin_define_abbrev_table(
         .expect("abbrev table header should exist");
 
     // Set as symbol value
-    eval.obarray_mut().set_symbol_value(name, table);
+    eval.store_variable_by_name(name, table);
 
     // Add to abbrev-table-name-list if not already present
     let name_sym = Value::symbol(name);
     let current_list = eval
-        .obarray()
-        .symbol_value_copied("abbrev-table-name-list")
+        .variable_value_by_name("abbrev-table-name-list")
         .unwrap_or(Value::NIL);
 
     // Check if already in list
@@ -939,8 +926,7 @@ pub(crate) fn builtin_define_abbrev_table(
 
     if !already_in_list {
         let new_list = Value::cons(name_sym, current_list);
-        eval.obarray_mut()
-            .set_symbol_value("abbrev-table-name-list", new_list);
+        eval.store_variable_by_name("abbrev-table-name-list", new_list);
     }
 
     // Process DOCSTRING (3rd arg) -- store as table property if it's a string
@@ -1031,10 +1017,7 @@ pub(crate) fn builtin_insert_abbrev_table_description(
     })?;
 
     // Get the table value
-    let table_val = eval
-        .obarray()
-        .symbol_value_copied(name)
-        .unwrap_or(Value::NIL);
+    let table_val = eval.variable_value_by_name(name).unwrap_or(Value::NIL);
 
     if expect_abbrev_table(eval, &table_val).is_err() {
         // Insert empty table description
@@ -1070,10 +1053,7 @@ pub(crate) fn builtin_insert_abbrev_table_description(
             let Some(sym_id) = symbol_id(*sym, symbol_mode) else {
                 continue;
             };
-            let expansion = eval
-                .obarray()
-                .symbol_value_id_copied(sym_id)
-                .unwrap_or(Value::NIL);
+            let expansion = eval.variable_value(sym_id).unwrap_or(Value::NIL);
             if expansion.is_nil() {
                 continue;
             }

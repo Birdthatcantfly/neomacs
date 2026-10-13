@@ -89,7 +89,7 @@ pub(crate) fn eval_fixture_program_named(
 ) -> Result<Value, crate::emacs_core::error::EvalError> {
     ev.setup_thread_locals();
     let forms =
-        crate::emacs_core::value_reader::read_all(program, &ev.obarray).map_err(|error| {
+        crate::emacs_core::value_reader::read_all(program, ev.variables()).map_err(|error| {
             crate::emacs_core::error::EvalError::signal(
                 intern("error"),
                 vec![Value::string(format!("Read error: {}", error.message))],

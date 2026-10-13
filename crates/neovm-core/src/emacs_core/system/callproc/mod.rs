@@ -258,7 +258,7 @@ fn fallback_subprocess_directory() -> Option<PathBuf> {
 
 pub(super) fn subprocess_default_directory(eval: &super::eval::Context) -> Option<PathBuf> {
     let default_dir =
-        super::fileio::default_directory_lisp_in_state(&eval.obarray, &[], &eval.buffers)?;
+        super::fileio::default_directory_lisp_in_state(eval.variables(), &[], &eval.buffers)?;
     // GNU's encode_current_directory (callproc.c) runs default-directory through
     // Fexpand_file_name before the subprocess chdir. A buffer visiting a file under
     // $HOME has an abbreviated default-directory like "~/foo/" (GNU abbreviates it
@@ -291,7 +291,7 @@ fn subprocess_curdir_lisp(eval: &super::eval::Context) -> Option<LispString> {
     if let Some(string) = visible.as_lisp_string() {
         return Some(string.clone());
     }
-    super::fileio::default_directory_lisp_in_state(&eval.obarray, &[], &eval.buffers)
+    super::fileio::default_directory_lisp_in_state(eval.variables(), &[], &eval.buffers)
 }
 
 /// GNU `get_current_directory (true)` (callproc.c): make sure the child will be
@@ -963,11 +963,11 @@ fn parse_optional_infile(args: &[Value], index: usize) -> Result<Option<LispStri
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
 fn obarray_lisp_string_variable(
-    obarray: &super::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     name: &str,
     fallback: &str,
 ) -> Result<LispString, Flow> {
-    let value = obarray.symbol_value_copied(name).unwrap_or(Value::NIL);
+    let value = vars.value_by_name(name).unwrap_or(Value::NIL);
     if value.is_nil() {
         Ok(LispString::from_utf8(fallback))
     } else {
@@ -1271,7 +1271,11 @@ fn builtin_call_process_region_impl(
     // GNU below and never deletes).
     let delete = args.len() > 3 && args[3].is_truthy();
     if delete && !args[0].is_string() {
-        super::editfns::ensure_current_buffer_writable_in_state(&eval.obarray, &[], &eval.buffers)?;
+        super::editfns::ensure_current_buffer_writable_in_state(
+            eval.variables(),
+            &[],
+            &eval.buffers,
+        )?;
     }
 
     // Resolve the region's write coding (`coding-system-for-write`) before taking
@@ -1511,8 +1515,9 @@ pub(crate) fn builtin_call_process_shell_command(
     let destination = args.get(2).copied().unwrap_or(Value::NIL);
     let display = args.get(3).is_some_and(|v| v.is_truthy());
     let shell_command = shell_command_with_legacy_args(&args[0], args.get(4..).unwrap_or(&[]))?;
-    let shell_program = obarray_lisp_string_variable(eval.obarray(), "shell-file-name", "sh")?;
-    let shell_switch = obarray_lisp_string_variable(eval.obarray(), "shell-command-switch", "-c")?;
+    let shell_program = obarray_lisp_string_variable(eval.variables(), "shell-file-name", "sh")?;
+    let shell_switch =
+        obarray_lisp_string_variable(eval.variables(), "shell-command-switch", "-c")?;
     let shell_args = vec![shell_switch, shell_command];
     let operation_args =
         shell_call_process_operation_args(&shell_program, &shell_args, destination);
@@ -1585,8 +1590,9 @@ pub(crate) fn builtin_process_file_shell_command(
     let destination = args.get(2).copied().unwrap_or(Value::NIL);
     let display = args.get(3).is_some_and(|v| v.is_truthy());
     let shell_command = shell_command_with_legacy_args(&args[0], args.get(4..).unwrap_or(&[]))?;
-    let shell_program = obarray_lisp_string_variable(eval.obarray(), "shell-file-name", "sh")?;
-    let shell_switch = obarray_lisp_string_variable(eval.obarray(), "shell-command-switch", "-c")?;
+    let shell_program = obarray_lisp_string_variable(eval.variables(), "shell-file-name", "sh")?;
+    let shell_switch =
+        obarray_lisp_string_variable(eval.variables(), "shell-command-switch", "-c")?;
     let shell_args = vec![shell_switch, shell_command];
     let operation_args =
         shell_call_process_operation_args(&shell_program, &shell_args, destination);

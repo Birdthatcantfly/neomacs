@@ -329,8 +329,7 @@ impl Context {
 
     pub(super) fn command_loop_top_level_1(&mut self) -> EvalResult {
         let top_level = self
-            .obarray
-            .symbol_value_copied("top-level")
+            .variable_value_by_name("top-level")
             .unwrap_or(Value::NIL);
 
         tracing::debug!("command_loop_top_level_1: top-level={}", top_level);
@@ -371,13 +370,11 @@ impl Context {
                 self.report_command_error(data, "")?;
                 if cfg!(test) {
                     let last_phase = self
-                        .obarray
-                        .symbol_value_copied("neomacs--startup-last-phase")
+                        .variable_value_by_name("neomacs--startup-last-phase")
                         .map(|value| crate::emacs_core::print_value_with_eval(self, &value))
                         .unwrap_or_else(|| "nil".to_string());
                     let last_call = self
-                        .obarray
-                        .symbol_value_copied("neomacs--startup-last-call")
+                        .variable_value_by_name("neomacs--startup-last-call")
                         .map(|value| crate::emacs_core::print_value_with_eval(self, &value))
                         .unwrap_or_else(|| "nil".to_string());
                     eprintln!(
@@ -444,25 +441,18 @@ impl Context {
         tracing::info!(
             "startup-state phase={} command-line-args={} command-line-args-left={} command-line-processed={} window-system={} initial-window-system={} current-buffer={} selected-frame={:?} frames={:?}",
             phase,
+            format_startup_value(self.variable_value_by_name("command-line-args").as_ref()),
             format_startup_value(
-                self.obarray
-                    .symbol_value_copied("command-line-args")
+                self.variable_value_by_name("command-line-args-left")
                     .as_ref()
             ),
             format_startup_value(
-                self.obarray
-                    .symbol_value_copied("command-line-args-left")
+                self.variable_value_by_name("command-line-processed")
                     .as_ref()
             ),
+            format_startup_value(self.variable_value_by_name("window-system").as_ref()),
             format_startup_value(
-                self.obarray
-                    .symbol_value_copied("command-line-processed")
-                    .as_ref()
-            ),
-            format_startup_value(self.obarray.symbol_value_copied("window-system").as_ref()),
-            format_startup_value(
-                self.obarray
-                    .symbol_value_copied("initial-window-system")
+                self.variable_value_by_name("initial-window-system")
                     .as_ref()
             ),
             current_buffer,
@@ -725,9 +715,7 @@ impl Context {
             // sentinel (NOT an eager C-g), so clearing it would defeat
             // while-no-input — mirror the same guard used by
             // `clear_quit_flag_after_read_key_sequence_event`.
-            let throw_on_input = self
-                .obarray
-                .symbol_value_id_or_nil(self.throw_on_input_symbol);
+            let throw_on_input = self.variable_value_or_nil(self.throw_on_input_symbol);
             let quit_flag = self.quit_flag_value();
             let is_while_no_input =
                 !throw_on_input.is_nil() && equal_value(&quit_flag, &throw_on_input, 0);
@@ -1691,7 +1679,7 @@ impl Context {
         // (window.c:4116) specbinds this to t so any nested redisplay
         // triggered by a window-change hook is a no-op. Without this check
         // a hook that indirectly calls `redisplay` infinitely recurses.
-        let inhibit_redisplay = self.obarray.symbol_value_copied("inhibit-redisplay");
+        let inhibit_redisplay = self.variable_value_by_name("inhibit-redisplay");
         if (!force || crate::emacs_core::xdisp::mode_line_flow_enabled())
             && inhibit_redisplay.as_ref().is_some_and(|v| v.is_truthy())
         {
@@ -1841,7 +1829,7 @@ impl Context {
     /// hook is demoted (GNU calls via `dsafe_calln`, and the lisp driver wraps
     /// each hook in `with-demoted-errors`).
     pub(super) fn run_pre_redisplay_function(&mut self, windows: Value) {
-        let Some(function) = self.obarray.symbol_value_copied("pre-redisplay-function") else {
+        let Some(function) = self.variable_value_by_name("pre-redisplay-function") else {
             return;
         };
         if function.is_nil() {
@@ -1868,8 +1856,7 @@ impl Context {
 
     pub(super) fn resize_minibuffer_only_frames(&mut self) {
         if !self
-            .obarray
-            .symbol_value_copied("resize-mini-frames")
+            .variable_value_by_name("resize-mini-frames")
             .is_some_and(|value| value.is_truthy())
         {
             return;
@@ -2966,9 +2953,7 @@ impl Context {
         let flag = self.quit_flag;
         self.set_quit_flag_value(Value::NIL);
 
-        let throw_on_input = self
-            .obarray
-            .symbol_value_id_or_nil(self.throw_on_input_symbol);
+        let throw_on_input = self.variable_value_or_nil(self.throw_on_input_symbol);
 
         if flag.as_symbol_id(symbol_mode) == Some(self.kill_emacs_symbol) {
             // GNU keyboard.c process_quit_flag: (setq quit-flag 'kill-emacs)
@@ -3099,7 +3084,7 @@ impl Context {
     /// on the printed name and a non-symbol really does select no arm.
     pub(crate) fn debug_on_event_signal_name(&self) -> Option<String> {
         let symbol_mode = self.symbol_mode();
-        let value = self.obarray.symbol_value_copied("debug-on-event")?;
+        let value = self.variable_value_by_name("debug-on-event")?;
         let name = value.as_symbol_lisp_string(symbol_mode)?;
         Some(crate::emacs_core::emacs_char::to_utf8_lossy(
             name.as_bytes(),
@@ -3143,8 +3128,7 @@ impl Context {
     pub(crate) fn set_quit_flag_value(&mut self, value: Value) {
         self.quit_flag = value;
         self.refresh_attention();
-        self.obarray
-            .set_symbol_value_id(self.quit_flag_symbol, value);
+        self.store_variable(self.quit_flag_symbol, value);
     }
 
     pub(crate) fn quit_char(&self) -> i64 {
@@ -3170,9 +3154,7 @@ impl Context {
             return;
         }
 
-        let throw_on_input = self
-            .obarray
-            .symbol_value_id_or_nil(self.throw_on_input_symbol);
+        let throw_on_input = self.variable_value_or_nil(self.throw_on_input_symbol);
 
         let quit_flag = self.quit_flag_value();
         // while-no-input is active iff `throw-on-input` is non-nil AND the
@@ -3207,8 +3189,7 @@ impl Context {
 
     pub(super) fn input_pending_filter(&self) -> crate::keyboard::InputPendingFilter {
         let configured = self
-            .obarray
-            .symbol_value_copied("input-pending-p-filter-events")
+            .variable_value_by_name("input-pending-p-filter-events")
             .unwrap_or(Value::T)
             .is_truthy();
         crate::keyboard::InputPendingFilter::from_filter_events_variable(configured)
@@ -3222,8 +3203,8 @@ impl Context {
     /// buffer has localised it (dframe, dictionary and gud all do), so the read
     /// names the buffer. Ledger 196.
     pub(crate) fn track_mouse_enabled(&self) -> bool {
-        self.obarray
-            .value_in_buffer(self.buffers.current_buffer(), "track-mouse")
+        self.variables()
+            .value_in_buffer_by_name(self.buffers.current_buffer(), "track-mouse")
             .unwrap_or(Value::NIL)
             .is_truthy()
     }
@@ -3231,8 +3212,7 @@ impl Context {
     pub(super) fn should_ignore_while_no_input_symbol(&self, ignore_symbol: &str) -> bool {
         let symbol_mode = self.symbol_mode();
         let ignore_list = self
-            .obarray
-            .symbol_value_copied("while-no-input-ignore-events")
+            .variable_value_by_name("while-no-input-ignore-events")
             .unwrap_or(Value::NIL);
         super::super::value::list_to_vec(&ignore_list)
             .into_iter()
@@ -3289,9 +3269,7 @@ impl Context {
             return Ok(());
         }
 
-        let throw_on_input = self
-            .obarray
-            .symbol_value_id_or_nil(self.throw_on_input_symbol);
+        let throw_on_input = self.variable_value_or_nil(self.throw_on_input_symbol);
         if throw_on_input.is_nil() {
             return Ok(());
         }
@@ -3326,9 +3304,7 @@ impl Context {
         &mut self,
         event: crate::keyboard::InputEvent,
     ) -> Result<bool, Flow> {
-        let throw_on_input = self
-            .obarray
-            .symbol_value_id_or_nil(self.throw_on_input_symbol);
+        let throw_on_input = self.variable_value_or_nil(self.throw_on_input_symbol);
         if throw_on_input.is_nil() {
             return Ok(false);
         }

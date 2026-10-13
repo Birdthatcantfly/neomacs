@@ -904,8 +904,7 @@ pub(crate) fn builtin_number_to_string(
         ValueKind::Float => Ok(Value::string(
             super::print::format_float_with_output_format(
                 args[0].xfloat(),
-                ctx.obarray
-                    .symbol_value_copied("float-output-format")
+                ctx.variable_value_by_name("float-output-format")
                     .filter(|v| v.is_string()),
             ),
         )),

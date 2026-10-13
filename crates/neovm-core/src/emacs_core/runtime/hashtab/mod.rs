@@ -108,11 +108,10 @@ fn validate_optional_obarray_arg(args: &[Value]) -> Result<(), Flow> {
 }
 
 fn is_global_obarray_proxy_in_state(
-    obarray: &crate::emacs_core::symbol::Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     value: &Value,
 ) -> bool {
-    obarray
-        .symbol_value_copied("obarray")
+    vars.value_by_name("obarray")
         .is_some_and(|proxy| proxy == *value)
 }
 
@@ -1032,13 +1031,10 @@ pub(crate) fn maphash_entry_at_slot(table: Value, slot: usize) -> Option<(Value,
 }
 
 fn current_lisp_obarray_value(eval: &super::eval::Context) -> Value {
-    eval.obarray()
-        .symbol_value_copied("obarray")
-        .unwrap_or_else(|| {
-            eval.obarray()
-                .symbol_value_copied("neovm--obarray-object")
-                .unwrap_or(Value::NIL)
-        })
+    eval.variable_value_by_name("obarray").unwrap_or_else(|| {
+        eval.variable_value_by_name("neovm--obarray-object")
+            .unwrap_or(Value::NIL)
+    })
 }
 
 fn effective_mapatoms_obarray_arg(eval: &super::eval::Context, args: &[Value]) -> Value {
@@ -1123,7 +1119,7 @@ pub(crate) fn builtin_unintern(eval: &mut super::eval::Context, args: Vec<Value>
     // Custom obarray path
     if let Some(custom_obarray) = args
         .get(1)
-        .filter(|v| !v.is_nil() && !is_global_obarray_proxy_in_state(eval.obarray(), v))
+        .filter(|v| !v.is_nil() && !is_global_obarray_proxy_in_state(eval.variables(), v))
     {
         let custom_obarray =
             crate::emacs_core::builtins::symbols::check_obarray_value(*custom_obarray)?;

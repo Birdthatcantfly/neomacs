@@ -15,13 +15,14 @@ use crate::emacs_core::error::EvalResult;
 use crate::emacs_core::error::{expect_args, expect_max_args, expect_min_args};
 use crate::emacs_core::heap_registry::{HeapRegistryHandle, HeapRegistrySlot};
 use crate::emacs_core::intern::resolve_sym;
+use crate::emacs_core::symbol::CanonicalAccess;
 use crate::emacs_core::symbol::Obarray;
 use crate::emacs_core::value::{HashKey, HashTableTest, Value, ValueKind, list_to_vec};
 use crate::face::{LFACE_VECTOR_SIZE, LFaceAttr};
 
 /// Register bootstrap variables owned by the face subsystem.
 pub fn register_bootstrap_vars(obarray: &mut Obarray) {
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "face--new-frame-defaults",
         bootstrap_face_new_frame_defaults_table(),
     );
@@ -29,7 +30,7 @@ pub fn register_bootstrap_vars(obarray: &mut Obarray) {
     // xfaces.c:7624-7751 DEFVAR cluster, GNU C inits.
     obarray.define_special_variable("face-default-stipple", Value::string("gray3"));
     obarray.define_special_variable("tty-defined-color-alist", Value::NIL);
-    obarray.set_symbol_value("scalable-fonts-allowed", Value::NIL);
+    obarray.seed_value("scalable-fonts-allowed", Value::NIL);
     obarray.define_special_variable("face-ignored-fonts", Value::NIL);
     obarray.define_special_variable("face-remapping-alist", Value::NIL);
     obarray.define_special_variable("face-font-rescale-alist", Value::NIL);
@@ -43,7 +44,7 @@ pub fn register_bootstrap_vars(obarray: &mut Obarray) {
 pub(crate) fn ensure_startup_compat_variables(eval: &mut crate::emacs_core::eval::Context) {
     match eval
         .obarray()
-        .symbol_value_copied("face--new-frame-defaults")
+        .canonical_value_by_name(CanonicalAccess::BOOTSTRAP, "face--new-frame-defaults")
     {
         Some(table) if table.is_hash_table() => seed_face_new_frame_defaults_table(table),
         _ => eval.set_variable(
@@ -73,7 +74,11 @@ pub(crate) fn ensure_startup_compat_variables(eval: &mut crate::emacs_core::eval
         ("face-font-lax-matched-attributes", Value::T),
     ];
     for (name, value) in defaults {
-        if eval.obarray().symbol_value_copied(name).is_none() {
+        if eval
+            .obarray()
+            .canonical_value_by_name(CanonicalAccess::BOOTSTRAP, name)
+            .is_none()
+        {
             eval.set_variable(name, value);
         }
     }
@@ -199,9 +204,7 @@ pub(crate) fn ensure_face_new_frame_defaults_entry(
     eval: &mut crate::emacs_core::eval::Context,
     face_name: &str,
 ) -> Option<Value> {
-    let table = eval
-        .obarray()
-        .symbol_value_copied("face--new-frame-defaults")?;
+    let table = eval.variable_value_by_name("face--new-frame-defaults")?;
     // The table is fully seeded once at bootstrap (`register_bootstrap_vars`)
     // and again at startup (`ensure_startup_compat_variables`). Re-seeding here
     // -- on every ensure/lookup -- rebuilt every face's cons + lface vector only
@@ -246,10 +249,7 @@ pub(crate) fn remove_face_new_frame_defaults_entry(
     eval: &crate::emacs_core::eval::Context,
     face_name: &str,
 ) {
-    let Some(table) = eval
-        .obarray()
-        .symbol_value_copied("face--new-frame-defaults")
-    else {
+    let Some(table) = eval.variable_value_by_name("face--new-frame-defaults") else {
         return;
     };
     if table.is_hash_table() {
@@ -284,9 +284,7 @@ pub(crate) fn lookup_face_new_frame_defaults_vector(
     eval: &crate::emacs_core::eval::Context,
     key: Value,
 ) -> Option<Value> {
-    let table = eval
-        .obarray()
-        .symbol_value_copied("face--new-frame-defaults")?;
+    let table = eval.variable_value_by_name("face--new-frame-defaults")?;
     let entry = lookup_frame_face_hash_entry(table, key)?;
     if entry.is_cons() {
         Some(entry.cons_cdr())

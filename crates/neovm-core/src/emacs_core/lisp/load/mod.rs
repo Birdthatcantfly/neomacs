@@ -7,6 +7,8 @@ use super::keymap::is_list_keymap;
 use super::value::{Value, ValueKind, VecLikeType, list_to_vec};
 use super::value_reader::ReadSymbolShorthands;
 use crate::emacs_core::error::LispCondition;
+use crate::emacs_core::eval::VariableView;
+use crate::emacs_core::symbol::CanonicalAccess;
 use crate::heap_types::LispString;
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
@@ -76,8 +78,7 @@ fn load_hist_file_name(
 ) -> LispString {
     let found_effective = load_found_effective(found);
     if !eval
-        .obarray()
-        .symbol_value_copied("purify-flag")
+        .variable_value_by_name("purify-flag")
         .is_some_and(|value| value.is_truthy())
     {
         return found_effective;
@@ -112,8 +113,7 @@ fn load_hist_file_name(
 /// handles itself, so the two together cover every preloaded file.
 fn record_preloaded_file(eval: &mut super::eval::Context, requested: &LispString) {
     if !eval
-        .obarray()
-        .symbol_value_copied("purify-flag")
+        .variable_value_by_name("purify-flag")
         .is_some_and(|value| value.is_truthy())
     {
         return;
@@ -126,8 +126,7 @@ fn record_preloaded_file(eval: &mut super::eval::Context, requested: &LispString
     // not something a `let` can shadow -- and the way `purify-flag` is read
     // just above.
     let list = eval
-        .obarray()
-        .symbol_value_copied("preloaded-file-list")
+        .variable_value_by_name("preloaded-file-list")
         .unwrap_or(Value::NIL);
     eval.push_specpdl_root(list);
     let updated = Value::cons(entry, list);
@@ -662,16 +661,14 @@ pub(crate) struct LoadSuffixPlan {
 }
 
 impl LoadSuffixPlan {
-    pub(crate) fn from_obarray(obarray: &super::symbol::Obarray) -> Result<Self, Flow> {
+    pub(crate) fn from_obarray(vars: VariableView<'_>) -> Result<Self, Flow> {
         let suffixes = strict_load_suffix_list(
-            obarray.symbol_value_copied("load-suffixes").as_ref(),
+            vars.value_by_name("load-suffixes").as_ref(),
             "load-suffixes",
             Some(default_load_suffixes()),
         )?;
         let representations = strict_load_suffix_list(
-            obarray
-                .symbol_value_copied("load-file-rep-suffixes")
-                .as_ref(),
+            vars.value_by_name("load-file-rep-suffixes").as_ref(),
             "load-file-rep-suffixes",
             Some(vec![Vec::new()]),
         )?;
@@ -679,8 +676,8 @@ impl LoadSuffixPlan {
         // non-empty representation of a dynamic module.  Keep the raw Lisp
         // value so irrelevant members (and even an otherwise-invalid value)
         // do not affect ordinary Elisp suffixes.
-        let compressed_representations = obarray
-            .symbol_value_copied("jka-compr-load-suffixes")
+        let compressed_representations = vars
+            .value_by_name("jka-compr-load-suffixes")
             .unwrap_or(Value::NIL);
 
         let mut required = Vec::with_capacity(suffixes.len() * representations.len());
@@ -890,11 +887,7 @@ impl LoadSuffixRequirement {
         }
     }
 
-    fn candidates(
-        self,
-        obarray: &super::symbol::Obarray,
-        file: &LispString,
-    ) -> Result<LoadCandidates, Flow> {
+    fn candidates(self, vars: VariableView<'_>, file: &LispString) -> Result<LoadCandidates, Flow> {
         if self == Self::ExactNameOnly {
             // GNU Fload does not even inspect the suffix variables when
             // NOSUFFIX is non-nil.  Besides avoiding needless work, keeping
@@ -904,7 +897,7 @@ impl LoadSuffixRequirement {
         }
 
         let suffix_required = self == Self::SuffixRequired && effective_must_suffix(file, true);
-        let suffixes = LoadSuffixPlan::from_obarray(obarray)?.search_suffixes(!suffix_required);
+        let suffixes = LoadSuffixPlan::from_obarray(vars)?.search_suffixes(!suffix_required);
         Ok(LoadCandidates::AppendSuffixes(suffixes))
     }
 }
@@ -978,20 +971,20 @@ pub fn find_file_in_load_path_with_flags(
 /// and the exact-vs-suffixed policy together prevents callers from silently
 /// falling back to the process-startup defaults.
 pub(crate) fn resolve_load_path_file_in_state(
-    obarray: &super::symbol::Obarray,
+    vars: VariableView<'_>,
     buf: Option<&crate::buffer::Buffer>,
     file: &LispString,
     requirement: LoadSuffixRequirement,
 ) -> Result<Option<LispString>, Flow> {
-    let candidates = requirement.candidates(obarray, file)?;
+    let candidates = requirement.candidates(vars, file)?;
     let (exact_name_only, suffixes) = match candidates {
         LoadCandidates::ExactName => (true, Vec::new()),
         LoadCandidates::AppendSuffixes(suffixes) => (false, suffixes),
     };
-    let prefer_newer = obarray
-        .symbol_value_copied("load-prefer-newer")
+    let prefer_newer = vars
+        .value_by_name("load-prefer-newer")
         .is_some_and(|value| value.is_truthy());
-    let load_path = get_load_path(obarray, buf);
+    let load_path = get_load_path(vars, buf);
 
     Ok(find_lisp_file_in_load_path_with_flags(
         file,
@@ -1057,20 +1050,18 @@ fn effective_must_suffix(file: &LispString, requested: bool) -> bool {
 /// produced the `"."` fallback and resolved against the process cwd instead of
 /// the buffer. Ledger 196; ledger 191 found the site and sized it.
 pub fn get_load_path(
-    obarray: &super::symbol::Obarray,
+    vars: VariableView<'_>,
     buf: Option<&crate::buffer::Buffer>,
 ) -> Vec<LispString> {
-    let default_directory = obarray
-        .value_in_buffer(buf, "default-directory")
+    let default_directory = vars
+        .value_in_buffer_by_name(buf, "default-directory")
         .and_then(|v| {
             v.is_string()
                 .then(|| v.as_lisp_string().expect("checked string").clone())
         })
         .unwrap_or_else(|| LispString::from_unibyte(b".".to_vec()));
 
-    let val = obarray
-        .symbol_value_copied("load-path")
-        .unwrap_or(Value::NIL);
+    let val = vars.value_by_name("load-path").unwrap_or(Value::NIL);
     super::value::list_to_vec(&val)
         .unwrap_or_default()
         .into_iter()
@@ -1091,7 +1082,7 @@ pub(crate) enum LoadPlan {
 }
 
 pub(crate) fn plan_load_in_state(
-    obarray: &super::symbol::Obarray,
+    vars: VariableView<'_>,
     buf: Option<&crate::buffer::Buffer>,
     file: Value,
     noerror: Option<Value>,
@@ -1117,7 +1108,7 @@ pub(crate) fn plan_load_in_state(
         LoadSuffixRequirement::BareNameAllowed
     };
 
-    match resolve_load_path_file_in_state(obarray, buf, &file, requirement)? {
+    match resolve_load_path_file_in_state(vars, buf, &file, requirement)? {
         Some(found) => Ok(LoadPlan::Load {
             requested: file,
             found,
@@ -1133,12 +1124,12 @@ pub(crate) fn plan_load_in_state(
 }
 
 pub(crate) fn resolve_autoload_load_path_in_state(
-    obarray: &super::symbol::Obarray,
+    vars: VariableView<'_>,
     buf: Option<&crate::buffer::Buffer>,
     file: &LispString,
 ) -> Result<PathBuf, Flow> {
     match plan_load_in_state(
-        obarray,
+        vars,
         buf,
         Value::heap_string(file.clone()),
         None,
@@ -1162,7 +1153,7 @@ pub(crate) fn builtin_load_in_vm_runtime(
     }
 
     match plan_load_in_state(
-        &shared.obarray,
+        shared.variables(),
         shared.buffers.current_buffer(),
         args[0],
         args.get(1).copied(),
@@ -1496,10 +1487,10 @@ fn source_read_symbol_shorthands_text(source: &str) -> Option<String> {
 fn read_symbol_shorthands_value_text(
     text: &str,
     source_multibyte: bool,
-    obarray: &super::symbol::Obarray,
+    vars: VariableView<'_>,
 ) -> Result<Option<ReadSymbolShorthands>, EvalError> {
     let Some((value, _)) =
-        super::value_reader::read_one_with_source_multibyte(text, source_multibyte, 0, obarray)
+        super::value_reader::read_one_with_source_multibyte(text, source_multibyte, 0, vars)
             .map_err(|err| {
                 EvalError::signal(
                     intern("invalid-read-syntax"),
@@ -1594,9 +1585,7 @@ pub(crate) fn get_eager_macroexpand_fn(eval: &super::eval::Context) -> Option<Va
     // Respect the Elisp `macroexp--pending-eager-loads` variable.
     // When it starts with `skip`, eager expansion is suppressed (mirrors
     // the check in `internal-macroexpand-for-load` in macroexp.el).
-    if let Some(val) = eval
-        .obarray()
-        .symbol_value_copied("macroexp--pending-eager-loads")
+    if let Some(val) = eval.variable_value_by_name("macroexp--pending-eager-loads")
         && val.is_cons()
         && val.cons_car().is_symbol_named("skip", symbol_mode)
     {
@@ -1884,7 +1873,7 @@ fn streaming_readevalloop(
         let read_result = super::value_reader::read_one_from_encoded_file_bytes(
             content,
             pos,
-            &eval.obarray,
+            eval.variables(),
             shorthands,
         )
         .map_err(|e| read_error_for_load(path, source, e))?;
@@ -2040,7 +2029,7 @@ fn streaming_readevalloop_lisp_source(
             // probe never consumes -- the cursor advances only from the reader
             // chosen below.
             let probe = read_source
-                .read_one_with_shorthands(pos, &eval.obarray, shorthands)
+                .read_one_with_shorthands(pos, eval.variables(), shorthands)
                 .map_err(|e| read_error_for_load(path, source, e))?;
             let Some((probed_form, probed_next)) = probe else {
                 break;
@@ -2057,8 +2046,7 @@ fn streaming_readevalloop_lisp_source(
             // default `read` symbol is observably identical and keeps the bootstrap
             // path off the Lisp call route.
             let read_hook = eval
-                .obarray
-                .symbol_value_copied("load-read-function")
+                .variable_value_by_name("load-read-function")
                 .filter(|hook| !hook.is_nil() && !hook.is_symbol_named("read", symbol_mode));
             let (form, next_pos) = match read_hook {
                 Some(hook) => {
@@ -2874,9 +2862,11 @@ fn load_file_body(
         )?;
         let shorthands =
             match source_read_symbol_shorthands_text(&local_variables_window_text(&content)) {
-                Some(text) => {
-                    read_symbol_shorthands_value_text(&text, content.is_multibyte(), &eval.obarray)?
-                }
+                Some(text) => read_symbol_shorthands_value_text(
+                    &text,
+                    content.is_multibyte(),
+                    eval.variables(),
+                )?,
                 None => None,
             };
         with_load_context(eval, &hist_file_name, found, lexical_binding, |eval| {
@@ -2929,7 +2919,7 @@ pub(crate) fn eval_lisp_source_file_in_context(
     let shorthands_text = source_read_symbol_shorthands_text(&source_text);
     let shorthands = match shorthands_text {
         Some(text) => {
-            read_symbol_shorthands_value_text(&text, content.is_multibyte(), &eval.obarray)?
+            read_symbol_shorthands_value_text(&text, content.is_multibyte(), eval.variables())?
         }
         None => None,
     };
@@ -2998,8 +2988,7 @@ fn build_load_history(eval: &mut super::eval::Context, filename: &LispString, en
     let current_load_list = eval.visible_variable_value_or_nil("current-load-list");
     eval.push_specpdl_root(current_load_list);
     let history = eval
-        .obarray()
-        .symbol_value_copied("load-history")
+        .variable_value_by_name("load-history")
         .unwrap_or(Value::NIL);
     eval.push_specpdl_root(history);
     let filtered_history = if entire {
@@ -3106,9 +3095,9 @@ fn run_after_load_evaluation(eval: &mut super::eval::Context, path_lisp: &LispSt
 
 /// Register bootstrap variables owned by the file-loading subsystem.
 pub fn register_bootstrap_vars(obarray: &mut super::symbol::Obarray) {
-    obarray.set_symbol_value("after-load-alist", Value::NIL);
+    obarray.seed_value("after-load-alist", Value::NIL);
     obarray.make_special("after-load-alist");
-    obarray.set_symbol_value("macroexp--dynvars", Value::NIL);
+    obarray.seed_value("macroexp--dynvars", Value::NIL);
     obarray.make_special("macroexp--dynvars");
 }
 
@@ -4042,7 +4031,11 @@ fn ensure_startup_compat_variables(eval: &mut super::eval::Context, project_root
         ),
     ];
     for (name, value) in defaults {
-        if eval.obarray().symbol_value_copied(name).is_none() {
+        if eval
+            .obarray()
+            .canonical_value_by_name(CanonicalAccess::BOOTSTRAP, name)
+            .is_none()
+        {
             eval.set_variable(name, value);
         }
     }
@@ -4062,10 +4055,10 @@ fn ensure_startup_compat_variables(eval: &mut super::eval::Context, project_root
         // fixnum limit and calls make_symbol_constant.  Reassert this here so
         // cached bootstrap dumps from older builds regain the C bootstrap
         // symbol flags after load.
-        obarray.set_symbol_value("most-positive-fixnum", Value::fixnum(i64::MAX >> 2));
+        obarray.seed_value("most-positive-fixnum", Value::fixnum(i64::MAX >> 2));
         obarray.make_special("most-positive-fixnum");
         obarray.set_constant("most-positive-fixnum");
-        obarray.set_symbol_value("most-negative-fixnum", Value::fixnum(-(i64::MAX >> 2) - 1));
+        obarray.seed_value("most-negative-fixnum", Value::fixnum(-(i64::MAX >> 2) - 1));
         obarray.make_special("most-negative-fixnum");
         obarray.set_constant("most-negative-fixnum");
     }
@@ -4349,17 +4342,20 @@ fn collect_source_surface_from_paths(
             crate::emacs_core::coding::EolConversion::Enabled,
         );
         let obarray = crate::emacs_core::symbol::Obarray::new();
-        let forms = crate::emacs_core::value_reader::read_all_lisp_source(&source, &obarray)
-            .map_err(|err| {
-                EvalError::signal(
-                    intern("error"),
-                    vec![Value::string(format!(
-                        "{error_context}: failed parsing {}: {err}",
-                        path.display()
-                    ))],
-                    None,
-                )
-            })?;
+        let forms = crate::emacs_core::value_reader::read_all_lisp_source(
+            &source,
+            VariableView::canonical(CanonicalAccess::BOOTSTRAP, &obarray),
+        )
+        .map_err(|err| {
+            EvalError::signal(
+                intern("error"),
+                vec![Value::string(format!(
+                    "{error_context}: failed parsing {}: {err}",
+                    path.display()
+                ))],
+                None,
+            )
+        })?;
 
         for form in forms {
             collect_value_symbol_names(
@@ -4540,17 +4536,20 @@ fn collect_loaddefs_surface_from_paths(
             crate::emacs_core::coding::EolConversion::Enabled,
         );
         let obarray = crate::emacs_core::symbol::Obarray::new();
-        let forms = crate::emacs_core::value_reader::read_all_lisp_source(&source, &obarray)
-            .map_err(|err| {
-                EvalError::signal(
-                    intern("error"),
-                    vec![Value::string(format!(
-                        "{error_context}: failed parsing {}: {err}",
-                        path.display()
-                    ))],
-                    None,
-                )
-            })?;
+        let forms = crate::emacs_core::value_reader::read_all_lisp_source(
+            &source,
+            VariableView::canonical(CanonicalAccess::BOOTSTRAP, &obarray),
+        )
+        .map_err(|err| {
+            EvalError::signal(
+                intern("error"),
+                vec![Value::string(format!(
+                    "{error_context}: failed parsing {}: {err}",
+                    path.display()
+                ))],
+                None,
+            )
+        })?;
 
         for form in &forms {
             collect_loaddefs_autoload_args(*form, allowed_files, allowed_names, &mut state);
@@ -4593,8 +4592,7 @@ fn runtime_loaddefs_restore_state(project_root: &Path) -> Result<LoaddefsSurface
 fn loaded_source_paths(eval: &mut super::eval::Context) -> Vec<PathBuf> {
     {
         let history = eval
-            .obarray()
-            .symbol_value_copied("load-history")
+            .variable_value_by_name("load-history")
             .unwrap_or(Value::NIL);
         let mut paths = std::collections::BTreeSet::new();
 
@@ -4683,7 +4681,9 @@ fn symbol_has_runtime_surface(eval: &super::eval::Context, id: super::intern::Sy
         || id == super::intern::T_SYM_ID
         || eval.obarray().is_constant_id(id)
         || eval.obarray().is_special_id(id)
-        || eval.obarray().boundp_id(id)
+        || eval
+            .obarray()
+            .canonical_boundp_id(CanonicalAccess::DUMP, id)
         || eval.obarray().symbol_function_id(id).is_some()
         || !eval.obarray().symbol_plist_id(id).is_nil()
         || eval.coding_systems.contains_runtime_symbol(id)
@@ -4696,7 +4696,7 @@ fn collect_runtime_referenced_symbol_names(
     let mut seen = std::collections::BTreeSet::new();
 
     for id in eval.obarray().global_member_ids().collect::<Vec<_>>() {
-        if let Some(value) = eval.obarray().symbol_value_id_copied(id) {
+        if let Some(value) = eval.obarray().canonical_value(CanonicalAccess::DUMP, id) {
             collect_value_symbol_names(value, &mut symbol_names, &mut seen);
         }
         if let Some(function) = eval.obarray().symbol_function_id(id) {
@@ -4926,7 +4926,7 @@ pub(crate) fn apply_ldefs_boot_autoloads_for_names(
         )
     })?;
     let source = decode_emacs_utf8_source_lisp(&bytes, eval.eol_conversion());
-    let forms = crate::emacs_core::value_reader::read_all_lisp_source(&source, &eval.obarray)
+    let forms = crate::emacs_core::value_reader::read_all_lisp_source(&source, eval.variables())
         .map_err(|err| {
             EvalError::signal(
                 intern("error"),
@@ -5090,7 +5090,8 @@ fn normalize_bootstrap_runtime_surface(
         );
     }
     for name in &runtime_source_state.variable_names {
-        eval.obarray_mut().makunbound(name);
+        eval.obarray_mut()
+            .makunbound_canonical_by_name(CanonicalAccess::BOOTSTRAP, name);
         // The transient load's `defvar` also wrote a `variable-documentation`
         // (FILE . POS) plist entry that this unbind left behind - seven rx.el
         // variables in the dumped image were documented-but-unbound, the
@@ -5222,7 +5223,10 @@ fn normalize_bootstrap_runtime_surface(
                 .iter()
                 .chain(runtime_loaddefs_state.keymap_forms.iter())
             {
-                let Some(value) = eval.obarray().symbol_value_copied(&replay.target) else {
+                let Some(value) = eval
+                    .obarray()
+                    .canonical_value_by_name(CanonicalAccess::BOOTSTRAP, &replay.target)
+                else {
                     continue;
                 };
                 if !is_list_keymap(&value, eval.symbol_mode()) {
@@ -5306,7 +5310,8 @@ pub(crate) fn normalize_final_dump_runtime_surface(
         );
     }
     for name in &runtime_source_state.variable_names {
-        eval.obarray_mut().makunbound(name);
+        eval.obarray_mut()
+            .makunbound_canonical_by_name(CanonicalAccess::BOOTSTRAP, name);
         // The transient load's `defvar` also wrote a `variable-documentation`
         // (FILE . POS) plist entry that this unbind left behind - seven rx.el
         // variables in the dumped image were documented-but-unbound, the
@@ -5843,7 +5848,7 @@ fn restore_final_image_interpreted_closure_filter(eval: &mut super::eval::Contex
     let cconv_sym = super::intern::intern("cconv-make-interpreted-closure");
     let filter_is_nil = eval
         .obarray()
-        .symbol_value_id_copied(filter_sym)
+        .canonical_value(CanonicalAccess::DUMP, filter_sym)
         .is_none_or(|value| value.is_nil());
     let cconv_bound = eval
         .obarray()
@@ -5861,16 +5866,13 @@ fn sync_runtime_interpreted_closure_filter(eval: &mut super::eval::Context) {
     let symbol_mode = eval.symbol_mode();
     let closure_filter_sym = super::intern::intern("internal-make-interpreted-closure-function");
     let cconv_sym = super::intern::intern("cconv-make-interpreted-closure");
-    let filter_fn = eval
-        .obarray()
-        .symbol_value_id_copied(closure_filter_sym)
-        .and_then(|value| {
-            if value.as_symbol_id(symbol_mode) == Some(cconv_sym) {
-                eval.obarray().symbol_function_id(cconv_sym)
-            } else {
-                None
-            }
-        });
+    let filter_fn = eval.variable_value(closure_filter_sym).and_then(|value| {
+        if value.as_symbol_id(symbol_mode) == Some(cconv_sym) {
+            eval.obarray().symbol_function_id(cconv_sym)
+        } else {
+            None
+        }
+    });
     eval.set_interpreted_closure_filter_fn(filter_fn);
 }
 
@@ -6026,7 +6028,7 @@ fn maybe_trace_bootstrap_macro_perf(eval: &super::eval::Context) {
     if let Some(summary) = eval.macro_perf_summary() {
         let gc_elapsed = eval
             .obarray()
-            .symbol_value_copied("gc-elapsed")
+            .canonical_value_by_name(CanonicalAccess::BOOTSTRAP, "gc-elapsed")
             .and_then(|value| value.as_number_f64())
             .unwrap_or(0.0);
         eprintln!(
@@ -6129,7 +6131,7 @@ pub(crate) fn seed_loadup_dump_branch_state(eval: &mut super::eval::Context) {
     // loadup.el:115 saves the pre-dump value before :116 overwrites it.
     let previous = eval
         .obarray()
-        .symbol_value_copied("load-prefer-newer")
+        .canonical_value_by_name(CanonicalAccess::BOOTSTRAP, "load-prefer-newer")
         .unwrap_or(Value::NIL);
     eval.set_variable("load--prefer-newer", previous);
     for name in LOADUP_DUMP_BRANCH_SEEDED_VARIABLES {

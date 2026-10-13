@@ -736,7 +736,7 @@ fn default_bookmark_file() -> LispString {
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
 fn active_bookmark_default_file(eval: &super::eval::Context) -> LispString {
-    if let Some(v) = eval.obarray.symbol_value_copied("bookmark-default-file")
+    if let Some(v) = eval.variable_value_by_name("bookmark-default-file")
         && let Some(ls) = v.as_lisp_string()
     {
         return ls.clone();
@@ -746,9 +746,7 @@ fn active_bookmark_default_file(eval: &super::eval::Context) -> LispString {
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
 fn bookmark_timestamp_file(eval: &super::eval::Context) -> Option<LispString> {
-    let value = eval
-        .obarray
-        .symbol_value_copied("bookmark-bookmarks-timestamp")?;
+    let value = eval.variable_value_by_name("bookmark-bookmarks-timestamp")?;
     if !value.is_cons() {
         return None;
     };
@@ -772,8 +770,7 @@ fn bookmark_save_stamp(path: &LispString) -> Value {
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
 fn set_bookmark_timestamp(eval: &mut super::eval::Context, file: &LispString) {
-    eval.obarray
-        .set_symbol_value("bookmark-bookmarks-timestamp", bookmark_save_stamp(file));
+    eval.store_variable_by_name("bookmark-bookmarks-timestamp", bookmark_save_stamp(file));
 }
 
 /// (bookmark-save &optional PARG FILE BATCH) -> nil or save-stamp list

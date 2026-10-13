@@ -77,7 +77,7 @@ fn mode_line_split_callback_follows_replaced_live_tail() {
     let mut callbacks = 0;
     let before_roots = save_scratch_gc_roots();
     let rendered = finish_format_mode_line_in_state_with_eval(
-        &eval.obarray,
+        crate::emacs_core::eval::VariableView::new(&eval.obarray, &eval.owner),
         &[],
         &eval.frames,
         &mut eval.buffers,
@@ -237,7 +237,10 @@ fn split_checkpoint_survives_collection(generational: bool) {
         let roots = mode_line_gc::ScratchRoots::new();
         let mut result = ModeLineRendered::default();
         format_mode_line_recursive_in_state_with_eval_rooted(
-            &obarray,
+            crate::emacs_core::eval::VariableView::canonical(
+                crate::emacs_core::symbol::CanonicalAccess::TEST,
+                &obarray,
+            ),
             &[],
             &buffers,
             &processes,

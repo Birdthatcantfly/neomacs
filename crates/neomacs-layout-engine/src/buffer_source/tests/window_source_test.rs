@@ -8,7 +8,7 @@ fn read_with_properties(properties: &str) -> Vec<u8> {
     let buffer = eval.buffer_manager().current_buffer().unwrap();
     let view = crate::neovm_bridge::BorrowedLayoutBuffer::for_window(
         buffer,
-        eval.obarray(),
+        eval.variables(),
         CharPos0::new(0),
         128,
         crate::display_property::DisplayPropertyTarget::for_window_system(true),
@@ -105,7 +105,7 @@ fn sync_source_budget_preserves_semantic_end_point_and_window_start() {
     let buffer = eval.buffer_manager().current_buffer().unwrap();
     let view = crate::neovm_bridge::BorrowedLayoutBuffer::for_window(
         buffer,
-        eval.obarray(),
+        eval.variables(),
         CharPos0::new(0),
         128,
         crate::display_property::DisplayPropertyTarget::for_window_system(true),
@@ -150,7 +150,7 @@ fn sync_source_budget_keeps_real_eob_when_lookahead_runs_out() {
     let buffer = eval.buffer_manager().current_buffer().unwrap();
     let view = crate::neovm_bridge::BorrowedLayoutBuffer::for_window(
         buffer,
-        eval.obarray(),
+        eval.variables(),
         CharPos0::new(0),
         128,
         crate::display_property::DisplayPropertyTarget::for_window_system(true),
@@ -194,7 +194,7 @@ fn sync_read_with_properties(properties: &str) -> (Vec<u8>, BufferWindowSource) 
     let buffer = eval.buffer_manager().current_buffer().unwrap();
     let view = crate::neovm_bridge::BorrowedLayoutBuffer::for_window(
         buffer,
-        eval.obarray(),
+        eval.variables(),
         CharPos0::new(0),
         128,
         crate::display_property::DisplayPropertyTarget::for_window_system(true),
@@ -263,7 +263,7 @@ fn window_character_budget_bounds_long_lines_and_preserves_semantic_metadata() {
         for start in [0, 41_387] {
             let view = crate::neovm_bridge::BorrowedLayoutBuffer::for_window(
                 buffer,
-                eval.obarray(),
+                eval.variables(),
                 CharPos0::new(start),
                 1024,
                 crate::display_property::DisplayPropertyTarget::for_window_system(true),
@@ -321,7 +321,7 @@ fn window_character_budget_distinguishes_horizon_from_real_accessible_end() {
     let buffer = eval.buffer_manager().current_buffer().unwrap();
     let view = crate::neovm_bridge::BorrowedLayoutBuffer::for_window(
         buffer,
-        eval.obarray(),
+        eval.variables(),
         CharPos0::new(2),
         128,
         crate::display_property::DisplayPropertyTarget::for_window_system(true),
@@ -387,7 +387,7 @@ fn window_character_budget_remains_progressive_with_hidden_or_selective_source()
         let buffer = eval.buffer_manager().current_buffer().unwrap();
         let view = crate::neovm_bridge::BorrowedLayoutBuffer::for_window(
             buffer,
-            eval.obarray(),
+            eval.variables(),
             CharPos0::ZERO,
             1024,
             crate::display_property::DisplayPropertyTarget::for_window_system(true),

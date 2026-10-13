@@ -19,7 +19,14 @@ fn logical_reader<'a>(
         EmacsBytePos::ZERO,
     )
     .expect("test logical range");
-    Reader::new_lisp_string(input, LispReaderRange::Characters(range), ob)
+    Reader::new_lisp_string(
+        input,
+        LispReaderRange::Characters(range),
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            ob,
+        ),
+    )
 }
 
 #[test]
@@ -59,7 +66,10 @@ fn logical_index_does_not_reverse_map_consumed_unicode_bytes() {
             )
             .expect("test range"),
             SymbolPositionMode::Bare,
-            &ob,
+            crate::emacs_core::eval::VariableView::canonical(
+                crate::emacs_core::symbol::CanonicalAccess::TEST,
+                &ob,
+            ),
             ReadSymbolShorthandBinding::Unbound,
         )
         .expect("read")
@@ -112,7 +122,16 @@ fn logical_read_all_does_not_leak_labels_across_forms() {
     let _context = crate::emacs_core::eval::Context::new();
     let ob = crate::emacs_core::symbol::Obarray::new();
     let text = LispString::from_utf8("#1=(a) #1#");
-    assert!(read_all_lisp_source(&text, &ob).is_err());
+    assert!(
+        read_all_lisp_source(
+            &text,
+            crate::emacs_core::eval::VariableView::canonical(
+                crate::emacs_core::symbol::CanonicalAccess::TEST,
+                &ob
+            )
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -133,7 +152,10 @@ fn logical_partial_end_zero_and_end_at_schars_preserve_original_units() {
                     )
                     .expect("test range"),
                     SymbolPositionMode::Bare,
-                    &ob,
+                    crate::emacs_core::eval::VariableView::canonical(
+                        crate::emacs_core::symbol::CanonicalAccess::TEST,
+                        &ob
+                    ),
                     ReadSymbolShorthandBinding::Unbound,
                 )
                 .expect("empty range")
@@ -149,7 +171,10 @@ fn logical_partial_end_zero_and_end_at_schars_preserve_original_units() {
             )
             .expect("test range"),
             SymbolPositionMode::Bare,
-            &ob,
+            crate::emacs_core::eval::VariableView::canonical(
+                crate::emacs_core::symbol::CanonicalAccess::TEST,
+                &ob,
+            ),
             ReadSymbolShorthandBinding::Unbound,
         )
         .expect("full logical range")
@@ -213,7 +238,10 @@ fn logical_string_reads_one_initialized_terminal_nul() {
             EmacsBytePos::ZERO,
             EmacsBytePos::new(1),
         )),
-        &ob,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &ob,
+        ),
     );
     assert_eq!(
         bytes

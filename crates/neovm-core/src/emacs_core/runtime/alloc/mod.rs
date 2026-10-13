@@ -361,11 +361,11 @@ impl AllocationFailure {
 /// Register bootstrap variables owned by the allocation / GC subsystem.
 pub fn register_bootstrap_vars(obarray: &mut Obarray) {
     obarray.define_int_variable("gc-cons-threshold", 800_000);
-    obarray.set_symbol_value("gc-cons-percentage", Value::make_float(0.1));
+    obarray.seed_value("gc-cons-percentage", Value::make_float(0.1));
     obarray.make_special("gc-cons-percentage");
-    obarray.set_symbol_value("post-gc-hook", Value::NIL);
+    obarray.seed_value("post-gc-hook", Value::NIL);
     obarray.make_special("post-gc-hook");
-    obarray.set_symbol_value(
+    obarray.seed_value(
         "memory-signal-data",
         Value::list(vec![
             Value::symbol("error"),
@@ -375,9 +375,9 @@ pub fn register_bootstrap_vars(obarray: &mut Obarray) {
         ]),
     );
     obarray.make_special("memory-signal-data");
-    obarray.set_symbol_value("memory-full", Value::NIL);
+    obarray.seed_value("memory-full", Value::NIL);
     obarray.make_special("memory-full");
-    obarray.set_symbol_value("gc-elapsed", Value::make_float(0.0));
+    obarray.seed_value("gc-elapsed", Value::make_float(0.0));
     obarray.make_special("gc-elapsed");
     obarray.define_int_variable("gcs-done", 0);
     obarray.define_int_variable("pure-bytes-used", 0);

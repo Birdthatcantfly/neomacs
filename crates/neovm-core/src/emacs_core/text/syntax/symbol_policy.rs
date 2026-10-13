@@ -314,11 +314,11 @@ pub(crate) fn builtin_copy_syntax_table_in_state(
 impl<'a> SyntaxProperties<'a> {
     pub(crate) fn for_scan_with_symbols(
         honor: bool,
-        obarray: &'a Obarray,
+        vars: crate::emacs_core::eval::VariableView<'a>,
         buffers: &BufferManager,
         mode: SymbolMode,
     ) -> Self {
-        let properties = Self::for_scan(honor, obarray, buffers);
+        let properties = Self::for_scan(honor, vars, buffers);
         if mode == SymbolMode::Bare {
             return properties;
         }

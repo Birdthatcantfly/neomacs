@@ -4,6 +4,7 @@
 //! the same view of `Context` and the parent's private items (`use super::*`).
 
 use super::*;
+use crate::emacs_core::symbol::CanonicalAccess;
 
 /// Push the entry MAKE builds onto SPECPDL, constructed in its final slot.
 ///
@@ -477,7 +478,8 @@ impl Context {
             } else {
                 // This preserves LOCALIZED defcell/valcell identity. These
                 // storage setters do not evaluate watchers or Lisp forms.
-                self.obarray.set_symbol_value_id(sym_id, value);
+                self.obarray
+                    .set_canonical_value(CanonicalAccess::STORAGE, sym_id, value);
             }
         }
         if self.runtime_binding_has_projection(resolved) {
@@ -614,7 +616,10 @@ impl Context {
                             buf.replace_local_var_alist(new_alist);
                         }
                     }
-                    None => self.obarray.set_symbol_value_id(resolved, stored),
+                    None => {
+                        self.obarray
+                            .set_canonical_value(CanonicalAccess::STORAGE, resolved, stored)
+                    }
                 }
                 stored
             }
@@ -650,13 +655,15 @@ impl Context {
                         ForwardStoreSite::Bind,
                     )?
                     .value();
-                    self.obarray.set_symbol_value_id(resolved, stored);
+                    self.obarray
+                        .set_canonical_value(CanonicalAccess::STORAGE, resolved, stored);
                     stored
                 }
             },
             // The alias walk above ends on a non-alias cell.
             None | Some(ValueCell::Plain(_) | ValueCell::Alias(_)) => {
-                self.obarray.set_symbol_value_id(resolved, value);
+                self.obarray
+                    .set_canonical_value(CanonicalAccess::STORAGE, resolved, value);
                 value
             }
         };
@@ -962,7 +969,9 @@ impl Context {
         // the typed-store probe is pure overhead for it; non-buffer forwarded
         // symbols (Int/Bool/Obj/Kboard) still take it so `(let
         // ((gc-cons-threshold "x")) ...)` keeps signaling before the body.
-        let old_value = self.obarray.symbol_value_id_copied(resolved);
+        let old_value = self
+            .obarray
+            .canonical_value(CanonicalAccess::STORAGE, resolved);
         self.push_specpdl_with(|| SpecBinding::Let {
             sym_id: resolved,
             old_value: SavedBindingValue::from_option(old_value),
@@ -981,7 +990,8 @@ impl Context {
             )?
             .value()
         };
-        self.obarray.set_symbol_value_id(resolved, stored);
+        self.obarray
+            .set_canonical_value(CanonicalAccess::STORAGE, resolved, stored);
         self.sync_cached_runtime_binding_by_id(resolved, stored);
         self.sync_user_test_gc_binding_by_id(resolved);
         Ok(())
@@ -1119,7 +1129,8 @@ impl Context {
         let current_value = if use_default_storage {
             super::super::data::default_value_by_id(self, sym_id)
         } else {
-            self.obarray.symbol_value_id_copied(sym_id)
+            self.obarray
+                .canonical_value(CanonicalAccess::STORAGE, sym_id)
         };
         if use_default_storage {
             self.restore_default_binding_by_id(
@@ -1130,12 +1141,14 @@ impl Context {
         } else {
             match old_value {
                 Some(value) => {
-                    self.obarray.set_symbol_value_id(sym_id, value);
+                    self.obarray
+                        .set_canonical_value(CanonicalAccess::STORAGE, sym_id, value);
                     self.sync_cached_runtime_binding_by_id(sym_id, value);
                     self.sync_user_test_gc_binding_by_id(sym_id);
                 }
                 None => {
-                    self.obarray.makunbound_id(sym_id);
+                    self.obarray
+                        .makunbound_canonical(CanonicalAccess::STORAGE, sym_id);
                     self.sync_cached_runtime_binding_by_id(sym_id, Value::NIL);
                     self.sync_user_test_gc_binding_by_id(sym_id);
                 }
@@ -1553,12 +1566,14 @@ impl Context {
                 } else if still_plain {
                     match old_value {
                         Some(val) => {
-                            self.obarray.set_symbol_value_id(sym_id, val);
+                            self.obarray
+                                .set_canonical_value(CanonicalAccess::STORAGE, sym_id, val);
                             self.sync_cached_runtime_binding_by_id(sym_id, val);
                             self.sync_user_test_gc_binding_by_id(sym_id);
                         }
                         None => {
-                            self.obarray.makunbound_id(sym_id);
+                            self.obarray
+                                .makunbound_canonical(CanonicalAccess::STORAGE, sym_id);
                             self.sync_cached_runtime_binding_by_id(sym_id, Value::NIL);
                             self.sync_user_test_gc_binding_by_id(sym_id);
                         }

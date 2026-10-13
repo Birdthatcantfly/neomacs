@@ -1199,12 +1199,13 @@ fn execute_elisp(evaluator: &mut Context, form: &LispValue) -> Result<LispValue,
 
     // The reader uses the owner's interner for symbols and keywords.
     evaluator.setup_thread_locals();
-    let forms = emacs_core::value_reader::read_all(source, evaluator.obarray()).map_err(|err| {
-        TaskError::Failed(Signal {
-            symbol: "invalid-read-syntax".to_string(),
-            data: Some(err.message),
-        })
-    })?;
+    let forms =
+        emacs_core::value_reader::read_all(source, evaluator.variables()).map_err(|err| {
+            TaskError::Failed(Signal {
+                symbol: "invalid-read-syntax".to_string(),
+                data: Some(err.message),
+            })
+        })?;
     let mut last = LispValue::default();
     for form in forms {
         match evaluator.eval_form(form) {

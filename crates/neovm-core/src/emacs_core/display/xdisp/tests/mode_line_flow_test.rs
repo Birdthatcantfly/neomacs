@@ -38,7 +38,7 @@ fn mode_line_split_throw_restores_buffer_and_roots() {
     let format = eval.eval_str("'(:eval nil)").expect("format");
     let roots = save_scratch_gc_roots();
     let result = finish_format_mode_line_in_state_with_eval(
-        &eval.obarray,
+        crate::emacs_core::eval::VariableView::new(&eval.obarray, &eval.owner),
         &[],
         &eval.frames,
         &mut eval.buffers,
@@ -68,7 +68,7 @@ fn mode_line_split_signal_is_demoted_like_gnu() {
         .eval_str(r#"'("before" (:eval nil) "after")"#)
         .expect("format");
     let result = finish_format_mode_line_in_state_with_eval(
-        &eval.obarray,
+        crate::emacs_core::eval::VariableView::new(&eval.obarray, &eval.owner),
         &[],
         &eval.frames,
         &mut eval.buffers,

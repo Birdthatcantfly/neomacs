@@ -14,7 +14,6 @@ pub(crate) use subrs::register_subrs;
 
 use super::buffer::{extract_cons_fixnums, point_char_pos};
 use super::error::{EvalResult, Flow, signal};
-use super::symbol::Obarray;
 use super::value::*;
 use super::xdisp::LineWrap;
 use super::xdisp::line_number_digit_width;
@@ -27,6 +26,7 @@ use crate::emacs_core::error::LispCondition;
 use crate::emacs_core::error::{
     expect_args, expect_args_range, expect_fixnum, expect_max_args, expect_min_args,
 };
+use crate::emacs_core::eval::VariableView;
 use crate::emacs_core::value::ValueKind;
 use crate::emacs_core::xdisp::motion::{self, MotionEngine, MotionRequest};
 use crate::heap_types::LispString;
@@ -1490,7 +1490,7 @@ fn align_to_keyword_symbol() -> Value {
 }
 
 pub(crate) fn dynamic_buffer_or_global_symbol_value(
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     _dynamic: &[OrderedRuntimeBindingMap],
     buf: Option<&Buffer>,
     name: &str,
@@ -1513,7 +1513,7 @@ pub(crate) fn dynamic_buffer_or_global_symbol_value(
     {
         return Some(value);
     }
-    obarray.symbol_value_copied(name)
+    vars.value_by_name(name)
 }
 
 /// A GNU tab stop width: only 1..=1000 are valid; other Lisp values mean eight.
@@ -1537,35 +1537,34 @@ impl TabWidth {
 }
 
 fn tab_width_in_state(
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     _dynamic: &[OrderedRuntimeBindingMap],
     buf: Option<&Buffer>,
 ) -> TabWidth {
     // Resolve by identity while retaining GNU's validated tab-width fallback.
     TabWidth::from(
-        obarray
-            .value_in_buffer_id(buf, tab_width_sym_id())
+        vars.value_in_buffer(buf, tab_width_sym_id())
             .unwrap_or(Value::NIL),
     )
 }
 
 /// GNU SANE_TAB_WIDTH, shared with char-width and string formatting.
 pub(crate) fn current_buffer_tab_width(ctx: &crate::emacs_core::eval::Context) -> usize {
-    tab_width_in_state(&ctx.obarray, &[], ctx.buffers.current_buffer()).get()
+    tab_width_in_state(ctx.variables(), &[], ctx.buffers.current_buffer()).get()
 }
 
 fn indent_tabs_mode_in_state(
-    obarray: &Obarray,
+    vars: VariableView<'_>,
     dynamic: &[OrderedRuntimeBindingMap],
     buf: Option<&Buffer>,
 ) -> bool {
-    dynamic_buffer_or_global_symbol_value(obarray, dynamic, buf, "indent-tabs-mode")
+    dynamic_buffer_or_global_symbol_value(vars, dynamic, buf, "indent-tabs-mode")
         .is_none_or(|value| value.is_truthy())
 }
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
 fn buffer_read_only_active(eval: &super::eval::Context, buf: &Buffer) -> bool {
-    super::editfns::buffer_read_only_active_in_state(&eval.obarray, &[], buf)
+    super::editfns::buffer_read_only_active_in_state(eval.variables(), &[], buf)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1786,18 +1785,18 @@ static_assertions::assert_not_impl_any!(DisplayCharacterHeaders: Send, Sync);
 
 impl DisplayCharacterHeaders {
     #[inline(always)]
-    fn read(obarray: &Obarray, buf: &Buffer) -> Self {
+    fn read(vars: VariableView<'_>, buf: &Buffer) -> Self {
         // Read both tables by cached identity, preserving canonical aliases,
         // forwarders and the nil-override policy. One Obarray loan serves all
         // three reads, and ends before the caller enters a mutable stop probe.
-        let display_table = obarray
-            .value_in_buffer_id(Some(buf), buffer_display_table_sym_id())
+        let display_table = vars
+            .value_in_buffer(Some(buf), buffer_display_table_sym_id())
             .filter(|v| !v.is_nil())
-            .or_else(|| obarray.symbol_value_id_copied(standard_display_table_sym_id()))
+            .or_else(|| vars.value(standard_display_table_sym_id()))
             .filter(|v| !v.is_nil());
         Self {
             end: buf.accessible_emacs_byte_region().end(),
-            tab_width: tab_width_in_state(obarray, &[], Some(buf)),
+            tab_width: tab_width_in_state(vars, &[], Some(buf)),
             display_table,
         }
     }
@@ -1858,7 +1857,8 @@ fn decode_display_character(
 /// temporary table Values. The next stop reacquires after every callback.
 #[cfg(not(feature = "display-stop-validate"))]
 struct DisplayCharacterPhase<'read> {
-    obarray: &'read Obarray,
+    /// The owner reading: its variables, through `Context::variables`.
+    ctx: &'read super::eval::Context,
     buffer: &'read Buffer,
     _confined: std::marker::PhantomData<std::rc::Rc<()>>,
 }
@@ -1882,7 +1882,7 @@ impl<'read> DisplayCharacterPhase<'read> {
     #[inline(always)]
     fn from_context(ctx: &'read super::eval::Context, buffer_id: BufferId) -> Option<Self> {
         Some(Self {
-            obarray: &*ctx.obarray,
+            ctx,
             buffer: ctx.buffers.get(buffer_id)?,
             _confined: std::marker::PhantomData,
         })
@@ -1890,7 +1890,7 @@ impl<'read> DisplayCharacterPhase<'read> {
 
     #[inline(always)]
     fn advance(self, byte: EmacsBytePos, column: DisplayColumn) -> Option<DisplayAdvance> {
-        let headers = DisplayCharacterHeaders::read(self.obarray, self.buffer);
+        let headers = DisplayCharacterHeaders::read(self.ctx.variables(), self.buffer);
         if byte >= headers.end {
             return None;
         }
@@ -1917,12 +1917,12 @@ pub(crate) fn display_advance_at(
     let headers = {
         // Header loans end before any mutable stop/property probe. The copied
         // headers deliberately retain the original pre-probe value timing.
-        let obarray = &*ctx.obarray;
+        let vars = ctx.variables();
         let buf = match ctx.buffers.get(buffer_id) {
             Some(buf) => buf,
             None => return Ok(None),
         };
-        DisplayCharacterHeaders::read(obarray, buf)
+        DisplayCharacterHeaders::read(vars, buf)
     };
     let end = headers.end.get();
     if byte >= end {
@@ -2071,7 +2071,7 @@ fn display_run_at(
     // `display` value and, when it came from an overlay, the overlay itself.
     let display_sym = display_prop_symbol();
     let (display, overlay) = super::textprop::buffer_overlay_property_at_byte_pos(
-        &ctx.obarray,
+        ctx.variables(),
         &ctx.buffers,
         buf,
         byte,
@@ -2081,7 +2081,7 @@ fn display_run_at(
     .map(|(v, ov)| (v, Some(ov)))
     .or_else(|| {
         let v = super::textprop::builtin_get_text_property_in_state(
-            &ctx.obarray,
+            ctx.variables(),
             &ctx.buffers,
             &[Value::fixnum(charpos1), display_sym],
         )
@@ -2132,7 +2132,7 @@ fn display_run_at(
             .unwrap_or_else(|| buf.accessible_emacs_byte_region().end().get())
     } else {
         let run_end_char1 = super::textprop::builtin_next_single_property_change_in_state(
-            &ctx.obarray,
+            ctx.variables(),
             &ctx.buffers,
             &[Value::fixnum(charpos1), display_prop_symbol()],
         )
@@ -2561,13 +2561,10 @@ fn scan_for_column(
     // Read by cached identity -- see the well-known-symbol block above.
     let display_table = {
         let buf = ctx.buffers.get(buffer_id);
-        ctx.obarray
-            .value_in_buffer_id(buf, buffer_display_table_sym_id())
+        ctx.variables()
+            .value_in_buffer(buf, buffer_display_table_sym_id())
             .filter(|v| !v.is_nil())
-            .or_else(|| {
-                ctx.obarray
-                    .symbol_value_id_copied(standard_display_table_sym_id())
-            })
+            .or_else(|| ctx.variable_value(standard_display_table_sym_id()))
             .filter(|v| !v.is_nil())
     };
 
@@ -2812,7 +2809,7 @@ fn insert_inheriting_indentation(
     super::editfns::signal_before_text_change(ctx, change)?;
     let symbol_mode = ctx.symbol_mode();
     super::builtins::insert_string_value_in_current_buffer(
-        &ctx.obarray,
+        VariableView::new(&ctx.obarray, &ctx.owner),
         &[],
         &mut ctx.buffers,
         Value::string(indentation),
@@ -2847,7 +2844,7 @@ pub(crate) fn current_indentation(
         (
             line.start().get(),
             buf.accessible_emacs_byte_region().end().get(),
-            tab_width_in_state(&ctx.obarray, &[], Some(buf)),
+            tab_width_in_state(ctx.variables(), &[], Some(buf)),
             !buf.overlays.is_empty()
                 || buf.text_props_property_name_presence(Value::symbol("invisible"))
                     != crate::buffer::text_props::PropertyNamePresence::DefinitelyAbsent,
@@ -3006,7 +3003,7 @@ pub(crate) fn move_to_column(
     let Some(buf) = ctx.buffers.get(current_id) else {
         return Ok(Value::fixnum(0));
     };
-    let read_only = super::editfns::buffer_read_only_active_in_state(&ctx.obarray, &[], buf);
+    let read_only = super::editfns::buffer_read_only_active_in_state(ctx.variables(), &[], buf);
     let pt = buf
         .accessible_emacs_byte_region()
         .clamp(buf.point_emacs_byte_pos());
@@ -3106,7 +3103,7 @@ pub(crate) fn indent_to(
             vec![Value::string("No current buffer")],
         )
     })?;
-    let tab_width = tab_width_in_state(&ctx.obarray, &[], Some(buf)).get();
+    let tab_width = tab_width_in_state(ctx.variables(), &[], Some(buf)).get();
 
     let mincol = column.max(
         fromcol
@@ -3117,14 +3114,14 @@ pub(crate) fn indent_to(
         return Ok(Value::fixnum(mincol as i64));
     }
 
-    if super::editfns::buffer_read_only_active_in_state(&ctx.obarray, &[], buf) {
+    if super::editfns::buffer_read_only_active_in_state(ctx.variables(), &[], buf) {
         return Err(signal(
             LispCondition::BufferReadOnly,
             vec![buf.name_value()],
         ));
     }
 
-    let use_tabs = indent_tabs_mode_in_state(&ctx.obarray, &[], Some(buf));
+    let use_tabs = indent_tabs_mode_in_state(ctx.variables(), &[], Some(buf));
 
     // Compute the run lengths before allocating or entering a repeat loop.
     let tab = tab_width.max(1);
@@ -3189,15 +3186,15 @@ pub(crate) fn indent_to(
 /// but before any user code runs).
 pub fn init_indent_vars(obarray: &mut super::symbol::Obarray) {
     // tab-width: default 8 (buffer-local in real Emacs, global default here)
-    obarray.set_symbol_value("tab-width", Value::fixnum(8));
+    obarray.seed_value("tab-width", Value::fixnum(8));
     obarray.make_special("tab-width");
 
     // standard-indent: default 4
-    obarray.set_symbol_value("standard-indent", Value::fixnum(4));
+    obarray.seed_value("standard-indent", Value::fixnum(4));
     obarray.make_special("standard-indent");
 
     // tab-stop-list: default nil
-    obarray.set_symbol_value("tab-stop-list", Value::NIL);
+    obarray.seed_value("tab-stop-list", Value::NIL);
     obarray.make_special("tab-stop-list");
 }
 
@@ -3206,7 +3203,6 @@ pub fn init_indent_vars(obarray: &mut super::symbol::Obarray) {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn compute_motion(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {
-    let obarray = &eval.obarray;
     let buffers = &eval.buffers;
     expect_args("compute-motion", &args, 7)?;
 
@@ -3281,7 +3277,7 @@ pub(crate) fn compute_motion(eval: &mut super::eval::Context, args: Vec<Value>) 
     let tab_width = crate::buffer::buffer::lookup_buffer_slot("tab-width")
         .map(|info| buf.slots[info.offset.index()])
         .or_else(|| buf.get_buffer_local("tab-width"))
-        .or_else(|| obarray.symbol_value_copied("tab-width"))
+        .or_else(|| eval.variable_value_by_name("tab-width"))
         .and_then(|value: Value| match value.kind() {
             ValueKind::Fixnum(n) if n > 0 => Some(n as usize),
             _ => None,

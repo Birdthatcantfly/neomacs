@@ -270,12 +270,8 @@ impl Context {
         // [`Context::debugger_reentry_is_permitted`].  Measured under GNU
         // `-Q --batch`: it reads `-1` at startup and `0` after one entry.
         let events = self.num_nonmacro_input_events();
-        self.obarray
-            .set_symbol_value_id(when_entered_debugger_symbol(), Value::fixnum(events));
-        let debugger = self
-            .obarray
-            .symbol_value_id_copied(debugger_symbol())
-            .unwrap_or(Value::NIL);
+        self.store_variable(when_entered_debugger_symbol(), Value::fixnum(events));
+        let debugger = self.variable_value(debugger_symbol()).unwrap_or(Value::NIL);
         // GNU's four `specbind`s, in GNU's order (`src/eval.c:306-314`).
         // `debugger-may-continue` is `debug_while_redisplaying ? Qnil : Qt`
         // there; this port has no redisplay re-entry to detect, and in batch

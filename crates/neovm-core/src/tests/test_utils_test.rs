@@ -3,6 +3,8 @@
 //! Provides shared helpers used across all test modules.
 
 use crate::emacs_core::error::map_flow;
+use crate::emacs_core::eval::VariableView;
+use crate::emacs_core::symbol::CanonicalAccess;
 fn test_ob() -> crate::emacs_core::symbol::Obarray {
     crate::emacs_core::symbol::Obarray::new()
 }
@@ -74,7 +76,7 @@ pub fn load_minimal_gnu_backquote_runtime(eval: &mut Context) {
         "load-path",
         Value::list(bootstrap_load_path_entries(&lisp_dir)),
     );
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     for name in &[
         "emacs-lisp/debug-early",
         "emacs-lisp/byte-run",
@@ -92,7 +94,7 @@ pub fn load_gnu_macroexp_runtime(eval: &mut Context) {
     if eval.obarray().symbol_function("macroexp-progn").is_some() {
         return;
     }
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     for name in &["emacs-lisp/macroexp", "emacs-lisp/pcase"] {
         let path = find_required_lisp_file(name, &load_path);
         load_file(eval, &path).unwrap_or_else(|err| panic!("load {name}: {err:?}"));
@@ -127,11 +129,14 @@ pub fn load_gnu_undo_auto_runtime(eval: &mut Context) {
     let limit_start = simple_source
         .find("(defvar amalgamating-undo-limit ")
         .expect("simple.el amalgamating-undo-limit form");
-    let limit_form =
-        crate::emacs_core::value_reader::read_one(&simple_source, limit_start, &test_ob())
-            .expect("parse simple.el amalgamating-undo-limit")
-            .map(|(form, _)| form)
-            .expect("read simple.el amalgamating-undo-limit");
+    let limit_form = crate::emacs_core::value_reader::read_one(
+        &simple_source,
+        limit_start,
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse simple.el amalgamating-undo-limit")
+    .map(|(form, _)| form)
+    .expect("read simple.el amalgamating-undo-limit");
 
     let start = simple_source
         .find("(defvar-local undo-auto--last-boundary-cause ")
@@ -142,8 +147,11 @@ pub fn load_gnu_undo_auto_runtime(eval: &mut Context) {
         .expect("simple.el undo auto section end");
     let mut forms = vec![limit_form];
     forms.extend(
-        crate::emacs_core::value_reader::read_all(&simple_source[start..end], &test_ob())
-            .expect("parse simple.el undo auto section"),
+        crate::emacs_core::value_reader::read_all(
+            &simple_source[start..end],
+            VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+        )
+        .expect("parse simple.el undo auto section"),
     );
 
     let roots = eval.save_specpdl_roots();
@@ -183,8 +191,11 @@ pub fn load_gnu_special_mode_runtime(eval: &mut Context) {
         .find(";; Making and deleting lines.")
         .map(|offset| start + offset)
         .expect("simple.el special-mode section end");
-    let forms = crate::emacs_core::value_reader::read_all(&simple_source[start..end], &test_ob())
-        .expect("parse simple.el special-mode section");
+    let forms = crate::emacs_core::value_reader::read_all(
+        &simple_source[start..end],
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse simple.el special-mode section");
 
     let roots = eval.save_specpdl_roots();
     for form in &forms {
@@ -218,19 +229,25 @@ pub fn load_gnu_display_graphic_runtime(eval: &mut Context) {
     let framep_start = frame_source
         .find("(defun framep-on-display ")
         .expect("frame.el framep-on-display form");
-    let framep_form =
-        crate::emacs_core::value_reader::read_one(&frame_source, framep_start, &test_ob())
-            .expect("parse frame.el framep-on-display")
-            .map(|(form, _)| form)
-            .expect("read frame.el framep-on-display");
+    let framep_form = crate::emacs_core::value_reader::read_one(
+        &frame_source,
+        framep_start,
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse frame.el framep-on-display")
+    .map(|(form, _)| form)
+    .expect("read frame.el framep-on-display");
     let display_start = frame_source
         .find("(defun display-graphic-p ")
         .expect("frame.el display-graphic-p form");
-    let display_form =
-        crate::emacs_core::value_reader::read_one(&frame_source, display_start, &test_ob())
-            .expect("parse frame.el display-graphic-p")
-            .map(|(form, _)| form)
-            .expect("read frame.el display-graphic-p");
+    let display_form = crate::emacs_core::value_reader::read_one(
+        &frame_source,
+        display_start,
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse frame.el display-graphic-p")
+    .map(|(form, _)| form)
+    .expect("read frame.el display-graphic-p");
     let forms = vec![framep_form, display_form];
 
     let roots = eval.save_specpdl_roots();
@@ -265,8 +282,11 @@ pub fn load_gnu_window_alias_runtime(eval: &mut Context) {
         .find("(defun window-full-height-p ")
         .map(|offset| start + offset)
         .expect("window.el window primitive alias block end");
-    let forms = crate::emacs_core::value_reader::read_all(&window_source[start..end], &test_ob())
-        .expect("parse window.el window primitive alias block");
+    let forms = crate::emacs_core::value_reader::read_all(
+        &window_source[start..end],
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse window.el window primitive alias block");
 
     let roots = eval.save_specpdl_roots();
     for form in &forms {
@@ -304,8 +324,11 @@ pub fn load_gnu_separator_line_runtime(eval: &mut Context) {
         .find("(defun delete-indentation ")
         .map(|offset| start + offset)
         .expect("simple.el make-separator-line section end");
-    let forms = crate::emacs_core::value_reader::read_all(&simple_source[start..end], &test_ob())
-        .expect("parse simple.el make-separator-line section");
+    let forms = crate::emacs_core::value_reader::read_all(
+        &simple_source[start..end],
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse simple.el make-separator-line section");
 
     let roots = eval.save_specpdl_roots();
     for form in &forms {
@@ -339,10 +362,14 @@ pub fn load_gnu_elisp_syntax_table_runtime(eval: &mut Context) {
     let start = elisp_mode_source
         .find("(defvar emacs-lisp-mode-syntax-table")
         .expect("elisp-mode.el emacs-lisp-mode-syntax-table form");
-    let form = crate::emacs_core::value_reader::read_one(&elisp_mode_source, start, &test_ob())
-        .expect("parse elisp-mode.el emacs-lisp-mode-syntax-table")
-        .map(|(form, _)| form)
-        .expect("read elisp-mode.el emacs-lisp-mode-syntax-table");
+    let form = crate::emacs_core::value_reader::read_one(
+        &elisp_mode_source,
+        start,
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse elisp-mode.el emacs-lisp-mode-syntax-table")
+    .map(|(form, _)| form)
+    .expect("read elisp-mode.el emacs-lisp-mode-syntax-table");
 
     let roots = eval.save_specpdl_roots();
     eval.push_specpdl_root(form);
@@ -360,7 +387,7 @@ pub fn load_gnu_elisp_syntax_table_runtime(eval: &mut Context) {
 /// full `loadup.el` startup.
 pub fn load_minimal_gnu_help_runtime(eval: &mut Context) {
     load_minimal_gnu_backquote_runtime(eval);
-    let load_path = get_load_path(eval.obarray(), eval.buffers.current_buffer());
+    let load_path = get_load_path(eval.variables(), eval.buffers.current_buffer());
     for name in &[
         "keymap",
         "widget",
@@ -420,8 +447,11 @@ pub fn load_minimal_gnu_help_runtime(eval: &mut Context) {
     let help_path = find_required_lisp_file("help.el", &load_path);
     let help_source =
         std::fs::read_to_string(&help_path).unwrap_or_else(|err| panic!("read help.el: {err}"));
-    let help_forms =
-        crate::emacs_core::value_reader::read_all(&help_source, &test_ob()).expect("parse help.el");
+    let help_forms = crate::emacs_core::value_reader::read_all(
+        &help_source,
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse help.el");
     // Root every parsed form upfront. Without this, forms still
     // sitting in the `help_forms` Vec aren't visible to the GC and
     // can be reclaimed when an `eval_sub` of an earlier form
@@ -523,7 +553,11 @@ pub fn runtime_startup_context() -> Context {
 /// results, matching the common bootstrap test pattern.
 pub fn runtime_startup_eval_all(src: &str) -> Vec<String> {
     let mut eval = runtime_startup_context();
-    let forms = crate::emacs_core::value_reader::read_all(src, &test_ob()).expect("parse");
+    let forms = crate::emacs_core::value_reader::read_all(
+        src,
+        VariableView::canonical(CanonicalAccess::TEST, &test_ob()),
+    )
+    .expect("parse");
     // Root parsed forms across the eval loop. Heap literals like bignums,
     // strings, and cons cells are otherwise invisible to the GC until the
     // evaluator reaches them, which can corrupt bootstrap tests that call

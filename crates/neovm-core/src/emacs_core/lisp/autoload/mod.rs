@@ -369,7 +369,7 @@ pub(crate) enum AutoloadDoLoadPlan {
 }
 
 pub(crate) fn plan_autoload_do_load_in_state(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     args: &[Value],
     mode: SymbolMode,
 ) -> Result<AutoloadDoLoadPlan, Flow> {
@@ -423,7 +423,7 @@ pub(crate) fn plan_autoload_do_load_in_state(
 
     if let Some(name) = funname
         && let Some(override_value) =
-            super::eval::compiler_function_override_in_obarray(obarray, name, mode)
+            super::eval::compiler_function_override_in_obarray(vars, name, mode)
     {
         return Ok(AutoloadDoLoadPlan::Return(override_value));
     }
@@ -432,11 +432,11 @@ pub(crate) fn plan_autoload_do_load_in_state(
 }
 
 pub(crate) fn resolve_autoload_load_path(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     buf: Option<&crate::buffer::Buffer>,
     file: &LispString,
 ) -> Result<PathBuf, Flow> {
-    super::load::resolve_autoload_load_path_in_state(obarray, buf, file)
+    super::load::resolve_autoload_load_path_in_state(vars, buf, file)
 }
 
 /// After loading an autoload file, check whether the function was defined.
@@ -515,7 +515,8 @@ fn execute_autoload_load(
     }
 
     let load_result = with_implicit_load_state(eval, |eval| {
-        let path = resolve_autoload_load_path(&eval.obarray, eval.buffers.current_buffer(), file)?;
+        let path =
+            resolve_autoload_load_path(eval.variables(), eval.buffers.current_buffer(), file)?;
         // GNU eval.c:Fautoload_do_load calls load_with_autoload_queue with
         // NOMESSAGE=t: autoloading is an implicit consequence of calling a
         // function, not an explicit user request to load a file.
@@ -538,7 +539,7 @@ pub(crate) fn builtin_autoload_do_load(
     args: Vec<Value>,
 ) -> EvalResult {
     let original_fundef = args.first().copied();
-    match plan_autoload_do_load_in_state(&eval.obarray, &args, eval.symbol_mode())? {
+    match plan_autoload_do_load_in_state(eval.variables(), &args, eval.symbol_mode())? {
         AutoloadDoLoadPlan::Return(value) => Ok(value),
         AutoloadDoLoadPlan::Load { file, funname } => {
             execute_autoload_load(eval, &file, funname, original_fundef)
@@ -553,7 +554,7 @@ pub(crate) fn builtin_autoload_do_load_3(
     macro_only: Value,
 ) -> EvalResult {
     let args = [fundef, funname, macro_only];
-    match plan_autoload_do_load_in_state(&eval.obarray, &args, eval.symbol_mode())? {
+    match plan_autoload_do_load_in_state(eval.variables(), &args, eval.symbol_mode())? {
         AutoloadDoLoadPlan::Return(value) => Ok(value),
         AutoloadDoLoadPlan::Load { file, funname } => {
             execute_autoload_load(eval, &file, funname, Some(fundef))
@@ -566,7 +567,7 @@ pub(crate) fn builtin_autoload_do_load_in_vm_runtime(
     args: &[Value],
 ) -> EvalResult {
     let original_fundef = args.first().copied();
-    match plan_autoload_do_load_in_state(&shared.obarray, args, shared.symbol_mode())? {
+    match plan_autoload_do_load_in_state(shared.variables(), args, shared.symbol_mode())? {
         AutoloadDoLoadPlan::Return(value) => Ok(value),
         AutoloadDoLoadPlan::Load { file, funname } => {
             execute_autoload_load(shared, &file, funname, original_fundef)

@@ -524,8 +524,7 @@ impl Context {
             self.mark_user_test_gc_settings_volatile();
         }
         self.gc_runtime_settings_cache.gc_cons_threshold_bytes = self
-            .obarray
-            .symbol_value_id_copied(syms.threshold())
+            .variable_value(syms.threshold())
             .and_then(|value| {
                 value.as_fixnum().or_else(|| {
                     // GNU's gc-cons-threshold watcher accepts integers fitting
@@ -537,8 +536,7 @@ impl Context {
             .and_then(|n| usize::try_from(n).ok())
             .unwrap_or(GC_DEFAULT_THRESHOLD_BYTES);
         self.gc_runtime_settings_cache.gc_cons_percentage_scaled = self
-            .obarray
-            .symbol_value_id_or_nil(syms.percentage)
+            .variable_value_or_nil(syms.percentage)
             .as_number_f64()
             .filter(|float| float.is_finite() && *float > 0.0)
             .and_then(|float| {
@@ -546,12 +544,8 @@ impl Context {
                     ((float * GC_PERCENT_SCALE as f64).ceil() as u64).clamp(1, u64::MAX),
                 )
             });
-        self.gc_runtime_settings_cache.memory_full = GcMemoryPressure::from_full(
-            !self
-                .obarray
-                .symbol_value_id_or_nil(syms.memory_full)
-                .is_nil(),
-        );
+        self.gc_runtime_settings_cache.memory_full =
+            GcMemoryPressure::from_full(!self.variable_value_or_nil(syms.memory_full).is_nil());
     }
 
     pub(super) fn effective_gc_threshold_bytes(&mut self) -> usize {
@@ -592,12 +586,11 @@ impl Context {
             .min(GC_HI_THRESHOLD_BYTES as u128) as usize;
         threshold = threshold.max(live_growth);
         let mut threshold = threshold.clamp(1, GC_HI_THRESHOLD_BYTES);
-        if self.gc_runtime_settings_cache.syms.is_some_and(|syms| {
-            !self
-                .obarray
-                .symbol_value_id_or_nil(syms.startup_ceiling)
-                .is_nil()
-        }) {
+        if self
+            .gc_runtime_settings_cache
+            .syms
+            .is_some_and(|syms| !self.variable_value_or_nil(syms.startup_ceiling).is_nil())
+        {
             threshold = threshold.min(GC_STARTUP_THRESHOLD_CEILING_BYTES);
         }
         gc_threshold_cap_from_env().map_or(threshold, |cap| threshold.min(cap))
@@ -619,15 +612,13 @@ impl Context {
     }
 
     pub(super) fn update_gc_runtime_stats(&mut self, elapsed: std::time::Duration) {
-        self.obarray
-            .set_symbol_value_id(gcs_done_symbol(), Value::fixnum(self.gc_count as i64));
+        self.store_variable(gcs_done_symbol(), Value::fixnum(self.gc_count as i64));
 
         let old_elapsed = self
-            .obarray
-            .symbol_value_id_copied(gc_elapsed_symbol())
+            .variable_value(gc_elapsed_symbol())
             .and_then(|value| value.as_number_f64())
             .unwrap_or(0.0);
-        self.obarray.set_symbol_value_id(
+        self.store_variable(
             gc_elapsed_symbol(),
             Value::make_float(old_elapsed + elapsed.as_secs_f64()),
         );

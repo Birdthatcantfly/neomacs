@@ -19,12 +19,12 @@
 use super::error::{EvalResult, Flow, signal};
 use super::eval::Context;
 use super::intern::{SymId, intern, lookup_interned, resolve_sym};
-use super::symbol::Obarray;
 use super::value::*;
 use crate::buffer::{BufferManager, EmacsByteRange, LispCharPos1};
 use crate::emacs_core::emacs_char::EmacsChar;
 use crate::emacs_core::error::LispCondition;
 use crate::emacs_core::error::{expect_args, expect_max_args, expect_min_args};
+use crate::emacs_core::eval::VariableStore;
 use crate::heap_types::LispString;
 use crate::tagged::value::SymbolMode;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
@@ -516,11 +516,11 @@ impl TextQuotingStyle {
 /// resolve to `curve' (the display-capability fallback always picks `curve'
 /// in batch/UTF-8, matching `builtin_text_quoting_style').
 pub(crate) fn effective_text_quoting_style(
-    obarray: &Obarray,
+    vars: crate::emacs_core::eval::VariableView<'_>,
     mode: SymbolMode,
 ) -> TextQuotingStyle {
-    let var = obarray
-        .symbol_value_copied("text-quoting-style")
+    let var = vars
+        .value_by_name("text-quoting-style")
         .unwrap_or(Value::NIL);
     if var.is_nil() {
         return TextQuotingStyle::Curve;
@@ -1520,10 +1520,10 @@ impl CodingSystemManager {
     }
 }
 
-fn cons_coding_system_variable(obarray: &mut Obarray, name: SymId) {
+fn cons_coding_system_variable(vars: &mut VariableStore<'_>, name: SymId) {
     let var = intern("coding-system-list");
-    let current = obarray.symbol_value_id_or_nil(var);
-    obarray.set_symbol_value_id(var, Value::cons(Value::from_sym_id(name), current));
+    let current = vars.view().value_or_nil(var);
+    vars.store(var, Value::cons(Value::from_sym_id(name), current));
 }
 
 fn coding_system_alist_has_name(mut alist: Value, name: &str) -> bool {
@@ -1540,20 +1540,20 @@ fn coding_system_alist_has_name(mut alist: Value, name: &str) -> bool {
     false
 }
 
-fn cons_coding_system_alist(obarray: &mut Obarray, name: SymId) {
+fn cons_coding_system_alist(vars: &mut VariableStore<'_>, name: SymId) {
     let var = intern("coding-system-alist");
-    let current = obarray.symbol_value_id_or_nil(var);
+    let current = vars.view().value_or_nil(var);
     let name_str = resolve_sym(name);
     if coding_system_alist_has_name(current, name_str) {
         return;
     }
     let entry = Value::cons(Value::string(name_str), Value::NIL);
-    obarray.set_symbol_value_id(var, Value::cons(entry, current));
+    vars.store(var, Value::cons(entry, current));
 }
 
-fn record_coding_system_name(obarray: &mut Obarray, name: SymId) {
-    cons_coding_system_variable(obarray, name);
-    cons_coding_system_alist(obarray, name);
+fn record_coding_system_name(vars: &mut VariableStore<'_>, name: SymId) {
+    cons_coding_system_variable(vars, name);
+    cons_coding_system_alist(vars, name);
 }
 
 /// Mirror GNU `define-coding-system-internal`'s updates to
@@ -1561,7 +1561,7 @@ fn record_coding_system_name(obarray: &mut Obarray, name: SymId) {
 /// When EOL is unspecified, GNU records the three subsidiary systems first
 /// and then the base coding system, all by consing onto the front.
 pub(crate) fn record_lisp_define_coding_system_internal(
-    obarray: &mut Obarray,
+    vars: &mut VariableStore<'_>,
     args: &[Value],
     mode: SymbolMode,
 ) {
@@ -1575,16 +1575,16 @@ pub(crate) fn record_lisp_define_coding_system_internal(
     let eol_unspecified = args[12].is_nil();
     if eol_unspecified && EolType::from_suffix(name).is_none() {
         for suffix in ["-unix", "-dos", "-mac"] {
-            record_coding_system_name(obarray, intern(&format!("{name}{suffix}")));
+            record_coding_system_name(vars, intern(&format!("{name}{suffix}")));
         }
     }
-    record_coding_system_name(obarray, name_id);
+    record_coding_system_name(vars, name_id);
 }
 
 /// Mirror GNU `define-coding-system-alias`: append alias metadata in the
 /// runtime registry, then cons the alias onto the Lisp-visible list and alist.
 pub(crate) fn record_lisp_define_coding_system_alias(
-    obarray: &mut Obarray,
+    vars: &mut VariableStore<'_>,
     args: &[Value],
     mode: SymbolMode,
 ) {
@@ -1594,7 +1594,7 @@ pub(crate) fn record_lisp_define_coding_system_alias(
     let Some(alias_id) = args[0].as_symbol_id(mode) else {
         return;
     };
-    record_coding_system_name(obarray, alias_id);
+    record_coding_system_name(vars, alias_id);
 }
 
 impl crate::gc_trace::GcTrace for CodingSystemManager {
@@ -5839,7 +5839,7 @@ pub(crate) fn builtin_find_coding_systems_region_internal(
 /// in C code (coding.c syms_of_coding).
 pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray) {
     fn defvar_lisp(obarray: &mut crate::emacs_core::symbol::Obarray, name: &str, value: Value) {
-        obarray.set_symbol_value(name, value);
+        obarray.seed_value(name, value);
         obarray.make_special(name);
     }
 
@@ -5856,14 +5856,18 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
     defvar_lisp(obarray, "coding-system-alist", Value::NIL);
     // `syms_of_coding` defines these two coding systems in C before
     // `mule-conf.el` adds aliases and the rest of the language codings.
-    record_coding_system_name(obarray, intern("no-conversion"));
-    for name in [
-        "undecided-unix",
-        "undecided-dos",
-        "undecided-mac",
-        "undecided",
-    ] {
-        record_coding_system_name(obarray, intern(name));
+    {
+        // Bootstrap: no owner exists yet.
+        let mut vars = VariableStore::new(obarray, None);
+        record_coding_system_name(&mut vars, intern("no-conversion"));
+        for name in [
+            "undecided-unix",
+            "undecided-dos",
+            "undecided-mac",
+            "undecided",
+        ] {
+            record_coding_system_name(&mut vars, intern(name));
+        }
     }
     // coding.c:11935 — DEFVAR_LISP (Vcoding_category_list)
     defvar_lisp(obarray, "coding-category-list", Value::NIL);

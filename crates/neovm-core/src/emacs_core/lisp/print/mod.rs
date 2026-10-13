@@ -722,10 +722,10 @@ fn refresh_print_options_after_callback(state: &mut PrintState) {
         return;
     };
     let buffer = state.settings_source.buffer(context);
-    let dynamic = super::error::print_options_from_state(&context.obarray, buffer);
+    let dynamic = super::error::print_options_from_state(context.variables(), buffer);
     let table = context
-        .obarray
-        .value_in_buffer(buffer, "print-number-table")
+        .variables()
+        .value_in_buffer_by_name(buffer, "print-number-table")
         .unwrap_or(Value::NIL);
     // Syntax nesting and destination belong to this invocation, whereas all
     // Lisp-visible print variables are read live after the callback returns.
@@ -806,10 +806,7 @@ fn bind_unreadable_printer_default(
         context,
         intern("print-unreadable-function"),
     )?;
-    let old = context
-        .obarray
-        .symbol_value_id_copied(symbol)
-        .unwrap_or(Value::UNBOUND);
+    let old = context.variable_value(symbol).unwrap_or(Value::UNBOUND);
     context.push_specpdl_with(|| SpecBinding::LetDefault {
         sym_id: symbol,
         old_value: SavedBindingValue::from_plain(old),
@@ -924,8 +921,8 @@ fn prepare_print_number_table(
     source: PrintSettingsSource,
 ) -> Result<(), crate::emacs_core::error::Flow> {
     let mut table = context
-        .obarray
-        .value_in_buffer(source.buffer(context), "print-number-table")
+        .variables()
+        .value_in_buffer_by_name(source.buffer(context), "print-number-table")
         .unwrap_or(Value::NIL);
     if !options.print_continuous_numbering || table.is_nil() {
         reset_print_number_index();

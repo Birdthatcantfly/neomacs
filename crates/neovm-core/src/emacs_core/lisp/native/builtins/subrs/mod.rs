@@ -138,14 +138,12 @@ fn push_onto_charset_list(
 ) {
     use crate::emacs_core::value::Value;
     let current = ctx
-        .obarray
-        .symbol_value_copied("charset-list")
+        .variable_value_by_name("charset-list")
         .unwrap_or(Value::NIL);
     // Unconditionally, as GNU does: defining the same alias twice leaves two
     // entries in its list, and nothing in a normal session defines a charset
     // twice.
-    ctx.obarray
-        .set_symbol_value("charset-list", Value::cons(name, current));
+    ctx.store_variable_by_name("charset-list", Value::cons(name, current));
 }
 
 pub(crate) fn register_subrs(ctx: &mut crate::emacs_core::eval::Context) {
@@ -8264,7 +8262,7 @@ pub(crate) fn register_subrs(ctx: &mut crate::emacs_core::eval::Context) {
     ctx.register_subr(SubrSpec::new(
         "get-load-suffixes",
         NativeFn::ContextVec(|ctx, args| {
-            crate::emacs_core::lread::builtin_get_load_suffixes(&ctx.obarray, args)
+            crate::emacs_core::lread::builtin_get_load_suffixes(ctx.variables(), args)
         }),
         SubrArity::new(0, Some(0)),
     ));

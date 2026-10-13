@@ -1359,7 +1359,10 @@ fn test_file_load_records_pdumper_stats_without_running_after_pdump_load_hook() 
            (setq compat-pdump-hook-fired nil)
            (setq after-pdump-load-hook
                  (list (lambda () (setq compat-pdump-hook-fired t)))))",
-        &test_ob(),
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
     )
     .unwrap();
     eval.eval_sub(setup[0]).expect("setup hook should evaluate");
@@ -1377,7 +1380,14 @@ fn test_file_load_records_pdumper_stats_without_running_after_pdump_load_hook() 
         Some(Value::NIL)
     );
 
-    let forms = crate::emacs_core::value_reader::read_all("(pdumper-stats)", &test_ob()).unwrap();
+    let forms = crate::emacs_core::value_reader::read_all(
+        "(pdumper-stats)",
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
+    )
+    .unwrap();
     let stats = loaded
         .eval_sub(forms[0])
         .expect("pdumper-stats should evaluate");
@@ -1525,33 +1535,61 @@ fn test_pdump_round_trip_bootstrap() {
     eprintln!("pdump: load took {load_time:.2?}");
 
     // Verify the loaded evaluator can evaluate Elisp
-    let forms = crate::emacs_core::value_reader::read_all("(+ 1 2)", &test_ob()).unwrap();
+    let forms = crate::emacs_core::value_reader::read_all(
+        "(+ 1 2)",
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
+    )
+    .unwrap();
     let result = loaded.eval_sub(forms[0]).expect("eval should succeed");
     assert_eq!(result, Value::fixnum(3));
 
     // Verify features survived (bootstrap sets many features)
     // Note: subr.el does NOT call (provide 'subr); use 'backquote instead
-    let forms =
-        crate::emacs_core::value_reader::read_all("(featurep 'backquote)", &test_ob()).unwrap();
+    let forms = crate::emacs_core::value_reader::read_all(
+        "(featurep 'backquote)",
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
+    )
+    .unwrap();
     let result = loaded.eval_sub(forms[0]).expect("featurep should succeed");
     assert_eq!(result, Value::T, "featurep 'backquote should be t");
 
     // Verify a bootstrapped function works
-    let forms = crate::emacs_core::value_reader::read_all("(length '(a b c))", &test_ob()).unwrap();
+    let forms = crate::emacs_core::value_reader::read_all(
+        "(length '(a b c))",
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
+    )
+    .unwrap();
     let result = loaded.eval_sub(forms[0]).expect("eval should succeed");
     assert_eq!(result, Value::fixnum(3));
 
     // Verify string operations (tests heap String objects)
-    let forms =
-        crate::emacs_core::value_reader::read_all("(concat \"hello\" \" \" \"world\")", &test_ob())
-            .unwrap();
+    let forms = crate::emacs_core::value_reader::read_all(
+        "(concat \"hello\" \" \" \"world\")",
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
+    )
+    .unwrap();
     let result = loaded.eval_sub(forms[0]).expect("eval should succeed");
     assert_eq!(crate::emacs_core::print_value(&result), "\"hello world\"");
 
     // Verify hash table access (tests hash table round-trip)
     let forms = crate::emacs_core::value_reader::read_all(
         "(let ((h (make-hash-table :test 'equal))) (puthash \"key\" 42 h) (gethash \"key\" h))",
-        &test_ob(),
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
     )
     .unwrap();
     let result = loaded.eval_sub(forms[0]).expect("eval should succeed");
@@ -1560,7 +1598,10 @@ fn test_pdump_round_trip_bootstrap() {
     // Verify defun works (tests lambda/macro round-trip)
     let forms = crate::emacs_core::value_reader::read_all(
         "(progn (defun pdump-test-fn (x) (* x x)) (pdump-test-fn 7))",
-        &test_ob(),
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
     )
     .unwrap();
     let result = loaded.eval_sub(forms[0]).expect("eval should succeed");
@@ -1592,7 +1633,14 @@ fn test_pdump_round_trip_preserves_runtime_derived_mode_syntax() {
              (char-syntax ?\;)
              (char-syntax ?{)
              (char-syntax ?'))"#;
-    let probe = crate::emacs_core::value_reader::read_all(probe_src, &test_ob()).unwrap();
+    let probe = crate::emacs_core::value_reader::read_all(
+        probe_src,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
+    )
+    .unwrap();
     let full_result = eval
         .eval_sub(probe[0])
         .expect("full bootstrap probe should run");
@@ -1610,7 +1658,14 @@ fn test_pdump_round_trip_preserves_runtime_derived_mode_syntax() {
     crate::emacs_core::load::apply_runtime_startup_state(&mut loaded)
         .expect("runtime startup after load should succeed");
 
-    let probe = crate::emacs_core::value_reader::read_all(probe_src, &test_ob()).unwrap();
+    let probe = crate::emacs_core::value_reader::read_all(
+        probe_src,
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
+    )
+    .unwrap();
     let loaded_result = loaded
         .eval_sub(probe[0])
         .expect("loaded bootstrap probe should run");
@@ -1649,7 +1704,10 @@ fn test_pdump_round_trip_preserves_pre_runtime_standard_syntax_identity() {
              (char-syntax ?\;)
              (char-syntax ?{)
              (char-syntax ?'))"#,
-        &test_ob(),
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
     )
     .unwrap();
     let result = loaded
@@ -1673,7 +1731,10 @@ fn test_pdump_round_trip_preserves_default_fontset_han_order() {
                (nil . "GB2312.1980-0")
                (nil . "JISX0208*")
                (nil . "gb18030"))))"#,
-        &test_ob(),
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
     )
     .unwrap();
     eval.eval_sub(setup[0])
@@ -1689,7 +1750,10 @@ fn test_pdump_round_trip_preserves_default_fontset_han_order() {
         r#"(list
             (fontset-font t ?好 t)
             (fontset-font t (string-to-char "好") t))"#,
-        &test_ob(),
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
     )
     .unwrap();
     let result = loaded
@@ -1722,7 +1786,10 @@ fn test_restore_snapshot_isolated_between_clones() {
         "(progn
            (setq compat-pdump-clone-smoke 'first)
            compat-pdump-clone-smoke)",
-        &test_ob(),
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
     )
     .unwrap();
     let first_result = first
@@ -1734,9 +1801,14 @@ fn test_restore_snapshot_isolated_between_clones() {
     );
 
     let mut second = restore_snapshot(&snapshot).expect("second clone should succeed");
-    let probe =
-        crate::emacs_core::value_reader::read_all("(boundp 'compat-pdump-clone-smoke)", &test_ob())
-            .unwrap();
+    let probe = crate::emacs_core::value_reader::read_all(
+        "(boundp 'compat-pdump-clone-smoke)",
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
+    )
+    .unwrap();
     let second_result = second
         .eval_sub(probe[0])
         .expect("second clone evaluation should succeed");
@@ -1758,7 +1830,10 @@ fn test_restore_snapshot_preserves_core_subr_callable_surface() {
                  (funcall 'list 1 2 3)
                  (funcall 'intern "compat-pdump-subr-probe")
                  (funcall 'format "%s-%s" "pdump" "ok"))"#,
-        &test_ob(),
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
     )
     .expect("parse");
     let result = restored
@@ -1868,7 +1943,10 @@ fn test_restore_snapshot_does_not_report_file_based_pdump_session() {
            (setq compat-pdump-snapshot-hook-fired nil)
            (setq after-pdump-load-hook
                  (list (lambda () (setq compat-pdump-snapshot-hook-fired t)))))",
-        &test_ob(),
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
     )
     .unwrap();
     template
@@ -1884,7 +1962,14 @@ fn test_restore_snapshot_does_not_report_file_based_pdump_session() {
         Some(Value::NIL)
     );
 
-    let forms = crate::emacs_core::value_reader::read_all("(pdumper-stats)", &test_ob()).unwrap();
+    let forms = crate::emacs_core::value_reader::read_all(
+        "(pdumper-stats)",
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &test_ob(),
+        ),
+    )
+    .unwrap();
     let stats = restored
         .eval_sub(forms[0])
         .expect("pdumper-stats should evaluate");

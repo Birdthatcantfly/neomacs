@@ -309,7 +309,7 @@ pub(super) fn parse_partial_sexp_propertizing(
             let buf = current_buffer_or_error(eval)?;
             let table = SyntaxTable::for_buffer(buf);
             let honor = parse_sexp_lookup_properties_enabled(eval);
-            let props = SyntaxProperties::for_scan(honor, &eval.obarray, &eval.buffers);
+            let props = SyntaxProperties::for_scan(honor, eval.variables(), &eval.buffers);
             let escape_policy = CommentEndEscapePolicy::for_context(eval);
             let end = run_parse_loop(
                 buf,

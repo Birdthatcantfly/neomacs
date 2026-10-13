@@ -5,7 +5,6 @@
 //! from optional metadata.
 
 use crate::emacs_core::Value;
-use crate::emacs_core::symbol::Obarray;
 use crate::heap_types::{LispString, LispStringStorageKind};
 use crate::window::Frame;
 pub use neomacs_display_protocol::ImageAnimationPolicy;
@@ -186,8 +185,11 @@ impl Default for ImageScaleEnvironment {
 /// selected frame facts.  Redisplay and synchronous image builtins share this
 /// entry point so the same image spec cannot acquire two geometries.
 #[must_use]
-pub fn image_scale_environment(frame: &Frame, obarray: &Obarray) -> ImageScaleEnvironment {
-    let default_scale = match obarray.symbol_value_copied("image-scaling-factor") {
+pub fn image_scale_environment(
+    frame: &Frame,
+    vars: crate::emacs_core::eval::VariableView<'_>,
+) -> ImageScaleEnvironment {
+    let default_scale = match vars.value_by_name("image-scaling-factor") {
         Some(value) if value.is_bare_symbol_named("auto") => ImageDefaultScale::Auto,
         Some(value) => numeric_image_scale(value)
             .map(ImageDefaultScale::Explicit)
@@ -199,7 +201,7 @@ pub fn image_scale_environment(frame: &Frame, obarray: &Obarray) -> ImageScaleEn
         frame.device_scale_factor as f32,
         default_scale,
     )
-    .with_size_limit(image_size_limit(frame, obarray))
+    .with_size_limit(image_size_limit(frame, vars))
 }
 
 /// GNU's `max-image-size` (`src/image.c:13037`), resolved against FRAME.
@@ -211,10 +213,13 @@ pub fn image_scale_environment(frame: &Frame, obarray: &Obarray) -> ImageScaleEn
 /// redisplay. `DEFVAR_LISP` keeps it out of every buffer, so there is no
 /// buffer-local case to consider.
 #[must_use]
-pub fn image_size_limit(frame: &Frame, obarray: &Obarray) -> ImageSizeLimit {
+pub fn image_size_limit(
+    frame: &Frame,
+    vars: crate::emacs_core::eval::VariableView<'_>,
+) -> ImageSizeLimit {
     // GNU tests `FIXNUMP` before `FLOATP`; `Value` splits the same way, and
     // anything else (nil, a string, a symbol) is GNU's "no explicit limit".
-    match obarray.symbol_value_copied("max-image-size") {
+    match vars.value_by_name("max-image-size") {
         Some(value) if value.as_int().is_some() => {
             ImageSizeLimit::from_axis_pixels(value.as_int().expect("tested fixnum"))
         }

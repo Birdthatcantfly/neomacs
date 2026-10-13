@@ -245,7 +245,7 @@ fn erase_buffer_widens_before_deleting_current_contents() {
     crate::test_utils::init_test_tracing();
     install_test_runtime();
 
-    let obarray = Obarray::new();
+    let obarray = crate::emacs_core::symbol::Obarray::new();
     let dynamic: Vec<OrderedRuntimeBindingMap> = Vec::new();
     let mut buffers = crate::buffer::BufferManager::new();
     let current = buffers.current_buffer_id().expect("current buffer");
@@ -256,7 +256,15 @@ fn erase_buffer_widens_before_deleting_current_contents() {
         buf.goto_emacs_byte_pos(crate::buffer::EmacsBytePos::new(4));
     }
 
-    let result = erase_buffer_impl(&obarray, &dynamic, &mut buffers, vec![]);
+    let result = erase_buffer_impl(
+        crate::emacs_core::eval::VariableView::canonical(
+            crate::emacs_core::symbol::CanonicalAccess::TEST,
+            &obarray,
+        ),
+        &dynamic,
+        &mut buffers,
+        vec![],
+    );
     assert!(result.as_ref().is_ok_and(|v| v.is_nil()));
 
     let buf = buffers.get(current).expect("buffer after erase");
