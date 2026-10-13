@@ -2,9 +2,11 @@
 //! unprojected variable for a single owner, its dynamic bindings living in
 //! the owner's slab.
 //!
-//! Each case runs the same script of forms in two fresh contexts, one with
-//! the variable projected and one without, and compares every result. The
-//! comparison is neomacs against itself, so no GNU oracle is involved.
+//! Each case runs the same script of forms in fresh contexts -- one with the
+//! variable unprojected, one projected, and one projected with a collection
+//! before every step, so the slab's values must be rooted -- and compares
+//! every result. The comparison is neomacs against itself, so no GNU oracle
+//! is involved.
 
 use crate::emacs_core::bytecode::opcode::Op;
 use crate::emacs_core::bytecode::{ByteCodeFunction, StackDepth, Vm};
@@ -244,8 +246,8 @@ impl Step {
     }
 }
 
-/// Run every step for every shape, projected and not, returning the
-/// divergences.
+/// Run every step for every shape, unprojected, projected, and projected
+/// with a collection first, returning the divergences.
 fn divergences() -> Vec<String> {
     let mut found = Vec::new();
     for &(shape, name) in SHAPES {
@@ -256,14 +258,19 @@ fn divergences() -> Vec<String> {
             .collect();
         let mut plain = context(shape, name, false);
         let mut projected = context(shape, name, true);
+        let mut collected = context(shape, name, true);
         for step in &steps {
             let want = step.run(&mut plain, name);
             let got = step.run(&mut projected, name);
-            if want != got {
-                found.push(format!(
-                    "{shape:?} {}\n    unprojected: {want}\n    projected:   {got}",
-                    step.label()
-                ));
+            collected.gc_collect_exact();
+            let got_collected = step.run(&mut collected, name);
+            for (arm, got) in [("projected", got), ("collected", got_collected)] {
+                if want != got {
+                    found.push(format!(
+                        "{shape:?} {} [{arm}]\n    unprojected: {want}\n    {arm}:   {got}",
+                        step.label()
+                    ));
+                }
             }
         }
     }

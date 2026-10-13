@@ -7850,6 +7850,9 @@ mod varset_plain_fast_path_tests;
 #[path = "tests/cconv_memo_test.rs"]
 mod cconv_memo_tests;
 #[cfg(test)]
+#[path = "tests/owner_bindings_test.rs"]
+mod owner_bindings_tests;
+#[cfg(test)]
 #[path = "tests/thread_projection_readers_test.rs"]
 mod thread_projection_reader_tests;
 #[cfg(test)]
