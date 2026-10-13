@@ -434,6 +434,7 @@ pub(crate) fn cleanup(func: &mut Func) -> Result<(), VerifyError> {
         bools: func.census.bools.clone(),
         reps: func.census.reps.clone(),
         gvn: func.census.gvn.clone(),
+        reads: func.census.reads.clone(),
         range: func.census.range.clone(),
         licm: func.census.licm.clone(),
         arrays: func.census.arrays.clone(),

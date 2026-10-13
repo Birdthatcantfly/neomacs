@@ -218,6 +218,13 @@ pub(super) fn build_plan_with_sqrt_sites(
         })?;
         tracing::debug!(target: "neovm_jit::opt", ?stats, "opt GVN census");
         func.census.gvn = Some(stats);
+    } else if jit_opt_passes().reads {
+        let stats =
+            crate::emacs_core::jit::opt::passes::reads::run(&mut func).map_err(|error| {
+                tracing::debug!(?error, "opt read-reuse pass refused a compilation");
+                CompileError::UnsupportedOp("opt-reads:verify")
+            })?;
+        func.census.reads = Some(stats);
     }
     if jit_opt_passes().range {
         if jit_inline_aref_on()

@@ -311,7 +311,7 @@ fn opt_profit_lists48_osr_aset_ignores_collecting_advice_and_preserves_retained_
     assert!(compile::jit_opt_require_osr());
     assert_eq!(
         compile::jit_opt_passes(),
-        OptPasses::parse(Some("fold,bool,reps"))
+        OptPasses::parse(Some("fold,bool,reps,reads"))
     );
 
     let source = mutating_aset_loop();

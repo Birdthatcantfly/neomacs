@@ -6,6 +6,7 @@ pub(crate) mod fold;
 pub(crate) mod gvn;
 pub(crate) mod licm;
 pub(crate) mod range;
+pub(crate) mod reads;
 pub(crate) mod reps;
 pub(crate) mod reps_lift;
 pub(crate) mod sink;

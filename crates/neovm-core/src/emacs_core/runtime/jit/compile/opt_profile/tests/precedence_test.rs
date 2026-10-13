@@ -30,7 +30,10 @@ fn opt_profile_presets_supply_only_the_bounded_lists_stack() {
         let defaults = Profile::parse(Some(text)).defaults();
         assert_eq!(defaults.mode, OptMode::Opt);
         assert_eq!(defaults.admit, OptAdmit::ALL);
-        assert_eq!(defaults.passes, OptPasses::parse(Some("fold,bool,reps")));
+        assert_eq!(
+            defaults.passes,
+            OptPasses::parse(Some("fold,bool,reps,reads"))
+        );
         assert_eq!(defaults.profit, OptProfitMode::Lists);
         assert_eq!(defaults.early, OptEarlyMode::Hot);
         assert_eq!(defaults.max_ops, max);
@@ -156,7 +159,10 @@ fn opt_profile_reader_scope_keeps_individual_override_highest_and_restores() {
         let _profile = scope_for_test(Profile::Lists20);
         assert_eq!(jit_opt_mode(), OptMode::Opt);
         assert_eq!(jit_opt_admit(), OptAdmit::ALL);
-        assert_eq!(jit_opt_passes(), OptPasses::parse(Some("fold,bool,reps")));
+        assert_eq!(
+            jit_opt_passes(),
+            OptPasses::parse(Some("fold,bool,reps,reads"))
+        );
         assert_eq!(jit_opt_profit(), OptProfitMode::Lists);
         assert_eq!(jit_opt_early(), OptEarlyMode::Hot);
         assert_eq!(jit_opt_max_ops(), 20);

@@ -66,6 +66,7 @@ impl Profile {
                 fold: true,
                 bool_rep: true,
                 reps: true,
+                reads: true,
                 ..OptPasses::default()
             },
             profit: if self == Self::Lists48Osr {

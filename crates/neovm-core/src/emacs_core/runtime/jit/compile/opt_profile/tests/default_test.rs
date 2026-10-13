@@ -11,7 +11,10 @@ fn opt_profile_unset_selects_the_qualified_lists48_osr_stack() {
     let defaults = selected.defaults();
     assert_eq!(defaults.mode, OptMode::Opt);
     assert_eq!(defaults.admit, OptAdmit::ALL);
-    assert_eq!(defaults.passes, OptPasses::parse(Some("fold,bool,reps")));
+    assert_eq!(
+        defaults.passes,
+        OptPasses::parse(Some("fold,bool,reps,reads"))
+    );
     assert_eq!(defaults.profit, OptProfitMode::PrimitiveLists);
     assert_eq!(defaults.early, OptEarlyMode::Hot);
     assert_eq!(defaults.max_ops, 48);

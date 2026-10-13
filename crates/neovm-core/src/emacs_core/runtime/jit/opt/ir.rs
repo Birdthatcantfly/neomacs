@@ -87,6 +87,7 @@ pub(crate) struct OptCensus {
     pub bools: Option<super::passes::bools::BoolStats>,
     pub reps: Option<RepsCensus>,
     pub gvn: Option<super::passes::gvn::GvnStats>,
+    pub reads: Option<super::passes::reads::ReadStats>,
     pub range: Option<super::passes::range::RangeStats>,
     pub licm: Option<super::passes::licm::LicmStats>,
     pub arrays: Option<super::passes::array_reads::ArrayLiftStats>,
@@ -580,6 +581,9 @@ impl fmt::Display for Func {
         }
         if let Some(bools) = &self.census.bools {
             writeln!(f, "  bool {bools:?}")?;
+        }
+        if let Some(reads) = &self.census.reads {
+            writeln!(f, "  reads {reads:?}")?;
         }
         for (i, constant) in self.consts.iter().enumerate() {
             writeln!(f, "  const{k} = 0x{bits:016x}", k = i, bits = constant.0)?;

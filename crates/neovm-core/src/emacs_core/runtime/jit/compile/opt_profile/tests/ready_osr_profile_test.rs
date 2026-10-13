@@ -80,7 +80,10 @@ fn opt_profile_lists48_osr_actual_reader_restores_individual_override_and_legacy
         let _selected = scope_for_test(Profile::Lists48Osr);
         assert_eq!(jit_opt_mode(), OptMode::Opt);
         assert_eq!(jit_opt_admit(), OptAdmit::ALL);
-        assert_eq!(jit_opt_passes(), OptPasses::parse(Some("fold,bool,reps")));
+        assert_eq!(
+            jit_opt_passes(),
+            OptPasses::parse(Some("fold,bool,reps,reads"))
+        );
         assert_eq!(jit_opt_profit(), OptProfitMode::PrimitiveLists);
         assert_eq!(jit_opt_early(), OptEarlyMode::Hot);
         assert_eq!(jit_opt_max_ops(), 48);
