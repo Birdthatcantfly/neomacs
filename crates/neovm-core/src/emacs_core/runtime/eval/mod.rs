@@ -3588,11 +3588,11 @@ pub struct Context {
     /// thread-local's lookup plus RefCell borrow ran on every bind, unbind
     /// and native entry.
     pub(crate) jit_bind_stack: Vec<usize>,
-    /// Reserved former opcode epoch word. Primitive opcodes never consult it;
-    /// keeping its storage preserves Context offsets used by protected call
-    /// paths while the obsolete Aset guards are removed. Threading: this word
-    /// is never read or published and contains no Lisp or mutator state.
-    _reserved_opcode_epoch: std::cell::Cell<u64>,
+    /// This owner's slab of dynamic bindings of projected variables (Phase 0
+    /// step 2), or none. It occupies the former reserved opcode-epoch word,
+    /// with the same size, alignment and niche, so no Context offset moves.
+    /// Thread-confined like the Context: only this owner mutates the slab.
+    pub(crate) owner: owner_bindings::OwnerSlot,
     /// The function epoch at which `apply` was last found to be the builtin
     /// with compiler overrides inactive (`Vm::call_apply_native`). Genuine
     /// calls must recheck after advice, redefinition or an overrides toggle.
@@ -7727,6 +7727,7 @@ mod pdump_reconstruct;
 
 mod macroexpand;
 
+mod owner_bindings;
 mod specpdl;
 mod thread_projection;
 pub(crate) use specpdl::{CurrentBufferScope, ExcursionScope, RestrictionScope};

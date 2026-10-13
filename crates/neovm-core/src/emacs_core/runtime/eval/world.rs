@@ -41,6 +41,9 @@ struct World {
     coding_systems: Box<UnsafeCell<CodingSystemManager>>,
     macro_perf_stats: Box<UnsafeCell<MacroPerfStats>>,
     buffers: Box<UnsafeCell<BufferStorage>>,
+    /// Every owner's slab of dynamic bindings (Phase 0 step 2), for
+    /// allocation and the collector's root phase.
+    owner_slabs: std::cell::RefCell<super::owner_bindings::OwnerSlabRegistry>,
     /// Owner-local variable slot assignments (Phase 0 step 2). Test-only
     /// until stopped admission exists; no view or Context field reaches it.
     #[cfg(test)]
@@ -955,6 +958,7 @@ impl WorldStorageBuilder {
             coding_systems: Box::new(UnsafeCell::new(self.coding_systems)),
             macro_perf_stats: Box::new(UnsafeCell::new(self.macro_perf_stats)),
             buffers,
+            owner_slabs: Default::default(),
             #[cfg(test)]
             thread_projections: Default::default(),
         }));
@@ -1037,6 +1041,31 @@ impl WorldStorageBuilder {
                 )
             },
         }
+    }
+}
+
+/// Owner slabs (Phase 0 step 2): the World allocates and traces them.
+impl Context {
+    /// Allocate this Context's owner slab in its World's registry.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn register_owner_slab(
+        &mut self,
+    ) -> std::ptr::NonNull<super::owner_bindings::OwnerSlab> {
+        let heap = self.tagged_heap.identity();
+        self.obarray.lease.0.owner_slabs.borrow_mut().register(heap)
+    }
+
+    /// Visit every owner slab's values: each owner's bindings are roots,
+    /// whether or not that owner is running.
+    pub(super) fn trace_owner_slabs(&self, visit: &mut dyn FnMut(Value)) {
+        let heap = self.tagged_heap.identity();
+        self.obarray
+            .lease
+            .0
+            .owner_slabs
+            .borrow()
+            .trace_roots(heap, visit);
     }
 }
 

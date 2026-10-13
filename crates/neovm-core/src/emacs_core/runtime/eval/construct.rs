@@ -2366,7 +2366,7 @@ impl Context {
                 crate::emacs_core::bytecode::vm::SymbolByteCodeCallCache::new(),
             interpreter_stacks: crate::emacs_core::bytecode::vm::InterpreterStackPool::new(),
             jit_bind_stack: Vec::new(),
-            _reserved_opcode_epoch: std::cell::Cell::new(u64::MAX),
+            owner: owner_bindings::OwnerSlot::DORMANT,
             apply_fast_path_epoch: std::cell::Cell::new(u64::MAX),
             named_call_cache: FxHashMap::with_capacity_and_hasher(
                 NAMED_CALL_CACHE_CAPACITY,
