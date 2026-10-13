@@ -152,10 +152,8 @@ fn osr_wait_entry_waits_for_pending_opt_osr_then_selects_opt() {
     assert_eq!(call(&mut ctx, &source), None);
     assert_eq!(cache_entry_kind_for_test(id), "deferred-osr");
     assert!(held(&source), "the waiting entry holds the dispatcher");
-    // A published backend is not an installation: the entry keeps waiting.
+    // The loop's own wrap installs the finished job first.
     assert_eq!(bg::publish_held_for_test(), 1);
-    assert_eq!(call(&mut ctx, &source), None);
-    assert_eq!(cache_entry_kind_for_test(id), "deferred-osr");
     install_osr(&mut ctx, &source);
     assert!(!held(&source), "settlement releases the entry's hold");
     bg::force_deferred_install_for_test(false);
@@ -165,7 +163,7 @@ fn osr_wait_entry_waits_for_pending_opt_osr_then_selects_opt() {
 }
 
 #[test]
-fn osr_wait_expired_hold_installs_a_finished_job_before_admission() {
+fn osr_wait_publication_releases_the_entry_to_install_the_job_first() {
     let _settings = Settings::enter();
     let _require = compile::opt_require_osr_scope_for_test(OptOsrRequirement::Required);
     let mut ctx = Context::new();
@@ -173,11 +171,10 @@ fn osr_wait_expired_hold_installs_a_finished_job_before_admission() {
     let id = pend_osr(&mut ctx, &source);
     assert_eq!(call(&mut ctx, &source), None);
     assert_eq!(cache_entry_kind_for_test(id), "deferred-osr");
-    // The job finishes but its loop never wraps again to install it.
+    // The job finishes but its loop never wraps again to install it: the
+    // publication itself releases the entry, whose next call installs it.
     assert_eq!(bg::publish_held_for_test(), 1);
-    while held(&source) {
-        source.jit_runtime().bump_heat();
-    }
+    assert!(!held(&source), "publication releases the entry's hold");
     bg::force_deferred_install_for_test(false);
     assert_eq!(call(&mut ctx, &source), Some(Value::make_int(6).bits()));
     assert!(OSR_PENDING.with(|p| p.borrow().is_empty()));
@@ -186,21 +183,20 @@ fn osr_wait_expired_hold_installs_a_finished_job_before_admission() {
 }
 
 #[test]
-fn osr_wait_expired_hold_keeps_waiting_on_an_unfinished_job() {
+fn osr_wait_entry_stays_parked_however_hot_until_the_job_settles() {
     let _settings = Settings::enter();
     let _require = compile::opt_require_osr_scope_for_test(OptOsrRequirement::Required);
     let mut ctx = Context::new();
     let source = list_loop();
     let id = pend_osr(&mut ctx, &source);
     assert_eq!(call(&mut ctx, &source), None);
-    let first = source.jit_runtime().deferred_heat() - source.jit_runtime().heat();
-    while held(&source) {
+    for _ in 0..5_000 {
         source.jit_runtime().bump_heat();
     }
+    assert!(held(&source), "no heat ends the park");
+    assert!(source.jit_runtime().tier_up_parked());
     assert_eq!(call(&mut ctx, &source), None);
     assert_eq!(cache_entry_kind_for_test(id), "deferred-osr");
-    let second = source.jit_runtime().deferred_heat() - source.jit_runtime().heat();
-    assert_eq!(second, first * 2, "re-asks back off like a pending entry");
 }
 
 #[test]
@@ -246,5 +242,5 @@ fn osr_wait_frontend_without_osr_requirement_compiles_at_once() {
     bg::force_deferred_install_for_test(false);
     assert_eq!(call(&mut ctx, &source), Some(Value::make_int(6).bits()));
     assert_ne!(cache_entry_kind_for_test(id), "deferred-osr");
-    assert!(OSR_PENDING.with(|p| p.borrow()[&(id, 1)].wait.is_none()));
+    assert!(!source.jit_runtime().tier_up_parked(), "nothing waits");
 }

@@ -455,12 +455,6 @@ pub(crate) struct DeferredCode {
 /// line (the front then sees the live epoch).
 pub(crate) const MAX_EPOCH_DISCARDS: u8 = 2;
 
-/// An entry compile waiting on a pending OSR compile (`cache::osr_wait`)
-/// re-asks after this many calls at first, doubling up to [`MAX_BACKOFF`].
-pub(crate) const FIRST_BACKOFF: u32 = 32;
-/// The longest hold between two re-asks of a waiting entry compile.
-pub(crate) const MAX_BACKOFF: u32 = 1024;
-
 /// A compile whose backend runs elsewhere, as its cache entry holds it
 /// (see the module docs). Lives on the eval thread; only its
 /// [`JobCell`] is shared. Each mutator owns its own cache and pending jobs;
@@ -614,6 +608,13 @@ impl PendingJob {
     /// The function's tier-up deferral before this job held it.
     pub(crate) fn saved_hold(&self) -> u32 {
         self.saved_hold
+    }
+
+    /// Park `waiter`, an entry compile that depends on this (OSR) job's
+    /// outcome (`cache::osr_wait`), until the backend publishes or the job
+    /// is dropped, however it settles.
+    pub(crate) fn park_waiter(&self, waiter: Arc<RuntimeState>) {
+        self.cell.park(waiter);
     }
 
     /// A probe found the backend still running (another owner's hold ran

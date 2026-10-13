@@ -481,13 +481,13 @@ thread_local! {
 }
 
 /// A pending OSR compile: the job and the header's entry depths the front
-/// computed, plus the normal entry compile waiting on its outcome, if any
-/// (released when this leaves `OSR_PENDING`, however it leaves).
+/// computed. A normal entry compile waiting on its outcome is parked on the
+/// job (`osr_wait`), released when the backend publishes or the job leaves
+/// `OSR_PENDING`, however it leaves.
 struct PendingOsr {
     job: Box<super::bg::PendingJob>,
     stack_depth: usize,
     bind_depth: usize,
-    wait: Option<osr_wait::EntryWait>,
 }
 
 /// What an OSR attempt at a hot back-edge did ([`try_run_osr_probe`]).
@@ -1013,7 +1013,6 @@ fn osr_lookup(ctx: *mut Context, func: &ByteCodeFunction, osr_pc: usize, id: u64
                         job,
                         stack_depth,
                         bind_depth,
-                        wait: None,
                     },
                 )
             });
@@ -1062,7 +1061,6 @@ enum EntryLeaves {
 }
 
 /// Install `key`'s ready pending OSR job (see [`probe_osr_pending`]).
-/// Settling the job releases a normal entry compile waiting on it.
 fn install_osr_pending(
     key: (u64, usize),
     ctx: Option<&Context>,
@@ -1072,7 +1070,6 @@ fn install_osr_pending(
         job,
         stack_depth,
         bind_depth,
-        wait,
     } = OSR_PENDING.with(|p| p.borrow_mut().remove(&key))?;
     let entry = match super::bg::install(job, None, ctx) {
         Ok(leaf) => Some(OsrEntry {
@@ -1092,9 +1089,9 @@ fn install_osr_pending(
     if let Some(entry) = &entry {
         register_osr_inline_deps(key.0, key.1, &entry.leaf, entry_leaves);
     }
+    // The settled job released a waiting entry: its next call compiles
+    // against the installed (or refused) leaf.
     OSR_CACHE.with(|c| c.borrow_mut().insert(key, entry.clone()));
-    // The entry's next call compiles against the installed (or refused) leaf.
-    drop(wait);
     Some(OsrLookup::Entry(entry))
 }
 
