@@ -3415,8 +3415,9 @@ impl Obarray {
     /// Phase 2: thin wrapper over `set_symbol_value_id` that exposes
     /// the GNU name. Phase 5+ adds the LOCALIZED-aware logic and the
     /// `where`/`bindflag` parameters via [`Self::set_internal_localized`].
+    #[cfg(test)]
     pub fn set_internal(&mut self, id: SymId, value: Value) {
-        self.set_canonical_value(CanonicalAccess::STORAGE, id, value);
+        self.set_canonical_value(CanonicalAccess::TEST, id, value);
     }
 
     /// LOCALIZED arm of `set_internal`. Mirrors GNU
@@ -4869,60 +4870,62 @@ mod copied_value_tests;
 #[path = "tests/canonical_dispatch_test.rs"]
 mod canonical_dispatch_tests;
 
-/// The pre-`CanonicalAccess` spellings, kept while callers move to the
-/// owner-aware `Context` API or name their reason ([`CanonicalAccess`]).
+/// The pre-`CanonicalAccess` spellings, for tests, which set up and inspect
+/// canonical storage. Production code names its reason
+/// ([`CanonicalAccess`]) or reads through the owner-aware `Context` API.
+#[cfg(test)]
 impl Obarray {
     pub fn symbol_value_copied(&self, name: &str) -> Option<Value> {
-        self.canonical_value_by_name(CanonicalAccess::STORAGE, name)
+        self.canonical_value_by_name(CanonicalAccess::TEST, name)
     }
     pub fn symbol_value_id_copied(&self, id: SymId) -> Option<Value> {
-        self.canonical_value(CanonicalAccess::STORAGE, id)
+        self.canonical_value(CanonicalAccess::TEST, id)
     }
     pub fn symbol_value_id_or_nil(&self, id: SymId) -> Value {
-        self.canonical_value_or_nil(CanonicalAccess::STORAGE, id)
+        self.canonical_value_or_nil(CanonicalAccess::TEST, id)
     }
     pub fn value_in_buffer(
         &self,
         buf: Option<&crate::buffer::Buffer>,
         name: &str,
     ) -> Option<Value> {
-        self.canonical_value_in_buffer(CanonicalAccess::STORAGE, buf, name)
+        self.canonical_value_in_buffer(CanonicalAccess::TEST, buf, name)
     }
     pub fn value_in_buffer_id(
         &self,
         buf: Option<&crate::buffer::Buffer>,
         id: SymId,
     ) -> Option<Value> {
-        self.canonical_value_in_buffer_id(CanonicalAccess::STORAGE, buf, id)
+        self.canonical_value_in_buffer_id(CanonicalAccess::TEST, buf, id)
     }
     pub fn value_without_buffer(&self, name: &str) -> BufferlessValue {
-        self.canonical_value_without_buffer(CanonicalAccess::STORAGE, name)
+        self.canonical_value_without_buffer(CanonicalAccess::TEST, name)
     }
     pub fn value_without_buffer_id(&self, id: SymId) -> BufferlessValue {
-        self.canonical_value_without_buffer_id(CanonicalAccess::STORAGE, id)
+        self.canonical_value_without_buffer_id(CanonicalAccess::TEST, id)
     }
     pub fn find_symbol_value(&self, id: SymId) -> Option<Value> {
-        self.canonical_find_value(CanonicalAccess::STORAGE, id)
+        self.canonical_find_value(CanonicalAccess::TEST, id)
     }
     pub fn default_value_id_copied(&self, id: SymId) -> Option<Value> {
-        self.canonical_default_value(CanonicalAccess::STORAGE, id)
+        self.canonical_default_value(CanonicalAccess::TEST, id)
     }
     pub fn boundp(&self, name: &str) -> bool {
-        self.canonical_boundp(CanonicalAccess::STORAGE, name)
+        self.canonical_boundp(CanonicalAccess::TEST, name)
     }
     pub fn boundp_id(&self, id: SymId) -> bool {
-        self.canonical_boundp_id(CanonicalAccess::STORAGE, id)
+        self.canonical_boundp_id(CanonicalAccess::TEST, id)
     }
     pub fn set_symbol_value(&mut self, name: &str, value: Value) {
-        self.set_canonical_value_by_name(CanonicalAccess::STORAGE, name, value);
+        self.set_canonical_value_by_name(CanonicalAccess::TEST, name, value);
     }
     pub fn set_symbol_value_id(&mut self, id: SymId, value: Value) {
-        self.set_canonical_value(CanonicalAccess::STORAGE, id, value);
+        self.set_canonical_value(CanonicalAccess::TEST, id, value);
     }
     pub fn makunbound(&mut self, name: &str) {
-        self.makunbound_canonical_by_name(CanonicalAccess::STORAGE, name);
+        self.makunbound_canonical_by_name(CanonicalAccess::TEST, name);
     }
     pub fn makunbound_id(&mut self, id: SymId) {
-        self.makunbound_canonical(CanonicalAccess::STORAGE, id);
+        self.makunbound_canonical(CanonicalAccess::TEST, id);
     }
 }

@@ -641,6 +641,7 @@ obarray_method_proxies! {
     pub fn intern_lisp_value(name_value: crate::tagged::value::TaggedValue) -> SymId;
     pub fn ensure_interned_global_id(id: SymId);
     pub(crate) fn materialize_read_symbols(value: Value);
+    #[cfg(test)]
     pub fn set_symbol_value(name: &str, value: Value);
     pub fn seed_value(name: &str, value: Value);
     pub fn set_canonical_value_by_name(access: CanonicalAccess,
@@ -651,6 +652,7 @@ obarray_method_proxies! {
             value: Value,
             locality: LispVariableLocality,
         );
+    #[cfg(test)]
     pub fn set_symbol_value_id(id: SymId, value: Value);
     pub fn set_canonical_value(access: CanonicalAccess,
             id: SymId,
@@ -667,9 +669,12 @@ obarray_method_proxies! {
             current_buffer_local_flags: u64,
             buffer_defaults: Option<&[Value]>,
         ) -> Option<Value>;
+    #[cfg(test)]
     pub fn set_internal(id: SymId, value: Value);
     pub fn for_each_value_cell_mut(f: impl FnMut(&mut Value));
+    #[cfg(test)]
     pub fn makunbound(name: &str);
+    #[cfg(test)]
     pub fn makunbound_id(id: SymId);
     pub fn makunbound_canonical_by_name(access: CanonicalAccess,
             name: &str,
