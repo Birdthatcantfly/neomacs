@@ -75,32 +75,99 @@ fn jit_bg_pending_leaf_installs_at_the_next_probe() {
     force_mode_for_test(None);
 }
 
-/// T-L2: a probe that finds the job running interprets the call and holds
-/// the function for 32, 64, ... 1024 calls; the probe after the backend
-/// publishes installs.
+/// T-L2: a pending compile parks its function: the dispatcher interprets
+/// every call without a probe, a probe that does run (the funcall seam,
+/// another owner's expired hold) parks it again, and the backend's
+/// publication releases the park so the next call installs.
 #[test]
-fn jit_bg_pending_probe_backs_off() {
+fn jit_bg_pending_function_is_parked_until_publication() {
+    use crate::emacs_core::jit::Plan;
     deferred_install();
     hold_publish_for_test(true);
     let mut ev = Context::new();
     let ctx = &mut ev as *mut Context;
     let f = add1();
     let rt = f.jit_runtime();
+    let len = f.executable_ops().len();
     assert_eq!(run(ctx, &f, 1), None);
     assert_eq!(kind(&f), "pending");
-    assert_eq!(rt.deferred_heat(), rt.heat() + FIRST_BACKOFF);
-    let probes = stats_snapshot().pending_probes;
-    let mut expected = FIRST_BACKOFF;
-    for _ in 0..8 {
-        expected = (expected * 2).min(MAX_BACKOFF);
-        assert_eq!(run(ctx, &f, 1), None, "still running");
-        assert_eq!(rt.deferred_heat(), rt.heat() + expected);
+    assert!(rt.tier_up_parked());
+    for _ in 0..5_000 {
+        assert!(matches!(rt.dispatch_sized(len), Plan::Interpret));
     }
-    assert_eq!(expected, MAX_BACKOFF, "the backoff saturates");
-    assert_eq!(stats_snapshot().pending_probes, probes + 8);
+    let probes = stats_snapshot().pending_probes;
+    assert_eq!(run(ctx, &f, 1), None, "still running");
+    assert!(rt.tier_up_parked(), "a probe parks it again");
+    assert_eq!(stats_snapshot().pending_probes, probes + 1);
     assert_eq!(publish_held_for_test(), 1);
+    assert!(!rt.tier_up_parked(), "publication releases the park");
+    assert!(matches!(rt.dispatch_sized(len), Plan::Compiled));
     assert_eq!(run(ctx, &f, 1), Some(Value::make_int(2).bits()));
     assert_eq!(rt.deferred_heat(), 0, "install restores the hold");
+    hold_publish_for_test(false);
+    force_deferred_install_for_test(false);
+    force_mode_for_test(None);
+}
+
+/// A park left by a job that published before its function was parked
+/// (an in-line deferred backend) is released at once: no lost wake-up.
+#[test]
+fn jit_bg_park_after_publication_is_released_at_once() {
+    deferred_install();
+    let mut ev = Context::new();
+    let ctx = &mut ev as *mut Context;
+    let f = add1();
+    assert_eq!(run(ctx, &f, 1), None);
+    assert_eq!(kind(&f), "pending");
+    assert!(!f.jit_runtime().tier_up_parked());
+    assert_eq!(run(ctx, &f, 1), Some(Value::make_int(2).bits()));
+    force_deferred_install_for_test(false);
+    force_mode_for_test(None);
+}
+
+/// An idle drain installs without the caller's runtime: the job's own
+/// parked runtime gets its hold back.
+#[test]
+fn jit_bg_drained_install_restores_the_hold() {
+    deferred_install();
+    hold_publish_for_test(true);
+    let mut ev = Context::new();
+    let ctx = &mut ev as *mut Context;
+    let f = add1();
+    assert_eq!(run(ctx, &f, 1), None);
+    assert!(f.jit_runtime().tier_up_parked());
+    assert_eq!(publish_held_for_test(), 1);
+    cache::drain_ready_pending(None);
+    assert_eq!(kind(&f), "compiled");
+    assert_eq!(f.jit_runtime().deferred_heat(), 0);
+    hold_publish_for_test(false);
+    force_deferred_install_for_test(false);
+    force_mode_for_test(None);
+}
+
+/// A pending entry dropped before its backend publishes (here a cache
+/// clear) releases the park: the next call compiles again.
+#[test]
+fn jit_bg_superseded_pending_entry_releases_the_park() {
+    use crate::emacs_core::jit::Plan;
+    deferred_install();
+    hold_publish_for_test(true);
+    let mut ev = Context::new();
+    let ctx = &mut ev as *mut Context;
+    let f = add1();
+    assert_eq!(run(ctx, &f, 1), None);
+    assert!(f.jit_runtime().tier_up_parked());
+    cache::clear();
+    assert_eq!(pending_count(), 0);
+    assert!(!f.jit_runtime().tier_up_parked());
+    let len = f.executable_ops().len();
+    assert!(matches!(
+        f.jit_runtime().dispatch_sized(len),
+        Plan::Compiled
+    ));
+    // The dropped job's held result is no one's: publishing it releases
+    // nothing.
+    assert_eq!(publish_held_for_test(), 1);
     hold_publish_for_test(false);
     force_deferred_install_for_test(false);
     force_mode_for_test(None);

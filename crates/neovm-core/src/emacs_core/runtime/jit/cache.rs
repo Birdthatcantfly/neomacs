@@ -2250,7 +2250,7 @@ pub(crate) fn clear() {
 
 /// A tier-up probe of `id`'s pending compile (`jit::bg`): the installed leaf
 /// when its backend finished, else `None` (interpret this call) with the
-/// function held in the interpreter for the job's next backoff.
+/// function parked in the interpreter until the backend publishes.
 #[cold]
 #[inline(never)]
 fn probe_pending(
@@ -2265,7 +2265,7 @@ fn probe_pending(
             install_pending(cache, id, Some(rt), ctx)
         }
         Some(CacheEntry::Pending(job)) => {
-            job.wait(rt);
+            job.repark();
             None
         }
         _ => None,

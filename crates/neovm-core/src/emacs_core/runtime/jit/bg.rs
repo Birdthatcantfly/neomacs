@@ -41,10 +41,12 @@
 //!   pending entry as it would a compiled leaf; every other removal (a
 //!   `make-closure` prefix widening, a deopt invalidation, a heap change)
 //!   drops the pending entry, which cancels its job.
-//! - Dispatch: a probe that finds the job unfinished holds the function in
-//!   the interpreter for the next 32, 64, ... 1024 calls
-//!   (`RuntimeState::defer_tier_up`), so the dispatcher does not probe per
-//!   call.
+//! - Dispatch: the function is parked in the interpreter
+//!   (`RuntimeState::park_tier_up`), a deferral no heat reaches, so the
+//!   dispatcher neither probes nor pays anything per call. The backend's
+//!   publication releases the park ([`JobCell::publish`]), and the next
+//!   call installs the leaf: no call is interpreted after the code is
+//!   ready, and none probes before.
 
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -315,11 +317,16 @@ pub(crate) struct BackendOut {
 
 /// The rendezvous of one backend job: the backend publishes its
 /// [`BackendOut`] and then marks it done (release); the eval thread reads
-/// the mark (acquire) before it takes the result.
+/// the mark (acquire) before it takes the result. A function parked on the
+/// job is released right after the mark.
 pub(crate) struct JobCell {
     state: AtomicU8,
     cancelled: AtomicBool,
     out: Mutex<Option<BackendOut>>,
+    /// The function parked on this job ([`JobCell::park`]). Its owner, the
+    /// eval thread's pending entry, takes it back before it drops the cell,
+    /// so a worker never holds the last reference.
+    parked: Mutex<Option<Arc<RuntimeState>>>,
 }
 
 impl JobCell {
@@ -328,7 +335,57 @@ impl JobCell {
             state: AtomicU8::new(JobState::Queued as u8),
             cancelled: AtomicBool::new(false),
             out: Mutex::new(None),
+            parked: Mutex::new(None),
         })
+    }
+
+    /// Park `rt` in the interpreter until this job publishes (at once if
+    /// it already has). Eval thread only.
+    fn park(&self, rt: Arc<RuntimeState>) {
+        rt.park_tier_up();
+        *self.parked.lock().unwrap_or_else(|p| p.into_inner()) = Some(rt);
+        self.release_if_done();
+    }
+
+    /// Park the function this job already holds again (a probe found it
+    /// unfinished). Eval thread only.
+    fn repark(&self) {
+        if let Some(rt) = self
+            .parked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            rt.park_tier_up();
+        }
+        self.release_if_done();
+    }
+
+    /// The parker's recheck: a publication that came before the park found
+    /// nothing to release, so release it here. `SeqCst` with the park and
+    /// the publication (see `RuntimeState::park_tier_up`).
+    fn release_if_done(&self) {
+        if self.state.load(Ordering::SeqCst) == JobState::Done as u8 {
+            self.release_parked();
+        }
+    }
+
+    /// End the park of the function waiting on this job, if any.
+    fn release_parked(&self) {
+        if let Some(rt) = self
+            .parked
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            rt.release_parked_tier_up();
+        }
+    }
+
+    /// Take the parked function back (its pending entry is settling), so
+    /// its last reference drops on the eval thread.
+    fn unpark(&self) -> Option<Arc<RuntimeState>> {
+        self.parked.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
 
     /// Tell the backend the result is no longer wanted (advisory: a job not
@@ -341,10 +398,12 @@ impl JobCell {
         self.cancelled.load(Ordering::Relaxed)
     }
 
-    /// Publish the backend's result.
+    /// Publish the backend's result, and release the function parked on
+    /// it: its next call installs the leaf.
     pub(crate) fn publish(&self, out: BackendOut) {
         *self.out.lock().unwrap_or_else(|p| p.into_inner()) = Some(out);
-        self.state.store(JobState::Done as u8, Ordering::Release);
+        self.state.store(JobState::Done as u8, Ordering::SeqCst);
+        self.release_parked();
     }
 
     /// Publish that the full queue dropped the job unrun.
@@ -396,10 +455,10 @@ pub(crate) struct DeferredCode {
 /// line (the front then sees the live epoch).
 pub(crate) const MAX_EPOCH_DISCARDS: u8 = 2;
 
-/// Probes that find a job unfinished hold its function in the interpreter
-/// for this many calls at first, doubling up to [`MAX_BACKOFF`].
+/// An entry compile waiting on a pending OSR compile (`cache::osr_wait`)
+/// re-asks after this many calls at first, doubling up to [`MAX_BACKOFF`].
 pub(crate) const FIRST_BACKOFF: u32 = 32;
-/// The longest hold between two probes of one pending job.
+/// The longest hold between two re-asks of a waiting entry compile.
 pub(crate) const MAX_BACKOFF: u32 = 1024;
 
 /// A compile whose backend runs elsewhere, as its cache entry holds it
@@ -418,10 +477,12 @@ pub(crate) struct PendingJob {
     class: JobClass,
     /// The tagged heap the front compiled against.
     heap: Option<usize>,
-    /// The function's tier-up deferral before this job's hold replaced it.
+    /// The function's tier-up deferral before this job's park replaced it.
     saved_hold: u32,
-    backoff: Cell<u32>,
     requested_heat: u32,
+    /// The function parked on this job (entry and first-sight compiles),
+    /// so an install without a caller's runtime still restores its hold.
+    parked: Option<Arc<RuntimeState>>,
     /// The upgrade's source runtime, so an idle drain can restore its hold
     /// and disarm its leaf slot. Owned by this mutator's job; never sent
     /// to the worker, which only sees JobCell and plain backend payloads.
@@ -442,17 +503,19 @@ pub(crate) struct PendingJob {
 }
 
 impl PendingJob {
-    /// The pending entry for `leaf`, whose code `code` is compiling; holds
-    /// the function (`rt`) in the interpreter for the first backoff.
+    /// The pending entry for `leaf`, whose code `code` is compiling; parks
+    /// the function (`rt`) in the interpreter until the backend publishes.
     pub(crate) fn new(
         id: u64,
         leaf: CompiledLeaf,
         code: DeferredCode,
-        rt: &RuntimeState,
+        rt: &super::Runtime,
     ) -> Box<PendingJob> {
-        let saved_hold = rt.deferred_heat();
+        // A park is this job's own state, never a hold to restore.
+        let saved_hold = Some(rt.deferred_heat()).filter(|_| !rt.tier_up_parked());
         let heat = rt.heat();
-        rt.defer_tier_up(heat.saturating_add(FIRST_BACKOFF));
+        let parked = rt.share_state();
+        code.cell.park(Arc::clone(&parked));
         PENDING_COUNT.with(|c| c.set(c.get() + 1));
         PENDING_IDS.with(|ids| ids.borrow_mut().push(id));
         Box::new(PendingJob {
@@ -462,9 +525,9 @@ impl PendingJob {
             cell: code.cell,
             class: code.class,
             heap: crate::tagged::gc::current_tagged_heap_identity(),
-            saved_hold,
-            backoff: Cell::new(FIRST_BACKOFF.saturating_mul(2)),
+            saved_hold: saved_hold.unwrap_or(0),
             requested_heat: heat,
+            parked: Some(parked),
             upgrade_runtime: None,
             cancel_estimate_us: 0,
             backend_charged_in_front: code.backend_charged_in_front,
@@ -487,8 +550,8 @@ impl PendingJob {
             class: code.class,
             heap: crate::tagged::gc::current_tagged_heap_identity(),
             saved_hold: 0,
-            backoff: Cell::new(0),
             requested_heat: 0,
+            parked: None,
             upgrade_runtime: None,
             cancel_estimate_us: 0,
             backend_charged_in_front: code.backend_charged_in_front,
@@ -553,12 +616,11 @@ impl PendingJob {
         self.saved_hold
     }
 
-    /// A probe found the backend still running: interpret the next
-    /// `backoff` calls of the function without probing.
-    pub(crate) fn wait(&self, rt: &RuntimeState) {
-        let backoff = self.backoff.get();
-        self.backoff.set(backoff.saturating_mul(2).min(MAX_BACKOFF));
-        rt.defer_tier_up(rt.heat().saturating_add(backoff));
+    /// A probe found the backend still running (another owner's hold ran
+    /// out first, or the stress soak reads a finished job as running): park
+    /// the function again until the backend publishes.
+    pub(crate) fn repark(&self) {
+        self.cell.repark();
         bump_stats(|s| s.pending_probes += 1);
     }
 
@@ -585,6 +647,11 @@ enum Settled {
 impl Drop for PendingJob {
     fn drop(&mut self) {
         let _ = PENDING_COUNT.try_with(|c| c.set(c.get().saturating_sub(1)));
+        // Superseded (or settled without restoring it): the function's next
+        // call compiles again rather than waiting on a dropped job.
+        if let Some(rt) = self.cell.unpark() {
+            rt.release_parked_tier_up();
+        }
         if !self.settled.get() {
             if self.class == JobClass::Upgrade && !self.backend_charged_in_front {
                 let cost = self
@@ -625,6 +692,10 @@ pub(crate) fn install(
     ctx: Option<&Context>,
 ) -> Result<CompiledLeaf, Discard> {
     let out = job.cell.take_out().expect("install only a ready job");
+    // An entry's own parked runtime stands in when the caller has none (an
+    // idle drain): its hold is restored either way.
+    let parked = job.parked.take();
+    let rt = rt.or(parked.as_deref());
     if job.class == JobClass::Upgrade && !job.backend_charged_in_front {
         super::tier2::charge_compile(std::time::Duration::from_micros(out.backend_cpu_us));
     }
