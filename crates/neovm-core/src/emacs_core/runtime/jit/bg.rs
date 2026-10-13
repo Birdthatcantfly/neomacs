@@ -1145,9 +1145,15 @@ fn in_line_insts_knob() -> u64 {
 }
 
 /// See [`in_line_insts`]. A backend this large takes about 5 ms; below it
-/// what a deferral costs (calls interpreted meanwhile and, when the
-/// activation that asked runs on in a loop, a second, OSR compile of the
-/// same body) outweighs the stall it saves.
+/// what a deferral costs -- the calls interpreted until the leaf installs,
+/// however soon the install follows the backend -- outweighs the stall it
+/// saves. Re-measured with the shortest-first queue, the parked install and
+/// OSR requests waiting on the entry job (2026-10-13, two CPUs): 1024..4096
+/// cut the first call of a body between 4,096 and 8,192 instructions from
+/// 3.2 to 0.8 ms and pass the benchmark rows (geomean +0.02..+0.05%), but
+/// cost the editing board +0.47% (org) and +31% (sustained editing, whose
+/// window then counts the worker's backend of `syntax-ppss`, 5,489
+/// instructions).
 pub(crate) const INLINE_INSTS: u64 = 8192;
 
 /// Start worker `index` for `pool` (x86-64 Linux only; see
