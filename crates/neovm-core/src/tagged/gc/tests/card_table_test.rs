@@ -301,3 +301,63 @@ fn minor_reaches_young_children_of_every_card_of_a_block() {
         assert!(heap.value_is_old_for_test(child), "owner {i}");
     }
 }
+
+/// S2 precision: a dirty arena card traces only its logged tenured slots.
+/// One logged vector must not drag in its unlogged card neighbours, whose
+/// out-of-line elements can number in the thousands.
+#[test]
+fn dirty_arena_card_selects_only_logged_slots() {
+    let mut heap = verified_heap();
+    set_tagged_heap(&mut heap);
+    let roots = ScratchRoots::new();
+    let logged = heap.alloc_vector(vec![TaggedValue::NIL]);
+    let neighbour = heap.alloc_vector(vec![TaggedValue::NIL]);
+    roots.keep(logged);
+    roots.keep(neighbour);
+    minor(&mut heap, &[logged, neighbour]);
+    assert_eq!(
+        card_index(card_addr(logged)),
+        card_index(card_addr(neighbour))
+    );
+    store_young_child(logged, OwnerClass::ArenaVector, heap.alloc_float(1.5));
+
+    let slot_of = |owner: TaggedValue| {
+        let ptr = owner.as_veclike_ptr().unwrap() as *const VectorObj;
+        let base = ObjectPage::<VectorObj>::page_base_for_ptr(ptr);
+        let page = heap.vector_arena.page_index_by_base[&base];
+        (
+            page,
+            (ptr as usize - base) / <VectorObj as PagedObject>::SLOT_BYTES,
+        )
+    };
+    let (page, slot) = slot_of(logged);
+    assert!(heap.vector_arena.logged_slot_header(page, slot).is_some());
+    let (page, slot) = slot_of(neighbour);
+    assert!(heap.vector_arena.logged_slot_header(page, slot).is_none());
+    minor(&mut heap, &[logged, neighbour]);
+}
+
+/// The dirty-card cons walk skips children that are old cells of the same
+/// block (list spines) without pushing them; anything else is pushed.
+#[test]
+fn same_block_old_cells_are_skipped_children() {
+    let mut heap = verified_heap();
+    set_tagged_heap(&mut heap);
+    let roots = ScratchRoots::new();
+    let old = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
+    roots.keep(old);
+    minor(&mut heap, &[old]);
+    let young = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
+    let float = heap.alloc_float(2.5);
+    let block = |cell: TaggedValue| {
+        let base = ConsBlock::block_base_for_ptr(cell.xcons_ptr());
+        heap.cons_blocks
+            .iter()
+            .find(|block| block.base_addr() == base)
+            .expect("owned cell")
+    };
+    assert!(block(old).holds_old_cell(old));
+    assert!(!block(young).holds_old_cell(young));
+    assert!(!block(old).holds_old_cell(TaggedValue::fixnum(7)));
+    assert!(!block(old).holds_old_cell(float));
+}

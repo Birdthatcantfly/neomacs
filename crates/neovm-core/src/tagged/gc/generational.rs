@@ -449,9 +449,10 @@ impl TaggedHeap {
         !unsafe { &*(addr as *const GcHeader) }.flags.boxed()
     }
 
-    /// Trace the old objects that start in a dirty card: old cells of every
-    /// cons block and tenured slots of every arena page (retired pages
-    /// included), straight onto the gray stack. Each chunk's cards are read
+    /// Trace the old objects that start in a dirty card: every old cell of a
+    /// cons block (32 per card, two children each) and the logged tenured
+    /// slots of every arena page (retired pages included), straight onto the
+    /// gray stack. Each chunk's cards are read
     /// once and copied only when one is dirty; blocks and pages are re-borrowed
     /// per owner, so nothing is collected first. With every mutator stopped;
     /// an aliased card only adds owners.
@@ -471,10 +472,16 @@ impl TaggedHeap {
                     let index = first + old.trailing_zeros() as usize;
                     old &= old - 1;
                     // SAFETY: an old cell of an owned block is a live cons.
-                    let owner = unsafe {
-                        TaggedValue::from_cons_ptr(self.cons_blocks[block].cells_ptr().add(index))
+                    let children = unsafe {
+                        let cell = self.cons_blocks[block].cells_ptr().add(index);
+                        [(*cell).load_car(), (*cell).load_cdr()]
                     };
-                    self.push_value_children_to_gray(owner, "generational-card");
+                    for child in children {
+                        // An old cell is black in a minor: skip it unpushed.
+                        if !self.cons_blocks[block].holds_old_cell(child) {
+                            self.mark_or_push_child(child, "generational-card");
+                        }
+                    }
                 }
             }
         }
@@ -502,7 +509,7 @@ impl TaggedHeap {
             };
             for offset in chunk.dirty_offsets() {
                 for slot in ObjectArena::<T>::slots_starting_in_card(offset) {
-                    let Some(header) = arena(self).tenured_slot_header(page, slot) else {
+                    let Some(header) = arena(self).logged_slot_header(page, slot) else {
                         continue;
                     };
                     // SAFETY: a tenured allocated slot holds a live object.

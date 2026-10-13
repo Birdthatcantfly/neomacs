@@ -246,6 +246,20 @@ impl ConsBlock {
         (first, old)
     }
 
+    /// Whether VALUE is an old cell of this block. A dirty card's cells are
+    /// mostly list spines whose cdr is the next old cell of the same block,
+    /// which a minor would only push and pop again to skip.
+    #[inline]
+    pub(super) fn holds_old_cell(&self, value: TaggedValue) -> bool {
+        if !value.is_cons() {
+            return false;
+        }
+        let ptr = value.xcons_ptr();
+        Self::block_base_for_ptr(ptr) == self.base_addr()
+            && Self::ptr_is_cell_aligned(ptr)
+            && self.trailer().is_old(Self::index_of_ptr(ptr))
+    }
+
     /// Sweep: thread reclaimed cells into the global intrusive free list and
     /// return the number of live cells in this block.
     pub(super) fn sweep(&mut self, free_list: &mut *mut ConsCell) -> usize {

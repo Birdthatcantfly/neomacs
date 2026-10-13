@@ -1195,17 +1195,21 @@ impl<T: PagedObject> ObjectArena<T> {
     }
 
     /// Card-mark S2: the header of slot SLOT of page PAGE when it holds a
-    /// tenured object. Every page counts: retired pages hold only tenured
-    /// slots and stay owners of old-to-young edges.
+    /// tenured object whose store logged it. A card covers several slots and
+    /// one object can own thousands of out-of-line children (a vector's
+    /// elements, a hash table's entries), so only the logged owners of a
+    /// dirty card are traced; every logged owner keeps its card dirty until
+    /// the reset. Every page counts: retired pages hold only tenured slots.
     #[inline]
-    pub(super) fn tenured_slot_header(&self, page: usize, slot: usize) -> Option<*mut GcHeader> {
+    pub(super) fn logged_slot_header(&self, page: usize, slot: usize) -> Option<*mut GcHeader> {
         let page = &self.pages[page];
         if !page.is_allocated(slot) {
             return None;
         }
         let header = page.slot_ptr(slot) as *mut GcHeader;
         // SAFETY: allocated bit set => readable header.
-        unsafe { (*header).tenured }.then_some(header)
+        let header_ref = unsafe { &*header };
+        (header_ref.tenured && header_ref.is_remembered()).then_some(header)
     }
 
     /// Visit the header of every ALLOCATED slot of a non-retired page, in
