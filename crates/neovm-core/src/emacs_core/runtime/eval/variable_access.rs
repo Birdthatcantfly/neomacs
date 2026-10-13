@@ -1,0 +1,471 @@
+//! Rust reads and writes of Lisp variables: GNU's `Vfoo` and
+//! `BVAR (current_buffer, foo)` (Phase 0 step 2).
+//!
+//! GNU's C reads and writes a variable's cell, and while a thread runs that
+//! cell holds the thread's own dynamic binding. Here an owner's bindings of a
+//! projected variable live in its slab (`eval::owner_bindings`) and the
+//! obarray holds only the canonical value, so every Rust site that stands in
+//! for C goes through this module: the running owner's binding first,
+//! canonical storage otherwise. The obarray's own accessors answer canonical
+//! storage only and ask the caller to say why that is right
+//! ([`CanonicalAccess`]).
+//!
+//! A Context with no owner bindings is DORMANT: no projected cell exists
+//! that it could see (a test projection and admission install the owner's
+//! slab first), so each read is the obarray's answer. A read whose canonical
+//! answer is a value returns it untouched; only a void answer -- which every
+//! projected cell gives -- tests for an owner. A write, a default read and a
+//! `boundp` test for an owner first.
+//!
+//! Reads go through a [`VariableView`], a copyable pair of the obarray and
+//! the owner's slab, so helpers that only read variables take a view instead
+//! of the whole Context. Writes are `Context` methods.
+
+use super::owner_bindings::{
+    Channel, OwnerSlab, SlotState, canonical_bufferless_value, per_buffer_local,
+};
+use super::{Context, SymId, Value};
+use crate::emacs_core::forward::{CanonicalArm, ThreadProjectionDescriptor};
+use crate::emacs_core::intern::intern;
+use crate::emacs_core::symbol::{BufferlessValue, CanonicalAccess, Obarray};
+
+/// The variables one owner sees: canonical storage under its bindings.
+#[derive(Clone, Copy)]
+pub struct VariableView<'a> {
+    obarray: &'a Obarray,
+    owner: Option<&'a OwnerSlab>,
+}
+
+static_assertions::assert_not_impl_any!(VariableView<'static>: Send, Sync);
+
+impl std::fmt::Debug for VariableView<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VariableView")
+            .field("owner", &self.owner.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> VariableView<'a> {
+    /// The view of OBARRAY for the owner OWNER names.
+    #[inline(always)]
+    pub(crate) fn new(obarray: &'a Obarray, owner: &'a super::owner_bindings::OwnerSlot) -> Self {
+        Self {
+            obarray,
+            owner: owner.slab(),
+        }
+    }
+
+    /// The view of canonical storage alone, with no owner: bootstrap, dump
+    /// and tests, which name why canonical storage is the answer.
+    #[inline(always)]
+    pub fn canonical(_access: CanonicalAccess, obarray: &'a Obarray) -> Self {
+        Self {
+            obarray,
+            owner: None,
+        }
+    }
+
+    /// The view as raw parts, for a scope that publishes it to same-thread
+    /// code without a borrow (CCL's program interpreter).
+    #[inline]
+    pub(crate) fn into_raw(self) -> RawVariableView {
+        RawVariableView {
+            obarray: self.obarray,
+            owner: self.owner.map_or(std::ptr::null(), std::ptr::from_ref),
+        }
+    }
+
+    /// The obarray, for what a view does not cover (functions, plists).
+    #[inline(always)]
+    pub fn obarray(self) -> &'a Obarray {
+        self.obarray
+    }
+
+    /// GNU `Vfoo`: the variable's value without a buffer -- the default of a
+    /// buffer-local variable, `None` for a per-buffer slot and when void. The
+    /// owner-aware form of `Obarray::canonical_value`.
+    #[inline(always)]
+    pub fn value(self, id: SymId) -> Option<Value> {
+        match self.obarray.canonical_value(CanonicalAccess::ROUTED, id) {
+            Some(value) => Some(value),
+            None => match self.owner {
+                None => None,
+                Some(slab) => owner_value(self.obarray, slab, id),
+            },
+        }
+    }
+
+    /// [`Self::value`] by name.
+    #[inline]
+    pub fn value_by_name(self, name: &str) -> Option<Value> {
+        self.value(intern(name))
+    }
+
+    /// [`Self::value`], nil when void.
+    #[inline(always)]
+    pub fn value_or_nil(self, id: SymId) -> Value {
+        self.value(id).unwrap_or(Value::NIL)
+    }
+
+    /// GNU `BVAR (BUF, foo)` / `Vfoo` with BUF current: BUF's slot or local
+    /// binding, else the default. The owner-aware form of
+    /// `Obarray::canonical_value_in_buffer_id`.
+    #[inline]
+    pub fn value_in_buffer(self, buf: Option<&crate::buffer::Buffer>, id: SymId) -> Option<Value> {
+        match self
+            .obarray
+            .canonical_value_in_buffer_id(CanonicalAccess::ROUTED, buf, id)
+        {
+            Some(value) => Some(value),
+            None => match self.owner {
+                None => None,
+                Some(slab) => owner_value_in_buffer(self.obarray, slab, buf, id),
+            },
+        }
+    }
+
+    /// [`Self::value_in_buffer`] by name.
+    #[inline]
+    pub fn value_in_buffer_by_name(
+        self,
+        buf: Option<&crate::buffer::Buffer>,
+        name: &str,
+    ) -> Option<Value> {
+        self.value_in_buffer(buf, intern(name))
+    }
+
+    /// GNU `default_value` without a buffer (`src/data.c:1962-2004`),
+    /// including a per-buffer forwarder's default. The owner-aware form of
+    /// `Obarray::canonical_default_value`.
+    #[inline]
+    pub fn default_value(self, id: SymId) -> Option<Value> {
+        match self.owner {
+            None => self
+                .obarray
+                .canonical_default_value(CanonicalAccess::ROUTED, id),
+            Some(slab) => owner_default_value(self.obarray, slab, id),
+        }
+    }
+
+    /// GNU `boundp` without a buffer. The owner-aware form of
+    /// `Obarray::canonical_boundp_id`.
+    #[inline]
+    pub fn boundp(self, id: SymId) -> bool {
+        match self.owner {
+            None => self
+                .obarray
+                .canonical_boundp_id(CanonicalAccess::ROUTED, id),
+            Some(slab) => owner_boundp(self.obarray, slab, id),
+        }
+    }
+
+    /// [`Self::boundp`] by name.
+    #[inline]
+    pub fn boundp_by_name(self, name: &str) -> bool {
+        self.boundp(intern(name))
+    }
+
+    /// The buffer-less read with GNU's disagreement named
+    /// (`Obarray::canonical_value_without_buffer_id`), owner-aware.
+    pub fn value_without_buffer(self, id: SymId) -> BufferlessValue {
+        let canonical = self
+            .obarray
+            .canonical_value_without_buffer_id(CanonicalAccess::ROUTED, id);
+        match (canonical, self.owner) {
+            (BufferlessValue::Void, Some(slab)) => match owner_value(self.obarray, slab, id) {
+                Some(value) => BufferlessValue::Global(value),
+                None => BufferlessValue::Void,
+            },
+            (canonical, _) => canonical,
+        }
+    }
+
+    /// [`Self::value_without_buffer`] by name.
+    #[inline]
+    pub fn value_without_buffer_by_name(self, name: &str) -> BufferlessValue {
+        self.value_without_buffer(intern(name))
+    }
+}
+
+/// The variables one owner sees, for writing: the obarray and the owner's
+/// slab, borrowed mutably, for helpers that hold the obarray's manager
+/// rather than the Context.
+pub struct VariableStore<'a> {
+    obarray: &'a mut Obarray,
+    owner: Option<&'a mut OwnerSlab>,
+}
+
+static_assertions::assert_not_impl_any!(VariableStore<'static>: Send, Sync);
+
+impl std::fmt::Debug for VariableStore<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VariableStore")
+            .field("owner", &self.owner.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> VariableStore<'a> {
+    /// The store of OBARRAY for the owner whose slab is OWNER.
+    #[inline(always)]
+    pub(crate) fn new(obarray: &'a mut Obarray, owner: Option<&'a mut OwnerSlab>) -> Self {
+        Self { obarray, owner }
+    }
+
+    /// The obarray, for what a store does not cover.
+    #[inline(always)]
+    pub fn obarray(&mut self) -> &mut Obarray {
+        self.obarray
+    }
+
+    /// The read view of the same variables.
+    #[inline(always)]
+    pub fn view(&self) -> VariableView<'_> {
+        VariableView {
+            obarray: self.obarray,
+            owner: self.owner.as_deref(),
+        }
+    }
+
+    /// GNU `Vfoo = VALUE` from C (see [`Context::store_variable`]).
+    #[inline]
+    pub fn store(&mut self, id: SymId, value: Value) {
+        match self.owner.as_deref_mut() {
+            None => self
+                .obarray
+                .set_canonical_value(CanonicalAccess::ROUTED, id, value),
+            Some(slab) => owner_store(self.obarray, slab, id, value),
+        }
+    }
+
+    /// [`Self::store`] by name (interning it).
+    #[inline]
+    pub fn store_by_name(&mut self, name: &str, value: Value) {
+        match self.owner.as_deref_mut() {
+            None => self
+                .obarray
+                .set_canonical_value_by_name(CanonicalAccess::ROUTED, name, value),
+            Some(slab) => {
+                let id = intern(name);
+                self.obarray.ensure_interned_global_id(id);
+                owner_store(self.obarray, slab, id, value);
+            }
+        }
+    }
+}
+
+/// GNU `Vfoo = VALUE` for an owner: its binding of the default when it has
+/// one, canonical storage otherwise.
+#[cold]
+#[inline(never)]
+fn owner_store(obarray: &mut Obarray, slab: &mut OwnerSlab, id: SymId, value: Value) {
+    let Some((base, projection)) = projection_behind(obarray, id) else {
+        obarray.set_canonical_value(CanonicalAccess::ROUTED, id, value);
+        return;
+    };
+    let index = projection.index();
+    if slab.slot(index, Channel::Default).value().is_some() {
+        slab.set_slot(
+            index,
+            Channel::Default,
+            SlotState::Bound(super::owner_bindings::SlotValue::new(value)),
+        );
+        return;
+    }
+    obarray.with_revealed_projection(base, |obarray| {
+        obarray.set_canonical_value(CanonicalAccess::STORAGE, base, value);
+    });
+}
+
+/// A [`VariableView`] as raw parts. Rebuilding the view is `unsafe`: the
+/// scope that made it must still hold the borrow it was made from.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RawVariableView {
+    obarray: *const Obarray,
+    owner: *const OwnerSlab,
+}
+
+impl RawVariableView {
+    /// The view these parts came from.
+    ///
+    /// # Safety
+    /// The [`VariableView`] these parts came from must still be valid: its
+    /// obarray and slab borrows outlive `'a`, on this thread.
+    #[inline]
+    pub(crate) unsafe fn view<'a>(self) -> VariableView<'a> {
+        // SAFETY: the caller keeps the original borrows alive for `'a`.
+        unsafe {
+            VariableView {
+                obarray: &*self.obarray,
+                owner: self.owner.as_ref(),
+            }
+        }
+    }
+
+    /// The obarray these parts name.
+    #[inline]
+    pub(crate) fn obarray_ptr(self) -> *const Obarray {
+        self.obarray
+    }
+}
+
+/// The projection behind ID, through its aliases.
+fn projection_behind(
+    obarray: &Obarray,
+    id: SymId,
+) -> Option<(SymId, &'static ThreadProjectionDescriptor)> {
+    let base = obarray.indirect_variable_id(id)?;
+    Some((base, obarray.thread_projection_of(base)?))
+}
+
+/// [`VariableView::value`] once canonical storage answered void.
+#[cold]
+#[inline(never)]
+fn owner_value(obarray: &Obarray, slab: &OwnerSlab, id: SymId) -> Option<Value> {
+    let (_, projection) = projection_behind(obarray, id)?;
+    match slab.slot(projection.index(), Channel::Default) {
+        SlotState::Bound(binding) => binding.bound(),
+        SlotState::NoBinding => canonical_bufferless_value(projection),
+    }
+}
+
+/// [`VariableView::value_in_buffer`] once canonical storage answered void:
+/// BUF's local channel when BUF has the local, the default otherwise, the
+/// owner's binding first on either.
+#[cold]
+#[inline(never)]
+fn owner_value_in_buffer(
+    obarray: &Obarray,
+    slab: &OwnerSlab,
+    buf: Option<&crate::buffer::Buffer>,
+    id: SymId,
+) -> Option<Value> {
+    let (base, projection) = projection_behind(obarray, id)?;
+    let Some(buffer) = buf else {
+        return owner_value(obarray, slab, id);
+    };
+    let channel = match projection.arm() {
+        CanonicalArm::Plain => Channel::Default,
+        CanonicalArm::Localized(_) => match buffer.local_variable_binding_cell(base) {
+            Some(_) => Channel::BufferLocal(buffer.id),
+            None => Channel::Default,
+        },
+        // A per-buffer slot without the local flag holds the live default,
+        // which an owner's default binding shadows, as GNU's let-default
+        // writes every buffer without the flag.
+        CanonicalArm::Forwarded(builtin) => match builtin.descriptor().as_buffer_obj_fwd() {
+            Some(buf_fwd) if per_buffer_local(buffer, buf_fwd) => Channel::BufferLocal(buffer.id),
+            _ => Channel::Default,
+        },
+    };
+    if let SlotState::Bound(binding) = slab.slot(projection.index(), channel) {
+        return binding.bound();
+    }
+    match projection.arm() {
+        CanonicalArm::Localized(blv) if channel != Channel::Default => {
+            let value = obarray.read_projected_localized(base, blv, Some(buffer));
+            (!value.is_unbound()).then_some(value)
+        }
+        CanonicalArm::Forwarded(builtin) => match builtin.descriptor().as_buffer_obj_fwd() {
+            Some(buf_fwd) => buf_fwd.buffer_slot().map(|slot| buffer.slots[slot.index()]),
+            None => builtin.descriptor().load(),
+        },
+        _ => canonical_bufferless_value(projection),
+    }
+}
+
+/// [`VariableView::default_value`] for an owner.
+#[cold]
+#[inline(never)]
+fn owner_default_value(obarray: &Obarray, slab: &OwnerSlab, id: SymId) -> Option<Value> {
+    if let Some((_, projection)) = projection_behind(obarray, id)
+        && let SlotState::Bound(binding) = slab.slot(projection.index(), Channel::Default)
+    {
+        return binding.bound();
+    }
+    obarray.canonical_default_value(CanonicalAccess::ROUTED, id)
+}
+
+/// [`VariableView::boundp`] for an owner.
+#[cold]
+#[inline(never)]
+fn owner_boundp(obarray: &Obarray, slab: &OwnerSlab, id: SymId) -> bool {
+    if let Some((_, projection)) = projection_behind(obarray, id)
+        && let SlotState::Bound(binding) = slab.slot(projection.index(), Channel::Default)
+    {
+        return binding.bound().is_some();
+    }
+    obarray.canonical_boundp_id(CanonicalAccess::ROUTED, id)
+}
+
+impl Context {
+    /// The variables this owner sees.
+    #[inline(always)]
+    pub fn variables(&self) -> VariableView<'_> {
+        VariableView::new(&self.obarray, &self.owner)
+    }
+
+    /// [`VariableView::value`] of this owner's view.
+    #[inline(always)]
+    pub fn variable_value(&self, id: SymId) -> Option<Value> {
+        self.variables().value(id)
+    }
+
+    /// [`VariableView::value_by_name`] of this owner's view.
+    #[inline]
+    pub fn variable_value_by_name(&self, name: &str) -> Option<Value> {
+        self.variables().value_by_name(name)
+    }
+
+    /// [`VariableView::value_or_nil`] of this owner's view.
+    #[inline(always)]
+    pub fn variable_value_or_nil(&self, id: SymId) -> Value {
+        self.variables().value_or_nil(id)
+    }
+
+    /// [`VariableView::value_in_buffer`] in the current buffer.
+    #[inline]
+    pub fn variable_value_in_current_buffer(&self, id: SymId) -> Option<Value> {
+        self.variables()
+            .value_in_buffer(self.buffers.current_buffer(), id)
+    }
+
+    /// GNU `Vfoo = VALUE` from C: the running owner's binding of the
+    /// variable's default when it has one, the canonical default otherwise.
+    /// No watchers, no type rule: the storage the obarray's
+    /// `set_canonical_value` writes.
+    #[inline]
+    pub fn store_variable(&mut self, id: SymId, value: Value) {
+        if self.owner.is_dormant() {
+            self.obarray
+                .set_canonical_value(CanonicalAccess::ROUTED, id, value);
+        } else {
+            self.store_owner_variable(id, value);
+        }
+    }
+
+    /// [`Self::store_variable`] by name (interning it).
+    #[inline]
+    pub fn store_variable_by_name(&mut self, name: &str, value: Value) {
+        if self.owner.is_dormant() {
+            self.obarray
+                .set_canonical_value_by_name(CanonicalAccess::ROUTED, name, value);
+        } else {
+            let id = intern(name);
+            self.obarray.ensure_interned_global_id(id);
+            self.store_owner_variable(id, value);
+        }
+    }
+
+    /// Make the variable void the way [`Self::store_variable`] writes it.
+    #[inline]
+    pub fn makunbound_variable(&mut self, id: SymId) {
+        if self.owner.is_dormant() {
+            self.obarray
+                .makunbound_canonical(CanonicalAccess::ROUTED, id);
+        } else {
+            self.makunbound_owner_variable(id);
+        }
+    }
+}

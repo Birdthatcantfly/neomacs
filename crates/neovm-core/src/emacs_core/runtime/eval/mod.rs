@@ -7727,6 +7727,9 @@ mod pdump_reconstruct;
 mod macroexpand;
 
 mod owner_bindings;
+mod variable_access;
+pub(crate) use variable_access::RawVariableView;
+pub use variable_access::{VariableStore, VariableView};
 mod specpdl;
 mod thread_projection;
 pub(crate) use specpdl::{CurrentBufferScope, ExcursionScope, RestrictionScope};

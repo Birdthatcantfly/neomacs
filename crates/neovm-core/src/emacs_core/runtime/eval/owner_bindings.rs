@@ -30,7 +30,7 @@ use crate::emacs_core::forward::{
     CanonicalArm, LispBufferObjFwd, ThreadProjectionDescriptor, TlsIndex,
 };
 use crate::emacs_core::intern::SymId;
-use crate::emacs_core::symbol::SetInternalBind;
+use crate::emacs_core::symbol::{CanonicalAccess, SetInternalBind};
 use crate::emacs_core::value::Value;
 use rustc_hash::FxHashMap;
 use std::marker::PhantomData;
@@ -554,7 +554,7 @@ impl OwnerSlot {
 
 /// Whether BUFFER holds a local binding of a per-buffer variable.
 #[inline]
-fn per_buffer_local(buffer: &crate::buffer::Buffer, buf_fwd: &LispBufferObjFwd) -> bool {
+pub(super) fn per_buffer_local(buffer: &crate::buffer::Buffer, buf_fwd: &LispBufferObjFwd) -> bool {
     buf_fwd.local_flags_idx < 0
         || buf_fwd
             .buffer_slot()
@@ -663,7 +663,7 @@ fn set_makes_local(projection: &ThreadProjectionDescriptor) -> bool {
 
 impl Context {
     /// This owner's slab, made and registered with the World on first use.
-    fn ensure_owner_slab(&mut self) -> &mut OwnerSlab {
+    pub(super) fn ensure_owner_slab(&mut self) -> &mut OwnerSlab {
         if self.owner.slab().is_none() {
             let slab = self.register_owner_slab();
             self.owner.install(slab);
@@ -1332,5 +1332,82 @@ impl Context {
             None if default.is_some() => self.owner_canonical_store(id, channel, start),
             None => {}
         }
+    }
+}
+
+/// The canonical value of the variable PROJECTION wraps without a buffer,
+/// as `Obarray::canonical_value` reads an unprojected cell: the plain word,
+/// a localized variable's default, a builtin's own storage (none for a
+/// per-buffer slot). `None` when void.
+pub(super) fn canonical_bufferless_value(projection: &ThreadProjectionDescriptor) -> Option<Value> {
+    let value = match projection.arm() {
+        CanonicalArm::Plain => projection.plain_value(),
+        // SAFETY: a projection's localized arm names a live record of the
+        // obarray's BLV pool; its default cell is only read.
+        CanonicalArm::Localized(blv) => unsafe { (*blv.blv().as_ptr()).defcell.cons_cdr() },
+        CanonicalArm::Forwarded(builtin) => return builtin.descriptor().load(),
+    };
+    (!value.is_unbound()).then_some(value)
+}
+
+/// The owner-aware halves of `eval::variable_access`: cold, reached only by a
+/// Context with owner bindings.
+impl Context {
+    /// The projection behind ID, through its aliases.
+    fn projection_behind(&self, id: SymId) -> Option<(SymId, &'static ThreadProjectionDescriptor)> {
+        let base = self.obarray.indirect_variable_id(id)?;
+        Some((base, self.obarray.thread_projection_of(base)?))
+    }
+
+    /// [`Context::store_variable`] for a Context with owner bindings.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn store_owner_variable(&mut self, id: SymId, value: Value) {
+        let Some((base, projection)) = self.projection_behind(id) else {
+            self.obarray
+                .set_canonical_value(CanonicalAccess::ROUTED, id, value);
+            return;
+        };
+        let index = projection.index();
+        if let Some(slab) = self.owner.slab_mut()
+            && slab.slot(index, Channel::Default).value().is_some()
+        {
+            slab.set_slot(
+                index,
+                Channel::Default,
+                SlotState::Bound(SlotValue::new(value)),
+            );
+            return;
+        }
+        self.with_revealed_projection(base, |ctx| {
+            ctx.obarray
+                .set_canonical_value(CanonicalAccess::STORAGE, base, value);
+        });
+    }
+
+    /// [`Context::makunbound_variable`] for a Context with owner bindings.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn makunbound_owner_variable(&mut self, id: SymId) {
+        let Some((base, projection)) = self.projection_behind(id) else {
+            self.obarray
+                .makunbound_canonical(CanonicalAccess::ROUTED, id);
+            return;
+        };
+        let index = projection.index();
+        if let Some(slab) = self.owner.slab_mut()
+            && slab.slot(index, Channel::Default).value().is_some()
+        {
+            slab.set_slot(
+                index,
+                Channel::Default,
+                SlotState::Bound(SlotValue::new(Value::UNBOUND)),
+            );
+            return;
+        }
+        self.with_revealed_projection(base, |ctx| {
+            ctx.obarray
+                .makunbound_canonical(CanonicalAccess::STORAGE, base);
+        });
     }
 }

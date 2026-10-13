@@ -25,10 +25,12 @@
 //! together as a [`ValueCell`] and written together by one seam, so the
 //! obarray cannot pair a tag with another arm's payload (see `cell`).
 
+mod canonical_access;
 mod cell;
 mod fn_stamps;
 mod projection;
 mod property_revision;
+pub use canonical_access::CanonicalAccess;
 use cell::{ArmMut, CellWrite, MarkGate, RevealedCell, read_symbol_children};
 pub(crate) use cell::{
     BlvPtr, DumpedCell, DumpedSymbolFlags, LISP_SYMBOL_FLAGS_OFFSET,
@@ -2058,8 +2060,8 @@ impl Obarray {
     ///
     /// The returned word does not borrow the mutable symbol or descriptor slot.
     #[inline]
-    pub fn symbol_value_copied(&self, name: &str) -> Option<Value> {
-        self.symbol_value_id_copied(intern(name))
+    pub fn canonical_value_by_name(&self, access: CanonicalAccess, name: &str) -> Option<Value> {
+        self.canonical_value(access, intern(name))
     }
 
     /// GNU's `Vfoo` / `foo` / `BVAR (current_buffer, foo)` -- the one spelling
@@ -2083,12 +2085,13 @@ impl Obarray {
     /// `indent::dynamic_buffer_or_global_symbol_value` is the older, identical
     /// reader; it lives in a file ledger 195 owns, so collapsing the two is
     /// owed rather than done here (ledger 196).
-    pub fn value_in_buffer(
+    pub fn canonical_value_in_buffer(
         &self,
+        access: CanonicalAccess,
         buf: Option<&crate::buffer::Buffer>,
         name: &str,
     ) -> Option<Value> {
-        self.value_in_buffer_id(buf, intern(name))
+        self.canonical_value_in_buffer_id(access, buf, intern(name))
     }
 
     /// [`Self::value_in_buffer`] by identity.
@@ -2100,8 +2103,9 @@ impl Obarray {
     /// [`Self::symbol_value_copied`] on the overwhelmingly common global path, which
     /// matters where a caller reads a dozen names at once -- the `print-*`
     /// family, for one.
-    pub fn value_in_buffer_id(
+    pub fn canonical_value_in_buffer_id(
         &self,
+        _access: CanonicalAccess,
         buf: Option<&crate::buffer::Buffer>,
         id: SymId,
     ) -> Option<Value> {
@@ -2118,7 +2122,7 @@ impl Obarray {
                 return Some(value);
             }
         }
-        self.symbol_value_id_copied(id)
+        self.canonical_value(CanonicalAccess::STORAGE, id)
     }
 
     /// A deliberate buffer-less read, with the disagreement with GNU named.
@@ -2126,19 +2130,27 @@ impl Obarray {
     /// Use this where a site genuinely has no buffer and the ledger row that
     /// licensed it can be cited at the `match`; use [`Self::value_in_buffer`]
     /// everywhere else.
-    pub fn value_without_buffer(&self, name: &str) -> BufferlessValue {
-        self.value_without_buffer_id(intern(name))
+    pub fn canonical_value_without_buffer(
+        &self,
+        access: CanonicalAccess,
+        name: &str,
+    ) -> BufferlessValue {
+        self.canonical_value_without_buffer_id(access, intern(name))
     }
 
     /// [`Self::value_without_buffer`] by identity.
-    pub fn value_without_buffer_id(&self, id: SymId) -> BufferlessValue {
+    pub fn canonical_value_without_buffer_id(
+        &self,
+        _access: CanonicalAccess,
+        id: SymId,
+    ) -> BufferlessValue {
         if crate::buffer::buffer::lookup_buffer_slot_by_sym_id(id).is_some() {
             return BufferlessValue::PerBufferSlot;
         }
         let localized = self
             .slot(self.resolve_alias_for_read(id))
             .is_some_and(|sym| sym.redirect() == SymbolRedirect::Localized);
-        match self.symbol_value_id_copied(id) {
+        match self.canonical_value(CanonicalAccess::STORAGE, id) {
             None => BufferlessValue::Void,
             Some(value) if localized => BufferlessValue::DefaultOfLocalized(value),
             Some(value) => BufferlessValue::Global(value),
@@ -2165,7 +2177,7 @@ impl Obarray {
     /// Phase F: reads from the redirect union (`val`) rather than the
     /// legacy `value` enum field.
     #[inline(always)]
-    pub fn symbol_value_id_copied(&self, id: SymId) -> Option<Value> {
+    pub fn canonical_value(&self, _access: CanonicalAccess, id: SymId) -> Option<Value> {
         let sym = match self.symbols.get(Self::slot_index(id)) {
             Some(sym) => sym,
             _ => return None,
@@ -2235,15 +2247,28 @@ impl Obarray {
     /// GNU's `find_symbol_value` returns a `Lisp_Object` directly; keeping
     /// hot evaluator reads in this shape avoids an extra Option path.
     #[inline(always)]
-    pub fn symbol_value_id_or_nil(&self, id: SymId) -> Value {
-        match self.symbol_value_id_copied(id) {
+    pub fn canonical_value_or_nil(&self, access: CanonicalAccess, id: SymId) -> Value {
+        match self.canonical_value(access, id) {
             Some(value) => value,
             None => Value::NIL,
         }
     }
 
+    /// Bootstrap's seeding of NAME's canonical value (GNU's `DEFVAR` and
+    /// `syms_of_*` initializers): before any owner exists, canonical storage
+    /// is every owner's view ([`CanonicalAccess::BOOTSTRAP`]).
+    #[inline]
+    pub fn seed_value(&mut self, name: &str, value: Value) {
+        self.set_canonical_value_by_name(CanonicalAccess::BOOTSTRAP, name, value);
+    }
+
     /// Set the value cell of a symbol. Interns if needed.
-    pub fn set_symbol_value(&mut self, name: &str, value: Value) {
+    pub fn set_canonical_value_by_name(
+        &mut self,
+        _access: CanonicalAccess,
+        name: &str,
+        value: Value,
+    ) {
         let id = intern(name);
         self.mark_global_member(id);
         self.set_symbol_value_id_inner(id, value);
@@ -2257,7 +2282,7 @@ impl Obarray {
         value: Value,
         locality: LispVariableLocality,
     ) {
-        self.set_symbol_value(name, value);
+        self.set_canonical_value_by_name(CanonicalAccess::STORAGE, name, value);
         self.make_special(name);
         match locality {
             LispVariableLocality::Global => {}
@@ -2266,7 +2291,7 @@ impl Obarray {
     }
 
     /// Set the value cell of a symbol by identity.
-    pub fn set_symbol_value_id(&mut self, id: SymId, value: Value) {
+    pub fn set_canonical_value(&mut self, _access: CanonicalAccess, id: SymId, value: Value) {
         self.ensure_global_member_if_canonical(id);
         self.set_symbol_value_id_inner(id, value);
     }
@@ -3012,7 +3037,11 @@ impl Obarray {
                 id,
                 crate::emacs_core::pdump::types::DumpLocalizedForwarder::Bool,
             );
-            self.set_symbol_value_id(id, if initial { Value::T } else { Value::NIL });
+            self.set_canonical_value(
+                CanonicalAccess::STORAGE,
+                id,
+                if initial { Value::T } else { Value::NIL },
+            );
         } else {
             match self.forwarder(id).and_then(|fwd| fwd.as_bool_fwd()) {
                 Some(existing) => existing.set(initial),
@@ -3027,7 +3056,9 @@ impl Obarray {
             return;
         }
         let list_id = intern("byte-boolean-vars");
-        let current = self.find_symbol_value(list_id).unwrap_or(Value::NIL);
+        let current = self
+            .canonical_find_value(CanonicalAccess::STORAGE, list_id)
+            .unwrap_or(Value::NIL);
         let symbol = Value::from_sym_id(id);
         let mut tail = current;
         while tail.is_cons() {
@@ -3037,7 +3068,7 @@ impl Obarray {
             tail = tail.cons_cdr();
         }
         let updated = Value::cons(symbol, current);
-        self.set_symbol_value_id(list_id, updated);
+        self.set_canonical_value(CanonicalAccess::STORAGE, list_id, updated);
         self.make_special_id(list_id);
     }
 
@@ -3191,7 +3222,7 @@ impl Obarray {
                 id,
                 crate::emacs_core::pdump::types::DumpLocalizedForwarder::Int,
             );
-            self.set_symbol_value_id(id, value.value());
+            self.set_canonical_value(CanonicalAccess::STORAGE, id, value.value());
             return;
         }
         if let Some(existing) = self.forwarder(id).and_then(|fwd| fwd.as_int_fwd()) {
@@ -3212,7 +3243,7 @@ impl Obarray {
     /// variant.
     ///
     /// Returns `None` for unbound (`void-variable` callsite signals).
-    pub fn find_symbol_value(&self, id: SymId) -> Option<Value> {
+    pub fn canonical_find_value(&self, _access: CanonicalAccess, id: SymId) -> Option<Value> {
         let mut current = id;
         for _ in 0..50 {
             let sym = self.slot(current)?;
@@ -3307,7 +3338,7 @@ impl Obarray {
             // walk can stay on a shared reference.
             match self.slot(current)?.value_cell() {
                 ValueCell::Plain(_) => {
-                    return self.find_symbol_value(current);
+                    return self.canonical_find_value(CanonicalAccess::STORAGE, current);
                 }
                 ValueCell::Alias(next) => {
                     current = next;
@@ -3369,7 +3400,7 @@ impl Obarray {
                         | ForwardSlot::Bool(_)
                         | ForwardSlot::Obj(_)
                         | ForwardSlot::KboardObj(_) => {
-                            return self.find_symbol_value(current);
+                            return self.canonical_find_value(CanonicalAccess::STORAGE, current);
                         }
                     }
                 }
@@ -3385,7 +3416,7 @@ impl Obarray {
     /// the GNU name. Phase 5+ adds the LOCALIZED-aware logic and the
     /// `where`/`bindflag` parameters via [`Self::set_internal_localized`].
     pub fn set_internal(&mut self, id: SymId, value: Value) {
-        self.set_symbol_value_id(id, value);
+        self.set_canonical_value(CanonicalAccess::STORAGE, id, value);
     }
 
     /// LOCALIZED arm of `set_internal`. Mirrors GNU
@@ -3855,8 +3886,8 @@ impl Obarray {
     }
 
     /// Remove the value cell (makunbound).
-    pub fn makunbound(&mut self, name: &str) {
-        self.makunbound_id(intern(name));
+    pub fn makunbound_canonical_by_name(&mut self, access: CanonicalAccess, name: &str) {
+        self.makunbound_canonical(access, intern(name));
     }
 
     /// Remove the value cell by identity: the store GNU's `set_internal`
@@ -3873,7 +3904,7 @@ impl Obarray {
     ///   (`src/data.c:1723-1727`, `:1802-1809`), which the evaluator signals
     ///   before it gets here (`check_forwarded_unbind`).
     /// - A constant is left alone.
-    pub fn makunbound_id(&mut self, id: SymId) {
+    pub fn makunbound_canonical(&mut self, _access: CanonicalAccess, id: SymId) {
         self.ensure_global_member_if_canonical(id);
         let target = self.resolve_alias_for_write(id);
         if self
@@ -3909,8 +3940,8 @@ impl Obarray {
     }
 
     /// Check if a symbol is bound (has a value cell).
-    pub fn boundp(&self, name: &str) -> bool {
-        self.boundp_id(intern(name))
+    pub fn canonical_boundp(&self, access: CanonicalAccess, name: &str) -> bool {
+        self.canonical_boundp_id(access, intern(name))
     }
 
     /// Check if a symbol is bound by identity.
@@ -3921,7 +3952,7 @@ impl Obarray {
     /// A thread projection answers as the variable it projects is by
     /// default, as for a localized one.
     #[inline(always)]
-    pub fn boundp_id(&self, id: SymId) -> bool {
+    pub fn canonical_boundp_id(&self, _access: CanonicalAccess, id: SymId) -> bool {
         self.boundp_id_with(id, |fwd| self.host_projected_forwarded_boundp(fwd))
     }
 
@@ -4129,7 +4160,7 @@ impl Obarray {
     /// constructing the invalid half-registered state where a variable is
     /// bound but lexical Lisp does not treat it as dynamically scoped.
     pub fn define_special_variable(&mut self, name: &str, value: Value) {
-        self.set_symbol_value(name, value);
+        self.set_canonical_value_by_name(CanonicalAccess::STORAGE, name, value);
         self.make_special(name);
     }
 
@@ -4260,7 +4291,9 @@ impl Obarray {
     pub fn make_buffer_local(&mut self, name: &str, local_if_set: bool) {
         let id = intern(name);
         self.mark_global_member(id);
-        let default = self.find_symbol_value(id).unwrap_or(Value::NIL);
+        let default = self
+            .canonical_find_value(CanonicalAccess::STORAGE, id)
+            .unwrap_or(Value::NIL);
         self.make_symbol_localized(id, default);
         self.set_blv_local_if_set(id, local_if_set);
     }
@@ -4432,7 +4465,7 @@ impl Obarray {
     ///
     /// Aliases and localized variables retain the same resolution rules as a
     /// global read. No returned value borrows a symbol, BLV or descriptor slot.
-    pub fn default_value_id_copied(&self, id: SymId) -> Option<Value> {
+    pub fn canonical_default_value(&self, _access: CanonicalAccess, id: SymId) -> Option<Value> {
         let mut current = id;
         for _ in 0..50 {
             let sym = self.slot(current)?;
@@ -4835,3 +4868,61 @@ mod copied_value_tests;
 #[cfg(test)]
 #[path = "tests/canonical_dispatch_test.rs"]
 mod canonical_dispatch_tests;
+
+/// The pre-`CanonicalAccess` spellings, kept while callers move to the
+/// owner-aware `Context` API or name their reason ([`CanonicalAccess`]).
+impl Obarray {
+    pub fn symbol_value_copied(&self, name: &str) -> Option<Value> {
+        self.canonical_value_by_name(CanonicalAccess::STORAGE, name)
+    }
+    pub fn symbol_value_id_copied(&self, id: SymId) -> Option<Value> {
+        self.canonical_value(CanonicalAccess::STORAGE, id)
+    }
+    pub fn symbol_value_id_or_nil(&self, id: SymId) -> Value {
+        self.canonical_value_or_nil(CanonicalAccess::STORAGE, id)
+    }
+    pub fn value_in_buffer(
+        &self,
+        buf: Option<&crate::buffer::Buffer>,
+        name: &str,
+    ) -> Option<Value> {
+        self.canonical_value_in_buffer(CanonicalAccess::STORAGE, buf, name)
+    }
+    pub fn value_in_buffer_id(
+        &self,
+        buf: Option<&crate::buffer::Buffer>,
+        id: SymId,
+    ) -> Option<Value> {
+        self.canonical_value_in_buffer_id(CanonicalAccess::STORAGE, buf, id)
+    }
+    pub fn value_without_buffer(&self, name: &str) -> BufferlessValue {
+        self.canonical_value_without_buffer(CanonicalAccess::STORAGE, name)
+    }
+    pub fn value_without_buffer_id(&self, id: SymId) -> BufferlessValue {
+        self.canonical_value_without_buffer_id(CanonicalAccess::STORAGE, id)
+    }
+    pub fn find_symbol_value(&self, id: SymId) -> Option<Value> {
+        self.canonical_find_value(CanonicalAccess::STORAGE, id)
+    }
+    pub fn default_value_id_copied(&self, id: SymId) -> Option<Value> {
+        self.canonical_default_value(CanonicalAccess::STORAGE, id)
+    }
+    pub fn boundp(&self, name: &str) -> bool {
+        self.canonical_boundp(CanonicalAccess::STORAGE, name)
+    }
+    pub fn boundp_id(&self, id: SymId) -> bool {
+        self.canonical_boundp_id(CanonicalAccess::STORAGE, id)
+    }
+    pub fn set_symbol_value(&mut self, name: &str, value: Value) {
+        self.set_canonical_value_by_name(CanonicalAccess::STORAGE, name, value);
+    }
+    pub fn set_symbol_value_id(&mut self, id: SymId, value: Value) {
+        self.set_canonical_value(CanonicalAccess::STORAGE, id, value);
+    }
+    pub fn makunbound(&mut self, name: &str) {
+        self.makunbound_canonical_by_name(CanonicalAccess::STORAGE, name);
+    }
+    pub fn makunbound_id(&mut self, id: SymId) {
+        self.makunbound_canonical(CanonicalAccess::STORAGE, id);
+    }
+}

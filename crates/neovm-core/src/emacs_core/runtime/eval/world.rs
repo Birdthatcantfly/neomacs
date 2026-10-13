@@ -7,6 +7,7 @@
 use super::*;
 use crate::buffer::buffer::{BufferStorage, OwnedBufferStorageParts};
 use crate::emacs_core::defvar_bool::ByteBooleanVars;
+use crate::emacs_core::symbol::CanonicalAccess;
 use crate::emacs_core::symbol::{
     CanonicalDispatchCells, ConcealOutcome, DebuggerDescriptor, FunctionEpoch, FunctionEpochBump,
     LispVariableLocality, MakeAliasError, NotPlain, OBARRAY_DISPATCH_CELLS_OFFSET,
@@ -641,11 +642,20 @@ obarray_method_proxies! {
     pub fn ensure_interned_global_id(id: SymId);
     pub(crate) fn materialize_read_symbols(value: Value);
     pub fn set_symbol_value(name: &str, value: Value);
+    pub fn seed_value(name: &str, value: Value);
+    pub fn set_canonical_value_by_name(access: CanonicalAccess,
+            name: &str,
+            value: Value,
+        );
     pub fn define_lisp_variable(name: &str,
             value: Value,
             locality: LispVariableLocality,
         );
     pub fn set_symbol_value_id(id: SymId, value: Value);
+    pub fn set_canonical_value(access: CanonicalAccess,
+            id: SymId,
+            value: Value,
+        );
     pub fn set_blv_local_if_set(id: SymId, local_if_set: bool);
     pub fn reset_blv_cache_to_default(id: SymId);
     pub fn reset_blv_cache_for_buffer(id: SymId, buffer: Value);
@@ -661,6 +671,10 @@ obarray_method_proxies! {
     pub fn for_each_value_cell_mut(f: impl FnMut(&mut Value));
     pub fn makunbound(name: &str);
     pub fn makunbound_id(id: SymId);
+    pub fn makunbound_canonical_by_name(access: CanonicalAccess,
+            name: &str,
+        );
+    pub fn makunbound_canonical(access: CanonicalAccess, id: SymId);
     pub fn put_property(name: &str, prop: &str, value: Value) -> Result<(), Flow>;
     pub fn put_property_id(symbol: SymId,
             prop: SymId,
@@ -1080,6 +1094,9 @@ impl Context {
         &mut self,
         id: SymId,
     ) -> Option<&'static crate::emacs_core::forward::ThreadProjectionDescriptor> {
+        // A Context that can see a projected cell holds an owner slab: the
+        // owner-aware variable API's dormant answer relies on it.
+        self.ensure_owner_slab();
         let world = Arc::clone(&self.obarray.lease.0);
         let mut table = world.thread_projections.borrow_mut();
         self.obarray
