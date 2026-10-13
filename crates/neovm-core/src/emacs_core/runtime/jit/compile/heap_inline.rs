@@ -358,15 +358,18 @@ fn emit_cons_old_bit(fb: &mut FunctionBuilder, owner: ClifValue) -> ClifValue {
     band_imm_p(fb, shifted, 1)
 }
 
-/// Mark the GEN1 card of the untagged OWNER in HEAP's card table:
-/// `card[(owner >> CARD_SHIFT) & CARD_INDEX_MASK] = CARD_DIRTY`, with no
-/// slow path. The table address is loaded from the heap, not
+/// Mark the GEN1 card of the untagged OWNER in HEAP's card table,
+/// `card[(owner >> CARD_SHIFT) & CARD_INDEX_MASK] = CARD_DIRTY`, and its
+/// chunk's summary byte, with no slow path. The table address is loaded from the heap, not
 /// baked, so AOT and preloaded code stay valid; it is fixed for the heap's
 /// life, which `install_card_table` publishes before any GEN1 leaf runs.
 /// The mark precedes the store and no safe point separates them, so a
 /// stop-all card clear can never fall between the two.
 fn emit_card_mark(fb: &mut FunctionBuilder, heap: ClifValue, owner: ClifValue) {
-    use super::jit_layout::heap::{CARD_DIRTY, CARD_INDEX_MASK, CARD_SHIFT, HEAP_JIT_CARD_TABLE};
+    use super::jit_layout::heap::{
+        CARD_CHUNK_SHIFT, CARD_DIRTY, CARD_INDEX_MASK, CARD_SHIFT, CHUNK_SUMMARY_OFFSET,
+        HEAP_JIT_CARD_TABLE,
+    };
     let table = fb.ins().load(
         types::I64,
         MemFlagsData::new().with_notrap().with_readonly(),
@@ -378,6 +381,15 @@ fn emit_card_mark(fb: &mut FunctionBuilder, heap: ClifValue, owner: ClifValue) {
     let address = fb.ins().iadd(table, card);
     let dirty = fb.ins().iconst(types::I8, CARD_DIRTY as i64);
     fb.ins().store(MemFlagsData::trusted(), dirty, address, 0);
+    // The chunk summary byte, so the minor reads cards of dirty chunks only.
+    let chunk = ushr_imm_p(fb, card, CARD_CHUNK_SHIFT as i64);
+    let summary = fb.ins().iadd(table, chunk);
+    fb.ins().store(
+        MemFlagsData::trusted(),
+        dirty,
+        summary,
+        CHUNK_SUMMARY_OFFSET as i32,
+    );
 }
 
 /// The non-cons half of the same store sequence. The OFF arm emits the

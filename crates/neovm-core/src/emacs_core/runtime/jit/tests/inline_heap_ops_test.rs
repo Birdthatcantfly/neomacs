@@ -426,7 +426,7 @@ fn stored_value_proofs_shape_only_the_gen1_card_mark() {
             .filter(|inst| clif.dfg.insts[*inst].opcode() == opcode)
             .count()
     };
-    // The card mark is the one byte-wide store of a cons store.
+    // A card mark is the byte-wide stores of a cons store: card and summary.
     let card_marks = |clif: &Function| {
         clif.layout
             .blocks()
@@ -465,7 +465,7 @@ fn stored_value_proofs_shape_only_the_gen1_card_mark() {
                 assert_eq!(card_marks(&dynamic), 0);
                 continue;
             }
-            assert_eq!(card_marks(&dynamic), 1);
+            assert_eq!(card_marks(&dynamic), 2, "the card and its chunk summary");
             assert_eq!(
                 card_marks(&fixnum),
                 0,

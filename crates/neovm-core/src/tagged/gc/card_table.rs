@@ -7,6 +7,12 @@
 //! dirty, never hide an edge. Clean is zero so the table starts as untouched,
 //! lazily zero-filled pages.
 //!
+//! A second level of one byte per 64 KiB chunk (128 cards), right after the
+//! cards in the same allocation, is marked with every card: the minor reads
+//! one dense summary byte per cons block and touches the cards of dirty
+//! chunks only, so a clean heap costs 64 KiB of summary rather than 128
+//! scattered card bytes per block.
+//!
 //! Threading: mutators only ever store [`CARD_DIRTY`] into a byte (idempotent,
 //! Relaxed, no read-modify-write); the collector reads and clears bytes only
 //! with every mutator stopped.
@@ -27,6 +33,12 @@ pub(crate) const CARD_TABLE_BYTES: usize = 1 << CARD_INDEX_BITS;
 pub(crate) const CHUNK_BYTES: usize = 64 * 1024;
 pub(crate) const CHUNK_CARDS: usize = CHUNK_BYTES / CARD_BYTES;
 const CHUNK_CARD_WORDS: usize = CHUNK_CARDS / size_of::<u64>();
+/// log2 of the cards per chunk: a card index shifted down by this names its
+/// chunk's summary byte.
+pub(crate) const CARD_CHUNK_SHIFT: u32 = CHUNK_CARDS.trailing_zeros();
+/// The chunk summary bytes start right after the cards.
+pub(crate) const CHUNK_SUMMARY_OFFSET: usize = CARD_TABLE_BYTES;
+const CHUNK_SUMMARY_BYTES: usize = CARD_TABLE_BYTES >> CARD_CHUNK_SHIFT;
 pub(crate) const CARD_CLEAN: u8 = 0;
 pub(crate) const CARD_DIRTY: u8 = 1;
 
@@ -74,7 +86,8 @@ unsafe impl Sync for CardTable {}
 
 impl CardTable {
     fn layout() -> Layout {
-        Layout::from_size_align(CARD_TABLE_BYTES, 64).expect("card table layout")
+        Layout::from_size_align(CARD_TABLE_BYTES + CHUNK_SUMMARY_BYTES, 64)
+            .expect("card table layout")
     }
 
     pub(crate) fn new() -> Self {
@@ -93,16 +106,24 @@ impl CardTable {
 
     #[inline(always)]
     fn byte(&self, index: usize) -> &AtomicU8 {
-        debug_assert!(index < CARD_TABLE_BYTES);
+        debug_assert!(index < CARD_TABLE_BYTES + CHUNK_SUMMARY_BYTES);
         // SAFETY: `index` is masked into the allocation, which outlives `self`.
         unsafe { &*self.bytes.as_ptr().add(index) }
     }
 
-    /// Mark the card of OWNER_ADDR. Mutator side: one Relaxed byte store.
+    /// The summary byte of the chunk holding card CARD.
+    #[inline(always)]
+    fn summary(&self, card: usize) -> &AtomicU8 {
+        self.byte(CHUNK_SUMMARY_OFFSET + (card >> CARD_CHUNK_SHIFT))
+    }
+
+    /// Mark the card of OWNER_ADDR and its chunk's summary. Mutator side:
+    /// two Relaxed byte stores.
     #[inline(always)]
     pub(crate) fn mark(&self, owner_addr: usize) {
-        self.byte(card_index(owner_addr))
-            .store(CARD_DIRTY, Ordering::Relaxed);
+        let card = card_index(owner_addr);
+        self.byte(card).store(CARD_DIRTY, Ordering::Relaxed);
+        self.summary(card).store(CARD_DIRTY, Ordering::Relaxed);
     }
 
     #[inline]
@@ -111,12 +132,15 @@ impl CardTable {
     }
 
     /// The 128 card bytes of the 64 KiB chunk at CHUNK_BASE, or `None` when
-    /// every one is clean. They are contiguous in the table, so a clean
-    /// chunk costs sixteen word loads folded by OR and nothing is copied.
-    /// Collector side, with every mutator stopped.
+    /// every one is clean. A clean chunk costs its summary byte; a dirty
+    /// one's cards are contiguous, read as sixteen words. Collector side,
+    /// with every mutator stopped.
     #[inline]
     pub(crate) fn dirty_chunk(&self, chunk_base: usize) -> Option<ChunkCards> {
         debug_assert_eq!(chunk_base % CHUNK_BYTES, 0);
+        if self.summary(card_index(chunk_base)).load(Ordering::Relaxed) == CARD_CLEAN {
+            return None;
+        }
         // SAFETY: a chunk's cards are CHUNK_CARDS consecutive in-table bytes
         // starting at a CHUNK_CARDS-aligned index, so the words are aligned
         // and in bounds; every mutator is stopped, so no store races.
@@ -133,13 +157,15 @@ impl CardTable {
         Some(ChunkCards(std::array::from_fn(word)))
     }
 
-    /// Clean every card of the 64 KiB chunk at CHUNK_BASE when one is
-    /// dirty. Collector side, with every mutator stopped.
+    /// Clean every card of the 64 KiB chunk at CHUNK_BASE, and its summary,
+    /// when the summary is dirty. Collector side, with every mutator stopped.
     #[inline]
     pub(crate) fn clear_chunk(&self, chunk_base: usize) {
-        if self.dirty_chunk(chunk_base).is_none() {
+        let summary = self.summary(card_index(chunk_base));
+        if summary.load(Ordering::Relaxed) == CARD_CLEAN {
             return;
         }
+        summary.store(CARD_CLEAN, Ordering::Relaxed);
         // SAFETY: as in `dirty_chunk`; no mutator runs, so no store races.
         let words = unsafe {
             self.bytes
@@ -152,7 +178,8 @@ impl CardTable {
         }
     }
 
-    /// Clean one card (tests: the collector cleans whole chunks).
+    /// Clean one card, leaving its chunk summary dirty (tests: the collector
+    /// cleans whole chunks).
     #[cfg(test)]
     pub(crate) fn clear(&self, owner_addr: usize) {
         self.byte(card_index(owner_addr))

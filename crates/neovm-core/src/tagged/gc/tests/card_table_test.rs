@@ -351,3 +351,28 @@ fn same_block_old_cells_are_skipped_children() {
     assert!(!block(old).holds_old_cell(TaggedValue::fixnum(7)));
     assert!(!block(old).holds_old_cell(float));
 }
+
+/// The chunk summary byte is marked with every card and cleaned with the
+/// chunk; a chunk whose summary is clean is never read card by card.
+#[test]
+fn chunk_summary_follows_marks_and_clears() {
+    use super::card_table::{CARD_BYTES, CHUNK_BYTES};
+    let cards = CardTable::new();
+    let chunk = 0x7f00_0000_0000usize;
+    let neighbour = chunk + CHUNK_BYTES;
+    assert!(cards.dirty_chunk(chunk).is_none());
+    cards.mark(chunk + 5 * CARD_BYTES);
+    assert_eq!(dirty_offsets(&cards, chunk), [5 * CARD_BYTES]);
+    assert!(
+        cards.dirty_chunk(neighbour).is_none(),
+        "one summary per chunk"
+    );
+    cards.clear_chunk(chunk);
+    assert!(cards.dirty_chunk(chunk).is_none());
+    assert!(!cards.is_dirty(chunk + 5 * CARD_BYTES));
+    // A card cleaned alone leaves a dirty summary over clean cards: the walk
+    // reads them and finds nothing.
+    cards.mark(neighbour);
+    cards.clear(neighbour);
+    assert!(cards.dirty_chunk(neighbour).is_none());
+}

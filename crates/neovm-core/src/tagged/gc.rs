@@ -2800,7 +2800,10 @@ use reclamation::ReclamationMode;
 
 mod card_table;
 #[cfg_attr(not(feature = "jit"), allow(unused_imports))]
-pub(crate) use card_table::{CARD_DIRTY, CARD_INDEX_MASK, CARD_SHIFT, HEAP_JIT_CARD_TABLE};
+pub(crate) use card_table::{
+    CARD_CHUNK_SHIFT, CARD_DIRTY, CARD_INDEX_MASK, CARD_SHIFT, CHUNK_SUMMARY_OFFSET,
+    HEAP_JIT_CARD_TABLE,
+};
 use card_table::{CardTable, ChunkCards};
 mod cons_block_trailer;
 use cons_block_trailer::*;
