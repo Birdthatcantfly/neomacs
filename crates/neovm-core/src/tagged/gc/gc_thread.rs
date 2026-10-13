@@ -1763,11 +1763,19 @@ fn note_cons_write_slow(
 ) {
     let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
     if !TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr)) {
-        // GEN1 outside the window: the card mark compiled stores emit, one
-        // Relaxed byte store. Characters share fixnum encoding and create no
-        // edge; a symbol's liveness rides on the card like any heap value.
+        // GEN1 outside the window: an old owner marks its card, as compiled
+        // stores do, with one Relaxed byte store. Characters share fixnum
+        // encoding and create no edge; a symbol's liveness rides on the card
+        // like any heap value.
         if !value.is_some_and(TaggedValue::is_fixnum) {
-            with_tagged_heap(|heap| heap.mark_owner_card(addr));
+            with_tagged_heap(|heap| {
+                if heap
+                    .old_cons_trailer(owner)
+                    .is_some_and(|(trailer, index)| trailer.is_old(index))
+                {
+                    heap.mark_owner_card(addr);
+                }
+            });
         }
         return;
     }

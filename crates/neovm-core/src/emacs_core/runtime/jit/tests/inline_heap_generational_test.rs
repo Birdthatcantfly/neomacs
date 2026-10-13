@@ -242,6 +242,8 @@ fn young_cons_and_fixnum_or_character_stores_stay_inline() {
         assert_eq!(native(&mut context, &leaf, &[owner, child]), child);
         assert_eq!(cons_shims(), before);
         assert_eq!(context.tagged_heap.remembered_log_len_for_test(), 0);
+        // A young owner marks no card: its old card neighbours stay clean.
+        assert!(!context.tagged_heap.owner_card_is_dirty_for_test(owner));
 
         context.gc_collect_exact();
         assert!(context.tagged_heap.value_is_old_for_test(owner));

@@ -2818,6 +2818,7 @@ mod cons_blocks;
 #[cfg_attr(not(feature = "jit"), allow(unused_imports))]
 pub(crate) use cons_block_trailer::{
     CONS_BLOCK_BYTES, CONS_BLOCK_SIZE as CONS_BLOCK_CELLS, CONS_MARK_WORDS, CONS_MARKS_OFFSET,
+    CONS_OLD_OFFSET,
 };
 use cons_blocks::*;
 

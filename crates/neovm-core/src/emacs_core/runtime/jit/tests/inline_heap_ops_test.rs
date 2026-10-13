@@ -410,9 +410,9 @@ fn opt_cons_store_proofs_keep_deopt_and_barrier_paths() {
     }
 }
 
-/// GEN1's card mark reads a stored-value proof only for the exact word it
-/// binds: a fixnum proof removes the mark; with the tag filter off (the
-/// default) a non-fixnum proof changes nothing. GEN0 never reads either.
+/// GEN1's old-owner card mark reads a stored-value proof only for the exact
+/// word it binds: a fixnum proof removes the age test and the mark; with the
+/// tag filter off (the default) a non-fixnum proof changes nothing. GEN0 never reads either.
 /// Threading: CLIF only, built and dropped by this test; no Lisp object or
 /// heap state is involved.
 #[test]
@@ -473,8 +473,8 @@ fn stored_value_proofs_shape_only_the_gen1_card_mark() {
             );
             assert_eq!(
                 count(&fixnum, Opcode::Brif),
-                count(&dynamic, Opcode::Brif),
-                "the card mark adds no branch"
+                count(&dynamic, Opcode::Brif) - 1,
+                "the owner-age test goes with the mark"
             );
             assert_eq!(
                 text(&non_fixnum),
@@ -483,7 +483,8 @@ fn stored_value_proofs_shape_only_the_gen1_card_mark() {
             );
             assert_eq!(
                 count(&fixnum, Opcode::Load),
-                count(&dynamic, Opcode::Load) - 1
+                count(&dynamic, Opcode::Load) - 2,
+                "the old-bitmap word and the table base"
             );
         }
     }
