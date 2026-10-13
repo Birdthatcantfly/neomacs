@@ -165,6 +165,10 @@ pub(crate) fn emit_dispatch_cells_base(fb: &mut FunctionBuilder, vmctx: ClifValu
 }
 /// `Context::jit_stack_limit`, the native stack guard's floor.
 pub(crate) const CONTEXT_JIT_STACK_LIMIT_OFFSET: usize = offset_of!(Context, jit_stack_limit);
+/// `Context::owner`: the owner's slab of dynamic bindings of projected
+/// variables (Phase 0 step 2), the former reserved opcode-epoch word. No
+/// generated code reads it yet; the AOT tag pins its offset.
+pub(crate) const CONTEXT_OWNER_OFFSET: usize = offset_of!(Context, owner);
 pub(crate) use crate::emacs_core::eval::runtime_projection::{
     CONTEXT_ATTENTION_OFFSET, CONTEXT_BUFFERS_OFFSET, CONTEXT_TAGGED_HEAP_OFFSET,
 };

@@ -134,7 +134,9 @@ pub(crate) const ABI_TAG: u32 = compute_abi_tag();
 // canonical dispatch-cell and selected-buffer pointers have separate offsets.
 // v49: native observation geometry extends the heap protocol and enabled
 // leaves use specialized observation imports; invalidate prior AOT images.
-const ABI_TAG_VERSION: u32 = 49;
+// v50: the reserved Context word becomes the owner's binding slab
+// (`CONTEXT_OWNER_OFFSET`, salted below); its offset is unchanged.
+const ABI_TAG_VERSION: u32 = 50;
 
 /// Format version of the AOT descriptor spec-section + the runtime spec ABI
 /// (`SpecSlot`/`spec_expected` sidecar bases, the loader re-classify+arm protocol).
@@ -232,6 +234,9 @@ const fn compute_abi_tag() -> u32 {
     // parameters in the scratch words.
     mix_u64!(core::mem::offset_of!(crate::emacs_core::eval::Context, jit_stack_limit) as u64);
     mix_u64!(core::mem::offset_of!(crate::emacs_core::eval::Context, jit_stack_scratch) as u64);
+    // The owner's binding slab (Phase 0 step 2): the word a post-admission
+    // tier reads an owner's bindings through.
+    mix_u64!(super::compile::jit_layout::CONTEXT_OWNER_OFFSET as u64);
     // STATUS_* codes (the loader + code agree on these). STATUS_NEED_GENERIC
     // never crosses the leaf entry ABI (it is consumed inside a leaf's OWN
     // generated code by the fast-shim -> generic-fallback branch — this now
