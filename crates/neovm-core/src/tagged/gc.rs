@@ -2777,7 +2777,7 @@ mod reclamation;
 use reclamation::ReclamationMode;
 
 mod card_table;
-use card_table::CardTable;
+use card_table::{CardTable, ChunkCards};
 mod cons_block_trailer;
 use cons_block_trailer::*;
 mod collection_observed;

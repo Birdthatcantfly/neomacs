@@ -79,41 +79,27 @@ impl CardTable {
         self.byte(card_index(owner_addr)).load(Ordering::Relaxed) != CARD_CLEAN
     }
 
-    /// Visit the byte offset from CHUNK_BASE of every dirty card of that
-    /// 64 KiB chunk, in address order. Its 128 card bytes are contiguous in
-    /// the table, so a clean chunk costs one OR over sixteen words and a
-    /// dirty one skips clean words eight cards at a time.
+    /// The 128 card bytes of the 64 KiB chunk at CHUNK_BASE, or `None` when
+    /// every one is clean. They are contiguous in the table, so a clean
+    /// chunk costs sixteen word loads folded by OR and nothing is copied.
     /// Collector side, with every mutator stopped.
     #[inline]
-    pub(crate) fn for_each_dirty_card_in_chunk(
-        &self,
-        chunk_base: usize,
-        mut visit: impl FnMut(usize),
-    ) {
+    pub(crate) fn dirty_chunk(&self, chunk_base: usize) -> Option<ChunkCards> {
         debug_assert_eq!(chunk_base % CHUNK_BYTES, 0);
-        let first = card_index(chunk_base);
         // SAFETY: a chunk's cards are CHUNK_CARDS consecutive in-table bytes
         // starting at a CHUNK_CARDS-aligned index, so the words are aligned
         // and in bounds; every mutator is stopped, so no store races.
         let words = unsafe {
             self.bytes
                 .as_ptr()
-                .add(first)
-                .cast::<[u64; CHUNK_CARD_WORDS]>()
-                .read()
+                .add(card_index(chunk_base))
+                .cast::<u64>()
         };
-        if words.iter().fold(0, |any, word| any | word) == 0 {
-            return;
+        let word = |index: usize| unsafe { words.add(index).read() };
+        if (0..CHUNK_CARD_WORDS).fold(0, |any, index| any | word(index)) == 0 {
+            return None;
         }
-        for (word_index, &word) in words.iter().enumerate() {
-            // Byte k of the word is card 8 * word_index + k in memory order.
-            let mut bytes = u64::from_le(word);
-            while bytes != 0 {
-                let byte = bytes.trailing_zeros() as usize / 8;
-                bytes &= !(0xff << (byte * 8));
-                visit((word_index * size_of::<u64>() + byte) << CARD_SHIFT);
-            }
-        }
+        Some(ChunkCards(std::array::from_fn(word)))
     }
 
     /// Collector side, with every mutator stopped.
@@ -121,6 +107,33 @@ impl CardTable {
     pub(crate) fn clear(&self, owner_addr: usize) {
         self.byte(card_index(owner_addr))
             .store(CARD_CLEAN, Ordering::Relaxed);
+    }
+}
+
+/// A copy of one chunk's card bytes with at least one dirty card.
+#[derive(Clone, Copy)]
+pub(crate) struct ChunkCards([u64; CHUNK_CARD_WORDS]);
+
+impl ChunkCards {
+    /// The byte offset from the chunk base of every dirty card, in address
+    /// order; clean words are skipped eight cards at a time.
+    #[inline]
+    pub(crate) fn dirty_offsets(self) -> impl Iterator<Item = usize> {
+        self.0
+            .into_iter()
+            .enumerate()
+            .flat_map(|(word_index, word)| {
+                // Byte k of the word is card 8 * word_index + k in memory order.
+                let mut bytes = u64::from_le(word);
+                std::iter::from_fn(move || {
+                    if bytes == 0 {
+                        return None;
+                    }
+                    let byte = bytes.trailing_zeros() as usize / 8;
+                    bytes &= !(0xff << (byte * 8));
+                    Some((word_index * size_of::<u64>() + byte) << CARD_SHIFT)
+                })
+            })
     }
 }
 

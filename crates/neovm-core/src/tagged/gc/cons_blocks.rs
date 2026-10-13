@@ -225,35 +225,25 @@ impl ConsBlock {
         self.trailer().count_old(self.next_index as usize)
     }
 
-    /// Card-mark S2: visit the old cells that start in a dirty card. Cells
-    /// are 16 bytes from the block base, so a 512-byte card holds 32 cells,
-    /// half of one old-bitmap word.
-    pub(super) fn for_each_old_cell_in_dirty_cards(
-        &self,
-        cards: &super::card_table::CardTable,
-        visit: &mut impl FnMut(*mut ConsCell),
-    ) {
+    /// Card-mark S2: the old cells that start in the card at byte OFFSET
+    /// from the block base, as the index of the card's first cell and a mask
+    /// of up to 32 cells from it. Cells are 16 bytes from the block base, so
+    /// a 512-byte card is half of one old-bitmap word.
+    #[inline]
+    pub(super) fn old_cells_in_card(&self, offset: usize) -> (usize, u64) {
         use super::card_table::CARD_BYTES;
         const CELLS_PER_CARD: usize = CARD_BYTES / size_of::<ConsCell>();
         const BITS_PER_WORD: usize = u64::BITS as usize;
         const _: () = assert!(BITS_PER_WORD % CELLS_PER_CARD == 0);
+        let first = offset / size_of::<ConsCell>();
         let used = self.next_index as usize;
-        let trailer = self.trailer();
-        cards.for_each_dirty_card_in_chunk(self.base_addr(), |offset| {
-            let first = offset / size_of::<ConsCell>();
-            if first >= used {
-                return;
-            }
-            let cells = (used - first).min(CELLS_PER_CARD);
-            let mut old = (trailer.old_word(first / BITS_PER_WORD) >> (first % BITS_PER_WORD))
-                & (u64::MAX >> (BITS_PER_WORD - cells));
-            while old != 0 {
-                let index = first + old.trailing_zeros() as usize;
-                old &= old - 1;
-                // SAFETY: `index < next_index` names a cell of this block.
-                visit(unsafe { self.cells_ptr().add(index) });
-            }
-        });
+        if first >= used {
+            return (first, 0);
+        }
+        let cells = (used - first).min(CELLS_PER_CARD);
+        let old = (self.trailer().old_word(first / BITS_PER_WORD) >> (first % BITS_PER_WORD))
+            & (u64::MAX >> (BITS_PER_WORD - cells));
+        (first, old)
     }
 
     /// Sweep: thread reclaimed cells into the global intrusive free list and

@@ -70,9 +70,9 @@ fn card_index_masks_and_aliases_without_losing_marks() {
 }
 
 fn dirty_offsets(cards: &CardTable, chunk: usize) -> Vec<usize> {
-    let mut offsets = Vec::new();
-    cards.for_each_dirty_card_in_chunk(chunk, |offset| offsets.push(offset));
-    offsets
+    cards
+        .dirty_chunk(chunk)
+        .map_or_else(Vec::new, |cards| cards.dirty_offsets().collect())
 }
 
 #[test]

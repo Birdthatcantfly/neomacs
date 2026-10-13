@@ -115,11 +115,7 @@ impl TaggedHeap {
                 self.push_value_children_to_gray(owner, "generational-remembered");
             }
         }
-        let mut card_owners = Vec::new();
-        self.collect_dirty_card_owners_world_stopped(&mut card_owners);
-        for owner in card_owners {
-            self.push_value_children_to_gray(owner, "generational-card");
-        }
+        self.trace_dirty_card_owners_world_stopped();
     }
 
     /// Merge current-mutator persistent additions only under collector
@@ -453,46 +449,76 @@ impl TaggedHeap {
         !unsafe { &*(addr as *const GcHeader) }.flags.boxed()
     }
 
-    /// Old objects that start in a dirty card: old cells of every cons block
-    /// and tenured slots of every arena page (retired pages included).
-    /// Collected with every mutator stopped; an aliased card only adds owners.
+    /// Trace the old objects that start in a dirty card: old cells of every
+    /// cons block and tenured slots of every arena page (retired pages
+    /// included), straight onto the gray stack. Each chunk's cards are read
+    /// once and copied only when one is dirty; blocks and pages are re-borrowed
+    /// per owner, so nothing is collected first. With every mutator stopped;
+    /// an aliased card only adds owners.
     #[cold]
     #[inline(never)]
-    pub(super) fn collect_dirty_card_owners_world_stopped(&self, owners: &mut Vec<TaggedValue>) {
-        let Some(cards) = self.card_table() else {
+    fn trace_dirty_card_owners_world_stopped(&mut self) {
+        if self.card_table().is_none() {
             return;
-        };
-        for block in &self.cons_blocks {
-            block.for_each_old_cell_in_dirty_cards(cards, &mut |cell| {
-                // SAFETY: an old cell of an owned block is a live cons.
-                owners.push(unsafe { TaggedValue::from_cons_ptr(cell) });
-            });
         }
-        let mut visit = |header: *mut GcHeader| match unsafe { (*header).kind } {
-            HeapObjectKind::VecLike => owners
-                .push(unsafe { TaggedValue::from_veclike_ptr(header as *const VecLikeHeader) }),
-            HeapObjectKind::String => {
-                owners.push(unsafe { TaggedValue::from_string_ptr(header as *const StringObj) })
+        for block in 0..self.cons_blocks.len() {
+            let Some(chunk) = self.dirty_chunk(self.cons_blocks[block].base_addr()) else {
+                continue;
+            };
+            for offset in chunk.dirty_offsets() {
+                let (first, mut old) = self.cons_blocks[block].old_cells_in_card(offset);
+                while old != 0 {
+                    let index = first + old.trailing_zeros() as usize;
+                    old &= old - 1;
+                    // SAFETY: an old cell of an owned block is a live cons.
+                    let owner = unsafe {
+                        TaggedValue::from_cons_ptr(self.cons_blocks[block].cells_ptr().add(index))
+                    };
+                    self.push_value_children_to_gray(owner, "generational-card");
+                }
             }
-            HeapObjectKind::Float => {}
-        };
+        }
         // Floats and bignums hold no Lisp references.
-        self.string_arena
-            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
-        self.vector_arena
-            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
-        self.bytecode_arena
-            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
-        self.lambda_arena
-            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
-        self.macro_arena
-            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
-        self.record_arena
-            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
-        self.symbol_with_pos_arena
-            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
-        self.marker_arena
-            .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
+        self.trace_arena_dirty_cards(|heap| &heap.string_arena);
+        self.trace_arena_dirty_cards(|heap| &heap.vector_arena);
+        self.trace_arena_dirty_cards(|heap| &heap.bytecode_arena);
+        self.trace_arena_dirty_cards(|heap| &heap.lambda_arena);
+        self.trace_arena_dirty_cards(|heap| &heap.macro_arena);
+        self.trace_arena_dirty_cards(|heap| &heap.record_arena);
+        self.trace_arena_dirty_cards(|heap| &heap.symbol_with_pos_arena);
+        self.trace_arena_dirty_cards(|heap| &heap.marker_arena);
+    }
+
+    #[inline]
+    fn dirty_chunk(&self, chunk_base: usize) -> Option<ChunkCards> {
+        self.card_table()?.dirty_chunk(chunk_base)
+    }
+
+    #[inline]
+    fn trace_arena_dirty_cards<T: PagedObject>(&mut self, arena: fn(&Self) -> &ObjectArena<T>) {
+        for page in 0..arena(self).pages.len() {
+            let Some(chunk) = self.dirty_chunk(arena(self).pages[page].base_addr()) else {
+                continue;
+            };
+            for offset in chunk.dirty_offsets() {
+                for slot in ObjectArena::<T>::slots_starting_in_card(offset) {
+                    let Some(header) = arena(self).tenured_slot_header(page, slot) else {
+                        continue;
+                    };
+                    // SAFETY: a tenured allocated slot holds a live object.
+                    let owner = match unsafe { (*header).kind } {
+                        HeapObjectKind::VecLike => unsafe {
+                            TaggedValue::from_veclike_ptr(header as *const VecLikeHeader)
+                        },
+                        HeapObjectKind::String => unsafe {
+                            TaggedValue::from_string_ptr(header as *const StringObj)
+                        },
+                        HeapObjectKind::Float => continue,
+                    };
+                    self.push_value_children_to_gray(owner, "generational-card");
+                }
+            }
+        }
     }
 
     /// S1 invariant: every unmapped owner in R_seed or a mutator R log has a

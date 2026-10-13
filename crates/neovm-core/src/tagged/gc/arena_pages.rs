@@ -1183,33 +1183,29 @@ impl<T: PagedObject> ObjectArena<T> {
         out
     }
 
-    /// Card-mark S2: visit the TENURED allocated slots that start in a dirty
-    /// card, on every page (retired pages hold only tenured slots and stay
-    /// owners of old-to-young edges). `visit` must not touch this arena.
-    pub(super) fn for_each_tenured_slot_in_dirty_cards(
-        &self,
-        cards: &super::card_table::CardTable,
-        visit: &mut impl FnMut(*mut GcHeader),
-    ) {
+    /// Card-mark S2: the slots of a page that start in the card at byte
+    /// OFFSET from the page base.
+    #[inline]
+    pub(super) fn slots_starting_in_card(offset: usize) -> std::ops::Range<usize> {
         use super::card_table::CARD_BYTES;
-        for page in &self.pages {
-            cards.for_each_dirty_card_in_chunk(page.base_addr(), |start| {
-                let first = start.div_ceil(T::SLOT_BYTES);
-                let end = (start + CARD_BYTES)
-                    .div_ceil(T::SLOT_BYTES)
-                    .min(ObjectPage::<T>::SLOTS);
-                for slot in first..end {
-                    if !page.is_allocated(slot) {
-                        continue;
-                    }
-                    let header = page.slot_ptr(slot) as *mut GcHeader;
-                    // SAFETY: allocated bit set => readable header.
-                    if unsafe { (*header).tenured } {
-                        visit(header);
-                    }
-                }
-            });
+        offset.div_ceil(T::SLOT_BYTES)
+            ..(offset + CARD_BYTES)
+                .div_ceil(T::SLOT_BYTES)
+                .min(ObjectPage::<T>::SLOTS)
+    }
+
+    /// Card-mark S2: the header of slot SLOT of page PAGE when it holds a
+    /// tenured object. Every page counts: retired pages hold only tenured
+    /// slots and stay owners of old-to-young edges.
+    #[inline]
+    pub(super) fn tenured_slot_header(&self, page: usize, slot: usize) -> Option<*mut GcHeader> {
+        let page = &self.pages[page];
+        if !page.is_allocated(slot) {
+            return None;
         }
+        let header = page.slot_ptr(slot) as *mut GcHeader;
+        // SAFETY: allocated bit set => readable header.
+        unsafe { (*header).tenured }.then_some(header)
     }
 
     /// Visit the header of every ALLOCATED slot of a non-retired page, in
