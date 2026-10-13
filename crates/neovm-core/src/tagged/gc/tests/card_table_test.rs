@@ -69,20 +69,41 @@ fn card_index_masks_and_aliases_without_losing_marks() {
     assert!(!cards.is_dirty(alias));
 }
 
+fn dirty_offsets(cards: &CardTable, chunk: usize) -> Vec<usize> {
+    let mut offsets = Vec::new();
+    cards.for_each_dirty_card_in_chunk(chunk, |offset| offsets.push(offset));
+    offsets
+}
+
 #[test]
-fn chunk_summary_sees_every_card_of_its_chunk_only() {
+fn chunk_walk_sees_every_card_of_its_chunk_only() {
     use super::card_table::{CARD_BYTES, CHUNK_BYTES};
     let cards = CardTable::new();
     let chunk = 0x7f00_0001_0000usize;
-    assert!(!cards.chunk_has_dirty(chunk));
-    for offset in [0, CARD_BYTES * 7, CHUNK_BYTES - CARD_BYTES] {
-        cards.mark(chunk + offset);
-        assert!(cards.chunk_has_dirty(chunk), "offset {offset}");
-        assert!(!cards.chunk_has_dirty(chunk + CHUNK_BYTES));
-        assert!(!cards.chunk_has_dirty(chunk - CHUNK_BYTES));
+    assert!(dirty_offsets(&cards, chunk).is_empty());
+    for offset in [0, CARD_BYTES * 7, CARD_BYTES * 8, CHUNK_BYTES - CARD_BYTES] {
+        cards.mark(chunk + offset + 16);
+        assert_eq!(dirty_offsets(&cards, chunk), [offset], "offset {offset}");
+        assert!(dirty_offsets(&cards, chunk + CHUNK_BYTES).is_empty());
+        assert!(dirty_offsets(&cards, chunk - CHUNK_BYTES).is_empty());
         cards.clear(chunk + offset);
-        assert!(!cards.chunk_has_dirty(chunk));
+        assert!(dirty_offsets(&cards, chunk).is_empty());
     }
+}
+
+#[test]
+fn chunk_walk_visits_dirty_cards_in_address_order() {
+    use super::card_table::{CARD_BYTES, CHUNK_CARDS};
+    let cards = CardTable::new();
+    let chunk = 0x7f00_0002_0000usize;
+    let dirty: Vec<usize> = (0..CHUNK_CARDS)
+        .filter(|card| card % 3 == 0 || card % 8 == 7)
+        .map(|card| card * CARD_BYTES)
+        .collect();
+    for &offset in dirty.iter().rev() {
+        cards.mark(chunk + offset);
+    }
+    assert_eq!(dirty_offsets(&cards, chunk), dirty);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -240,4 +261,43 @@ fn minor_traces_every_old_cell_of_a_dirty_card() {
     );
     assert!(heap.value_is_old_for_test(logged_child));
     assert!(!heap.owner_card_is_dirty(card_addr(logged)));
+}
+
+/// S2: the old-bitmap word selection reads each card's own half of its
+/// word. Only the cells of odd 32-cell cards (plus the last allocated cell)
+/// stay old, so a card reading its neighbour's half finds no old cell there
+/// and the verifying minor loses their young children.
+#[test]
+fn minor_reaches_young_children_of_every_card_of_a_block() {
+    let mut heap = verified_heap();
+    set_tagged_heap(&mut heap);
+    let roots = ScratchRoots::new();
+    let cells: Vec<TaggedValue> = (0..150)
+        .map(|_| heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL))
+        .collect();
+    let owners: Vec<TaggedValue> = cells
+        .iter()
+        .copied()
+        .filter(|&cell| {
+            let index = ConsBlock::index_of_ptr(cell.xcons_ptr());
+            (index / 32) % 2 == 1 || cell.bits() == cells[149].bits()
+        })
+        .collect();
+    assert!(owners.len() > 32);
+    for &owner in &owners {
+        roots.keep(owner);
+    }
+    minor(&mut heap, &owners);
+    let children: Vec<TaggedValue> = owners
+        .iter()
+        .map(|&owner| {
+            let child = heap.alloc_cons(TaggedValue::T, TaggedValue::NIL);
+            store_young_child(owner, OwnerClass::Cons, child);
+            child
+        })
+        .collect();
+    minor(&mut heap, &owners);
+    for (i, &child) in children.iter().enumerate() {
+        assert!(heap.value_is_old_for_test(child), "owner {i}");
+    }
 }

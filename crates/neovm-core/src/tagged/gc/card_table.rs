@@ -26,6 +26,7 @@ pub(crate) const CARD_TABLE_BYTES: usize = 1 << CARD_INDEX_BITS;
 /// Cons blocks and arena pages are 64 KiB-aligned chunks of 128 cards.
 pub(crate) const CHUNK_BYTES: usize = 64 * 1024;
 pub(crate) const CHUNK_CARDS: usize = CHUNK_BYTES / CARD_BYTES;
+const CHUNK_CARD_WORDS: usize = CHUNK_CARDS / size_of::<u64>();
 pub(crate) const CARD_CLEAN: u8 = 0;
 pub(crate) const CARD_DIRTY: u8 = 1;
 
@@ -78,19 +79,41 @@ impl CardTable {
         self.byte(card_index(owner_addr)).load(Ordering::Relaxed) != CARD_CLEAN
     }
 
-    /// Whether any card of the 64 KiB chunk at CHUNK_BASE is dirty: its 128
-    /// card bytes are contiguous in the table, read as sixteen words.
+    /// Visit the byte offset from CHUNK_BASE of every dirty card of that
+    /// 64 KiB chunk, in address order. Its 128 card bytes are contiguous in
+    /// the table, so a clean chunk costs one OR over sixteen words and a
+    /// dirty one skips clean words eight cards at a time.
     /// Collector side, with every mutator stopped.
     #[inline]
-    pub(crate) fn chunk_has_dirty(&self, chunk_base: usize) -> bool {
-        const WORDS: usize = CHUNK_CARDS / size_of::<u64>();
+    pub(crate) fn for_each_dirty_card_in_chunk(
+        &self,
+        chunk_base: usize,
+        mut visit: impl FnMut(usize),
+    ) {
         debug_assert_eq!(chunk_base % CHUNK_BYTES, 0);
         let first = card_index(chunk_base);
         // SAFETY: a chunk's cards are CHUNK_CARDS consecutive in-table bytes
         // starting at a CHUNK_CARDS-aligned index, so the words are aligned
         // and in bounds; every mutator is stopped, so no store races.
-        let words = unsafe { self.bytes.as_ptr().add(first).cast::<u64>() };
-        (0..WORDS).any(|word| unsafe { words.add(word).read() } != 0)
+        let words = unsafe {
+            self.bytes
+                .as_ptr()
+                .add(first)
+                .cast::<[u64; CHUNK_CARD_WORDS]>()
+                .read()
+        };
+        if words.iter().fold(0, |any, word| any | word) == 0 {
+            return;
+        }
+        for (word_index, &word) in words.iter().enumerate() {
+            // Byte k of the word is card 8 * word_index + k in memory order.
+            let mut bytes = u64::from_le(word);
+            while bytes != 0 {
+                let byte = bytes.trailing_zeros() as usize / 8;
+                bytes &= !(0xff << (byte * 8));
+                visit((word_index * size_of::<u64>() + byte) << CARD_SHIFT);
+            }
+        }
     }
 
     /// Collector side, with every mutator stopped.

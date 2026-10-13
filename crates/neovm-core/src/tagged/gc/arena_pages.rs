@@ -1193,14 +1193,7 @@ impl<T: PagedObject> ObjectArena<T> {
     ) {
         use super::card_table::CARD_BYTES;
         for page in &self.pages {
-            let base = page.base_addr();
-            if !cards.chunk_has_dirty(base) {
-                continue;
-            }
-            for start in (0..OBJECT_PAGE_BYTES).step_by(CARD_BYTES) {
-                if !cards.is_dirty(base + start) {
-                    continue;
-                }
+            cards.for_each_dirty_card_in_chunk(page.base_addr(), |start| {
                 let first = start.div_ceil(T::SLOT_BYTES);
                 let end = (start + CARD_BYTES)
                     .div_ceil(T::SLOT_BYTES)
@@ -1215,7 +1208,7 @@ impl<T: PagedObject> ObjectArena<T> {
                         visit(header);
                     }
                 }
-            }
+            });
         }
     }
 

@@ -226,7 +226,8 @@ impl ConsBlock {
     }
 
     /// Card-mark S2: visit the old cells that start in a dirty card. Cells
-    /// are 16 bytes from the block base, so a 512-byte card holds 32 cells.
+    /// are 16 bytes from the block base, so a 512-byte card holds 32 cells,
+    /// half of one old-bitmap word.
     pub(super) fn for_each_old_cell_in_dirty_cards(
         &self,
         cards: &super::card_table::CardTable,
@@ -234,23 +235,25 @@ impl ConsBlock {
     ) {
         use super::card_table::CARD_BYTES;
         const CELLS_PER_CARD: usize = CARD_BYTES / size_of::<ConsCell>();
+        const BITS_PER_WORD: usize = u64::BITS as usize;
+        const _: () = assert!(BITS_PER_WORD % CELLS_PER_CARD == 0);
         let used = self.next_index as usize;
         let trailer = self.trailer();
-        let base = self.base_addr();
-        if !cards.chunk_has_dirty(base) {
-            return;
-        }
-        for first in (0..used).step_by(CELLS_PER_CARD) {
-            if !cards.is_dirty(base + first * size_of::<ConsCell>()) {
-                continue;
+        cards.for_each_dirty_card_in_chunk(self.base_addr(), |offset| {
+            let first = offset / size_of::<ConsCell>();
+            if first >= used {
+                return;
             }
-            for index in first..(first + CELLS_PER_CARD).min(used) {
-                if trailer.is_old(index) {
-                    // SAFETY: `index < next_index` names a cell of this block.
-                    visit(unsafe { self.cells_ptr().add(index) });
-                }
+            let cells = (used - first).min(CELLS_PER_CARD);
+            let mut old = (trailer.old_word(first / BITS_PER_WORD) >> (first % BITS_PER_WORD))
+                & (u64::MAX >> (BITS_PER_WORD - cells));
+            while old != 0 {
+                let index = first + old.trailing_zeros() as usize;
+                old &= old - 1;
+                // SAFETY: `index < next_index` names a cell of this block.
+                visit(unsafe { self.cells_ptr().add(index) });
             }
-        }
+        });
     }
 
     /// Sweep: thread reclaimed cells into the global intrusive free list and

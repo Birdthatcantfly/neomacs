@@ -115,7 +115,9 @@ impl TaggedHeap {
                 self.push_value_children_to_gray(owner, "generational-remembered");
             }
         }
-        for owner in self.dirty_card_owners_world_stopped() {
+        let mut card_owners = Vec::new();
+        self.collect_dirty_card_owners_world_stopped(&mut card_owners);
+        for owner in card_owners {
             self.push_value_children_to_gray(owner, "generational-card");
         }
     }
@@ -428,22 +430,27 @@ impl TaggedHeap {
         }
     }
 
-    /// Whether a minor reaches OWNER's children through its dirty card: an
-    /// old cons in an owned block, or a page-arena object. Box and mapped
-    /// owners stay on the remembered-set path.
+    /// Whether a minor reaches logged OWNER's children through its dirty
+    /// card: an old cons in an owned block, or a page-arena object. Box and
+    /// mapped owners stay on the remembered-set path. Only `remember_owner`
+    /// logs, and it logs an unmapped cons only through its block trailer and
+    /// a header only once tenured, which an owned object alone can be; the
+    /// `boxed` flag then separates Box objects from arena slots.
+    #[inline]
     pub(super) fn owner_is_card_scanned(&self, owner: TaggedValue) -> bool {
         if self.owner_is_mapped(owner) {
             return false;
         }
         if owner.is_cons() {
-            return self.old_cons_trailer(owner).is_some();
+            debug_assert!(self.old_cons_trailer(owner).is_some());
+            return true;
         }
         let Some(addr) = Self::value_heap_addr(owner) else {
             return false;
         };
+        debug_assert!(self.owns_heap_value_object(owner, addr));
         // SAFETY: a logged owner is live, so its header is readable.
-        self.owns_heap_value_object(owner, addr)
-            && !unsafe { &*(addr as *const GcHeader) }.flags.boxed()
+        !unsafe { &*(addr as *const GcHeader) }.flags.boxed()
     }
 
     /// Old objects that start in a dirty card: old cells of every cons block
@@ -451,11 +458,10 @@ impl TaggedHeap {
     /// Collected with every mutator stopped; an aliased card only adds owners.
     #[cold]
     #[inline(never)]
-    pub(super) fn dirty_card_owners_world_stopped(&self) -> Vec<TaggedValue> {
+    pub(super) fn collect_dirty_card_owners_world_stopped(&self, owners: &mut Vec<TaggedValue>) {
         let Some(cards) = self.card_table() else {
-            return Vec::new();
+            return;
         };
-        let mut owners = Vec::new();
         for block in &self.cons_blocks {
             block.for_each_old_cell_in_dirty_cards(cards, &mut |cell| {
                 // SAFETY: an old cell of an owned block is a live cons.
@@ -487,7 +493,6 @@ impl TaggedHeap {
             .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
         self.marker_arena
             .for_each_tenured_slot_in_dirty_cards(cards, &mut visit);
-        owners
     }
 
     /// S1 invariant: every unmapped owner in R_seed or a mutator R log has a
