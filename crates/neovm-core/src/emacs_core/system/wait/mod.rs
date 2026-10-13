@@ -1077,7 +1077,23 @@ impl super::eval::Context {
         &mut self,
         request: &WaitRequest,
     ) -> Result<WaitServiceOutcome, Flow> {
-        self.service_wait_request_processes(request, WaitProcessService::Poll, true)
+        self.service_wait_request_processes(request, WaitProcessService::Poll, true, None)
+    }
+
+    /// First pass of `wait_reading_process_output`: GNU runs `timer_check`
+    /// (process.c:5490) BEFORE the `status_notify` of :5554, so a ripe timer
+    /// fires ahead of the sentinel (and the output it drains) of a child that
+    /// already exited while Lisp was busy.
+    fn service_wait_request_first_pass(
+        &mut self,
+        request: &WaitRequest,
+    ) -> Result<WaitServiceOutcome, Flow> {
+        self.service_wait_request_processes(
+            request,
+            WaitProcessService::Poll,
+            true,
+            Some(WaitStatusNotifySite::before_the_block()),
+        )
     }
 
     #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
@@ -1116,6 +1132,7 @@ impl super::eval::Context {
             request,
             activity.into_process_service(),
             run_timers,
+            None,
         )?;
         outcome.handshake_ready = handshake_ready;
         Ok(outcome)
@@ -1126,6 +1143,7 @@ impl super::eval::Context {
         request: &WaitRequest,
         process_service: WaitProcessService,
         run_timers: bool,
+        notify_status_after_timers: Option<WaitStatusNotifySite>,
     ) -> Result<WaitServiceOutcome, Flow> {
         let mut outcome = WaitServiceOutcome::default();
         let special_input = if request.services_special_input() {
@@ -1158,6 +1176,11 @@ impl super::eval::Context {
         // Honor it before invoking display hooks or more process callbacks;
         // the caller's binding still determines whether quitting is allowed.
         self.maybe_quit()?;
+
+        if let Some(site) = notify_status_after_timers {
+            let notified = self.record_and_notify_status_changes(request, site)?;
+            outcome.absorb_process_activity(notified);
+        }
 
         // Drain ready process output (a non-blocking poll of already-readable
         // fds plus filter dispatch) BEFORE yielding to pending command input.
@@ -1356,10 +1379,7 @@ impl super::eval::Context {
         // before anything blocks, notify any status that changed while Lisp
         // was busy.  Here that means running `handle_child_signal`'s walk
         // first, because this port could not run it in the handler.
-        let notified = self
-            .record_and_notify_status_changes(&request, WaitStatusNotifySite::before_the_block())?;
-        let mut outcome = self.service_wait_request_once_outcome(&request)?;
-        outcome.absorb_process_activity(notified);
+        let mut outcome = self.service_wait_request_first_pass(&request)?;
         if let Some(completion) =
             self.complete_wait_after_required_minimum_drain(&request, outcome)?
         {

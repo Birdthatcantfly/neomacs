@@ -6598,6 +6598,18 @@ fn accept_process_output_timer_preserves_deactivate_mark_like_gnu() {
 
 #[test]
 fn accept_process_output_runs_timer_before_filter_and_sentinel_like_gnu() {
+    check_timer_before_filter_and_sentinel(Duration::ZERO);
+}
+
+/// The child has already exited (status change and output pending) when the
+/// wait starts: GNU's `timer_check` (process.c:5490) still precedes the
+/// `status_notify` (:5554) of the first loop pass.
+#[test]
+fn accept_process_output_runs_timer_before_exited_child_callbacks_like_gnu() {
+    check_timer_before_filter_and_sentinel(Duration::from_millis(500));
+}
+
+fn check_timer_before_filter_and_sentinel(child_head_start: Duration) {
     crate::test_utils::init_test_tracing();
     let echo = find_bin("echo");
     let mut ev = Context::new();
@@ -6659,6 +6671,7 @@ fn accept_process_output_runs_timer_before_filter_and_sentinel_like_gnu() {
     )
     .expect("install ordering sentinel");
 
+    std::thread::sleep(child_head_start);
     let first = builtin_accept_process_output(
         &mut ev,
         vec![Value::make_process(pid), Value::make_float(0.1)],
