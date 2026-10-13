@@ -763,6 +763,7 @@ impl Context {
             .iter()
             .rev()
             .any(|entry| entry.let_bound_symbol() == Some(symbol))
+            || self.owner_binds(symbol)
     }
 
     /// Re-anchor the backtrace frame at `index`, which compiled code pushed

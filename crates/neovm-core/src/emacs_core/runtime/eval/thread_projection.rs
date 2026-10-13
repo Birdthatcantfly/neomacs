@@ -1,36 +1,26 @@
-//! Routing a thread-projected variable to its canonical storage (Phase 0
-//! step 2, round 2).
+//! Routing a thread-projected variable (Phase 0 step 2).
 //!
-//! For a single owner a projected variable behaves exactly like the variable
-//! it wraps. Every hot path refuses a projected cell (see
-//! `forward::thread_projection`); the slow paths it then reaches recognise
-//! it inside their existing per-buffer handling -- on a branch a real
-//! per-buffer forwarder never takes, because its slot index is valid -- and
-//! come here:
-//! - reads with only `&self` compute the logical value from the canonical
-//!   storage ([`Context::projected_value`]);
-//! - everything else REVEALS the cell (gives it back its logical arm), runs
-//!   the unchanged operation on it, and conceals it again
-//!   ([`Context::with_revealed_projection`]).
+//! Every hot path refuses a projected cell (see `forward::thread_projection`);
+//! the slow paths it then reaches recognise it inside their existing
+//! per-buffer handling -- on a branch a real per-buffer forwarder never
+//! takes, because its slot index is valid -- and come here:
+//! - a dynamic binding is the binding owner's (`eval::owner_bindings`);
+//! - reads and assignments take the owner's binding first, and the
+//!   variable's canonical storage otherwise;
+//! - canonical reads with only `&self` compute the logical value from the
+//!   canonical storage ([`Context::projected_value`]); every other canonical
+//!   operation REVEALS the cell (gives it back its logical arm), runs the
+//!   unchanged operation on it, and conceals it again
+//!   ([`Context::with_revealed_projection`]). No Lisp runs while a cell is
+//!   revealed.
 //!
-//! Each entry is cold and out of line. Round 3 replaces the binding paths
-//! with owner-local slots; the places that will change are marked
-//! "ROUND 3".
+//! Each entry is cold and out of line.
 
 use super::{Context, EvalResult, Flow, LispCondition, SymbolValueLookup, signal};
 use crate::emacs_core::forward::{CanonicalArm, LispBufferObjFwd, ThreadProjectionDescriptor};
 use crate::emacs_core::intern::SymId;
 use crate::emacs_core::symbol::SetInternalBind;
 use crate::emacs_core::value::Value;
-
-#[cfg(test)]
-thread_local! {
-    /// How many `LetLocal` entries `specbind` pushed for a projected
-    /// variable whose logical arm is `Localized`: the one binding shape
-    /// whose restore waits for round 3's owner-binding entry.
-    pub(crate) static ROUND3_LOCALIZED_LET_LOCAL: std::cell::Cell<usize> =
-        const { std::cell::Cell::new(0) };
-}
 
 impl Context {
     /// GNU `find_symbol_value` of the variable PROJECTION wraps, for symbol
@@ -42,7 +32,19 @@ impl Context {
         id: SymId,
         projection: &ThreadProjectionDescriptor,
     ) -> SymbolValueLookup {
-        // ROUND 3: an owner's binding answers first.
+        if let Some(slab) = self.owner.slab()
+            && let Some(binding) = slab
+                .slot(
+                    projection.index(),
+                    super::owner_bindings::access_channel(&self.buffers, id, projection),
+                )
+                .value()
+        {
+            return match binding.bound() {
+                Some(value) => SymbolValueLookup::Bound(value),
+                None => SymbolValueLookup::Unbound,
+            };
+        }
         let value = match projection.arm() {
             CanonicalArm::Plain => projection.plain_value(),
             CanonicalArm::Localized(blv) => {
@@ -122,41 +124,25 @@ impl Context {
     #[inline(never)]
     fn conceal_projection(&mut self, revealed: crate::emacs_core::symbol::RevealedProjection) {
         // An alias retires the projection; the variable it names is
-        // projected on its own (ROUND 3: admission projects bases).
+        // projected on its own (admission projects bases).
         let _ = self.obarray.conceal_projection(revealed);
     }
 
-    /// `specbind` of a projected variable: GNU's shallow binding on the
-    /// variable it projects. The specpdl entry it pushes names the symbol,
-    /// and unbinding restores through the same routing.
-    /// ROUND 3: an owner binds in its own slot instead.
+    /// `specbind` of a projected variable: a binding of this owner
+    /// ([`Context::specbind_owner`]); canonical storage does not change.
     #[cold]
     #[inline(never)]
     pub(super) fn specbind_projected(&mut self, resolved: SymId, value: Value) -> Result<(), Flow> {
-        #[cfg(test)]
-        let localized = matches!(
-            self.obarray.thread_projection_of(resolved).map(|p| p.arm()),
-            Some(CanonicalArm::Localized(_))
-        );
-        let result =
-            self.with_revealed_projection(resolved, |ctx| ctx.specbind_uncached(resolved, value));
-        // ROUND 3: the unbind loop's LetLocal arm tests the cell's redirect,
-        // so it cannot restore a concealed localized variable's buffer
-        // binding; the owner-binding entry kind replaces this push.
-        #[cfg(test)]
-        if localized
-            && matches!(
-                self.specpdl.last(),
-                Some(super::SpecBinding::LetLocal { sym_id, .. }) if *sym_id == resolved
-            )
-        {
-            ROUND3_LOCALIZED_LET_LOCAL.with(|count| count.set(count.get() + 1));
+        match self.obarray.thread_projection_of(resolved) {
+            Some(projection) => self.specbind_owner(resolved, projection, value),
+            // Only a projection's header reaches here.
+            None => self.specbind_uncached(resolved, value),
         }
-        result
     }
 
-    /// `set_internal` (bind, unbind, thread switch) of a projected variable,
-    /// on the variable it projects.
+    /// `set_internal` of a projected variable once its watchers have run
+    /// (`src/data.c:1678-1831`): this owner's binding takes the store when it
+    /// binds the channel the store meets, canonical storage otherwise.
     #[cold]
     #[inline(never)]
     pub(super) fn set_projected_internal(
@@ -166,6 +152,48 @@ impl Context {
         value: Value,
         bindflag: SetInternalBind,
     ) -> Result<(), Flow> {
+        if let Some(projection) = self.obarray.thread_projection_of(resolved)
+            && let Some(slab) = self.owner.slab()
+            && let Some(channel) = super::owner_bindings::owner_store_channel(
+                slab,
+                &self.buffers,
+                resolved,
+                projection,
+                bindflag,
+            )
+        {
+            let site = if bindflag == SetInternalBind::Set {
+                super::ForwardStoreSite::Set
+            } else {
+                super::ForwardStoreSite::Bind
+            };
+            let stored = super::check_forwarded_store_at(
+                &self.obarray,
+                &self.buffers,
+                &self.specpdl,
+                resolved,
+                value,
+                site,
+            )?
+            .value();
+            if let Some(slab) = self.owner.slab_mut() {
+                slab.set_slot(
+                    projection.index(),
+                    channel,
+                    super::owner_bindings::SlotState::Bound(super::owner_bindings::SlotValue::new(
+                        stored,
+                    )),
+                );
+            }
+            let visible = if stored.is_unbound() {
+                Value::NIL
+            } else {
+                stored
+            };
+            self.publish_runtime_binding_write_by_resolved_id(resolved, visible);
+            self.sync_user_test_gc_binding_by_id(resolved);
+            return Ok(());
+        }
         self.with_revealed_projection(resolved, |ctx| {
             ctx.set_internal_after_watchers(sym_id, value, bindflag)
         })
@@ -210,4 +238,42 @@ impl Context {
             Value::NIL
         }
     }
+}
+
+/// [`store_runtime_binding`] of a thread-projected variable: GNU
+/// `set_internal`'s `SET` (`src/data.c:1678-1831`). OWNER's binding takes
+/// the store when it binds the channel the store meets; otherwise the same
+/// store runs on the cell revealed as the variable it projects.
+#[cold]
+#[inline(never)]
+pub(super) fn store_projected_runtime_binding(
+    obarray: &mut crate::emacs_core::symbol::Obarray,
+    buffers: &mut crate::buffer::BufferManager,
+    owner: Option<&mut super::owner_bindings::OwnerSlab>,
+    specpdl: &[super::SpecBinding],
+    sym_id: SymId,
+    checked: super::ForwardChecked,
+) -> Option<crate::buffer::BufferId> {
+    if let Some(slab) = owner
+        && let Some(projection) = obarray.thread_projection_of(sym_id)
+        && let Some(channel) = super::owner_bindings::owner_store_channel(
+            slab,
+            buffers,
+            sym_id,
+            projection,
+            crate::emacs_core::symbol::SetInternalBind::Set,
+        )
+    {
+        slab.set_slot(
+            projection.index(),
+            channel,
+            super::owner_bindings::SlotState::Bound(super::owner_bindings::SlotValue::new(
+                checked.value(),
+            )),
+        );
+        return channel.locus();
+    }
+    obarray.with_revealed_projection(sym_id, |obarray| {
+        super::store_runtime_binding(obarray, buffers, None, specpdl, sym_id, checked)
+    })
 }

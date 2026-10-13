@@ -1280,6 +1280,11 @@ pub(crate) enum NativeUnwindAction {
     /// (eval.c:4255): re-swap the specpdl suffix a `backtrace-eval` unbound,
     /// restoring the frames' own bindings before their normal unwind.
     BacktraceEvalRewind { distance: usize },
+    /// An owner-local dynamic binding of a projected variable (Phase 0 step
+    /// 2): GNU's `SPECPDL_LET` family for a variable whose bindings live in
+    /// its owner's slab. Unbinding restores the owner's slot; the values are
+    /// the slab's, so the entry holds none.
+    OwnerBinding(owner_bindings::OwnerBindingRef),
 }
 
 impl NativeUnwindAction {
@@ -1292,6 +1297,7 @@ impl NativeUnwindAction {
             Self::MinibufferSession { state } => state.trace_roots(visit),
             Self::MinibufferBuffer { .. } => {}
             Self::BacktraceEvalRewind { .. } => {}
+            Self::OwnerBinding(_) => {}
         }
     }
 
@@ -1318,6 +1324,9 @@ impl NativeUnwindAction {
             Self::BacktraceEvalRewind { distance } => context
                 .specpdl_swap_suffix_for_backtrace_eval(distance, false)
                 .map(|()| Value::NIL),
+            Self::OwnerBinding(binding) => {
+                context.unbind_owner_binding(binding).map(|()| Value::NIL)
+            }
         };
         context.restore_vm_roots(root_scope);
         result
@@ -6648,6 +6657,11 @@ pub(crate) fn default_toplevel_value(ctx: &mut Context, args: Vec<Value>) -> Eva
         return value.ok_or_else(|| signal(LispCondition::VoidVariable, vec![args[0]]));
     }
 
+    // An owner binding of a projected variable is GNU's entry too.
+    if let Some(value) = ctx.owner_default_toplevel_value(symbol) {
+        return value.ok_or_else(|| signal(LispCondition::VoidVariable, vec![args[0]]));
+    }
+
     // GNU scans the specpdl by exact symbol identity before Fdefault_value
     // resolves aliases. A let through an alias records the resolved target,
     // so querying the alias itself intentionally falls back to its currently
@@ -6665,7 +6679,9 @@ pub(crate) fn set_default_toplevel_value(ctx: &mut Context, args: Vec<Value>) ->
     let symbol = SymId::from_value(ctx, args[0])?;
     let value = args[1];
 
-    if set_default_toplevel_value_in_state(ctx.specpdl.as_mut_slice(), symbol, value) {
+    if set_default_toplevel_value_in_state(ctx.specpdl.as_mut_slice(), symbol, value)
+        || ctx.set_owner_default_toplevel_value(symbol, value)
+    {
         // The visible binding has not changed yet, so GNU neither notifies
         // watchers nor publishes a runtime-variable update at this point.
         ctx.note_macro_expansion_mutation();
@@ -6734,7 +6750,7 @@ pub(crate) fn set_runtime_binding_in_state(
             set_runtime_binding(
                 obarray,
                 &mut ctx.buffers,
-                &ctx.custom,
+                ctx.owner.slab_mut(),
                 ctx.specpdl.as_slice(),
                 sym_id,
                 value,
@@ -6785,10 +6801,10 @@ pub(crate) fn let_shadows_buffer_binding_p_in_state(
 ///
 /// Takes a [`ForwardChecked`] rather than a `Value` so that the forward type's
 /// rule cannot be skipped by adding another assignment path here.
-fn store_runtime_binding(
+pub(super) fn store_runtime_binding(
     obarray: &mut Obarray,
     buffers: &mut BufferManager,
-    _custom: &CustomManager,
+    owner: Option<&mut owner_bindings::OwnerSlab>,
     specpdl: &[SpecBinding],
     sym_id: SymId,
     checked: ForwardChecked,
@@ -6847,11 +6863,11 @@ fn store_runtime_binding(
             .and_then(|s| s.forwarded_descriptor())
             .and_then(|fwd| fwd.as_buffer_obj_fwd())
     {
-        // A thread projection's header names no slot: store on the variable
-        // it projects. ROUND 3: an owner's binding takes the write first.
+        // A thread projection's header names no slot: this owner's binding
+        // takes the store, or the variable it projects.
         let Some(slot) = buf_fwd.buffer_slot() else {
-            return store_projected_runtime_binding(
-                obarray, buffers, _custom, specpdl, sym_id, checked,
+            return thread_projection::store_projected_runtime_binding(
+                obarray, buffers, owner, specpdl, sym_id, checked,
             );
         };
         debug_assert!(
@@ -6903,23 +6919,6 @@ fn store_runtime_binding(
 
     obarray.set_symbol_value_id(sym_id, value);
     None
-}
-
-/// [`store_runtime_binding`] of a thread-projected variable: the same store,
-/// on the cell revealed as the variable it projects.
-#[cold]
-#[inline(never)]
-fn store_projected_runtime_binding(
-    obarray: &mut Obarray,
-    buffers: &mut BufferManager,
-    custom: &CustomManager,
-    specpdl: &[SpecBinding],
-    sym_id: SymId,
-    checked: ForwardChecked,
-) -> Option<crate::buffer::BufferId> {
-    obarray.with_revealed_projection(sym_id, |obarray| {
-        store_runtime_binding(obarray, buffers, custom, specpdl, sym_id, checked)
-    })
 }
 
 /// Map the buffer module's typed predicate failure into GNU-compatible Lisp
@@ -7136,14 +7135,14 @@ pub(crate) fn check_forwarded_store(
 pub(crate) fn set_runtime_binding(
     obarray: &mut Obarray,
     buffers: &mut BufferManager,
-    custom: &CustomManager,
+    owner: Option<&mut owner_bindings::OwnerSlab>,
     specpdl: &[SpecBinding],
     sym_id: SymId,
     value: Value,
 ) -> Result<Option<crate::buffer::BufferId>, Flow> {
     let checked = check_forwarded_store(obarray, buffers, specpdl, sym_id, value)?;
     Ok(store_runtime_binding(
-        obarray, buffers, custom, specpdl, sym_id, checked,
+        obarray, buffers, owner, specpdl, sym_id, checked,
     ))
 }
 
@@ -7395,7 +7394,7 @@ impl Context {
                 store_runtime_binding(
                     obarray,
                     &mut self.buffers,
-                    &self.custom,
+                    self.owner.slab_mut(),
                     &self.specpdl,
                     sym_id,
                     checked,

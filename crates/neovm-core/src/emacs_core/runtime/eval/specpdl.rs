@@ -398,12 +398,16 @@ impl Context {
                 }
                 SpecBinding::LoadsInProgress { len } => self.loads_in_progress.truncate(len),
                 SpecBinding::RequireStack { len } => self.require_stack.truncate(len),
+                SpecBinding::NativeUnwind { action } => {
+                    if let NativeUnwindAction::OwnerBinding(binding) = action {
+                        self.discard_owner_binding(binding);
+                    }
+                }
                 SpecBinding::GcRoot { .. }
                 | SpecBinding::Backtrace1 { .. }
                 | SpecBinding::Backtrace2 { .. }
                 | SpecBinding::BacktraceNative { .. }
                 | SpecBinding::UnwindProtect { .. }
-                | SpecBinding::NativeUnwind { .. }
                 | SpecBinding::Nop => {}
             }
         }
@@ -576,7 +580,7 @@ impl Context {
                         store_runtime_binding(
                             obarray,
                             &mut self.buffers,
-                            &self.custom,
+                            self.owner.slab_mut(),
                             &self.specpdl,
                             resolved,
                             checked,
@@ -1281,6 +1285,7 @@ impl Context {
             LexicalEnv,
             Let,
             LetLocal,
+            Owner(super::owner_bindings::OwnerBindingRef),
         }
         let swap = match self.specpdl.get(index) {
             Some(SpecBinding::SaveExcursion {
@@ -1292,6 +1297,9 @@ impl Context {
             Some(SpecBinding::LexicalEnv { .. }) => Swap::LexicalEnv,
             Some(SpecBinding::Let { .. } | SpecBinding::LetDefault { .. }) => Swap::Let,
             Some(SpecBinding::LetLocal { .. }) => Swap::LetLocal,
+            Some(SpecBinding::NativeUnwind {
+                action: NativeUnwindAction::OwnerBinding(binding),
+            }) => Swap::Owner(*binding),
             _ => return Ok(()),
         };
         match swap {
@@ -1351,6 +1359,7 @@ impl Context {
                 self.swap_let_binding_for_thread_switch(index)?;
                 self.swap_local_let_binding_for_thread_switch(index);
             }
+            Swap::Owner(binding) => self.swap_owner_binding(binding),
         }
         Ok(())
     }
@@ -1461,7 +1470,16 @@ impl Context {
                 LispExecution::Live => PoppedBindingPolicy::LispCleanup,
                 LispExecution::ExitedAlready => PoppedBindingPolicy::PureStorage,
             },
-            Some(SpecBinding::NativeUnwind { .. }) => PoppedBindingPolicy::LispCleanup,
+            // An owner binding is a `let`: storage only, unless watched.
+            Some(SpecBinding::NativeUnwind { action }) => {
+                if let NativeUnwindAction::OwnerBinding(binding) = action
+                    && !self.watchers.has_watchers(binding.symbol())
+                {
+                    PoppedBindingPolicy::PureStorage
+                } else {
+                    PoppedBindingPolicy::LispCleanup
+                }
+            }
             Some(
                 SpecBinding::LexicalEnv { .. }
                 | SpecBinding::GcRoot { .. }

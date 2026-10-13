@@ -5506,10 +5506,15 @@ fn projected_buffer_local_default(
     original_arg: Value,
 ) -> EvalResult {
     let obarray = eval.obarray();
-    obarray
-        .thread_projection_of(resolved)
-        .and_then(|projection| obarray.projected_default_value(projection))
-        .ok_or_else(|| signal(LispCondition::VoidVariable, vec![original_arg]))
+    // The default this owner binds, if it binds one (GNU reads the running
+    // thread's default cell).
+    let value = match eval.owner_default_binding(resolved) {
+        Some(binding) => binding.bound(),
+        None => obarray
+            .thread_projection_of(resolved)
+            .and_then(|projection| obarray.projected_default_value(projection)),
+    };
+    value.ok_or_else(|| signal(LispCondition::VoidVariable, vec![original_arg]))
 }
 
 // ===========================================================================

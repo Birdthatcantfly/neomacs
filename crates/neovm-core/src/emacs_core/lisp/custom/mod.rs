@@ -270,7 +270,8 @@ pub(crate) fn builtin_make_local_variable(
 }
 
 /// `make-local-variable` of a thread-projected variable: the same operation
-/// on the variable it projects, whose new arm the projection then records.
+/// on the variable it projects, whose new arm the projection then records;
+/// a new local starts at the default this owner sees.
 #[cold]
 #[inline(never)]
 fn make_projected_variable_local(
@@ -278,7 +279,13 @@ fn make_projected_variable_local(
     resolved: SymId,
     args: Vec<Value>,
 ) -> EvalResult {
-    ctx.with_revealed_projection(resolved, |ctx| builtin_make_local_variable(ctx, args))
+    let had_local = ctx.projected_local_in_current_buffer(resolved);
+    let result =
+        ctx.with_revealed_projection(resolved, |ctx| builtin_make_local_variable(ctx, args))?;
+    if !had_local {
+        ctx.owner_local_made(resolved);
+    }
+    Ok(result)
 }
 
 /// `(local-variable-p VARIABLE &optional BUFFER)` -- test if variable is local.
@@ -515,6 +522,9 @@ pub(crate) fn builtin_buffer_local_toplevel_value(
     if let Some(value) = local_toplevel_binding_value(ctx.specpdl.as_slice(), resolved, buffer_id) {
         return Ok(value);
     }
+    if let Some(value) = ctx.owner_local_toplevel_value(resolved, buffer_id) {
+        return Ok(value);
+    }
 
     super::builtins::builtin_buffer_local_value(ctx, vec![args[0], buffer_value])
 }
@@ -535,7 +545,9 @@ pub(crate) fn builtin_set_buffer_local_toplevel_value(
     let resolved = super::builtins::resolve_variable_alias_id_in_obarray(&ctx.obarray, symbol)?;
     let buffer_id =
         buffer_arg_or_current(ctx, "set-buffer-local-toplevel-value", args.get(2).copied())?;
-    if set_local_toplevel_binding_value(ctx.specpdl.as_mut_slice(), resolved, buffer_id, args[1]) {
+    if set_local_toplevel_binding_value(ctx.specpdl.as_mut_slice(), resolved, buffer_id, args[1])
+        || ctx.set_owner_local_toplevel_value(resolved, buffer_id, args[1])
+    {
         return Ok(Value::NIL);
     }
 
@@ -578,7 +590,7 @@ pub(crate) struct KillLocalVariableOutcome {
 }
 
 /// `kill-local-variable` of a thread-projected variable, on the variable it
-/// projects.
+/// projects; a binding of this owner that hid the local hides nothing now.
 #[cold]
 #[inline(never)]
 fn kill_projected_local_variable(
@@ -586,6 +598,7 @@ fn kill_projected_local_variable(
     resolved: SymId,
     args: &[Value],
 ) -> Result<KillLocalVariableOutcome, Flow> {
+    ctx.owner_local_killed(resolved);
     ctx.with_revealed_projection(resolved, |ctx| builtin_kill_local_variable_impl(ctx, args))
 }
 

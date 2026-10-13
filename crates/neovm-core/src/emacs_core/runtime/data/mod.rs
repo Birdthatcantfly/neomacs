@@ -205,19 +205,24 @@ fn set_default_internal_with(
 }
 
 /// [`store_default_internal`] of a thread-projected variable: GNU
-/// `set_default_internal`'s redirect switch (`src/data.c`) on the variable it
-/// projects, entered where the projection's per-buffer header meets that
-/// switch, after [`set_default_internal_with`]'s trapped-write phase.
+/// `set_default_internal`'s redirect switch (`src/data.c:2034-2128`) on the
+/// variable it projects, entered where the projection's per-buffer header
+/// meets that switch, after [`set_default_internal_with`]'s trapped-write
+/// phase.
 ///
 /// That phase notified the watchers once, as `set`, for the projected cell's
 /// forwarded redirect. For a localized or per-buffer variable GNU notifies
-/// there and only there. For a builtin-forwarded one GNU's `set_internal`
-/// notifies again, with BINDFLAG's operation, which this does. For a plain
-/// variable set by its own name GNU's one notification is `set_internal`'s,
-/// and the phase already made it: only `set-default` reaches a plain
-/// variable here, so its operation is that `set`. (Through an alias, GNU
-/// notifies a plain variable twice; [`set_default_internal_through_alias`]
+/// there and only there, then stores the default. For a builtin-forwarded one
+/// GNU's `set_internal` notifies again, with BINDFLAG's operation, which this
+/// does. For a plain variable set by its own name GNU's one notification is
+/// `set_internal`'s, and the phase already made it: only `set-default`
+/// reaches a plain variable here, so its operation is that `set`. (Through an
+/// alias, GNU notifies a plain variable twice; [`set_default_internal_through_alias`]
 /// reveals before that phase, so an alias never arrives here.)
+///
+/// The default this owner binds, if it binds one, takes the store; canonical
+/// storage otherwise. Watchers run on the projected cell, never on a revealed
+/// one.
 #[cold]
 #[inline(never)]
 fn store_projected_default_internal(
@@ -226,47 +231,67 @@ fn store_projected_default_internal(
     value: Value,
     bindflag: SetInternalBind,
 ) -> EvalResult {
-    use super::forward::LispFwdType;
-    use super::symbol::SymbolRedirect;
+    use super::forward::{CanonicalArm, LispFwdType};
 
-    ctx.with_revealed_projection(resolved, |ctx| {
-        let redirect = ctx
-            .obarray()
-            .get_by_id(resolved)
-            .map(|sym| sym.redirect())
-            .unwrap_or(SymbolRedirect::Plainval);
-        let falls_through_set_internal = match redirect {
-            SymbolRedirect::Plainval => true,
-            SymbolRedirect::Forwarded => !matches!(
-                ctx.obarray().forward_type(resolved),
-                Some(LispFwdType::BufferObj | LispFwdType::KboardObj)
-            ),
-            SymbolRedirect::Localized | SymbolRedirect::Varalias => false,
+    let Some(projection) = ctx.obarray().thread_projection_of(resolved) else {
+        return store_default_internal(ctx, resolved, value, bindflag);
+    };
+    let arm = projection.arm();
+    let falls_through_set_internal = match arm {
+        CanonicalArm::Plain => true,
+        CanonicalArm::Forwarded(builtin) => !matches!(
+            builtin.descriptor().ty(),
+            LispFwdType::BufferObj | LispFwdType::KboardObj
+        ),
+        CanonicalArm::Localized(_) => false,
+    };
+    if !falls_through_set_internal {
+        if ctx.owner_default_binding(resolved).is_some() {
+            let stored = super::eval::check_forwarded_store_at(
+                ctx.obarray(),
+                &ctx.buffers,
+                &ctx.specpdl,
+                resolved,
+                value,
+                ForwardStoreSite::SetDefault,
+            )?
+            .value();
+            ctx.store_owner_default(resolved, stored);
+            if bindflag == SetInternalBind::Set {
+                ctx.note_macro_expansion_mutation();
+            }
+            if ctx.runtime_binding_has_projection(resolved) {
+                let visible = ctx.visible_variable_value_or_nil_by_id(resolved);
+                ctx.publish_runtime_binding_write_by_resolved_id(resolved, visible);
+            }
+            return Ok(value);
+        }
+        return ctx.with_revealed_projection(resolved, |ctx| {
+            store_default_internal(ctx, resolved, value, bindflag)
+        });
+    }
+    if bindflag != SetInternalBind::ThreadSwitch && arm != CanonicalArm::Plain {
+        let operation = match bindflag {
+            SetInternalBind::Set if value.is_unbound() => "makunbound",
+            SetInternalBind::Set => "set",
+            SetInternalBind::Bind => "let",
+            SetInternalBind::Unbind => "unlet",
+            SetInternalBind::ThreadSwitch => unreachable!("filtered above"),
         };
-        if !falls_through_set_internal {
-            return store_default_internal(ctx, resolved, value, bindflag);
-        }
-        if bindflag != SetInternalBind::ThreadSwitch && redirect != SymbolRedirect::Plainval {
-            let operation = match bindflag {
-                SetInternalBind::Set if value.is_unbound() => "makunbound",
-                SetInternalBind::Set => "set",
-                SetInternalBind::Bind => "let",
-                SetInternalBind::Unbind => "unlet",
-                SetInternalBind::ThreadSwitch => unreachable!("filtered above"),
-            };
-            let reported_value = if value.is_unbound() {
-                Value::NIL
-            } else {
-                value
-            };
-            ctx.run_variable_watchers_by_id(resolved, &reported_value, &Value::NIL, operation)?;
-        }
-        ctx.set_internal_after_watchers(resolved, value, bindflag)?;
-        if bindflag == SetInternalBind::Set {
-            ctx.note_macro_expansion_mutation();
-        }
-        Ok(value)
-    })
+        let reported_value = if value.is_unbound() {
+            Value::NIL
+        } else {
+            value
+        };
+        ctx.run_variable_watchers_by_id(resolved, &reported_value, &Value::NIL, operation)?;
+    }
+    // GNU's `set_internal` (`src/data.c:2067`, `:2123`): the owner's binding
+    // of the channel it meets, or canonical storage.
+    ctx.set_internal_after_watchers(resolved, value, bindflag)?;
+    if bindflag == SetInternalBind::Set {
+        ctx.note_macro_expansion_mutation();
+    }
+    Ok(value)
 }
 
 /// The resolved storage half of GNU `set_default_internal`.
@@ -334,6 +359,9 @@ pub(crate) fn default_boundp(ctx: &mut Context, args: Vec<Value>) -> EvalResult 
     expect_args("default-boundp", &args, 1)?;
     let symbol = SymId::from_value(ctx, args[0])?;
     let resolved = super::builtins::resolve_variable_alias_id_in_obarray(ctx.obarray(), symbol)?;
+    if let Some(binding) = ctx.owner_default_binding(resolved) {
+        return Ok(Value::bool_val(binding.bound().is_some()));
+    }
     Ok(Value::bool_val(
         ctx.obarray().boundp_id(resolved) || ctx.obarray().is_constant_id(resolved),
     ))
@@ -374,6 +402,11 @@ pub(crate) fn default_value(ctx: &mut Context, args: Vec<Value>) -> EvalResult {
 /// binding/thread-switch code must use this projection rather than reading the
 /// static descriptor directly.
 pub(crate) fn default_value_by_id(ctx: &Context, resolved: SymId) -> Option<Value> {
+    // The default this owner binds, if it binds one (GNU's `default_value`
+    // reads the running thread's binding).
+    if let Some(binding) = ctx.owner_default_binding(resolved) {
+        return binding.bound();
+    }
     default_value_in_state(ctx.obarray(), Some(&ctx.buffers.buffer_defaults), resolved)
 }
 

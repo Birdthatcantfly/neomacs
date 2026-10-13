@@ -17,8 +17,8 @@
 //! representation re-tests the cell's redirect or word on every access, so
 //! nothing it caches outlives a reveal or a conceal.
 //!
-//! Round 3 replaces reveal for bindings: an owner-local binding will live in
-//! the owner's slot instead of the revealed cell.
+//! Dynamic bindings never reveal: they live in the binding owner's slab
+//! (`eval::owner_bindings`), and no Lisp runs while a cell is revealed.
 
 use super::cell::{ArmMut, RevealedCell};
 use super::{Obarray, SymId};

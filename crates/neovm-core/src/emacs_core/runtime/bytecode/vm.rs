@@ -6907,28 +6907,19 @@ impl<'a> Vm<'a> {
         Ok(())
     }
 
-    /// `Bvarset` of a thread-projected variable: the same assignment, with
-    /// the cell revealed as the variable it projects (the plain store first,
-    /// as the `varset` callers offer it).
-    /// ROUND 3: an owner's binding takes the write first.
+    /// `Bvarset` of a thread-projected variable: GNU's `set_internal`
+    /// (`src/data.c:1678-1831`) through the evaluator's `setq` path, where
+    /// this owner's binding takes the write first. Watchers run on the
+    /// projected cell.
     #[cold]
     #[inline(never)]
     fn assign_projected_var_id(
         &mut self,
         name_id: SymId,
-        resolved: SymId,
+        _resolved: SymId,
         value: Value,
     ) -> Result<(), Flow> {
-        let revealed = self.ctx.obarray.reveal_projection(resolved);
-        let result = if self.ctx.try_set_plain_variable(name_id, value) {
-            Ok(())
-        } else {
-            self.assign_var_id(name_id, value)
-        };
-        if let Some(revealed) = revealed {
-            let _ = self.ctx.obarray.conceal_projection(revealed);
-        }
-        result
+        self.ctx.assign_setq_dynamic_by_id(name_id, value).map(drop)
     }
 
     #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up

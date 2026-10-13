@@ -4255,8 +4255,8 @@ fn symbol_name_for_value_lt(
 }
 
 /// `variable-binding-locus` of a thread-projected variable, on the variable
-/// it projects.
-/// ROUND 3: an owner's `let` binding is not a buffer binding either.
+/// it projects: an owner's `let` binding of the default is not a buffer
+/// binding, and a buffer-local one implies the local.
 #[cold]
 #[inline(never)]
 fn projected_variable_binding_locus(

@@ -2873,7 +2873,7 @@ pub(crate) fn builtin_discard_input(
 ) -> EvalResult {
     expect_args("discard-input", &args, 0)?;
     let buffers = &mut ctx.buffers;
-    let custom = &ctx.custom;
+    let owner = ctx.owner.slab_mut();
     let specpdl = ctx.specpdl.as_slice();
     // SAFETY: this storage helper only clears a runtime variable through the
     // value/forwarder path. It never calls watchers/Lisp or writes either
@@ -2883,7 +2883,7 @@ pub(crate) fn builtin_discard_input(
             super::eval::set_runtime_binding(
                 obarray,
                 buffers,
-                custom,
+                owner,
                 specpdl,
                 intern("unread-command-events"),
                 Value::NIL,

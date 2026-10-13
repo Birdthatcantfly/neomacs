@@ -1,5 +1,6 @@
-//! Phase 0 step 2, round 2: a thread-projected variable behaves exactly like
-//! the unprojected variable for a single owner.
+//! Phase 0 step 2: a thread-projected variable behaves exactly like the
+//! unprojected variable for a single owner, its dynamic bindings living in
+//! the owner's slab.
 //!
 //! Each case runs the same script of forms in two fresh contexts, one with
 //! the variable projected and one without, and compares every result. The
@@ -219,84 +220,47 @@ fn vm_answer(ev: &mut Context, f: &ByteCodeFunction) -> String {
     }
 }
 
-fn round3_count() -> usize {
-    super::thread_projection::ROUND3_LOCALIZED_LET_LOCAL.with(std::cell::Cell::get)
-}
-
 /// The steps of one shape's script: each source form, then the bytecode.
 #[derive(Clone)]
 enum Step {
-    /// A SCRIPT entry, as written and as run.
-    Form(&'static str, String),
+    /// A SCRIPT entry, as run.
+    Form(String),
     Bytecode,
 }
 
 impl Step {
     fn run(&self, ev: &mut Context, name: &str) -> String {
         match self {
-            Step::Form(_, form) => answer(ev, form),
+            Step::Form(form) => answer(ev, form),
             Step::Bytecode => vm_answer(ev, &bytecode_script(name)),
         }
     }
 
     fn label(&self) -> &str {
         match self {
-            Step::Form(_, form) => form,
-            Step::Bytecode => "<bytecode>",
-        }
-    }
-
-    fn template(&self) -> &'static str {
-        match self {
-            Step::Form(template, _) => template,
+            Step::Form(form) => form,
             Step::Bytecode => "<bytecode>",
         }
     }
 }
 
-/// What the harness found: transparency divergences, and the steps it set
-/// aside because they `let`-bind a projected variable over a buffer-local
-/// binding of its localized arm (see [`ROUND3_LETLOCAL_PROJECTED`]).
-struct Findings {
-    divergences: Vec<String>,
-    round3: Vec<String>,
-}
-
-/// Run every step for every shape, projected and not. A step that pushes a
-/// round-3 `LetLocal` is set aside; both contexts are then rebuilt by
-/// replaying the steps kept so far, so later steps compare equal states.
-fn findings() -> Findings {
-    let mut found = Findings {
-        divergences: Vec::new(),
-        round3: Vec::new(),
-    };
+/// Run every step for every shape, projected and not, returning the
+/// divergences.
+fn divergences() -> Vec<String> {
+    let mut found = Vec::new();
     for &(shape, name) in SHAPES {
-        let steps: Vec<Step> = SCRIPT
-            .iter()
-            .zip(script_forms(name))
-            .map(|(template, form)| Step::Form(template, form))
+        let steps: Vec<Step> = script_forms(name)
+            .into_iter()
+            .map(Step::Form)
             .chain([Step::Bytecode])
             .collect();
-        let mut kept: Vec<&Step> = Vec::new();
         let mut plain = context(shape, name, false);
         let mut projected = context(shape, name, true);
         for step in &steps {
             let want = step.run(&mut plain, name);
-            let before = round3_count();
             let got = step.run(&mut projected, name);
-            if round3_count() != before {
-                found.round3.push(format!("{shape:?} {}", step.template()));
-                plain = context(shape, name, false);
-                projected = context(shape, name, true);
-                for step in &kept {
-                    step.run(&mut plain, name);
-                    step.run(&mut projected, name);
-                }
-                continue;
-            }
-            kept.push(step);
             if want != got {
-                found.divergences.push(format!(
+                found.push(format!(
                     "{shape:?} {}\n    unprojected: {want}\n    projected:   {got}",
                     step.label()
                 ));
@@ -306,53 +270,15 @@ fn findings() -> Findings {
     found
 }
 
-/// The steps set aside for round 3, by shape and step. Each `let`-binds the
-/// variable in a buffer where its localized arm has a local binding, which
-/// the unbind loop's `LetLocal` arm cannot restore through a concealed cell
-/// without a change on that gated path; round 3's owner-binding entry kind
-/// replaces this push. Round 3 empties the list.
-const ROUND3_LETLOCAL_PROJECTED: &[&str] = &[
-    "Special (save-current-buffer (set-buffer O) (let ((V 17)) V))",
-    "Special <bytecode>",
-    "Void (save-current-buffer (set-buffer O) (let ((V 17)) V))",
-    "Void <bytecode>",
-    "Free (save-current-buffer (set-buffer O) (let ((V 17)) V))",
-    "Free <bytecode>",
-    "AutoLocal (save-current-buffer (set-buffer O) (let ((V 15)) (list V (default-value 'V))))",
-    "AutoLocal (save-current-buffer (set-buffer O) (let ((V 17)) V))",
-    "AutoLocal (progn (add-variable-watcher 'V 'tpx-watch) (setq V 18) (let ((V 19)) V) (set-default 'V 22) (list V tpx-log))",
-    "AutoLocal (let ((tpx-alias-V 24)) (list V tpx-alias-V))",
-    "AutoLocal (let ((V 25)) (list V (boundp 'V)))",
-    "AutoLocal (condition-case e (let ((V \"str\")) V) (error (car e)))",
-    "AutoLocal (let ((V 70)) (funcall (lambda () (let ((V 71)) (list (condition-case nil (backtrace-eval 'V 0) (error 'err)) (condition-case nil (backtrace-eval 'V 1) (error 'err)) (condition-case nil (backtrace-eval 'V 2) (error 'err)) V)))))",
-    "AutoLocal (progn (add-variable-watcher 'V 'tpx-throw) (prog1 (catch 'tpx-w (let ((V 90)) V)) (remove-variable-watcher 'V 'tpx-throw)))",
-    "AutoLocal (condition-case e (let ((V 80)) (makunbound 'V) (boundp 'V)) (error (list 'err (car e))))",
-    "AutoLocal <bytecode>",
-    "SomeLocal (save-current-buffer (set-buffer O) (let ((V 15)) (list V (default-value 'V))))",
-    "SomeLocal (save-current-buffer (set-buffer O) (let ((V 17)) V))",
-    "SomeLocal <bytecode>",
-    "Int (save-current-buffer (set-buffer O) (let ((V 17)) V))",
-    "Int <bytecode>",
-    "Bool (save-current-buffer (set-buffer O) (let ((V 17)) V))",
-    "Bool <bytecode>",
-    "Obj (save-current-buffer (set-buffer O) (let ((V 17)) V))",
-    "Obj <bytecode>",
-];
-
 #[test]
 fn projected_variables_behave_as_unprojected() {
-    let found = findings();
+    let found = divergences();
     assert!(
-        found.divergences.is_empty(),
+        found.is_empty(),
         "{} divergences:\n{}",
-        found.divergences.len(),
-        found.divergences.join("\n")
+        found.len(),
+        found.join("\n")
     );
-    let pinned: Vec<String> = ROUND3_LETLOCAL_PROJECTED
-        .iter()
-        .map(|step| (*step).to_string())
-        .collect();
-    assert_eq!(found.round3, pinned, "the round-3 LetLocal steps changed");
 }
 
 /// GNU notifies a watched plain variable twice when `set-default` reaches
