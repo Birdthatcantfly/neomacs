@@ -110,6 +110,10 @@ fn compiled_id(callee: Value) -> u64 {
 
 #[test]
 fn direct_stack_entry_arms_after_the_tier_up_entry_and_agrees_with_it() {
+    // Asserts what a tier-up installs by the call that triggered it: the
+    // deterministic split, whatever `NEOVM_JIT_BG` the suite runs under.
+    let _bg_mode =
+        crate::emacs_core::jit::bg::TestModeScope::enter(crate::emacs_core::jit::bg::BgMode::Sync);
     crate::emacs_core::jit::compile::force_profit_gate_for_test(false);
     let mut ev = Context::new();
     let (sym, callee) = bind_fn(&mut ev, "c1-leaf-slot-adder", adder());
@@ -141,6 +145,10 @@ fn direct_stack_entry_arms_after_the_tier_up_entry_and_agrees_with_it() {
 
 #[test]
 fn retire_and_clear_disarm_the_slot_and_the_next_call_re_arms_it() {
+    // Asserts what a tier-up installs by the call that triggered it: the
+    // deterministic split, whatever `NEOVM_JIT_BG` the suite runs under.
+    let _bg_mode =
+        crate::emacs_core::jit::bg::TestModeScope::enter(crate::emacs_core::jit::bg::BgMode::Sync);
     crate::emacs_core::jit::compile::force_profit_gate_for_test(false);
     let mut ev = Context::new();
     let (sym, callee) = bind_fn(&mut ev, "c1-leaf-slot-retired", adder());
@@ -169,6 +177,10 @@ fn retire_and_clear_disarm_the_slot_and_the_next_call_re_arms_it() {
 /// does, so a 1-arg and a 2-arg call agree, interleaved, from the same slot.
 #[test]
 fn omitted_optionals_are_nil_padded_on_the_direct_entry() {
+    // Asserts what a tier-up installs by the call that triggered it: the
+    // deterministic split, whatever `NEOVM_JIT_BG` the suite runs under.
+    let _bg_mode =
+        crate::emacs_core::jit::bg::TestModeScope::enter(crate::emacs_core::jit::bg::BgMode::Sync);
     crate::emacs_core::jit::compile::force_profit_gate_for_test(false);
     let mut ev = Context::new();
     let (sym, callee) = bind_fn(
@@ -210,6 +222,10 @@ fn omitted_optionals_are_nil_padded_on_the_direct_entry() {
 /// a fresh list otherwise — from the same slot, interleaved arities.
 #[test]
 fn rest_callees_take_the_direct_entry_with_a_consed_list() {
+    // Asserts what a tier-up installs by the call that triggered it: the
+    // deterministic split, whatever `NEOVM_JIT_BG` the suite runs under.
+    let _bg_mode =
+        crate::emacs_core::jit::bg::TestModeScope::enter(crate::emacs_core::jit::bg::BgMode::Sync);
     crate::emacs_core::jit::compile::force_profit_gate_for_test(false);
     let mut ev = Context::new();
     let (sym, callee) = bind_fn(

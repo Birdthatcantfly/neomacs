@@ -128,6 +128,10 @@ fn recording_the_same_leaf_again_is_unchanged() {
 #[cfg(feature = "jit")]
 #[test]
 fn reinstalling_a_different_leaf_clears_the_jit_cache() {
+    // Asserts what a tier-up installs by the call that triggered it: the
+    // deterministic split, whatever `NEOVM_JIT_BG` the suite runs under.
+    let _bg_mode =
+        crate::emacs_core::jit::bg::TestModeScope::enter(crate::emacs_core::jit::bg::BgMode::Sync);
     use crate::emacs_core::bytecode::ByteCodeFunction;
     use crate::emacs_core::bytecode::opcode::Op;
     use crate::emacs_core::jit::cache;

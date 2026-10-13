@@ -244,6 +244,10 @@ fn spec_subr_stack_results_arity_and_signal_frame() {
 #[cfg(feature = "jit")]
 #[test]
 fn jit_spec_subr_from_bc_stack_results_and_signal_frame() {
+    // Asserts what a tier-up installs by the call that triggered it: the
+    // deterministic split, whatever `NEOVM_JIT_BG` the suite runs under.
+    let _bg_mode =
+        crate::emacs_core::jit::bg::TestModeScope::enter(crate::emacs_core::jit::bg::BgMode::Sync);
     crate::test_utils::init_test_tracing();
     crate::emacs_core::jit::compile::force_profit_gate_for_test(false);
     let mut eval = Context::new();

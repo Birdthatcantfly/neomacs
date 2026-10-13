@@ -214,6 +214,10 @@ fn run_nbody(mode: FlonumMode, probe_name: &str) -> (u64, lowering::FlonumCensus
 
 #[test]
 fn nbody_applyforces_unboxed_locally_allocates_15_floats_per_call() {
+    // Asserts what a tier-up installs by the call that triggered it: the
+    // deterministic split, whatever `NEOVM_JIT_BG` the suite runs under.
+    let _bg_mode =
+        crate::emacs_core::jit::bg::TestModeScope::enter(crate::emacs_core::jit::bg::BgMode::Sync);
     let (per_call, census) = run_nbody(FlonumMode::OpLocal, "flonum-nbody-local");
     assert_eq!(
         census.results, 26,
@@ -232,6 +236,10 @@ fn nbody_applyforces_boxed_at_every_site_allocates_27_floats_per_call() {
 
 #[test]
 fn nbody_applyforces_unboxed_resident_allocates_8_floats_per_call() {
+    // Asserts what a tier-up installs by the call that triggered it: the
+    // deterministic split, whatever `NEOVM_JIT_BG` the suite runs under.
+    let _bg_mode =
+        crate::emacs_core::jit::bg::TestModeScope::enter(crate::emacs_core::jit::bg::BgMode::Sync);
     let (per_call, census) = run_nbody(FlonumMode::Resident, "flonum-nbody-resident");
     assert_eq!(census.results, 26);
     assert_eq!(

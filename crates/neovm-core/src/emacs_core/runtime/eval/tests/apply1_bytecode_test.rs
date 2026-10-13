@@ -52,6 +52,10 @@ fn outcome(r: Result<Value, Flow>) -> String {
 
 #[test]
 fn apply1_matches_the_general_path_for_every_parameter_shape() {
+    // Asserts what a tier-up installs by the call that triggered it: the
+    // deterministic split, whatever `NEOVM_JIT_BG` the suite runs under.
+    let _bg_mode =
+        crate::emacs_core::jit::bg::TestModeScope::enter(crate::emacs_core::jit::bg::BgMode::Sync);
     crate::test_utils::init_test_tracing();
     for gc_stress in [false, true] {
         let mut ev = Context::new();
