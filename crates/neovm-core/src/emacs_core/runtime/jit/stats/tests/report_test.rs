@@ -512,6 +512,7 @@ fn jit_final_report_prints_the_bg_line_off_the_legacy_path() {
         "backend_us=0",
         "pending_probes=0",
         "osr_waits=0",
+        "osr_adopted=0",
         "refused=0",
         "native_calls_while_pending=0",
         "in_flight_at_exit=2",

@@ -590,6 +590,12 @@ impl PendingJob {
         self.leaf.as_ref().expect("a pending job holds its leaf")
     }
 
+    /// Whether the backend has published, ignoring the stress soak's
+    /// skips (a read without the side effect of [`Self::is_ready`]).
+    pub(crate) fn cell_done(&self) -> bool {
+        self.cell.is_done()
+    }
+
     /// Whether the backend has published (install it now).
     pub(crate) fn is_ready(&self) -> bool {
         if !self.cell.is_done() {
@@ -847,6 +853,10 @@ pub(crate) struct BgStats {
     /// Hot back-edge wraps that found their OSR leaf still compiling (and
     /// interpreted on without latching).
     pub(crate) osr_waits: u64,
+    /// Hot back-edge wraps that found their function's entry compile still
+    /// pending and waited on it rather than compile an OSR leaf of the
+    /// same body.
+    pub(crate) osr_adopted: u64,
     /// Heat a function gained between its request and its install (the
     /// calls it interpreted meanwhile), over the installs that know it.
     pub(crate) interp_calls_while_pending: u64,
@@ -938,7 +948,7 @@ impl BgReport {
         format!(
             "mode={} workers={} enqueued={} installed={} discarded={discarded} backend_us={} \
              backend_max_us={} queue_wait_us={} latency_hist_us[<100,<250,<500,<1ms,<2.5ms,<5ms,<10ms,>=10ms]={latency} \
-             pending_probes={} osr_waits={} refused={} interp_calls_while_pending={} native_calls_while_pending={} spec_restamps={} in_flight_at_exit={} worker_jobs={} \
+             pending_probes={} osr_waits={} osr_adopted={} refused={} interp_calls_while_pending={} native_calls_while_pending={} spec_restamps={} in_flight_at_exit={} worker_jobs={} \
              worker_skipped={} worker_panics={} worker_code_bytes={} worker_backend_max_us={} \
              worker_batches={} worker_failed_batches={} worker_published_modules_finalized={} worker_published_arena_seals={}",
             self.mode,
@@ -950,6 +960,7 @@ impl BgReport {
             self.stats.queue_wait_us,
             self.stats.pending_probes,
             self.stats.osr_waits,
+            self.stats.osr_adopted,
             self.stats.refused,
             self.stats.interp_calls_while_pending,
             self.stats.native_calls_while_pending,
@@ -1026,6 +1037,11 @@ fn bump_stats(f: impl FnOnce(&mut BgStats)) {
 /// A hot back-edge found its OSR leaf still compiling.
 pub(crate) fn note_osr_wait() {
     bump_stats(|s| s.osr_waits += 1);
+}
+
+/// A hot back-edge waited on its function's pending entry compile.
+pub(crate) fn note_osr_adopted() {
+    bump_stats(|s| s.osr_adopted += 1);
 }
 
 /// This thread's counters.
@@ -1548,6 +1564,10 @@ mod osr_pending_tests;
 #[cfg(test)]
 #[path = "bg/tests/osr_best_test.rs"]
 mod osr_best_tests;
+
+#[cfg(test)]
+#[path = "bg/tests/osr_adopt_test.rs"]
+mod osr_adopt_tests;
 
 #[cfg(test)]
 #[path = "bg/tests/upgrade_test.rs"]

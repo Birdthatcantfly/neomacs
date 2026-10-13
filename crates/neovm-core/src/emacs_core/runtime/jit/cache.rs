@@ -978,6 +978,9 @@ fn osr_lookup(ctx: *mut Context, func: &ByteCodeFunction, osr_pc: usize, id: u64
     if let Some(entry) = OSR_CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return OsrLookup::Entry(entry);
     }
+    if super::bg::pending_count() != 0 && adopt_pending_entry(id, func, live) {
+        return OsrLookup::Pending;
+    }
     // The running function's own frame is the innermost one.
     let name_hint = stats::naming_enabled()
         .then(|| callee_name_hint(ctx, id))
@@ -1034,6 +1037,47 @@ fn osr_lookup(ctx: *mut Context, func: &ByteCodeFunction, osr_pc: usize, id: u64
             OsrLookup::Entry(compiled)
         }
     }
+}
+
+/// Whether an OSR request for `id` waits on the function's pending entry
+/// compile instead of compiling the body a second time. A deferred entry
+/// tier-up leaves the activations that run meanwhile -- the one that asked
+/// first of all -- interpreting, and their loops then ask for OSR leaves
+/// of the same body: a compile a synchronous tier-up never makes, since
+/// the activation would have entered the leaf. While the entry job is
+/// unfinished the loop interprets on and asks again at its next hot wrap.
+/// A finished job is installed here and the wrap still waits: wraps count
+/// the backward branches of every frame of the interpreter, so this one
+/// may land in a short activation of the body. An activation still looping
+/// at its next wrap has proven long enough for its own OSR leaf.
+#[cold]
+#[inline(never)]
+fn adopt_pending_entry(id: u64, func: &ByteCodeFunction, ctx: &Context) -> bool {
+    COMPILED.with(|c| {
+        let Ok(mut cache) = c.try_borrow_mut() else {
+            return false;
+        };
+        match cache.get(id) {
+            Some(CacheEntry::Pending(job)) => {
+                if job.is_ready() {
+                    install_pending(&mut cache, id, Some(func.jit_runtime()), Some(ctx));
+                }
+                super::bg::note_osr_adopted();
+                true
+            }
+            _ => false,
+        }
+    })
+}
+
+/// Whether `id`'s entry compile is pending and unfinished (an OSR request
+/// waits on it, see [`adopt_pending_entry`]).
+fn entry_compile_in_flight(id: u64) -> bool {
+    COMPILED.with(|c| {
+        c.try_borrow().is_ok_and(
+            |cache| matches!(cache.get(id), Some(CacheEntry::Pending(job)) if !job.cell_done()),
+        )
+    })
 }
 
 /// `key`'s pending OSR compile: its lookup once installed (a refused
@@ -1095,7 +1139,8 @@ fn install_osr_pending(
     Some(OsrLookup::Entry(entry))
 }
 
-/// Whether `(func, osr_pc)`'s OSR compile is still running in the
+/// Whether `(func, osr_pc)`'s OSR compile -- or the function's entry
+/// compile, which an OSR request waits on -- is still running in the
 /// background: the back-edge skips its snapshot and interprets on without
 /// latching. A finished one reads `false` (the probe installs it).
 pub(crate) fn osr_compile_in_flight(func: &ByteCodeFunction, osr_pc: usize) -> bool {
@@ -1112,8 +1157,14 @@ pub(crate) fn osr_compile_in_flight(func: &ByteCodeFunction, osr_pc: usize) -> b
     });
     if running {
         super::bg::note_osr_wait();
+        return true;
     }
-    running
+    let adopted = !OSR_PENDING.with(|p| p.borrow().contains_key(&(id, osr_pc)))
+        && entry_compile_in_flight(id);
+    if adopted {
+        super::bg::note_osr_adopted();
+    }
+    adopted
 }
 
 /// Drop `id`'s pending OSR compiles (cancelling their jobs).
