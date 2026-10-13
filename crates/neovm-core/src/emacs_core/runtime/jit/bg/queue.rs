@@ -1,8 +1,15 @@
 //! The background backend's job queue (P2.4 §3.4): one process-wide
-//! priority queue (class first, then FIFO) that eval threads push into and
-//! the worker threads pop from. The eval thread holds the lock only to push
-//! (never across Lisp, a safepoint or a compile), and the GC never takes
-//! it.
+//! priority queue that eval threads push into and the worker threads pop
+//! from. The eval thread holds the lock only to push (never across Lisp, a
+//! safepoint or a compile), and the GC never takes it.
+//!
+//! Service order: class first, then the shortest job first. A job's size is
+//! its CLIF instruction count, which a backend's time follows; within a
+//! class each job is tagged at push with its virtual finish, the
+//! instructions the workers had taken by then plus its own, and the lowest
+//! tag goes first. A small job thus overtakes a large one queued before it,
+//! and a large one waits through at most its own size of later, smaller
+//! work: the tags of later pushes grow with every job taken.
 //!
 //! Bounded (`NEOVM_JIT_BG_QUEUE` jobs, `NEOVM_JIT_BG_QUEUE_INSTS` CLIF
 //! instructions): when a job does not fit, the lowest-class, newest job
@@ -36,18 +43,35 @@ pub(crate) struct BackendJob {
 
 static_assertions::assert_impl_all!(BackendJob: Send);
 
-/// Heap order: the lowest class first, then the oldest.
-struct Queued(BackendJob);
+/// A queued job and its virtual finish (see the module docs).
+struct Queued {
+    job: BackendJob,
+    finish: u64,
+}
 
 impl Queued {
+    /// Tag `job` against `taken`, the instructions the workers have taken.
+    fn new(job: BackendJob, taken: u64) -> Queued {
+        let finish = taken.saturating_add(job.insts);
+        Queued { job, finish }
+    }
+
+    /// Service order: the lowest class, then the earliest virtual finish,
+    /// then the oldest.
+    fn service_key(&self) -> (JobClass, u64, u64) {
+        (self.job.class, self.finish, self.job.seq)
+    }
+
+    /// Drop order (`admission`): the highest class, then the newest, goes
+    /// first when the queue is full.
     fn key(&self) -> (JobClass, u64) {
-        (self.0.class, self.0.seq)
+        (self.job.class, self.job.seq)
     }
 }
 
 impl PartialEq for Queued {
     fn eq(&self, other: &Self) -> bool {
-        self.key() == other.key()
+        self.service_key() == other.service_key()
     }
 }
 
@@ -61,8 +85,8 @@ impl PartialOrd for Queued {
 
 impl Ord for Queued {
     fn cmp(&self, other: &Self) -> CmpOrdering {
-        // `BinaryHeap` pops the greatest: reverse the (class, seq) order.
-        other.key().cmp(&self.key())
+        // `BinaryHeap` pops the greatest: reverse the service order.
+        other.service_key().cmp(&self.service_key())
     }
 }
 
@@ -70,6 +94,9 @@ struct PoolState {
     jobs: BinaryHeap<Queued>,
     /// CLIF instructions of the queued jobs.
     insts: u64,
+    /// CLIF instructions of every job a worker has taken: the virtual clock
+    /// that tags pushes (see the module docs).
+    taken: u64,
     /// Jobs a worker has taken and not yet finished.
     running: usize,
     /// Worker threads started.
@@ -79,6 +106,21 @@ struct PoolState {
     /// Test gate: workers take no job while it is set.
     #[cfg(test)]
     held: bool,
+}
+
+impl PoolState {
+    /// Take the next job in service order if it has at most `insts` CLIF
+    /// instructions, leasing it to the calling worker.
+    fn take_next(&mut self, insts: u64) -> Option<BackendJob> {
+        if self.jobs.peek()?.job.insts > insts {
+            return None;
+        }
+        let Queued { job, .. } = self.jobs.pop()?;
+        self.running += 1;
+        self.insts -= job.insts;
+        self.taken = self.taken.saturating_add(job.insts);
+        Some(job)
+    }
 }
 
 /// The queue and its two wake-ups: `work` for the workers, `idle` for a
@@ -96,6 +138,7 @@ pub(crate) fn pool() -> &'static Pool {
         state: Mutex::new(PoolState {
             jobs: BinaryHeap::new(),
             insts: 0,
+            taken: 0,
             running: 0,
             workers: 0,
             spawn_failed: false,
@@ -161,7 +204,7 @@ impl Pool {
         if state.jobs.len() < super::queue_cap() && state.insts < super::queue_insts_cap() {
             return true;
         }
-        state.jobs.iter().any(|queued| queued.0.class > class)
+        state.jobs.iter().any(|queued| queued.job.class > class)
     }
 
     /// The next job for a worker: blocks until there is one.
@@ -172,27 +215,31 @@ impl Pool {
             let held = state.held;
             #[cfg(not(test))]
             let held = false;
-            if !held && let Some(Queued(job)) = state.jobs.pop() {
-                state.running += 1;
-                state.insts -= job.insts;
+            if !held && let Some(job) = state.take_next(u64::MAX) {
                 return job;
             }
             state = self.work.wait(state).unwrap_or_else(|p| p.into_inner());
         }
     }
 
-    /// Take an immediately ready job without waiting. A worker with
-    /// unsealed members must flush instead of blocking for more work.
+    /// Take an immediately ready job of any size without waiting (tests).
+    #[cfg(test)]
     pub(crate) fn try_pop(&self) -> Option<BackendJob> {
+        self.try_pop_within(u64::MAX)
+    }
+
+    /// Take an immediately ready job without waiting, if the next one has
+    /// at most `insts` CLIF instructions. A worker with unsealed members
+    /// must flush instead of blocking for more work, and grows a batch only
+    /// while its first members' results are not held back long by the
+    /// later ones'.
+    pub(crate) fn try_pop_within(&self, insts: u64) -> Option<BackendJob> {
         let mut state = self.lock();
         #[cfg(test)]
         if state.held {
             return None;
         }
-        let Queued(job) = state.jobs.pop()?;
-        state.running += 1;
-        state.insts -= job.insts;
-        Some(job)
+        state.take_next(insts)
     }
 
     /// A private preloaded queue for worker protocol tests; no process
@@ -202,8 +249,9 @@ impl Pool {
         let insts = jobs.iter().map(|job| job.insts).sum();
         Pool {
             state: Mutex::new(PoolState {
-                jobs: jobs.into_iter().map(Queued).collect(),
+                jobs: jobs.into_iter().map(|job| Queued::new(job, 0)).collect(),
                 insts,
+                taken: 0,
                 running: 0,
                 workers: 0,
                 spawn_failed: false,
@@ -234,7 +282,8 @@ impl Pool {
         );
         let mut state = self.lock();
         state.insts += job.insts;
-        state.jobs.push(Queued(job));
+        let queued = Queued::new(job, state.taken);
+        state.jobs.push(queued);
     }
 
     /// A worker finished (or skipped) the job it popped.
@@ -288,3 +337,7 @@ impl Pool {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "queue/tests/order_test.rs"]
+mod order_tests;

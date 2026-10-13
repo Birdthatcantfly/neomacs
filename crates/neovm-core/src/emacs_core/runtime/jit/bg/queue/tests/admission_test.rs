@@ -14,6 +14,7 @@ fn state() -> PoolState {
     PoolState {
         jobs: BinaryHeap::new(),
         insts: 0,
+        taken: 0,
         running: 0,
         workers: 0,
         spawn_failed: false,

@@ -473,3 +473,39 @@ fn jit_worker_protocol_interval_shares_never_multiply_the_compile_budget() {
     success(&upgrade_cell, 22);
     drained(&pool);
 }
+
+#[test]
+fn jit_worker_protocol_a_large_next_job_waits_for_the_next_batch() {
+    let (small, small_cell) = job(0, constant(31), JobClass::Entry);
+    let (mut large, large_cell) = job(1, constant(32), JobClass::Entry);
+    // A real 600-instruction body is beside the point: the batch budget
+    // reads the job's recorded size.
+    large.insts = WORKER_BATCH_INSTS + 88;
+    let pool = Pool::from_jobs_for_worker_test(vec![small, large]);
+    let mut backend = WorkerBackend::new();
+    assert!(
+        serve_batch(
+            &mut backend,
+            &pool,
+            start(&pool),
+            &mut BatchHooks::default()
+        )
+        .is_none()
+    );
+    success(&small_cell, 31);
+    assert!(
+        !large_cell.is_done(),
+        "the large job does not hold back the small one's result"
+    );
+    assert!(
+        serve_batch(
+            &mut backend,
+            &pool,
+            start(&pool),
+            &mut BatchHooks::default()
+        )
+        .is_none()
+    );
+    success(&large_cell, 32);
+    drained(&pool);
+}

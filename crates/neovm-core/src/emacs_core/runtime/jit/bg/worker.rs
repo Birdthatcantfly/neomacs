@@ -30,6 +30,13 @@ use hooks::BatchHooks;
 /// Stack of a worker thread: Cranelift recursion on large functions.
 const WORKER_STACK_BYTES: usize = 16 << 20;
 
+/// CLIF instructions one batch grows to: a later job joins only while the
+/// batch stays within it. A batch publishes all its members at its seal,
+/// so each member's result waits for the rest of the batch; at about
+/// 0.3 ms of backend, this bounds that wait while tiny jobs still share a
+/// seal. A larger job is always served, alone.
+const WORKER_BATCH_INSTS: u64 = 512;
+
 /// Start worker `index`, serving `pool` for the life of the process.
 pub(super) fn spawn(index: usize, pool: &'static Pool) -> std::io::Result<()> {
     std::thread::Builder::new()
@@ -141,6 +148,7 @@ fn serve_batch<'a>(
     let mut members = Vec::with_capacity(WORKER_BATCH_LIMIT);
     let mut failure = None;
     let mut considered = 0;
+    let mut batch_insts = 0u64;
     while let Some(popped) = current.take() {
         considered += 1;
         if popped.job.cell.is_cancelled() {
@@ -162,8 +170,9 @@ fn serve_batch<'a>(
                 cell,
                 class,
                 seq,
-                ..
+                insts,
             } = job;
+            batch_insts = batch_insts.saturating_add(insts);
             if super::stress_enabled() {
                 std::thread::sleep(std::time::Duration::from_micros(
                     super::stress_mix(seq) % 2_001,
@@ -222,7 +231,9 @@ fn serve_batch<'a>(
         if considered >= WORKER_BATCH_LIMIT {
             break;
         }
-        current = pool.try_pop().map(|job| PoppedJob::new(pool, job));
+        current = pool
+            .try_pop_within(WORKER_BATCH_INSTS.saturating_sub(batch_insts))
+            .map(|job| PoppedJob::new(pool, job));
     }
     if members.is_empty() {
         // All selected jobs were already cancelled; Empty Drop does no reset.

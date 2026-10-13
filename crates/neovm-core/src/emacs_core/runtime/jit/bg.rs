@@ -1077,7 +1077,8 @@ fn spawn_worker(index: usize, pool: &'static queue::Pool) -> std::io::Result<()>
     }
 }
 
-/// Process-unique job sequence numbers (FIFO order within a class).
+/// Process-unique job sequence numbers (the queue's last tie-break: equal
+/// class and virtual finish go oldest first).
 static NEXT_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Hand `payload` to a worker under `class` and record the job for the

@@ -57,7 +57,7 @@ impl PoolState {
                 .iter()
                 .position(|queued| queued.key() == victim)
                 .expect("the victim is queued");
-            let Queued(dropped) = jobs.swap_remove(at);
+            let Queued { job: dropped, .. } = jobs.swap_remove(at);
             self.jobs = BinaryHeap::from(jobs);
             self.insts -= dropped.insts;
             dropped.cell.publish_dropped();
@@ -65,7 +65,8 @@ impl PoolState {
         // The remaining-capacity comparison (including the empty queue case)
         // proves this addition fits in the instruction cap and therefore u64.
         self.insts += job.insts;
-        self.jobs.push(Queued(job));
+        let queued = Queued::new(job, self.taken);
+        self.jobs.push(queued);
         Ok(())
     }
 }
