@@ -37,7 +37,7 @@ fn memory_telemetry_unsupported_allocator_does_not_claim_zero_bytes() {
 #[test]
 fn memory_telemetry_records_all_due_reasons_without_advancing_pacing() {
     let mut heap = TaggedHeap::new();
-    heap.generational.enabled = true;
+    heap.set_generational_enabled(true);
     heap.bootstrap_collected = true;
     heap.generational.old_bytes_after_major = 32 * 1024 * 1024;
     heap.generational.pacing_knobs = knobs::GenerationalPacingKnobs {
@@ -56,7 +56,7 @@ fn memory_telemetry_records_all_due_reasons_without_advancing_pacing() {
         vec!["memory_full", "old_growth", "minor_limit", "stress_stride"]
     );
     assert_eq!(heap.current_mutator_gc().pacing, before);
-    heap.generational.enabled = false;
+    heap.set_generational_enabled(false);
     assert_eq!(
         selection_reasons(&heap, true, true),
         vec!["generational_disabled"]

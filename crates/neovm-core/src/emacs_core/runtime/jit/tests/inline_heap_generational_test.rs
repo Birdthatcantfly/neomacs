@@ -105,7 +105,7 @@ fn heapless_runtime_lowering_does_not_install_a_fallback_heap() {
         #[cfg(debug_assertions)]
         let before = crate::tagged::gc::heap_generational_mode_reads_for_test();
         #[cfg(debug_assertions)]
-        let gates_before = super::heap_inline::GENERATIONAL_CONS_TESTS_EMITTED
+        let gates_before = super::heap_inline::GENERATIONAL_CARD_MARKS_EMITTED
             .load(std::sync::atomic::Ordering::Relaxed);
         let leaf = lower_leaf(&[Op::StackRef(1), Op::StackRef(1), op, Op::Return], &[], 2)
             .expect("heapless store lowering preserves the legacy shape");
@@ -118,7 +118,7 @@ fn heapless_runtime_lowering_does_not_install_a_fallback_heap() {
                 "the store gate must query the heapless generational mode"
             );
             assert_eq!(
-                super::heap_inline::GENERATIONAL_CONS_TESTS_EMITTED
+                super::heap_inline::GENERATIONAL_CARD_MARKS_EMITTED
                     .load(std::sync::atomic::Ordering::Relaxed),
                 gates_before,
                 "heapless lowering must select the legacy store gate"
@@ -152,14 +152,18 @@ fn pure_runtime_lowering_does_not_read_an_owner_dropped_context_heap() {
     assert!(!crate::tagged::gc::tagged_heap_is_installed());
 }
 
+/// Card-mark S3: an old owner's compiled store marks its card inline, with
+/// no shim and no log, every time; the next minor finds the young child
+/// through the card and cleans it.
 #[test]
-fn old_unlogged_cons_stores_take_one_shim_per_cycle() {
+fn old_cons_stores_mark_their_card_inline() {
     let mut context = context(true);
     for (index, op) in [Op::Setcar, Op::Setcdr].into_iter().enumerate() {
         let owner = Value::cons(Value::NIL, Value::NIL);
         context.assign("u34-inline-owner", owner);
         context.gc_collect_exact();
         assert!(context.tagged_heap.value_is_old_for_test(owner));
+        assert!(!context.tagged_heap.owner_card_is_dirty_for_test(owner));
         let leaf = compile_bytecode_function(&store_function(op)).expect("cons store compiles");
 
         for cycle in 0..2 {
@@ -169,11 +173,10 @@ fn old_unlogged_cons_stores_take_one_shim_per_cycle() {
             assert!(!context.tagged_heap.value_is_old_for_test(child));
             let before = cons_shims();
             assert_eq!(native(&mut context, &leaf, &[owner, child]), child);
-            assert_eq!(cons_shims() - before, 1, "the first store claims the owner");
-            assert!(context.tagged_heap.is_remembered_for_test(owner));
-            assert_eq!(context.tagged_heap.remembered_log_len_for_test(), 1);
             assert_eq!(native(&mut context, &leaf, &[owner, child]), child);
-            assert_eq!(cons_shims() - before, 1, "the second store stays inline");
+            assert_eq!(cons_shims(), before, "card marks never take the shim");
+            assert!(context.tagged_heap.owner_card_is_dirty_for_test(owner));
+            assert_eq!(context.tagged_heap.remembered_log_len_for_test(), 0);
             context.restore_specpdl_roots(roots);
 
             minor(&mut context);
@@ -188,8 +191,39 @@ fn old_unlogged_cons_stores_take_one_shim_per_cycle() {
                 Value::make_int(71 + index as i64 + cycle)
             );
             assert!(context.tagged_heap.value_is_old_for_test(stored));
-            assert_eq!(context.tagged_heap.remembered_log_len_for_test(), 0);
+            assert!(!context.tagged_heap.owner_card_is_dirty_for_test(owner));
         }
+    }
+}
+
+/// NEOVM_GC_CARD_TAG_FILTER: off, an unproven immediate store dirties the
+/// owner's card (harmless); on, its fixnum tag test skips the mark.
+#[test]
+fn card_tag_filter_skips_marks_for_immediates_only() {
+    let mut context = context(true);
+    for filter in [false, true] {
+        let leaf = crate::tagged::gc::with_card_tag_filter_for_test(filter, || {
+            compile_bytecode_function(&store_function(Op::Setcar)).expect("cons store compiles")
+        });
+        let owner = Value::cons(Value::NIL, Value::NIL);
+        context.assign("u34-inline-owner", owner);
+        context.gc_collect_exact();
+        assert!(!context.tagged_heap.owner_card_is_dirty_for_test(owner));
+        let immediate = Value::make_int(-17);
+        assert_eq!(native(&mut context, &leaf, &[owner, immediate]), immediate);
+        assert_eq!(
+            context.tagged_heap.owner_card_is_dirty_for_test(owner),
+            !filter,
+            "filter {filter}"
+        );
+        let roots = context.save_specpdl_roots();
+        let child = Value::cons(Value::T, Value::NIL);
+        context.push_specpdl_root(child);
+        assert_eq!(native(&mut context, &leaf, &[owner, child]), child);
+        assert!(context.tagged_heap.owner_card_is_dirty_for_test(owner));
+        context.restore_specpdl_roots(roots);
+        minor(&mut context);
+        assert!(context.tagged_heap.value_is_old_for_test(owner.cons_car()));
     }
 }
 
@@ -221,7 +255,7 @@ fn young_cons_and_fixnum_or_character_stores_stay_inline() {
 }
 
 #[test]
-fn bare_uninterned_symbol_store_logs_owner_once_before_a_minor() {
+fn bare_uninterned_symbol_store_marks_the_owner_card_before_a_minor() {
     let mut context = context(true);
     context
         .eval_str(
@@ -242,31 +276,16 @@ fn bare_uninterned_symbol_store_logs_owner_once_before_a_minor() {
     assert!(key.is_bare_symbol());
     assert!(!key.is_heap_object(), "the symbol needs side-table marking");
     assert!(context.tagged_heap.value_is_old_for_test(owner));
-    assert!(!context.tagged_heap.is_remembered_for_test(owner));
-    let logs_before = context.tagged_heap.remembered_log_len_for_test();
+    assert!(!context.tagged_heap.owner_card_is_dirty_for_test(owner));
     let before = cons_shims();
     assert_eq!(native(&mut context, &leaf, &[owner, key]), key);
     // A minor conservatively retains every symbol id, so the weak-key check
-    // below cannot prove logging. Observe the owner's mutator log directly.
+    // below cannot prove the barrier ran. Observe the owner's card directly.
     assert!(
-        context.tagged_heap.is_remembered_for_test(owner),
-        "storing a bare symbol must log the old owner"
+        context.tagged_heap.owner_card_is_dirty_for_test(owner),
+        "storing a bare symbol must dirty the old owner's card"
     );
-    assert_eq!(
-        context.tagged_heap.remembered_log_len_for_test(),
-        logs_before + 1
-    );
-    assert_eq!(cons_shims() - before, 1);
-    assert_eq!(native(&mut context, &leaf, &[owner, key]), key);
-    assert_eq!(
-        context.tagged_heap.remembered_log_len_for_test(),
-        logs_before + 1
-    );
-    assert_eq!(
-        cons_shims() - before,
-        1,
-        "an already logged owner stays inline"
-    );
+    assert_eq!(cons_shims(), before, "the card mark stays inline");
     context.assign("u34-inline-key", Value::NIL);
     minor(&mut context);
     assert_eq!(owner.cons_car(), key);
@@ -290,7 +309,7 @@ fn bare_uninterned_symbol_store_logs_owner_once_before_a_minor() {
 fn legacy_cons_store_compilation_emits_no_generational_test() {
     use std::sync::atomic::Ordering;
     let mut context = context(false);
-    let before = super::heap_inline::GENERATIONAL_CONS_TESTS_EMITTED.load(Ordering::Relaxed);
+    let before = super::heap_inline::GENERATIONAL_CARD_MARKS_EMITTED.load(Ordering::Relaxed);
     for op in [Op::Setcar, Op::Setcdr] {
         let leaf = compile_bytecode_function(&store_function(op)).expect("legacy store compiles");
         let roots = context.save_specpdl_roots();
@@ -303,7 +322,7 @@ fn legacy_cons_store_compilation_emits_no_generational_test() {
         context.restore_specpdl_roots(roots);
     }
     assert_eq!(
-        super::heap_inline::GENERATIONAL_CONS_TESTS_EMITTED.load(Ordering::Relaxed),
+        super::heap_inline::GENERATIONAL_CARD_MARKS_EMITTED.load(Ordering::Relaxed),
         before
     );
 }
@@ -380,10 +399,9 @@ fn blv_default_and_current_cell_stores_remember_young_children() {
         context.push_specpdl_root(child);
         let before = VARSET_SHIM_CALLS.with(|count| count.get());
         assert_eq!(native(&mut context, &leaf, &[child]), child);
-        assert_eq!(VARSET_SHIM_CALLS.with(|count| count.get()) - before, 1);
-        assert!(context.tagged_heap.is_remembered_for_test(owner));
         assert_eq!(native(&mut context, &leaf, &[child]), child);
-        assert_eq!(VARSET_SHIM_CALLS.with(|count| count.get()) - before, 1);
+        assert_eq!(VARSET_SHIM_CALLS.with(|count| count.get()), before);
+        assert!(context.tagged_heap.owner_card_is_dirty_for_test(owner));
         context.restore_specpdl_roots(roots);
 
         minor(&mut context);
@@ -431,21 +449,15 @@ fn blv_bind_and_restore_use_the_cons_gate_across_an_explicit_major() {
         let bind_before = VARBIND_SHIM_CALLS.with(|count| count.get());
         let unbind_before = UNBIND_SHIM_CALLS.with(|count| count.get());
         assert_eq!(native(&mut context, &leaf, &[child]), restored);
-        assert_eq!(
-            VARBIND_SHIM_CALLS.with(|count| count.get()) - bind_before,
-            1
-        );
-        // The body's major reset the unlogged bit: restoring a pointer value
-        // must log again, even though the earlier bind logged the same owner.
-        assert_eq!(
-            UNBIND_SHIM_CALLS.with(|count| count.get()) - unbind_before,
-            1
-        );
+        // Bind and restore both mark the owner's card inline; the body's
+        // major cleans every card between them, so the restore re-marks it.
+        assert_eq!(VARBIND_SHIM_CALLS.with(|count| count.get()), bind_before);
+        assert_eq!(UNBIND_SHIM_CALLS.with(|count| count.get()), unbind_before);
         assert_eq!(context.gc_count, collections + 1);
         assert_eq!(context.specpdl.len(), bindings);
         assert_eq!(context.jit_bind_stack.len(), bind_stack);
         assert_eq!(owner.cons_cdr(), restored);
-        assert!(context.tagged_heap.is_remembered_for_test(owner));
+        assert!(context.tagged_heap.owner_card_is_dirty_for_test(owner));
         context.restore_specpdl_roots(roots);
         minor(&mut context);
         assert_eq!(
@@ -572,20 +584,29 @@ fn opt_store_leaf(ops: Vec<Op>) -> (CompiledLeaf, String) {
     (leaf, clif.into_iter().next().unwrap())
 }
 
-fn unlogged_old_owner(context: &mut Context) -> Value {
+fn clean_old_owner(context: &mut Context) -> Value {
     let owner = Value::cons(Value::NIL, Value::NIL);
     context.assign("u34-opt-owner", owner);
     context.gc_collect_exact();
     assert!(context.tagged_heap.value_is_old_for_test(owner));
-    assert!(!context.tagged_heap.is_remembered_for_test(owner));
+    assert!(!context.tagged_heap.owner_card_is_dirty_for_test(owner));
     owner
 }
 
+/// The GEN1 card marks in CLIF text: the owner shifted down to its card
+/// (`vN = ushr.i64 owner, vK  ; vK = 9`).
+fn card_marks(clif: &str) -> usize {
+    let shift = format!(" = {}", crate::tagged::gc::CARD_SHIFT);
+    clif.lines()
+        .filter(|line| line.contains(" = ushr") && line.trim_end().ends_with(&shift))
+        .count()
+}
+
 /// The optimizer's own checked `1+` result is a fixnum on every path that
-/// reaches the store, so GEN1 emits no remembered-set filter there. A float
+/// reaches the store, so GEN1 emits no card mark there. A float
 /// or overflowing input leaves through the checked deopt before any store.
 #[test]
-fn gen1_optimized_fixnum_store_needs_no_remembered_set_filter() {
+fn gen1_optimized_fixnum_store_needs_no_card_mark() {
     let mut context = context(true);
     let (leaf, clif) = opt_store_leaf(vec![
         Op::StackRef(1),
@@ -594,11 +615,12 @@ fn gen1_optimized_fixnum_store_needs_no_remembered_set_filter() {
         Op::Setcar,
         Op::Return,
     ]);
-    assert!(
-        !clif.contains("atomic_load"),
-        "a proven fixnum needs no unlogged-bit test:\n{clif}"
+    assert_eq!(
+        card_marks(&clif),
+        0,
+        "a proven fixnum needs no card mark:\n{clif}"
     );
-    let owner = unlogged_old_owner(&mut context);
+    let owner = clean_old_owner(&mut context);
     let before = cons_shims();
     assert_eq!(
         native(&mut context, &leaf, &[owner, Value::make_int(41)]),
@@ -606,7 +628,7 @@ fn gen1_optimized_fixnum_store_needs_no_remembered_set_filter() {
     );
     assert_eq!(owner.cons_car(), Value::make_int(42));
     assert_eq!(cons_shims(), before);
-    assert!(!context.tagged_heap.is_remembered_for_test(owner));
+    assert!(!context.tagged_heap.owner_card_is_dirty_for_test(owner));
 
     let float = context.eval_str("1.5").expect("float");
     for input in [float, Value::make_int(Value::MOST_POSITIVE_FIXNUM)] {
@@ -622,7 +644,7 @@ fn gen1_optimized_fixnum_store_needs_no_remembered_set_filter() {
 
 /// Each store's young child must survive a minor collection through its old
 /// owner. Fresh conses and branch-refined conses are proven never fixnums:
-/// the dynamic tag test goes, the unlogged-bit test that remembers stays.
+/// the dynamic tag test goes, the card mark that remembers stays.
 #[test]
 fn gen1_optimized_heap_value_stores_remember_their_young_children() {
     let mut context = context(true);
@@ -647,18 +669,14 @@ fn gen1_optimized_heap_value_stores_remember_their_young_children() {
     ];
     for (index, ops) in [fresh, refined].into_iter().enumerate() {
         let (leaf, clif) = opt_store_leaf(ops);
-        assert_eq!(
-            clif.matches("atomic_load").count(),
-            1,
-            "the unlogged-bit test stays:\n{clif}"
-        );
+        assert_eq!(card_marks(&clif), 1, "the card mark stays:\n{clif}");
         assert!(
             !clif
                 .lines()
                 .any(|line| line.contains("band") && line.trim_end().ends_with(" = 3")),
             "no fixnum tag test remains:\n{clif}"
         );
-        let owner = unlogged_old_owner(&mut context);
+        let owner = clean_old_owner(&mut context);
         let roots = context.save_specpdl_roots();
         let marker = Value::make_int(90 + index as i64);
         let child = Value::cons(marker, Value::NIL);
@@ -666,10 +684,9 @@ fn gen1_optimized_heap_value_stores_remember_their_young_children() {
         assert!(!context.tagged_heap.value_is_old_for_test(child));
         let before = cons_shims();
         native(&mut context, &leaf, &[owner, child]);
-        assert_eq!(cons_shims() - before, 1, "the first store logs the owner");
-        assert!(context.tagged_heap.is_remembered_for_test(owner));
         native(&mut context, &leaf, &[owner, child]);
-        assert_eq!(cons_shims() - before, 1, "a logged owner stays inline");
+        assert_eq!(cons_shims(), before, "card marks stay inline");
+        assert!(context.tagged_heap.owner_card_is_dirty_for_test(owner));
         context.restore_specpdl_roots(roots);
 
         minor(&mut context);
@@ -684,8 +701,8 @@ fn gen1_optimized_heap_value_stores_remember_their_young_children() {
     }
 }
 
-/// A proven fixnum makes no old-to-young edge, so GEN1 emits no remembered-set
-/// filter for it. The store still overwrites a reference a concurrent mark may
+/// A proven fixnum makes no old-to-young edge, so GEN1 emits no card mark
+/// for it. The store still overwrites a reference a concurrent mark may
 /// need: the shared owner window must send it to the shim, which logs the old
 /// car as the SATB pre-image. GEN0 compiles the same leaf without the fact.
 #[test]

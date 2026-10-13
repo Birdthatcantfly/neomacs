@@ -30,6 +30,32 @@ const CHUNK_CARD_WORDS: usize = CHUNK_CARDS / size_of::<u64>();
 pub(crate) const CARD_CLEAN: u8 = 0;
 pub(crate) const CARD_DIRTY: u8 = 1;
 
+/// Byte offset, from a `*const TaggedHeap`, of the published card-table base
+/// (one unaligned native-endian word in byte Cells after the exclusion words).
+#[cfg_attr(not(feature = "jit"), allow(dead_code))]
+pub(crate) const HEAP_JIT_CARD_TABLE: usize =
+    std::mem::offset_of!(super::TaggedHeap, card_table_base_0);
+
+const _: () = {
+    let offsets = [
+        std::mem::offset_of!(super::TaggedHeap, card_table_base_0),
+        std::mem::offset_of!(super::TaggedHeap, card_table_base_1),
+        std::mem::offset_of!(super::TaggedHeap, card_table_base_2),
+        std::mem::offset_of!(super::TaggedHeap, card_table_base_3),
+        std::mem::offset_of!(super::TaggedHeap, card_table_base_4),
+        std::mem::offset_of!(super::TaggedHeap, card_table_base_5),
+        std::mem::offset_of!(super::TaggedHeap, card_table_base_6),
+        std::mem::offset_of!(super::TaggedHeap, card_table_base_7),
+    ];
+    let mut byte = 0;
+    while byte < offsets.len() {
+        assert!(offsets[byte] == HEAP_JIT_CARD_TABLE + byte);
+        byte += 1;
+    }
+    // The base follows the exclusion words, so no older offset moved.
+    assert!(HEAP_JIT_CARD_TABLE == super::HEAP_JIT_EXCLUSION_LO + 40);
+};
+
 /// The card of an owner address. Total: any address names exactly one card.
 #[inline(always)]
 pub(crate) const fn card_index(owner_addr: usize) -> usize {
@@ -58,6 +84,11 @@ impl CardTable {
         let bytes = NonNull::new(raw.cast::<AtomicU8>())
             .unwrap_or_else(|| alloc::handle_alloc_error(layout));
         Self { bytes }
+    }
+
+    /// The table's fixed address, which compiled cons stores index.
+    pub(crate) fn base_addr(&self) -> usize {
+        self.bytes.as_ptr() as usize
     }
 
     #[inline(always)]
@@ -100,6 +131,25 @@ impl CardTable {
             return None;
         }
         Some(ChunkCards(std::array::from_fn(word)))
+    }
+
+    /// Clean every card of the 64 KiB chunk at CHUNK_BASE when one is
+    /// dirty. Collector side, with every mutator stopped.
+    #[inline]
+    pub(crate) fn clear_chunk(&self, chunk_base: usize) {
+        if self.dirty_chunk(chunk_base).is_none() {
+            return;
+        }
+        // SAFETY: as in `dirty_chunk`; no mutator runs, so no store races.
+        let words = unsafe {
+            self.bytes
+                .as_ptr()
+                .add(card_index(chunk_base))
+                .cast::<u64>()
+        };
+        for index in 0..CHUNK_CARD_WORDS {
+            unsafe { words.add(index).write(0) };
+        }
     }
 
     /// Collector side, with every mutator stopped.

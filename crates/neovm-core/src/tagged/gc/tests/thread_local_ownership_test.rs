@@ -92,7 +92,7 @@ fn gc_tls_hash_activation_follows_real_launch_join_and_termination() {
     for generational in [false, true] {
         for claims in [false, true] {
             let mut heap = heap_with_hash_claims(claims);
-            heap.generational.enabled = generational;
+            heap.set_generational_enabled(generational);
             set_tagged_heap(&mut heap);
             let owner = heap.alloc_hash_table(LispHashTable::new(HashTableTest::Eq));
             assert!(!concurrent_hash_mutation_active());

@@ -1,5 +1,6 @@
 //! Card-mark S1: every logged GEN1 owner keeps a dirty card until the
-//! stop-all reset that also clears its logged bit.
+//! stop-all reset that also clears its logged bit. S3: a cons store only
+//! marks its owner's card, which the reset cleans with every cons card.
 
 use super::card_table::{CARD_INDEX_MASK, CARD_SHIFT, CardTable, card_index};
 use super::*;
@@ -30,7 +31,7 @@ impl Drop for ScratchRoots {
 
 fn verified_heap() -> TaggedHeap {
     let mut heap = TaggedHeap::new();
-    heap.generational.enabled = true;
+    heap.set_generational_enabled(true);
     heap.generational.verify = true;
     heap.partition_dump = false;
     heap.dump_blackened = false;
@@ -148,7 +149,12 @@ fn logged_owner_keeps_a_dirty_card_until_the_reset(class: OwnerClass) {
 
     let child = heap.alloc_string(LispString::from_utf8("card-young-child"));
     store_young_child(owner, class, child);
-    assert_eq!(heap.current_mutator_gc().remset, [owner], "{class:?}");
+    // S3: a cons store marks the card alone; slot owners still log.
+    let logged: &[TaggedValue] = match class {
+        OwnerClass::Cons => &[],
+        OwnerClass::ArenaVector | OwnerClass::BoxHashTable => &[owner],
+    };
+    assert_eq!(heap.current_mutator_gc().remset, logged, "{class:?}");
     assert!(heap.owner_card_is_dirty(card_addr(owner)), "{class:?}");
 
     // Verify mode checks every logged owner's card before promotion.
@@ -192,11 +198,11 @@ fn verify_mode_rejects_a_logged_owner_with_a_clean_card() {
     let mut heap = verified_heap();
     set_tagged_heap(&mut heap);
     let roots = ScratchRoots::new();
-    let owner = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
+    let owner = heap.alloc_vector(vec![TaggedValue::NIL]);
     roots.keep(owner);
     minor(&mut heap, &[owner]);
     let child = heap.alloc_cons(TaggedValue::T, TaggedValue::NIL);
-    store_young_child(owner, OwnerClass::Cons, child);
+    store_young_child(owner, OwnerClass::ArenaVector, child);
     heap.card_table()
         .expect("logging built the table")
         .clear(card_addr(owner));
@@ -212,10 +218,12 @@ fn verify_mode_rejects_a_logged_owner_with_a_clean_card() {
     assert!(message.contains("clean card"), "{message}");
 }
 
+/// A GEN0 heap marks no card: under a GEN1 environment the constructor
+/// still installs a table, which GEN0 stores must leave clean.
 #[test]
-fn gen0_heap_never_builds_a_card_table() {
+fn gen0_heap_never_marks_a_card() {
     let mut heap = TaggedHeap::new();
-    heap.generational.enabled = false;
+    heap.set_generational_enabled(false);
     heap.publish_barrier_window();
     set_tagged_heap(&mut heap);
     let roots = ScratchRoots::new();
@@ -224,7 +232,7 @@ fn gen0_heap_never_builds_a_card_table() {
     heap.collect_exact(std::iter::once(owner));
     let child = heap.alloc_cons(TaggedValue::T, TaggedValue::NIL);
     store_young_child(owner, OwnerClass::ArenaVector, child);
-    assert!(heap.card_table().is_none());
+    assert!(!heap.owner_card_is_dirty(card_addr(owner)));
 }
 
 /// S2: the minor traces old owners through their dirty cards, not the R log.
@@ -251,7 +259,10 @@ fn minor_traces_every_old_cell_of_a_dirty_card() {
     // An unbarriered store into the neighbour: only the shared card covers it.
     let hidden_child = heap.alloc_string(LispString::from_utf8("card-only-child"));
     unsafe { (*(neighbour.xcons_ptr() as *mut ConsCell)).set_car(hidden_child) };
-    assert_eq!(heap.current_mutator_gc().remset, [logged]);
+    assert!(
+        heap.current_mutator_gc().remset.is_empty(),
+        "cons stores only mark"
+    );
 
     // The verifying minor would panic if the neighbour's child were missed.
     minor(&mut heap, &[logged, neighbour]);

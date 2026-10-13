@@ -89,9 +89,14 @@ fn gen1_unobserved_old_owners_remember_young_children_without_history() {
                 0,
                 "an unobserved GEN1 owner records no history: {kind:?}"
             );
+            // Conses dirty their card; other owners log in the remembered set.
             assert!(
-                context.tagged_heap.is_remembered_for_test(owner),
-                "the remembered-set barrier still runs: {kind:?}"
+                if owner.is_cons() {
+                    context.tagged_heap.owner_card_is_dirty_for_test(owner)
+                } else {
+                    context.tagged_heap.is_remembered_for_test(owner)
+                },
+                "the generational barrier still runs: {kind:?}"
             );
             assert!(!is_observed(owner.bits()), "the store is not a read");
             context.restore_specpdl_roots(child_roots);

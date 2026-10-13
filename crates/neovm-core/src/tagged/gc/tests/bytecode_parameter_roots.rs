@@ -66,7 +66,7 @@ fn collect(heap: &mut TaggedHeap, owner: TaggedValue, collection: Collection) {
 fn independent_parameter_child_survives(collection: Collection) {
     crate::test_utils::init_test_tracing();
     let mut heap = TaggedHeap::new();
-    heap.generational.enabled = true;
+    heap.set_generational_enabled(true);
     heap.publish_barrier_window();
     set_tagged_heap(&mut heap);
     let roots = ScratchRoots::new();

@@ -24,7 +24,7 @@ impl Drop for ScratchRoots {
 
 fn weak_symbol_key_survives_full_collections(mapped: bool, with_position: bool) {
     let mut heap = TaggedHeap::new();
-    heap.generational.enabled = false;
+    heap.set_generational_enabled(false);
     set_tagged_heap(&mut heap);
     let roots = ScratchRoots::new();
     // Register a real image span so the first full cycle blackens the partition.

@@ -6,7 +6,7 @@ use super::*;
 #[test]
 fn symbol_cons_stores_do_not_install_a_heap() {
     let mut heap = TaggedHeap::new();
-    heap.generational.enabled = false;
+    heap.set_generational_enabled(false);
     set_tagged_heap(&mut heap);
     let owner = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
     clear_tagged_heap_if_installed(&heap);
@@ -44,7 +44,7 @@ fn assert_published_windows(heap: &TaggedHeap, ordinary: BarrierWindow) {
 fn generational_cons_protocol_window_preserves_disabled_window_transitions() {
     for enabled in [false, true] {
         let mut heap = Box::new(TaggedHeap::new());
-        heap.generational.enabled = enabled;
+        heap.set_generational_enabled(enabled);
         heap.publish_barrier_window();
         set_tagged_heap(&mut heap);
         assert_published_windows(&heap, BarrierWindow::NONE);
@@ -65,12 +65,12 @@ fn generational_cons_protocol_window_preserves_disabled_window_transitions() {
 #[test]
 fn generational_cons_protocol_window_rederives_on_heap_switch_and_uninstall() {
     let mut enabled = Box::new(TaggedHeap::new());
-    enabled.generational.enabled = true;
+    enabled.set_generational_enabled(true);
     enabled.publish_barrier_window();
     set_tagged_heap(&mut enabled);
     assert_published_windows(&enabled, BarrierWindow::NONE);
     let mut disabled = Box::new(TaggedHeap::new());
-    disabled.generational.enabled = false;
+    disabled.set_generational_enabled(false);
     disabled.extend_dump_span(4096, 4096);
     set_tagged_heap(&mut disabled);
     assert_published_windows(&disabled, BarrierWindow::span(4096, 8192));
@@ -104,9 +104,9 @@ fn generational_cons_protocol_window_fallback_install_derives_both_mirrors() {
 }
 
 #[test]
-fn generational_cons_protocol_window_logs_symbols_once_and_keeps_preimages() {
+fn generational_cons_protocol_window_marks_symbols_and_keeps_preimages() {
     let mut heap = Box::new(TaggedHeap::new());
-    heap.generational.enabled = true;
+    heap.set_generational_enabled(true);
     heap.publish_barrier_window();
     set_tagged_heap(&mut heap);
     let owner = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
@@ -114,10 +114,12 @@ fn generational_cons_protocol_window_logs_symbols_once_and_keeps_preimages() {
     trailer.set_old(index);
     trailer.set_unlogged(index);
     owner.set_car(TaggedValue::fixnum(1));
-    assert!(heap.current_mutator_gc().remset.is_empty());
+    assert!(!heap.owner_card_is_dirty_for_test(owner));
     owner.set_car(TaggedValue::T);
     owner.set_cdr(TaggedValue::NIL);
-    assert_eq!(heap.current_mutator_gc().remset, [owner]);
+    // A symbol's liveness rides on the card: S3 cons stores mark, never log.
+    assert!(heap.owner_card_is_dirty_for_test(owner));
+    assert!(heap.current_mutator_gc().remset.is_empty());
     // Concurrent marking must still record an immediate overwrite's old
     // child, even though generation-only stores reject that new value.
     owner.set_car(owner);
@@ -130,10 +132,9 @@ fn generational_cons_protocol_window_logs_symbols_once_and_keeps_preimages() {
 #[test]
 fn generational_cold_cons_reject_skips_full_hook_for_immediates_and_ineligible_owners() {
     let mut heap = Box::new(TaggedHeap::new());
-    heap.generational.enabled = true;
+    heap.set_generational_enabled(true);
     heap.publish_barrier_window();
     set_tagged_heap(&mut heap);
-    let young = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
     let old = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
     let (trailer, index) = heap.old_cons_trailer(old).unwrap();
     trailer.set_old(index);
@@ -141,17 +142,21 @@ fn generational_cold_cons_reject_skips_full_hook_for_immediates_and_ineligible_o
     let before = BARRIER_SLOW_CALLS.with(Cell::get);
     old.set_car(TaggedValue::fixnum(7));
     old.set_cdr(TaggedValue::char('x'));
-    young.set_car(TaggedValue::T);
-    young.set_cdr(old);
-    assert_eq!(BARRIER_SLOW_CALLS.with(Cell::get), before);
-    assert!(heap.current_mutator_gc().remset.is_empty());
+    assert!(
+        !heap.owner_card_is_dirty_for_test(old),
+        "immediates mark nothing"
+    );
 
+    // Outside the window a heap value only marks its owner's card: the
+    // full hook, its record and the remembered set are all skipped.
+    let young = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
     old.set_car(TaggedValue::T);
-    assert_eq!(BARRIER_SLOW_CALLS.with(Cell::get), before + 1);
     old.set_cdr(TaggedValue::NIL);
     old.set_car(young);
-    assert_eq!(BARRIER_SLOW_CALLS.with(Cell::get), before + 1);
-    assert_eq!(heap.current_mutator_gc().remset, [old]);
+    young.set_cdr(old);
+    assert_eq!(BARRIER_SLOW_CALLS.with(Cell::get), before);
+    assert!(heap.owner_card_is_dirty_for_test(old));
+    assert!(heap.current_mutator_gc().remset.is_empty());
 }
 
 #[test]
@@ -159,7 +164,7 @@ fn generational_cold_cons_reject_preserves_real_window_immediate_writes() {
     use super::fake_image::FakeImage;
 
     let mut heap = Box::new(TaggedHeap::new());
-    heap.generational.enabled = true;
+    heap.set_generational_enabled(true);
     heap.publish_barrier_window();
     set_tagged_heap(&mut heap);
     let young = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);

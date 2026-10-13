@@ -1750,8 +1750,9 @@ fn barrier_gate(owner: TaggedValue) -> bool {
 /// Dispatch cons writes admitted by the protocol mirror. A real-window hit
 /// retains the full barrier, including immediate-overwrite preimage capture.
 /// Otherwise admission proves GEN1: its mirror is ALL, whereas GEN0's mirror
-/// equals the real window. Reject generation-only stores before constructing
-/// a record or reading census, tracking or concurrent state.
+/// equals the real window. A generation-only store marks its owner's card
+/// and stops there, before constructing a record or reading census,
+/// tracking or concurrent state.
 #[cold]
 #[inline(never)]
 fn note_cons_write_slow(
@@ -1762,17 +1763,13 @@ fn note_cons_write_slow(
 ) {
     let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
     if !TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr)) {
-        // Characters share fixnum encoding; symbols must continue through.
-        if value.is_some_and(TaggedValue::is_fixnum) {
-            return;
+        // GEN1 outside the window: the card mark compiled stores emit, one
+        // Relaxed byte store. Characters share fixnum encoding and create no
+        // edge; a symbol's liveness rides on the card like any heap value.
+        if !value.is_some_and(TaggedValue::is_fixnum) {
+            with_tagged_heap(|heap| heap.mark_owner_card(addr));
         }
-        let needs_log = with_tagged_heap(|heap| {
-            heap.old_cons_trailer(owner)
-                .is_some_and(|(trailer, index)| trailer.is_unlogged(index))
-        });
-        if !needs_log {
-            return;
-        }
+        return;
     }
     note_heap_write_slow(owner, kind, slot, value);
 }

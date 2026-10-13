@@ -33,7 +33,7 @@ impl Drop for Roots {
 
 fn heap(on: bool) -> TaggedHeap {
     let mut heap = TaggedHeap::new();
-    heap.generational.enabled = on;
+    heap.set_generational_enabled(on);
     heap.publish_barrier_window();
     heap
 }

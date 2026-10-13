@@ -61,7 +61,7 @@ fn heap(enabled: bool, chunk_map: bool, generational: bool) -> Box<TaggedHeap> {
     let mut heap = Box::new(TaggedHeap::new());
     knobs::set_concurrent_claims_for_test(None);
     knobs::set_chunk_map_for_test(None);
-    heap.generational.enabled = generational;
+    heap.set_generational_enabled(generational);
     set_tagged_heap(&mut heap);
     heap
 }

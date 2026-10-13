@@ -935,6 +935,18 @@ pub struct TaggedHeap {
     compiled_observation_exclusion_37: Cell<u8>,
     compiled_observation_exclusion_38: Cell<u8>,
     compiled_observation_exclusion_39: Cell<u8>,
+    /// GEN1 card-table base address, one native-endian word in byte Cells
+    /// after the exclusion words for the same reason: compiled cons stores
+    /// read it (`HEAP_JIT_CARD_TABLE`) without moving any older offset.
+    /// Published once, by `install_card_table`, before any GEN1 leaf runs.
+    card_table_base_0: Cell<u8>,
+    card_table_base_1: Cell<u8>,
+    card_table_base_2: Cell<u8>,
+    card_table_base_3: Cell<u8>,
+    card_table_base_4: Cell<u8>,
+    card_table_base_5: Cell<u8>,
+    card_table_base_6: Cell<u8>,
+    card_table_base_7: Cell<u8>,
 }
 
 impl Default for TaggedHeap {
@@ -1184,9 +1196,20 @@ impl TaggedHeap {
             compiled_observation_exclusion_37: Cell::new(0),
             compiled_observation_exclusion_38: Cell::new(0),
             compiled_observation_exclusion_39: Cell::new(0),
+            card_table_base_0: Cell::new(0),
+            card_table_base_1: Cell::new(0),
+            card_table_base_2: Cell::new(0),
+            card_table_base_3: Cell::new(0),
+            card_table_base_4: Cell::new(0),
+            card_table_base_5: Cell::new(0),
+            card_table_base_6: Cell::new(0),
+            card_table_base_7: Cell::new(0),
         };
         if knobs::concurrent_claims_on() {
             heap.install_concurrent_claims();
+        }
+        if heap.generational.enabled {
+            heap.install_card_table();
         }
         // The census's remembered-set probe widens the window compiled code
         // tests from the start (the thread-local mirror follows when the heap
@@ -2777,6 +2800,8 @@ mod reclamation;
 use reclamation::ReclamationMode;
 
 mod card_table;
+#[cfg_attr(not(feature = "jit"), allow(unused_imports))]
+pub(crate) use card_table::{CARD_DIRTY, CARD_INDEX_MASK, CARD_SHIFT, HEAP_JIT_CARD_TABLE};
 use card_table::{CardTable, ChunkCards};
 mod cons_block_trailer;
 use cons_block_trailer::*;
@@ -2794,7 +2819,6 @@ mod cons_blocks;
 #[cfg_attr(not(feature = "jit"), allow(unused_imports))]
 pub(crate) use cons_block_trailer::{
     CONS_BLOCK_BYTES, CONS_BLOCK_SIZE as CONS_BLOCK_CELLS, CONS_MARK_WORDS, CONS_MARKS_OFFSET,
-    CONS_UNLOGGED_OFFSET,
 };
 use cons_blocks::*;
 
@@ -2819,6 +2843,10 @@ mod mutator_gc;
 use mutator_gc::MutatorGcState;
 
 mod knobs;
+#[cfg_attr(not(feature = "jit"), allow(unused_imports))]
+pub(crate) use knobs::card_tag_filter_on;
+#[cfg(test)]
+pub(crate) use knobs::with_card_tag_filter_for_test;
 
 mod chunk_map;
 use chunk_map::{CHUNK_CLASS_COUNT, ChunkClass, ChunkEntry, ChunkMap, HeapChunkMap, PageSnapshot};

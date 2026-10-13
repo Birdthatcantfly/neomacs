@@ -143,6 +143,13 @@ impl TaggedHeap {
             return;
         }
         self.publish_persistent_remembered_world_stopped();
+        // Compiled cons stores mark cards without logging their owner, so
+        // every cons chunk's cards are cleaned here, with the claims.
+        if let Some(cards) = self.card_table() {
+            for block in &self.cons_blocks {
+                cards.clear_chunk(block.base_addr());
+            }
+        }
         let mut owners = std::mem::take(&mut self.generational.r_seed);
         for mutator in self.mutators_mut() {
             owners.append(&mut mutator.remset);
@@ -373,6 +380,12 @@ impl TaggedHeap {
         }
     }
 
+    /// Whether OWNER's GEN1 card is dirty (false without a card table).
+    #[cfg(test)]
+    pub(crate) fn owner_card_is_dirty_for_test(&self, owner: TaggedValue) -> bool {
+        Self::owner_card_addr(owner).is_some_and(|addr| self.owner_card_is_dirty(addr))
+    }
+
     #[cfg(test)]
     pub(crate) fn remembered_log_len_for_test(&self) -> usize {
         self.mutators().map(|m| m.remset.len()).sum()
@@ -400,15 +413,44 @@ impl TaggedHeap {
             .and_then(|carrier| carrier.cards.as_ref())
     }
 
-    /// Mark the card of a newly logged owner. Mutator side, GEN1 only; the
-    /// first mark builds the carrier and the table.
+    /// Mark the card of OWNER_ADDR. Mutator side, GEN1 only: one Relaxed
+    /// byte store into the table `install_card_table` built.
     #[inline]
-    pub(super) fn mark_owner_card(&mut self, owner_addr: usize) {
-        self.census
+    pub(super) fn mark_owner_card(&self, owner_addr: usize) {
+        self.card_table()
+            .expect("a GEN1 heap installs its card table")
+            .mark(owner_addr);
+    }
+
+    /// Turn generations on or off. A GEN1 heap builds its card table here,
+    /// before any leaf can compile a card mark against it.
+    #[cfg(test)]
+    pub(crate) fn set_generational_enabled(&mut self, enabled: bool) {
+        self.generational.enabled = enabled;
+        if enabled {
+            self.install_card_table();
+        }
+    }
+
+    /// Build the GEN1 card table, carried with the heap's other optional
+    /// cold state, and publish its fixed address where compiled cons stores
+    /// read it. Idempotent; the table lives as long as the heap.
+    pub(super) fn install_card_table(&mut self) {
+        let base = self
+            .census
             .get_or_insert_with(|| Box::new(GenCensus::disabled()))
             .cards
             .get_or_insert_with(CardTable::new)
-            .mark(owner_addr);
+            .base_addr();
+        let bytes = base.to_ne_bytes();
+        self.card_table_base_0.set(bytes[0]);
+        self.card_table_base_1.set(bytes[1]);
+        self.card_table_base_2.set(bytes[2]);
+        self.card_table_base_3.set(bytes[3]);
+        self.card_table_base_4.set(bytes[4]);
+        self.card_table_base_5.set(bytes[5]);
+        self.card_table_base_6.set(bytes[6]);
+        self.card_table_base_7.set(bytes[7]);
     }
 
     #[inline]

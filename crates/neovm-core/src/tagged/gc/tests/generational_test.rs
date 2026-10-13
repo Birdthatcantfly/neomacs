@@ -23,7 +23,7 @@ impl Drop for ScratchRoots {
 
 fn heap_with_generations(on: bool) -> TaggedHeap {
     let mut heap = TaggedHeap::new();
-    heap.generational.enabled = on;
+    heap.set_generational_enabled(on);
     heap.publish_barrier_window();
     heap
 }
@@ -86,8 +86,10 @@ fn generational_owned_owner_logging_and_immediate_filter() {
     heap.assert_remembered_membership_for_test(owner);
 }
 
+/// S3: a GEN1 cons store outside the window marks its owner's card and
+/// logs nothing; the minor traces the card and the reset cleans it.
 #[test]
-fn generational_cons_claim_and_logged_lifecycle() {
+fn generational_cons_card_lifecycle() {
     let mut heap = heap_with_generations(true);
     set_tagged_heap(&mut heap);
     let roots = ScratchRoots::new();
@@ -100,23 +102,22 @@ fn generational_cons_claim_and_logged_lifecycle() {
         owner,
         TaggedValue::fixnum(8)
     ));
-    assert!(heap.current_mutator_gc().remset.is_empty());
+    assert!(!heap.owner_card_is_dirty_for_test(owner));
     let child = heap.alloc_string(LispString::from_utf8("child"));
     assert!(crate::tagged::mutate::set_cons_car(owner, child));
     assert!(crate::tagged::mutate::set_cons_cdr(owner, child));
-    assert_eq!(heap.current_mutator_gc().remset, [owner]);
-    assert!(!heap.old_cons_trailer(owner).unwrap().0.is_unlogged(index));
-    heap.begin_minor_collection();
+    assert!(heap.owner_card_is_dirty_for_test(owner));
     assert!(heap.current_mutator_gc().remset.is_empty());
-    assert_eq!(heap.generational.r_seed, [owner]);
+    heap.begin_minor_collection();
+    assert!(heap.generational.r_seed.is_empty());
     heap.seed_root(owner);
     heap.complete_minor_collection();
     heap.finish_incremental_sweep_now();
-    assert!(heap.generational.r_seed.is_empty());
-    assert!(heap.old_cons_trailer(owner).unwrap().0.is_unlogged(index));
+    assert!(!heap.owner_card_is_dirty_for_test(owner));
     assert!(heap.owns_string_object(child.as_string_ptr().unwrap().cast()));
+    assert!(heap.value_is_old_for_test(child));
     assert!(crate::tagged::mutate::set_cons_car(owner, child));
-    assert_eq!(heap.current_mutator_gc().remset, [owner]);
+    assert!(heap.owner_card_is_dirty_for_test(owner));
 }
 
 #[test]
@@ -232,7 +233,9 @@ fn minor_old_vector_and_cons_keep_new_children_and_drop_overwritten_young() {
     crate::tagged::mutate::set_cons_car(cons, string);
     let child = heap.alloc_cons(TaggedValue::T, TaggedValue::NIL);
     crate::tagged::mutate::set_vector_slot(vector, 0, child);
-    assert_eq!(heap.remembered_log_len_for_test(), 2);
+    // The vector logs; the cons only marks its card.
+    assert_eq!(heap.remembered_log_len_for_test(), 1);
+    assert!(heap.owner_card_is_dirty_for_test(cons));
     minor(&mut heap, &[vector, cons]);
     assert!(!heap.owns_string_object(discarded.as_string_ptr().unwrap().cast()));
     assert!(heap.value_is_old_for_test(child));
@@ -583,7 +586,12 @@ fn minor_then_major_old_owner_keeps_new_uninterned_weak_symbol_key() {
                     strong_value
                 ));
             }
-            assert_eq!(heap.current_mutator_gc().remset, [owner]);
+            if cons_owner {
+                assert!(heap.owner_card_is_dirty_for_test(owner));
+                assert!(heap.current_mutator_gc().remset.is_empty());
+            } else {
+                assert_eq!(heap.current_mutator_gc().remset, [owner]);
+            }
 
             let table = heap.alloc_hash_table(LispHashTable::new_with_options(
                 HashTableTest::Eq,

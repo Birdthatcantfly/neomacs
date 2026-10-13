@@ -30,7 +30,7 @@ impl Drop for ScratchRoots {
 
 fn verified_heap() -> TaggedHeap {
     let mut heap = TaggedHeap::new();
-    heap.generational.enabled = true;
+    heap.set_generational_enabled(true);
     heap.generational.verify = true;
     // The independent verifier must work without a blackened dump partition.
     heap.partition_dump = false;
@@ -175,7 +175,9 @@ fn generational_verifier_accepts_barriered_old_cons_arena_and_box_edges() {
         })
         .expect("the old Box owner is a hash table");
     }
-    assert_eq!(heap.remembered_log_len_for_test(), 3);
+    // The vector and the Box table log; the cons only marks its card.
+    assert_eq!(heap.remembered_log_len_for_test(), 2);
+    assert!(heap.owner_card_is_dirty_for_test(cons));
     minor(&mut heap, &[cons, vector, table]);
     assert!(!heap.partition_dump);
     assert!(heap.value_is_old_for_test(cons.cons_car()));

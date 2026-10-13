@@ -11,8 +11,9 @@
 //! the owner lies outside it and its remaining gate accepts the store.
 //! Concurrent marking or owner tracking makes the window ALL; a dump
 //! partition uses the image span. Non-conses test their logged header.
-//! Generational conses additionally test their unlogged bitmap. A refusal
-//! takes the unchanged shim, which signals, records and stores.
+//! Generational conses additionally mark their owner's card, without a
+//! branch. A refusal takes the unchanged shim, which signals, records and
+//! stores.
 //!
 //! Why a plain store is sound outside the window: the window is ALL for the
 //! whole life of a concurrent mark (`launch_concurrent_mark` publishes it
@@ -20,7 +21,7 @@
 //! clears it after the thread has exited), so an inline store never races a
 //! collector read; the next mark's start handshake (a channel send) orders
 //! it before any. With generations enabled, an owned cons outside the window
-//! additionally tests its unlogged bit; only the outlined barrier claims it.
+//! additionally dirties its card, which the next minor scans.
 //!
 //! Allocation: `JitHeapState` also holds each class's region cursor and
 //! limit (`tagged::gc::alloc_region`), which the Rust allocator bumps too.
@@ -115,9 +116,10 @@ pub(crate) fn inline_heap_sites() -> u32 {
 pub(crate) static INLINE_HEAP_STORES_EMITTED: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// Compile-time instrumentation only: no mutator data or runtime cache.
+/// GEN1 card marks emitted by cons stores. Compile-time instrumentation
+/// only: no mutator data or runtime cache.
 #[cfg(debug_assertions)]
-pub(crate) static GENERATIONAL_CONS_TESTS_EMITTED: std::sync::atomic::AtomicUsize =
+pub(crate) static GENERATIONAL_CARD_MARKS_EMITTED: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 fn note_inline_site() {
@@ -267,9 +269,10 @@ pub(crate) fn emit_collection_write(
 
 /// The single cons-store gate, shared by setcar/setcdr, HOF stores and BLVs.
 /// OWNER is an untagged, shape-guarded live cons. Window refusal comes first:
-/// mapped cells have no owned-block trailer, and marks/tracking need the shim
-/// even when VALUE is a fixnum. Symbols must reach the unlogged test because
-/// their liveness is tracked in a side table.
+/// mapped cells stay on the shim's persistent mapped set, and marks/tracking
+/// need the shim even when VALUE is a fixnum. Only a proven fixnum skips the
+/// GEN1 card mark: a symbol's liveness is tracked in a side table, so a
+/// symbol store must dirty the card the minor traces it through.
 pub(crate) fn emit_cons_store_barrier(
     fb: &mut FunctionBuilder,
     rt: &RtCtx,
@@ -297,44 +300,50 @@ pub(crate) fn emit_cons_store_barrier(
         }
         return;
     }
-    let store = fb.create_block();
-    if class.is_none() {
-        let bitmap = fb.create_block();
+    // Card-mark Stage A S3: the owner's card byte, branchless. A fixnum
+    // tag filter only skips false-dirty cards; it stays behind its knob.
+    let filtered = (class.is_none() && crate::tagged::gc::card_tag_filter_on()).then(|| {
+        let store = fb.create_block();
+        let mark = fb.create_block();
         let immediate = super::lowering::fixnum_tag_test(fb, value);
-        fb.ins().brif(immediate, store, &[], bitmap, &[]);
-        fb.switch_to_block(bitmap);
-        fb.seal_block(bitmap);
+        fb.ins().brif(immediate, store, &[], mark, &[]);
+        fb.switch_to_block(mark);
+        fb.seal_block(mark);
+        store
+    });
+    emit_card_mark(fb, heap, owner);
+    if let Some(store) = filtered {
+        fb.ins().jump(store, &[]);
+        fb.switch_to_block(store);
+        fb.seal_block(store);
     }
-    use super::jit_layout::heap::{CONS_BLOCK_BYTES, CONS_UNLOGGED_OFFSET};
-    let base = band_imm_p(fb, owner, !((CONS_BLOCK_BYTES - 1) as i64));
-    let offset = fb.ins().isub(owner, base);
-    let index = fb.ins().ushr_imm(
-        offset,
-        std::mem::size_of::<ConsCell>().trailing_zeros() as i64,
-    );
-    let word = fb.ins().ushr_imm(index, u64::BITS.trailing_zeros() as i64);
-    let word_bytes = ishl_imm_p(fb, word, std::mem::size_of::<u64>().trailing_zeros() as i64);
-    let address = fb.ins().iadd(base, word_bytes);
-    let address = iadd_imm_p(fb, address, CONS_UNLOGGED_OFFSET as i64);
-    // Cranelift exposes SeqCst atomic loads, not Relaxed. On our x86-64 JIT
-    // target this is one aligned MOV, exactly the Relaxed fast-path load.
-    // Atomic IR prevents compiler coalescing across concurrent bitmap RMWs;
-    // no publication ordering beyond the existing stop-all handshake is used.
-    let bits = fb
-        .ins()
-        .atomic_load(types::I64, MemFlagsData::trusted(), address);
-    // Cranelift 0.134.3 defines ushr's shift amount modulo the operand width,
-    // so the I64 shift already selects index modulo 64 within this word.
-    let shifted = fb.ins().ushr(bits, index);
-    let unlogged = band_imm_p(fb, shifted, 1);
-    fb.ins().brif(unlogged, slow, &[], store, &[]);
-    fb.switch_to_block(store);
-    fb.seal_block(store);
     if journal {
         emit_collection_write(fb, rt, owner, TAG_CONS);
     }
     #[cfg(debug_assertions)]
-    GENERATIONAL_CONS_TESTS_EMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    GENERATIONAL_CARD_MARKS_EMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Mark the GEN1 card of the untagged OWNER in HEAP's card table:
+/// `card[(owner >> CARD_SHIFT) & CARD_INDEX_MASK] = CARD_DIRTY`, with no
+/// branch and no slow path. The table address is loaded from the heap, not
+/// baked, so AOT and preloaded code stay valid; it is fixed for the heap's
+/// life, which `install_card_table` publishes before any GEN1 leaf runs.
+/// The mark precedes the store and no safe point separates them, so a
+/// stop-all card clear can never fall between the two.
+fn emit_card_mark(fb: &mut FunctionBuilder, heap: ClifValue, owner: ClifValue) {
+    use super::jit_layout::heap::{CARD_DIRTY, CARD_INDEX_MASK, CARD_SHIFT, HEAP_JIT_CARD_TABLE};
+    let table = fb.ins().load(
+        types::I64,
+        MemFlagsData::new().with_notrap().with_readonly(),
+        heap,
+        HEAP_JIT_CARD_TABLE as i32,
+    );
+    let card = ushr_imm_p(fb, owner, CARD_SHIFT as i64);
+    let card = band_imm_p(fb, card, CARD_INDEX_MASK as i64);
+    let address = fb.ins().iadd(table, card);
+    let dirty = fb.ins().iconst(types::I8, CARD_DIRTY as i64);
+    fb.ins().store(MemFlagsData::trusted(), dirty, address, 0);
 }
 
 /// The non-cons half of the same store sequence. The OFF arm emits the

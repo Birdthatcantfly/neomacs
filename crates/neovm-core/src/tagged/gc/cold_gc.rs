@@ -129,6 +129,7 @@ impl TaggedHeap {
     pub(crate) fn new_for_concurrent_hash_test(generational: bool) -> Self {
         let mut heap = knobs::with_concurrent_claims_for_test(true, Self::new);
         heap.generational = super::generational::GenState::new(generational);
+        heap.set_generational_enabled(generational);
         heap
     }
 
@@ -252,13 +253,14 @@ impl TaggedHeap {
 
 // The normal x86-64 shipping type has no cfg(test) mapped_veclike_traces word.
 // Main 2e4c571469 supplies the hot-field baseline; the appended 40-byte
-// compiled observation protocol extends only the heap's tail. These assertions
+// compiled observation protocol and the 8-byte card-table base (ABI 51)
+// extend only the heap's tail. These assertions
 // reject silent hot-layout drift during ordinary compilation, independently
 // of the runtime knob. The complete staged DWARF table remains the final gate.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64", not(test)))]
 const _: () = {
     use std::mem::{align_of, offset_of, size_of};
-    assert!(size_of::<TaggedHeap>() == 4568);
+    assert!(size_of::<TaggedHeap>() == 4576);
     assert!(align_of::<TaggedHeap>() == 8);
     assert!(offset_of!(TaggedHeap, mutator_gc) == 24);
     assert!(offset_of!(TaggedHeap, region_book) == 840);
@@ -305,7 +307,8 @@ mod tests {
     #[test]
     fn u35_cold_carrier_is_absent_off_and_separates_census_from_claims() {
         let off = heap(false, knobs::CensusMode::Off);
-        assert!(off.census.is_none());
+        // Only a GEN1 heap's card table occupies the carrier then.
+        assert_eq!(off.census.is_some(), off.generational_enabled());
         assert!(!off.concurrent_claims());
         assert!(off.concurrent_hash_mutators().next().is_none());
         assert!(off.concurrent_leaf_claimed().is_none());
@@ -408,7 +411,7 @@ mod tests {
         // alter accounting layout; the OFF allocation uses the original path.
         let cons = off.alloc_cons(TaggedValue::fixnum(5), TaggedValue::NIL);
         assert!(cons.is_cons());
-        assert!(off.census.is_none());
+        assert_eq!(off.census.is_some(), off.generational_enabled());
     }
 
     #[test]

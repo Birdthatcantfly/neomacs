@@ -22,7 +22,7 @@ fn counters(promoted: usize, minors: usize, stress_cycles: usize) -> GenerationP
 
 fn ready_heap(enabled: bool) -> TaggedHeap {
     let mut heap = TaggedHeap::new();
-    heap.generational.enabled = enabled;
+    heap.set_generational_enabled(enabled);
     heap.generational.pacing_knobs = GenerationalPacingKnobs::default();
     heap.bootstrap_collected = true;
     heap.publish_barrier_window();

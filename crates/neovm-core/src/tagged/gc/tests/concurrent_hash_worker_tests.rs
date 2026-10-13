@@ -13,7 +13,7 @@ fn heap(generational: bool) -> Box<TaggedHeap> {
     knobs::set_concurrent_claims_for_test(Some(true));
     let mut heap = Box::new(TaggedHeap::new());
     knobs::set_concurrent_claims_for_test(None);
-    heap.generational.enabled = generational;
+    heap.set_generational_enabled(generational);
     set_tagged_heap(&mut heap);
     heap
 }
@@ -72,7 +72,7 @@ fn transitive_bare_symbol_cycle(claims: bool, generational: bool, ancestor: Symb
     knobs::set_concurrent_claims_for_test(Some(claims));
     let mut heap = Box::new(TaggedHeap::new());
     knobs::set_concurrent_claims_for_test(None);
-    heap.generational.enabled = generational;
+    heap.set_generational_enabled(generational);
     set_tagged_heap(&mut heap);
 
     let symbol = TaggedValue::from_sym_id(intern_uninterned("u35-transitive-worker-weak-key"));

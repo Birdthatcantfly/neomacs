@@ -6,6 +6,7 @@
 //! * the cons-block trailer (the mark bitmap after the cells);
 //! * a float's value word and slot stride;
 //! * the `JitHeapState` words (allocation cursors, barrier window);
+//! * the GEN1 card table's published base and index geometry;
 //! * the vector-storage probes (`LispValueVec`).
 //!
 //! The owning modules keep the definitions; this is the JIT's one place to
@@ -15,10 +16,11 @@ use crate::tagged::header::{GcHeader, HeapObjectKind};
 use std::mem::{offset_of, size_of};
 
 pub(crate) use crate::tagged::gc::{
-    CONS_BLOCK_BYTES, CONS_BLOCK_CELLS, CONS_MARK_WORDS, CONS_MARKS_OFFSET, CONS_UNLOGGED_OFFSET,
-    FLOAT_SLOT_BYTES, HEAP_JIT_BARRIER_LEN, HEAP_JIT_BARRIER_LO, HEAP_JIT_CONS_CUR,
-    HEAP_JIT_CONS_LIM, HEAP_JIT_EXCLUSION_LEN, HEAP_JIT_EXCLUSION_LO, HEAP_JIT_FLOAT_CUR,
-    HEAP_JIT_FLOAT_LIM, HEAP_JIT_SINGLE_CONS, HEAP_JIT_SLOT_BARRIER_LEN, HEAP_JIT_SLOT_BARRIER_LO,
+    CARD_DIRTY, CARD_INDEX_MASK, CARD_SHIFT, CONS_BLOCK_BYTES, CONS_BLOCK_CELLS, CONS_MARK_WORDS,
+    CONS_MARKS_OFFSET, FLOAT_SLOT_BYTES, HEAP_JIT_BARRIER_LEN, HEAP_JIT_BARRIER_LO,
+    HEAP_JIT_CARD_TABLE, HEAP_JIT_CONS_CUR, HEAP_JIT_CONS_LIM, HEAP_JIT_EXCLUSION_LEN,
+    HEAP_JIT_EXCLUSION_LO, HEAP_JIT_FLOAT_CUR, HEAP_JIT_FLOAT_LIM, HEAP_JIT_SINGLE_CONS,
+    HEAP_JIT_SLOT_BARRIER_LEN, HEAP_JIT_SLOT_BARRIER_LO,
 };
 pub(crate) use crate::tagged::header::{
     FLOAT_VALUE_OFFSET, GC_HEADER_COLLECTION_OBSERVED_OFFSET, GC_HEADER_TENURED_OFFSET,

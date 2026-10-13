@@ -67,6 +67,7 @@ thread_local! {
     static CHUNK_MAP_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static VEC_SCAN_OVERRIDE: std::cell::Cell<Option<VecScanMode>> = const { std::cell::Cell::new(None) };
     static CONCURRENT_CLAIMS_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static CARD_TAG_FILTER_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 /// `NEOVM_GC_CENSUS` / `NEOVM_GC_CENSUS_REMSET`.
@@ -160,6 +161,42 @@ pub(crate) fn concurrent_hash_scan_policy() -> super::concurrent_hash::HashTable
             _ => HashTableScanPolicy::DeferWrites,
         }
     })
+}
+
+/// `NEOVM_GC_CARD_TAG_FILTER`: whether a GEN1 compiled cons store tests the
+/// stored word's fixnum tag before marking its owner's card. Off by
+/// default: on a branchless four-instruction mark the tag test costs about
+/// what it saves and only avoids false-dirty cards. Read at compile time.
+#[cfg_attr(not(feature = "jit"), allow(dead_code))]
+pub(crate) fn card_tag_filter_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = CARD_TAG_FILTER_OVERRIDE.with(|c| c.get()) {
+        return on;
+    }
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = matches!(
+            std::env::var("NEOVM_GC_CARD_TAG_FILTER").ok().as_deref(),
+            Some("1" | "on" | "true" | "yes")
+        );
+        if on {
+            note_knob("NEOVM_GC_CARD_TAG_FILTER", "1");
+        }
+        on
+    })
+}
+
+/// Nestable test scope for leaves compiled on this thread.
+#[cfg(test)]
+pub(crate) fn with_card_tag_filter_for_test<R>(on: bool, f: impl FnOnce() -> R) -> R {
+    struct RestoreFilter(Option<bool>);
+    impl Drop for RestoreFilter {
+        fn drop(&mut self) {
+            CARD_TAG_FILTER_OVERRIDE.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = RestoreFilter(CARD_TAG_FILTER_OVERRIDE.with(|c| c.replace(Some(on))));
+    f()
 }
 
 /// Test hook for heaps created on this thread; no process environment race.

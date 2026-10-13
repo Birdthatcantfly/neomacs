@@ -12,7 +12,7 @@ use super::*;
 // stores are exercised independently by generational_tests.
 fn legacy_gate_heap() -> TaggedHeap {
     let mut heap = TaggedHeap::new();
-    heap.generational.enabled = false;
+    heap.set_generational_enabled(false);
     heap.publish_barrier_window();
     heap
 }

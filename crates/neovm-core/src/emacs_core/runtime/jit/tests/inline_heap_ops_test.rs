@@ -410,12 +410,13 @@ fn opt_cons_store_proofs_keep_deopt_and_barrier_paths() {
     }
 }
 
-/// GEN1's remembered-set filter reads a stored-value proof only for the exact
-/// word it binds: a fixnum proof removes the filter, a non-fixnum proof only
-/// its dynamic tag test. GEN0 never reads either. Threading: CLIF only, built
-/// and dropped by this test; no Lisp object or heap state is involved.
+/// GEN1's card mark reads a stored-value proof only for the exact word it
+/// binds: a fixnum proof removes the mark; with the tag filter off (the
+/// default) a non-fixnum proof changes nothing. GEN0 never reads either.
+/// Threading: CLIF only, built and dropped by this test; no Lisp object or
+/// heap state is involved.
 #[test]
-fn stored_value_proofs_shape_only_the_gen1_remembered_set_filter() {
+fn stored_value_proofs_shape_only_the_gen1_card_mark() {
     use cranelift_codegen::ir::Opcode;
     use heap_inline::{StoreProof, StoredValueClass, StoredValueProof};
     let count = |clif: &Function, opcode| {
@@ -423,6 +424,17 @@ fn stored_value_proofs_shape_only_the_gen1_remembered_set_filter() {
             .blocks()
             .flat_map(|block| clif.layout.block_insts(block))
             .filter(|inst| clif.dfg.insts[*inst].opcode() == opcode)
+            .count()
+    };
+    // The card mark is the one byte-wide store of a cons store.
+    let card_marks = |clif: &Function| {
+        clif.layout
+            .blocks()
+            .flat_map(|block| clif.layout.block_insts(block))
+            .filter(|inst| {
+                clif.dfg.insts[*inst].opcode() == Opcode::Store
+                    && clif.dfg.value_type(clif.dfg.inst_args(*inst)[0]) == types::I8
+            })
             .count()
     };
     fn proven(word: ClifValue, class: StoredValueClass) -> StoreProof {
@@ -446,33 +458,33 @@ fn stored_value_proofs_shape_only_the_gen1_remembered_set_filter() {
                 text(&dynamic),
                 "a proof for another word is ignored"
             );
+            assert_eq!(count(&dynamic, Opcode::AtomicLoad), 0, "no bitmap test");
             if !generational {
                 assert_eq!(text(&fixnum), text(&dynamic), "GEN0 ignores proofs");
                 assert_eq!(text(&non_fixnum), text(&dynamic), "GEN0 ignores proofs");
-                assert_eq!(count(&dynamic, Opcode::AtomicLoad), 0);
+                assert_eq!(card_marks(&dynamic), 0);
                 continue;
             }
-            assert_eq!(count(&dynamic, Opcode::AtomicLoad), 1);
+            assert_eq!(card_marks(&dynamic), 1);
             assert_eq!(
-                count(&fixnum, Opcode::AtomicLoad),
+                card_marks(&fixnum),
                 0,
                 "a fixnum creates no old-to-young edge"
             );
             assert_eq!(
                 count(&fixnum, Opcode::Brif),
-                count(&dynamic, Opcode::Brif) - 2,
-                "the tag test and the unlogged test both vanish"
+                count(&dynamic, Opcode::Brif),
+                "the card mark adds no branch"
             );
-            assert_eq!(count(&non_fixnum, Opcode::AtomicLoad), 1);
             assert_eq!(
-                count(&non_fixnum, Opcode::Brif),
-                count(&dynamic, Opcode::Brif) - 1,
-                "only the dead tag test vanishes"
+                text(&non_fixnum),
+                text(&dynamic),
+                "with the tag filter off, a non-fixnum proof changes nothing"
             );
-            for kept in [Opcode::Load, Opcode::Store] {
-                assert_eq!(count(&fixnum, kept), count(&dynamic, kept));
-                assert_eq!(count(&non_fixnum, kept), count(&dynamic, kept));
-            }
+            assert_eq!(
+                count(&fixnum, Opcode::Load),
+                count(&dynamic, Opcode::Load) - 1
+            );
         }
     }
 }
