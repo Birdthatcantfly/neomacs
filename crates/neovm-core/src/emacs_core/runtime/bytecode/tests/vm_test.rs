@@ -4838,8 +4838,11 @@ fn vm_call_interactively_honors_function_cell_mutation_during_interactive_spec_e
 #[test]
 fn vm_call_interactively_builtin_forward_char_uses_default_prefix_arg() {
     crate::test_utils::init_test_tracing();
+    // forward-char is (interactive "^p"); GNU callint.c calls the Lisp
+    // `handle-shift-selection` from simple.el unconditionally, so the bare
+    // harness (no Lisp loaded) cannot run it.
     assert_eq!(
-        vm_eval_with_init_str(
+        vm_bootstrap_eval_with_init_str(
             r#"(progn
                  (call-interactively 'forward-char)
                  (point))"#,
