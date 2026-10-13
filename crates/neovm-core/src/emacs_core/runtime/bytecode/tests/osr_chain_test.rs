@@ -402,6 +402,10 @@ fn osr_chain_in_place_roots_the_physical_residual_across_inner_collection() {
 #[test]
 fn osr_hof_chain_in_place_resumes_the_current_callback_and_mapping_once() {
     use crate::emacs_core::jit::compile::{self, Inline2Mode};
+    // One `osr_transfer` call must transfer: the OSR leaf is compiled in
+    // line, whatever `NEOVM_JIT_BG` the suite runs under.
+    let _mode =
+        crate::emacs_core::jit::bg::TestModeScope::enter(crate::emacs_core::jit::bg::BgMode::Sync);
     crate::emacs_core::jit::inline::force_inline_for_test(Some(true));
     compile::force_inline2_for_test(Some(Inline2Mode::Hof));
     compile::force_deopt_for_test(false);
