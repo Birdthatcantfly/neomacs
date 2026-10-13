@@ -1183,35 +1183,6 @@ impl<T: PagedObject> ObjectArena<T> {
         out
     }
 
-    /// Card-mark S2: the slots of a page that start in the card at byte
-    /// OFFSET from the page base.
-    #[inline]
-    pub(super) fn slots_starting_in_card(offset: usize) -> std::ops::Range<usize> {
-        use super::card_table::CARD_BYTES;
-        offset.div_ceil(T::SLOT_BYTES)
-            ..(offset + CARD_BYTES)
-                .div_ceil(T::SLOT_BYTES)
-                .min(ObjectPage::<T>::SLOTS)
-    }
-
-    /// Card-mark S2: the header of slot SLOT of page PAGE when it holds a
-    /// tenured object whose store logged it. A card covers several slots and
-    /// one object can own thousands of out-of-line children (a vector's
-    /// elements, a hash table's entries), so only the logged owners of a
-    /// dirty card are traced; every logged owner keeps its card dirty until
-    /// the reset. Every page counts: retired pages hold only tenured slots.
-    #[inline]
-    pub(super) fn logged_slot_header(&self, page: usize, slot: usize) -> Option<*mut GcHeader> {
-        let page = &self.pages[page];
-        if !page.is_allocated(slot) {
-            return None;
-        }
-        let header = page.slot_ptr(slot) as *mut GcHeader;
-        // SAFETY: allocated bit set => readable header.
-        let header_ref = unsafe { &*header };
-        (header_ref.tenured && header_ref.is_remembered()).then_some(header)
-    }
-
     /// Visit the header of every ALLOCATED slot of a non-retired page, in
     /// place (allocated-bit-first). Retired pages are skipped: every slot
     /// on one is tenured. `visit` must not touch this arena.

@@ -1,6 +1,6 @@
-//! Card-mark S1: every logged GEN1 owner keeps a dirty card until the
-//! stop-all reset that also clears its logged bit. S3: a cons store only
-//! marks its owner's card, which the reset cleans with every cons card.
+//! GEN1 card marking covers conses only: a cons store marks its owner's
+//! card, which the stop-all reset cleans with every cons card. Slot owners
+//! (vectors, records, Box objects) stay on the remembered set, precisely.
 
 use super::card_table::{CARD_INDEX_MASK, CARD_SHIFT, CardTable, card_index};
 use super::*;
@@ -133,7 +133,7 @@ fn store_young_child(owner: TaggedValue, class: OwnerClass, child: TaggedValue) 
     }
 }
 
-fn logged_owner_keeps_a_dirty_card_until_the_reset(class: OwnerClass) {
+fn owner_survives_a_minor_through_its_card_or_its_log(class: OwnerClass) {
     let mut heap = verified_heap();
     set_tagged_heap(&mut heap);
     let roots = ScratchRoots::new();
@@ -149,13 +149,15 @@ fn logged_owner_keeps_a_dirty_card_until_the_reset(class: OwnerClass) {
 
     let child = heap.alloc_string(LispString::from_utf8("card-young-child"));
     store_young_child(owner, class, child);
-    // S3: a cons store marks the card alone; slot owners still log.
-    let logged: &[TaggedValue] = match class {
-        OwnerClass::Cons => &[],
-        OwnerClass::ArenaVector | OwnerClass::BoxHashTable => &[owner],
-    };
+    // A cons store marks the card alone; slot owners log and mark nothing.
+    let carded = matches!(class, OwnerClass::Cons);
+    let logged: &[TaggedValue] = if carded { &[] } else { &[owner] };
     assert_eq!(heap.current_mutator_gc().remset, logged, "{class:?}");
-    assert!(heap.owner_card_is_dirty(card_addr(owner)), "{class:?}");
+    assert_eq!(
+        heap.owner_card_is_dirty(card_addr(owner)),
+        carded,
+        "{class:?}"
+    );
 
     // Verify mode checks every logged owner's card before promotion.
     minor(&mut heap, &[owner]);
@@ -172,25 +174,33 @@ fn logged_owner_keeps_a_dirty_card_until_the_reset(class: OwnerClass) {
         class,
         heap.alloc_cons(TaggedValue::T, TaggedValue::NIL),
     );
-    assert!(
+    assert_eq!(
         heap.owner_card_is_dirty(card_addr(owner)),
-        "{class:?}: re-logged"
+        carded,
+        "{class:?}: re-marked"
     );
+    if !carded {
+        assert_eq!(
+            heap.current_mutator_gc().remset,
+            [owner],
+            "{class:?}: re-logged"
+        );
+    }
 }
 
 #[test]
-fn logged_old_cons_keeps_a_dirty_card_until_the_reset() {
-    logged_owner_keeps_a_dirty_card_until_the_reset(OwnerClass::Cons);
+fn old_cons_keeps_a_dirty_card_until_the_reset() {
+    owner_survives_a_minor_through_its_card_or_its_log(OwnerClass::Cons);
 }
 
 #[test]
-fn logged_old_arena_vector_keeps_a_dirty_card_until_the_reset() {
-    logged_owner_keeps_a_dirty_card_until_the_reset(OwnerClass::ArenaVector);
+fn old_arena_vector_logs_without_a_card() {
+    owner_survives_a_minor_through_its_card_or_its_log(OwnerClass::ArenaVector);
 }
 
 #[test]
-fn logged_old_box_owner_keeps_a_dirty_card_until_the_reset() {
-    logged_owner_keeps_a_dirty_card_until_the_reset(OwnerClass::BoxHashTable);
+fn old_box_owner_logs_without_a_card() {
+    owner_survives_a_minor_through_its_card_or_its_log(OwnerClass::BoxHashTable);
 }
 
 #[test]
@@ -198,11 +208,15 @@ fn verify_mode_rejects_a_logged_owner_with_a_clean_card() {
     let mut heap = verified_heap();
     set_tagged_heap(&mut heap);
     let roots = ScratchRoots::new();
-    let owner = heap.alloc_vector(vec![TaggedValue::NIL]);
+    let owner = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
     roots.keep(owner);
     minor(&mut heap, &[owner]);
     let child = heap.alloc_cons(TaggedValue::T, TaggedValue::NIL);
-    store_young_child(owner, OwnerClass::ArenaVector, child);
+    // A cons the window path logged (a concurrent mark, tracking) marks its
+    // card too; the minor would reach it only through that card.
+    heap.remember_owner(owner);
+    unsafe { (*(owner.xcons_ptr() as *mut ConsCell)).set_car(child) };
+    assert_eq!(heap.current_mutator_gc().remset, [owner]);
     heap.card_table()
         .expect("logging built the table")
         .clear(card_addr(owner));
@@ -311,41 +325,6 @@ fn minor_reaches_young_children_of_every_card_of_a_block() {
     for (i, &child) in children.iter().enumerate() {
         assert!(heap.value_is_old_for_test(child), "owner {i}");
     }
-}
-
-/// S2 precision: a dirty arena card traces only its logged tenured slots.
-/// One logged vector must not drag in its unlogged card neighbours, whose
-/// out-of-line elements can number in the thousands.
-#[test]
-fn dirty_arena_card_selects_only_logged_slots() {
-    let mut heap = verified_heap();
-    set_tagged_heap(&mut heap);
-    let roots = ScratchRoots::new();
-    let logged = heap.alloc_vector(vec![TaggedValue::NIL]);
-    let neighbour = heap.alloc_vector(vec![TaggedValue::NIL]);
-    roots.keep(logged);
-    roots.keep(neighbour);
-    minor(&mut heap, &[logged, neighbour]);
-    assert_eq!(
-        card_index(card_addr(logged)),
-        card_index(card_addr(neighbour))
-    );
-    store_young_child(logged, OwnerClass::ArenaVector, heap.alloc_float(1.5));
-
-    let slot_of = |owner: TaggedValue| {
-        let ptr = owner.as_veclike_ptr().unwrap() as *const VectorObj;
-        let base = ObjectPage::<VectorObj>::page_base_for_ptr(ptr);
-        let page = heap.vector_arena.page_index_by_base[&base];
-        (
-            page,
-            (ptr as usize - base) / <VectorObj as PagedObject>::SLOT_BYTES,
-        )
-    };
-    let (page, slot) = slot_of(logged);
-    assert!(heap.vector_arena.logged_slot_header(page, slot).is_some());
-    let (page, slot) = slot_of(neighbour);
-    assert!(heap.vector_arena.logged_slot_header(page, slot).is_none());
-    minor(&mut heap, &[logged, neighbour]);
 }
 
 /// The dirty-card cons walk skips children that are old cells of the same

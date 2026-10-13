@@ -1766,7 +1766,6 @@ impl TaggedHeap {
                 }
                 if !major_mark && unsafe { &*(addr as *const GcHeader) }.claim_remembered() {
                     self.current_mutator_gc_mut().remset.push(owner);
-                    self.mark_owner_card(addr);
                 }
             }
             return;

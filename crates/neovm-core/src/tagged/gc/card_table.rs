@@ -152,8 +152,8 @@ impl CardTable {
         }
     }
 
-    /// Collector side, with every mutator stopped.
-    #[inline]
+    /// Clean one card (tests: the collector cleans whole chunks).
+    #[cfg(test)]
     pub(crate) fn clear(&self, owner_addr: usize) {
         self.byte(card_index(owner_addr))
             .store(CARD_CLEAN, Ordering::Relaxed);

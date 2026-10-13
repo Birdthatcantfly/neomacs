@@ -143,8 +143,9 @@ impl TaggedHeap {
             return;
         }
         self.publish_persistent_remembered_world_stopped();
-        // Compiled cons stores mark cards without logging their owner, so
-        // every cons chunk's cards are cleaned here, with the claims.
+        // Cons stores mark cards without logging their owner, so every cons
+        // chunk's cards are cleaned here, with the claims. Only conses have
+        // cards; slot owners leave through their logged headers below.
         if let Some(cards) = self.card_table() {
             for block in &self.cons_blocks {
                 cards.clear_chunk(block.base_addr());
@@ -158,9 +159,6 @@ impl TaggedHeap {
         for owner in owners {
             if self.owner_is_mapped(owner) {
                 continue;
-            }
-            if let Some(addr) = Self::owner_card_addr(owner) {
-                self.clear_owner_card(addr);
             }
             if owner.is_cons() {
                 if let Some((trailer, index)) = self.old_cons_trailer(owner)
@@ -459,36 +457,18 @@ impl TaggedHeap {
             .is_some_and(|cards| cards.is_dirty(owner_addr))
     }
 
-    /// Clear with every mutator stopped, together with the owner's logged bit:
-    /// a logged owner always keeps a dirty card until its claim is reset.
-    #[inline]
-    fn clear_owner_card(&self, owner_addr: usize) {
-        if let Some(cards) = self.card_table() {
-            cards.clear(owner_addr);
-        }
-    }
-
     /// Whether a minor reaches logged OWNER's children through its dirty
-    /// card: an old cons in an owned block, or a page-arena object. Box and
-    /// mapped owners stay on the remembered-set path. Only `remember_owner`
-    /// logs, and it logs an unmapped cons only through its block trailer and
-    /// a header only once tenured, which an owned object alone can be; the
-    /// `boxed` flag then separates Box objects from arena slots.
+    /// card: an old cons of an owned block. Vector-like, string and Box
+    /// owners stay on the remembered set, which names exactly the logged
+    /// owners: one of them can own thousands of out-of-line children, and
+    /// a card would drag in every neighbour that shares it.
     #[inline]
     pub(super) fn owner_is_card_scanned(&self, owner: TaggedValue) -> bool {
-        if self.owner_is_mapped(owner) {
+        if !owner.is_cons() || self.owner_is_mapped(owner) {
             return false;
         }
-        if owner.is_cons() {
-            debug_assert!(self.old_cons_trailer(owner).is_some());
-            return true;
-        }
-        let Some(addr) = Self::value_heap_addr(owner) else {
-            return false;
-        };
-        debug_assert!(self.owns_heap_value_object(owner, addr));
-        // SAFETY: a logged owner is live, so its header is readable.
-        !unsafe { &*(addr as *const GcHeader) }.flags.boxed()
+        debug_assert!(self.old_cons_trailer(owner).is_some());
+        true
     }
 
     /// Trace the old objects that start in a dirty card: every old cell of a
@@ -527,15 +507,6 @@ impl TaggedHeap {
                 }
             }
         }
-        // Floats and bignums hold no Lisp references.
-        self.trace_arena_dirty_cards(|heap| &heap.string_arena);
-        self.trace_arena_dirty_cards(|heap| &heap.vector_arena);
-        self.trace_arena_dirty_cards(|heap| &heap.bytecode_arena);
-        self.trace_arena_dirty_cards(|heap| &heap.lambda_arena);
-        self.trace_arena_dirty_cards(|heap| &heap.macro_arena);
-        self.trace_arena_dirty_cards(|heap| &heap.record_arena);
-        self.trace_arena_dirty_cards(|heap| &heap.symbol_with_pos_arena);
-        self.trace_arena_dirty_cards(|heap| &heap.marker_arena);
     }
 
     #[inline]
@@ -543,35 +514,9 @@ impl TaggedHeap {
         self.card_table()?.dirty_chunk(chunk_base)
     }
 
-    #[inline]
-    fn trace_arena_dirty_cards<T: PagedObject>(&mut self, arena: fn(&Self) -> &ObjectArena<T>) {
-        for page in 0..arena(self).pages.len() {
-            let Some(chunk) = self.dirty_chunk(arena(self).pages[page].base_addr()) else {
-                continue;
-            };
-            for offset in chunk.dirty_offsets() {
-                for slot in ObjectArena::<T>::slots_starting_in_card(offset) {
-                    let Some(header) = arena(self).logged_slot_header(page, slot) else {
-                        continue;
-                    };
-                    // SAFETY: a tenured allocated slot holds a live object.
-                    let owner = match unsafe { (*header).kind } {
-                        HeapObjectKind::VecLike => unsafe {
-                            TaggedValue::from_veclike_ptr(header as *const VecLikeHeader)
-                        },
-                        HeapObjectKind::String => unsafe {
-                            TaggedValue::from_string_ptr(header as *const StringObj)
-                        },
-                        HeapObjectKind::Float => continue,
-                    };
-                    self.push_value_children_to_gray(owner, "generational-card");
-                }
-            }
-        }
-    }
-
-    /// S1 invariant: every unmapped owner in R_seed or a mutator R log has a
-    /// dirty card. Runs in GEN1 verify mode with every mutator stopped.
+    /// Every unmapped cons in R_seed or a mutator R log has a dirty card: the
+    /// minor reaches logged conses only through their cards. Runs in GEN1
+    /// verify mode with every mutator stopped.
     #[cold]
     #[inline(never)]
     pub(super) fn verify_remembered_owner_cards_world_stopped(&self) {
@@ -581,7 +526,7 @@ impl TaggedHeap {
             .iter()
             .chain(self.mutators().flat_map(|mutator| mutator.remset.iter()));
         for &owner in logged {
-            if self.owner_is_mapped(owner) {
+            if !self.owner_is_card_scanned(owner) {
                 continue;
             }
             if let Some(addr) = Self::owner_card_addr(owner) {
