@@ -374,3 +374,69 @@ fn symbols_born_after_admission_behave_as_before() {
         assert_eq!(eval(&mut ev, form), expected, "{form}");
     }
 }
+
+/// Resident set size in KiB (`/proc/self/statm`), or 0 off Linux.
+fn rss_kib() -> u64 {
+    std::fs::read_to_string("/proc/self/statm")
+        .ok()
+        .and_then(|statm| statm.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .map_or(0, |pages| pages * 4)
+}
+
+/// Cold inventory of admission on the loaded runtime image: the cells it
+/// projects, how many own a descriptor, its time and memory. Run inside
+/// `tmp/v10x/sandbox-run.sh` with `--run-ignored only`.
+#[test]
+#[ignore = "inventory probe on the loaded image; run explicitly, sandboxed"]
+fn admission_inventory_probe() {
+    use crate::emacs_core::symbol::AdmissionPlanCell;
+
+    let mut ev = crate::test_utils::runtime_startup_context();
+    ev.set_threading_mode_at_construction(ThreadingMode::Green);
+    eval(&mut ev, "(defvar tad-probe 1)");
+    let id = intern("tad-probe");
+    ev.try_specbind(id, Value::fixnum(2)).expect("bind");
+    let undo_list = super::super::buffer_undo_list_symbol();
+    let (mut cells, mut owned, mut void, mut skipped) = (0usize, 0usize, 0usize, 0usize);
+    for (id, _) in ev.obarray.iter_symbols() {
+        cells += 1;
+        match (id == undo_list, ev.obarray.admission_plan(id)) {
+            (false, Some(AdmissionPlanCell::Owned)) => owned += 1,
+            (false, Some(AdmissionPlanCell::Void)) => void += 1,
+            _ => skipped += 1,
+        }
+    }
+    let entries = ev.specpdl.len();
+    ev.gc_collect_exact();
+    let rss_before = rss_kib();
+    let started = std::time::Instant::now();
+    ev.admit_threads().expect("admission");
+    let elapsed = started.elapsed();
+    let rss_after = rss_kib();
+    let issued = ev.thread_projection_count_for_test();
+    let descriptor = std::mem::size_of::<crate::emacs_core::forward::ThreadProjectionDescriptor>();
+    println!(
+        "ADMISSION-PROBE cells={cells} owned={owned} void={void} skipped={skipped} \
+         specpdl={entries} issued={issued} descriptor_bytes={descriptor} \
+         arena_kib={} admit_us={} rss_before_kib={rss_before} rss_after_kib={rss_after} \
+         rss_delta_kib={}",
+        issued.div_ceil(256) * 256 * descriptor / 1024,
+        elapsed.as_micros(),
+        rss_after.saturating_sub(rss_before),
+    );
+    assert_eq!(issued, owned, "every owned cell got a descriptor");
+    // The loaded image keeps working once admitted.
+    assert_eq!(eval(&mut ev, "tad-probe"), "2");
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(list (let ((case-fold-search nil)) (string-match \"a\" \"A\"))
+                   (let ((fill-column 33)) fill-column)
+                   (with-temp-buffer (insert \"abc\") (buffer-string))
+                   (progn (defvar tad-probe-new 5) (let ((tad-probe-new 6)) tad-probe-new)))"
+        ),
+        "(nil 33 \"abc\" 6)"
+    );
+    ev.unbind_to(0);
+    assert_eq!(eval(&mut ev, "tad-probe"), "1");
+}
