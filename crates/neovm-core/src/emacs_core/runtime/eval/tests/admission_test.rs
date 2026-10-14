@@ -440,3 +440,38 @@ fn admission_inventory_probe() {
     ev.unbind_to(0);
     assert_eq!(eval(&mut ev, "tad-probe"), "1");
 }
+
+/// Pins the BUFFER_OBJFWD default-channel gap: in an admitted World a `let`
+/// of a per-buffer variable in a buffer with no local binds an owner slot,
+/// so a direct slot reader (redisplay's `BVAR`) still sees the default. GNU
+/// binds through `set_default`, which every non-local buffer's slot shows.
+/// 3d binds it in place (a legacy `LetDefault`, swapped at park/resume)
+/// before Green `make-thread` becomes Lisp-reachable.
+#[test]
+#[ignore = "3d: BUFFER_OBJFWD default-channel binding in place"]
+fn a_default_binding_of_a_per_buffer_variable_reaches_direct_slot_readers() {
+    let mut ev = green();
+    eval(&mut ev, "(set-buffer (get-buffer-create \"tad-truncate\"))");
+    ev.admit_threads().expect("admission");
+    let id = intern("truncate-lines");
+    let info = crate::buffer::buffer::lookup_buffer_slot_by_sym_id(id).expect("a per-buffer slot");
+    let buffer = ev.buffers.current_buffer_id().expect("a current buffer");
+    let count = ev.specpdl.len();
+    ev.try_specbind(id, Value::T).expect("bind");
+    let slot = |ev: &Context| ev.buffers.get(buffer).expect("live").slots[info.offset.index()];
+    assert_eq!(eval(&mut ev, "truncate-lines"), "t");
+    assert_eq!(slot(&ev), Value::T, "a direct slot reader sees the binding");
+    ev.unbind_to(count);
+    assert_eq!(slot(&ev), Value::NIL);
+}
+
+/// Review condition 2 of round 3: `defvaralias` of a plain variable another
+/// owner has let-bound. GNU's let-bound refusal walks only the current
+/// thread's specpdl (`src/eval.c:703-711`), so GNU succeeds. Needs a second
+/// owner (3d) and the generated GNU oracle (3e); match GNU if its answer is
+/// deterministic, else document the refusal.
+#[test]
+#[ignore = "3e: needs a second owner (3d) and the GNU oracle"]
+fn defvaralias_of_a_variable_another_owner_binds_follows_the_gnu_oracle() {
+    unimplemented!("3e: two owners, one binding tad-alias-base; the other runs defvaralias")
+}
