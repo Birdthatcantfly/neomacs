@@ -112,7 +112,8 @@ impl Context {
     }
 
     /// The returning continuation of a PARKED owner, on the thread it runs
-    /// on now: the World's projection scope is entered there, the owner's
+    /// on now: the owner's thread state and its World's projection scope
+    /// are installed there, the owner's
     /// in-place buffer bindings swap back in, its bindings whose local
     /// another owner killed retire (design §5.4), and every host mirror
     /// shows what it sees again.
@@ -125,6 +126,7 @@ impl Context {
             self.obarray.generation(),
             "an owner resumes in its own World"
         );
+        self.setup_thread_locals();
         if self.threads_admitted() {
             self.enter_world_projection_scope();
         }

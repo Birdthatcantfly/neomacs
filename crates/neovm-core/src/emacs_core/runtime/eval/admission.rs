@@ -21,9 +21,10 @@
 //! from the start would be (design §5.2). Its `let` entries per variable and
 //! channel, outermost first, become: the first one `Inherited` (popping it
 //! exposes canonical storage), the rest `Previous` with the value each saved.
-//! A `backtrace-eval` in progress has exchanged the entries below its rewind
-//! entry with their live storage; admission undoes those exchanges on a copy,
-//! builds the owner from the result, then replays them as owner exchanges.
+//! To get there, admission unwinds a copy of the entries top down, as
+//! `unbind_to` would (a `backtrace-eval` rewind entry re-exchanging the
+//! entries below it), then binds them again bottom up as owner bindings,
+//! replaying each exchange as an owner exchange where its rewind entry sits.
 //! A buffer-local binding whose local is gone keeps the value it hid as
 //! `Captured`, restored only if the local is made again (GNU,
 //! `src/eval.c:3871-3883`).
@@ -212,6 +213,9 @@ impl Context {
         if !self.suspended_thread_bindings.is_empty() {
             return Err(AdmissionError::SimulatedThreadsLive);
         }
+        // The projection scope and the heap the collector closes are this
+        // owner's, on this thread.
+        self.setup_thread_locals();
         let phase = CollectorClosedPhase::enter(self)?;
         let plan = phase.context.plan_admission();
         let fresh = phase.context.reserve_admission(&plan, reservation)?;
@@ -266,7 +270,7 @@ impl Context {
                     action: NativeUnwindAction::BacktraceEvalRewind { distance },
                 } => {
                     if let Some(base) = position.checked_sub(distance) {
-                        rewinds.push(base..position);
+                        rewinds.push((position, base..position));
                     }
                     continue;
                 }
@@ -466,74 +470,114 @@ impl Context {
     }
 }
 
+/// A point of the specpdl reconstruction walks.
+#[derive(Clone, Copy, Debug)]
+enum HistoryPoint {
+    /// The planned binding at this index.
+    Binding(usize),
+    /// The rewind entry of a `backtrace-eval`: the planned bindings in this
+    /// index range are the ones it exchanged.
+    Rewind(usize, usize),
+}
+
 /// Turn the planned entries into the owner an owner that had bound these
-/// variables owner-locally from the start would be: undo the in-progress
-/// `backtrace-eval` exchanges (REWINDS, each the specpdl range one rewind
-/// entry re-exchanges) on the plan's copy of the entries and their live
-/// values, build the owner from that, then replay the exchanges as owner
-/// exchanges, in the order `backtrace-eval` made them.
+/// variables owner-locally from the start would be. REWINDS are the
+/// `backtrace-eval` rewind entries, each with the specpdl range it
+/// exchanged.
+///
+/// The walk first unwinds a copy of the entries and their live values, as
+/// `unbind_to` would, top down -- a rewind entry re-exchanging its range,
+/// a binding giving its value up and restoring the one it saved -- which
+/// leaves the value of each binding and, per channel, the value no binding
+/// hides: canonical storage. It then binds them again bottom up as owner
+/// bindings, replaying each `backtrace-eval` exchange as an owner exchange
+/// where its rewind entry sits. A binding made while an exchange hid the
+/// outer ones therefore hides canonical storage, as it would have.
+///
+/// A buffer-local channel whose local is gone has no live value to walk:
+/// its outermost binding keeps the value it saved as `Captured`, the rest
+/// as `Previous`, and an exchanged one, whose value was lost with the
+/// local, is retired, as its rewind would retire it.
 fn reconstruct_owner(
     bindings: &mut [PlannedBinding],
     chains: &mut [PlannedChain],
-    rewinds: &[std::ops::Range<usize>],
+    rewinds: &[(usize, std::ops::Range<usize>)],
 ) {
-    let in_range = |range: &std::ops::Range<usize>| {
+    let mut points: Vec<(usize, HistoryPoint)> = Vec::with_capacity(bindings.len() + rewinds.len());
+    points.extend(
+        bindings
+            .iter()
+            .enumerate()
+            .map(|(index, binding)| (binding.position, HistoryPoint::Binding(index))),
+    );
+    for (position, range) in rewinds {
         let start = bindings.partition_point(|binding| binding.position < range.start);
         let end = bindings.partition_point(|binding| binding.position < range.end);
-        start..end
-    };
-    let ranges: Vec<std::ops::Range<usize>> = rewinds.iter().map(in_range).collect();
-    for range in &ranges {
-        for binding in &mut bindings[range.clone()] {
+        for binding in &mut bindings[start..end] {
             binding.exchanged = !binding.exchanged;
         }
+        points.push((*position, HistoryPoint::Rewind(start, end)));
     }
+    points.sort_unstable_by_key(|(position, _)| *position);
 
-    // Undo: the latest `backtrace-eval` first, each one's exchanges (made
-    // innermost first) outermost first.
-    for range in ranges.iter().rev() {
-        for binding in &mut bindings[range.clone()] {
-            if let Some(live) = chains[binding.chain].live.as_mut() {
-                std::mem::swap(&mut binding.saved, live);
+    // Unwind the copy, top down.
+    let mut values = vec![Value::UNBOUND; bindings.len()];
+    for &(_, point) in points.iter().rev() {
+        match point {
+            HistoryPoint::Binding(index) => {
+                let binding = &mut bindings[index];
+                if let Some(live) = chains[binding.chain].live.as_mut() {
+                    values[index] = std::mem::replace(live, binding.saved);
+                }
+            }
+            HistoryPoint::Rewind(start, end) => {
+                for binding in &mut bindings[start..end] {
+                    if let Some(live) = chains[binding.chain].live.as_mut() {
+                        std::mem::swap(&mut binding.saved, live);
+                    }
+                }
             }
         }
     }
-
-    let mut seen = vec![false; chains.len()];
-    for binding in bindings.iter_mut() {
-        let chain = &mut chains[binding.chain];
-        let outermost = !std::mem::replace(&mut seen[binding.chain], true);
-        let saved = SlotValue::new(binding.saved);
-        binding.undo = match (chain.live, outermost) {
-            (Some(_), true) => {
-                chain.canonical = Some(binding.saved);
-                UndoTarget::Inherited { suspended: None }
-            }
-            (Some(_), false) => UndoTarget::Previous(saved),
-            // The local is gone. An exchanged entry's value was lost with
-            // it; its rewind would retire the binding anyway.
-            (None, _) if binding.exchanged => UndoTarget::Retired,
-            (None, true) => UndoTarget::Captured(saved),
-            (None, false) => UndoTarget::Previous(saved),
-        };
-    }
     for chain in chains.iter_mut() {
-        chain.slot = match chain.live {
-            Some(live) => SlotState::Bound(SlotValue::new(live)),
-            None => SlotState::NoBinding,
-        };
+        chain.canonical = chain.live;
+        chain.slot = SlotState::NoBinding;
     }
 
-    // Replay: the earliest `backtrace-eval` first, innermost first.
-    for range in &ranges {
-        for binding in bindings[range.clone()].iter_mut().rev() {
-            let chain = &mut chains[binding.chain];
-            if chain.live.is_none() {
-                continue;
+    // Bind again as owner bindings, bottom up.
+    let mut seen = vec![false; chains.len()];
+    for &(_, point) in &points {
+        match point {
+            HistoryPoint::Binding(index) => {
+                let binding = &mut bindings[index];
+                let chain = &mut chains[binding.chain];
+                let outermost = !std::mem::replace(&mut seen[binding.chain], true);
+                if chain.live.is_none() {
+                    let saved = SlotValue::new(binding.saved);
+                    binding.undo = match (binding.exchanged, outermost) {
+                        (true, _) => UndoTarget::Retired,
+                        (false, true) => UndoTarget::Captured(saved),
+                        (false, false) => UndoTarget::Previous(saved),
+                    };
+                    continue;
+                }
+                binding.undo = match chain.slot {
+                    SlotState::NoBinding => UndoTarget::Inherited { suspended: None },
+                    SlotState::Bound(outer) => UndoTarget::Previous(outer),
+                };
+                chain.slot = SlotState::Bound(SlotValue::new(values[index]));
             }
-            if let Some((undo, slot)) = exchanged_binding(binding.undo, chain.slot) {
-                binding.undo = undo;
-                chain.slot = slot;
+            HistoryPoint::Rewind(start, end) => {
+                for binding in bindings[start..end].iter_mut().rev() {
+                    let chain = &mut chains[binding.chain];
+                    if chain.live.is_none() {
+                        continue;
+                    }
+                    if let Some((undo, slot)) = exchanged_binding(binding.undo, chain.slot) {
+                        binding.undo = undo;
+                        chain.slot = slot;
+                    }
+                }
             }
         }
     }
@@ -542,3 +586,7 @@ fn reconstruct_owner(
 #[cfg(test)]
 #[path = "tests/admission_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/admission_scenarios_test.rs"]
+mod scenario_tests;
