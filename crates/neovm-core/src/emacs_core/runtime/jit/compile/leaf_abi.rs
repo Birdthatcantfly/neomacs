@@ -268,18 +268,46 @@ macro_rules! bare_trampoline {
     };
 }
 
+// Opcode leaves retain GNU's inlined primitive frame only for the error
+// shapes where bytecode.c records one. The owned signal carries the request
+// until dispatch, after LeafActive has finished its read-only witness check.
+// Threading: the request belongs to this mutator's Flow; no state is shared.
+#[inline(always)]
+fn opcode_nth(ctx: &Context, n: Value, list: Value) -> LeafResult {
+    leaves::nth(ctx, n, list).map_err(|exit| opcode_error_backtrace(exit, &Op::Nth, n, list))
+}
+
+#[inline(always)]
+fn opcode_elt(ctx: &Context, sequence: Value, n: Value) -> LeafResult {
+    leaves::elt(ctx, sequence, n)
+        .map_err(|exit| opcode_error_backtrace(exit, &Op::Elt, sequence, n))
+}
+
+// Materialize the argument slice in this cold frame so opcode trampolines
+// do not reserve an error-only array in their successful call frames.
+#[cold]
+#[inline(never)]
+fn opcode_error_backtrace(exit: LeafExit, op: &Op, arg0: Value, arg1: Value) -> LeafExit {
+    match exit {
+        LeafExit::Signal(flow) => {
+            LeafExit::Signal(flow.with_bytecode_error_backtrace(op, &[arg0, arg1]))
+        }
+        LeafExit::Generic => LeafExit::Generic,
+    }
+}
+
 bare_trampoline!(neovm_leaf_bare_get, leaves::GET, leaves::get, 2);
 bare_trampoline!(neovm_leaf_bare_length, leaves::LENGTH, leaves::length, 1);
 bare_trampoline!(
     neovm_leaf_bare_nth,
     leaves::NTH,
-    leaves::nth,
+    opcode_nth,
     2,
     fast = leaves::fast::nth_fast,
     rest = nth_rest
 );
 bare_trampoline!(neovm_leaf_bare_nthcdr, leaves::NTHCDR, leaves::nthcdr, 2);
-bare_trampoline!(neovm_leaf_bare_elt, leaves::ELT, leaves::elt, 2);
+bare_trampoline!(neovm_leaf_bare_elt, leaves::ELT, opcode_elt, 2);
 bare_trampoline!(neovm_leaf_bare_member, leaves::MEMBER, leaves::member, 2);
 bare_trampoline!(neovm_leaf_bare_equal, leaves::EQUAL, leaves::equal, 2);
 bare_trampoline!(

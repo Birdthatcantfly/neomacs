@@ -18,6 +18,9 @@ use crate::tagged::SymbolMode;
 use crate::window::WindowId;
 use strum::{EnumString, IntoStaticStr};
 
+mod bytecode_backtrace;
+use bytecode_backtrace::BytecodeErrorBacktrace;
+
 thread_local! {
     static FORMAT_OBJECT_STACK: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
@@ -65,6 +68,7 @@ pub struct EvalSignalState {
     delivery: SignalDelivery,
     selected_resume: Option<ResumeTarget>,
     search_complete: bool,
+    bytecode_error_backtrace: Option<BytecodeErrorBacktrace>,
 }
 
 impl EvalError {
@@ -84,6 +88,7 @@ impl EvalError {
             delivery,
             selected_resume,
             search_complete,
+            bytecode_error_backtrace,
             pin,
         } = signal;
         Self::Signal {
@@ -95,6 +100,7 @@ impl EvalError {
                 delivery,
                 selected_resume,
                 search_complete,
+                bytecode_error_backtrace,
             },
         }
     }
@@ -170,6 +176,7 @@ pub(crate) fn flow_from_eval_error(err: EvalError) -> Flow {
                 delivery,
                 selected_resume,
                 search_complete,
+                bytecode_error_backtrace,
             } = pin;
             Flow::signal_boxed(Box::new(SignalData {
                 symbol,
@@ -178,6 +185,7 @@ pub(crate) fn flow_from_eval_error(err: EvalError) -> Flow {
                 delivery,
                 selected_resume,
                 search_complete,
+                bytecode_error_backtrace,
                 pin: roots,
             }))
         }
@@ -658,6 +666,7 @@ pub struct SignalData {
     delivery: SignalDelivery,
     pub(crate) selected_resume: Option<ResumeTarget>,
     pub(crate) search_complete: bool,
+    pub(crate) bytecode_error_backtrace: Option<BytecodeErrorBacktrace>,
     /// Keeps `data` and `raw_data` reachable for the collector while this
     /// signal is in flight. PRIVATE on purpose: it is what makes an unrooted
     /// signal payload unrepresentable outside this module — a struct with a
@@ -710,6 +719,7 @@ impl SignalData {
             delivery,
             selected_resume: None,
             search_complete: false,
+            bytecode_error_backtrace: None,
             pin,
         }
     }

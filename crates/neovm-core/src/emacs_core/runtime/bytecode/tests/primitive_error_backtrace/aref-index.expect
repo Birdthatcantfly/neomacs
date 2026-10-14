@@ -1,0 +1,1 @@
+(1 ((t carframe--debugger (error (wrong-type-argument fixnump bad)) nil) (t aref ([4] bad) nil) (t carframe--f ([4] bad nil) nil)))

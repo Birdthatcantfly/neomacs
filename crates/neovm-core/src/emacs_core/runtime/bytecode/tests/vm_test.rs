@@ -14,6 +14,10 @@ use std::rc::Rc;
 #[path = "primitive_opcode_cells_test.rs"]
 mod primitive_opcode_cells;
 
+#[cfg(test)]
+#[path = "primitive_error_backtrace_test.rs"]
+mod primitive_error_backtrace;
+
 fn new_vm(eval: &mut Context) -> Vm<'_> {
     Vm::from_context(eval)
 }

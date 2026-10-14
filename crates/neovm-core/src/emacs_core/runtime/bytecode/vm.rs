@@ -9113,6 +9113,30 @@ impl<'a> Vm<'a> {
         callers: &mut InterpreterCallerStack,
         flow: Flow,
     ) -> ResumeFlowOutcome {
+        // All successful dispatch stays in run_loop unchanged. The operands of
+        // failed pure/builtin opcodes remain on bc_buf; car/cdr popped their
+        // operand, whose identity is retained by the wrong-type signal itself.
+        let func = callers.active().function.code();
+        let flow = match func.executable_ops().get(pc_local.saturating_sub(1)) {
+            Some(op @ (Op::Car | Op::Cdr)) => {
+                if let FlowRef::Signal(sig) = flow.kind()
+                    && let Some(value) = sig.data.get(1).copied()
+                {
+                    flow.with_bytecode_error_backtrace(op, &[value])
+                } else {
+                    flow
+                }
+            }
+            Some(op @ (Op::Nth | Op::Elt | Op::Setcar | Op::Setcdr | Op::Aref)) => {
+                let len = self.ctx.bc_buf.len();
+                flow.with_bytecode_error_backtrace(op, &self.ctx.bc_buf[len.saturating_sub(2)..])
+            }
+            Some(op @ Op::Aset) => {
+                let len = self.ctx.bc_buf.len();
+                flow.with_bytecode_error_backtrace(op, &self.ctx.bc_buf[len.saturating_sub(3)..])
+            }
+            _ => flow,
+        };
         let resume = {
             let func = callers.active().function.code();
             let aux = aux_stack.current_mut();

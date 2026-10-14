@@ -199,6 +199,12 @@ impl Context {
     }
 
     pub(super) fn dispatch_signal(&mut self, mut sig: SignalData) -> Result<SignalData, Flow> {
+        // GNU bytecode.c records inline primitive error frames before signalling.
+        // Native leaves defer this specpdl mutation until their witness is gone.
+        // The selected handler/function unwinder owns the frame from here on.
+        if let Some(frame) = sig.bytecode_error_backtrace.take() {
+            frame.record(self);
+        }
         self.run_signal_hook(&sig)?;
         let original_delivery = sig.delivery();
         sig = self.canonicalize_signal_symbol(sig);

@@ -3561,6 +3561,30 @@ mod osr_inline_tests;
 #[path = "cache/tests/hof_regalloc_test.rs"]
 mod hof_regalloc_tests;
 
+/// Install a directly compiled leaf for an exact-tier runtime observation.
+/// Threading: the fixture owns this dormant Context and this mutator's cache;
+/// the function cell roots the source, and the cache roots the leaf constants.
+#[cfg(test)]
+pub(crate) fn install_leaf_for_test(
+    ctx: &Context,
+    func: &ByteCodeFunction,
+    leaf: CompiledLeaf,
+) -> Rc<CompiledLeaf> {
+    sync_cache_to_current_heap();
+    sync_cache_to_obarray(ctx.obarray.generation());
+    let id = func.jit_runtime().compiled_id_or_assign();
+    let leaf = Rc::new(leaf);
+    func.jit_runtime().disarm_leaf_slot();
+    COMPILED.with(|cache| {
+        cache
+            .borrow_mut()
+            .retire_and_replace(id, Some(CacheEntry::Compiled(Rc::clone(&leaf))));
+    });
+    func.jit_runtime().set_hot_for_test();
+    func.jit_runtime().defer_tier_up(0);
+    leaf
+}
+
 /// Prepare an entry through its real front/backend protocol without executing
 /// the body. Native-observation tests call this at explicit fixture boundaries;
 /// pending/cancellation tests use the production seam directly.
