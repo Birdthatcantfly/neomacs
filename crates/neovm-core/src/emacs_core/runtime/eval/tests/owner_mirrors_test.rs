@@ -208,3 +208,83 @@ fn undo_list_bindings_swap_with_their_owner() {
     ev.unbind_to(count);
     assert_eq!(eval(&mut ev, "buffer-undo-list"), recorded);
 }
+
+#[test]
+fn a_buffer_slot_binding_lives_in_the_slot_and_parks_in_the_slab() {
+    let mut ev = projected(&["fill-column", "mode-name"]);
+    eval(
+        &mut ev,
+        "(progn (set-buffer (get-buffer-create \" tom-slot\"))
+                (setq fill-column 50) (setq mode-name \"outer\"))",
+    );
+    let buffer = ev.buffers.current_buffer_id().expect("current buffer");
+    let fill = intern("fill-column");
+    let mode = intern("mode-name");
+    let count = ev.specpdl.len();
+    ev.try_specbind(fill, Value::fixnum(60))
+        .expect("bind fill-column");
+    eval(
+        &mut ev,
+        "(setq tom-name (concat \"inner-\" (number-to-string 7)))",
+    );
+    let name = ev.variable_value_by_name("tom-name").expect("tom-name");
+    ev.try_specbind(mode, name).expect("bind mode-name");
+    // In place: the slot holds the binding, and the slab records nothing.
+    assert_eq!(
+        print_value(&ev.owner_canonical_value(fill, Channel::BufferLocal(buffer))),
+        "60"
+    );
+    assert!(
+        ev.owner
+            .slab()
+            .is_none_or(|slab| slab.records_of(fill).next().is_none()),
+        "a buffer's own slot binding is not a slab binding"
+    );
+    assert_eq!(
+        eval(&mut ev, "(list fill-column mode-name)"),
+        "(60 \"inner-7\")"
+    );
+    // Another owner runs: it sees what the bindings hide, and writes it.
+    ev.park_owner();
+    eval(&mut ev, "(makunbound 'tom-name)");
+    assert_eq!(
+        eval(&mut ev, "(list fill-column mode-name)"),
+        "(50 \"outer\")"
+    );
+    eval(&mut ev, "(setq fill-column 55)");
+    // The parked binding values stay rooted through the slab.
+    ev.gc_collect_exact();
+    ev.refresh_owner_mirrors();
+    assert_eq!(
+        eval(&mut ev, "(list fill-column mode-name)"),
+        "(60 \"inner-7\")"
+    );
+    ev.unbind_to(count);
+    // The other owner's write is what the binding hid when it popped.
+    assert_eq!(
+        eval(&mut ev, "(list fill-column mode-name)"),
+        "(55 \"outer\")"
+    );
+}
+
+#[test]
+fn undo_list_reads_answer_the_shared_state() {
+    let mut ev = projected(&["fill-column"]);
+    let undo = intern("buffer-undo-list");
+    eval(
+        &mut ev,
+        "(progn (set-buffer (get-buffer-create \" tom-u2\"))
+                (setq buffer-undo-list nil) (insert \"a\"))",
+    );
+    let shared = eval(&mut ev, "buffer-undo-list");
+    let read = |ev: &Context| match ev.find_symbol_value_by_id(undo) {
+        Ok(super::super::SymbolValueLookup::Bound(value)) => print_value(&value),
+        other => format!("{other:?}"),
+    };
+    assert_eq!(read(&ev), shared, "the shared undo state, with a slab");
+    let count = ev.specpdl.len();
+    ev.try_specbind(undo, Value::T).expect("bind");
+    assert_eq!(read(&ev), "t");
+    ev.unbind_to(count);
+    assert_eq!(read(&ev), shared);
+}

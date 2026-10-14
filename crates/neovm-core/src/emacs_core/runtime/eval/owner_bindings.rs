@@ -216,6 +216,9 @@ pub(crate) struct OwnerSlab {
     /// so compiled code's armed test (one load through the admission
     /// header) reads the owner's binding.
     debugger: Option<(TlsIndex, &'static LispBoolFwd)>,
+    /// The values of the owner's in-place buffer bindings while it is
+    /// parked: its specpdl saves them then, and the slab keeps them traced.
+    parked: Vec<Value>,
     _thread_confined: PhantomData<*const ()>,
 }
 
@@ -259,6 +262,7 @@ impl OwnerSlab {
             records: Vec::new(),
             next_generation: NonZeroU32::MIN,
             debugger: None,
+            parked: Vec::new(),
             _thread_confined: PhantomData,
         }
     }
@@ -311,6 +315,19 @@ impl OwnerSlab {
             && channel == Channel::Default
         {
             cell.set(debugger_armed(state));
+        }
+    }
+
+    /// Keep VALUES traced while the owner is parked.
+    pub(crate) fn park(&mut self, values: Vec<Value>) {
+        debug_assert!(self.parked.is_empty(), "an owner parks once");
+        self.parked = values;
+    }
+
+    /// The owner runs again: its parked values are back in its specpdl.
+    pub(crate) fn unpark(&mut self) {
+        for value in std::mem::take(&mut self.parked) {
+            note_dropped(Some(SlotValue::new(value)));
         }
     }
 
@@ -486,6 +503,9 @@ impl OwnerSlab {
     /// current value of the channel it binds. Every bound slot belongs to a
     /// live record, so this visits each bound slot.
     pub(crate) fn trace_roots(&self, visit: &mut dyn FnMut(Value)) {
+        for value in &self.parked {
+            visit(*value);
+        }
         for record in self.records.iter().flatten() {
             let [saved] = record.undo.values();
             if let Some(saved) = saved {
@@ -734,6 +754,15 @@ impl Context {
         value: Value,
     ) -> Result<(), Flow> {
         let (kind, channel) = binding_shape(&self.buffers, resolved, projection);
+        // A buffer's own per-buffer slot binds in place (design §1.3b).
+        if let (
+            BindingKind::LetLocal,
+            Channel::BufferLocal(buffer),
+            CanonicalArm::Forwarded(builtin),
+        ) = (kind, channel, projection.arm())
+        {
+            return self.specbind_slot_in_place(resolved, builtin.descriptor(), buffer, value);
+        }
         let index = projection.index();
         let slab = self.ensure_owner_slab();
         let undo = match slab.slot(index, channel) {
@@ -779,6 +808,47 @@ impl Context {
             slab.set_slot(index, channel, SlotState::Bound(SlotValue::new(stored)));
         }
         self.publish_owner_binding(resolved);
+        Ok(())
+    }
+
+    /// GNU `specbind`'s `SPECPDL_LET_LOCAL` of a per-buffer slot the current
+    /// BUFFER holds (`src/eval.c:3641-3677`), for a projected variable: the
+    /// binding lives in the slot, a shallow binding as GNU's, recorded by a
+    /// `LetLocal` entry. A buffer's per-buffer slots always hold the
+    /// effective value of the owner running in it, so every `BVAR` reader
+    /// stays a slot load; an owner leaving the baton parks these bindings
+    /// (design §1.3b).
+    #[cold]
+    #[inline(never)]
+    fn specbind_slot_in_place(
+        &mut self,
+        resolved: SymId,
+        logical: &'static crate::emacs_core::forward::LispFwd,
+        buffer: BufferId,
+        value: Value,
+    ) -> Result<(), Flow> {
+        let slot = logical
+            .as_buffer_obj_fwd()
+            .and_then(LispBufferObjFwd::buffer_slot)
+            .expect("a per-buffer forwarder names a slot");
+        let off = slot.index();
+        let old_value = self
+            .buffers
+            .get(buffer)
+            .map_or(Value::NIL, |buf| buf.slots[off]);
+        self.push_specpdl_with(|| SpecBinding::LetLocal {
+            sym_id: resolved,
+            old_value,
+            buffer_id: buffer,
+        });
+        self.run_specbind_watcher(resolved, value, "let")?;
+        let stored = match logical.store(value) {
+            Ok(store) => store.canonical_value(),
+            Err(error) => return Err(super::forward_store_signal(error, value)),
+        };
+        if let Some(buf) = self.buffers.get_mut(buffer) {
+            buf.slots[off] = stored;
+        }
         Ok(())
     }
 

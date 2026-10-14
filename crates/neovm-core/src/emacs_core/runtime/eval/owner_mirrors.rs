@@ -11,16 +11,17 @@
 //! GNU's thread switch zaps a `SPECPDL_LET_LOCAL` whose local is gone
 //! (`src/eval.c:4204-4228`).
 //!
-//! `buffer-undo-list` is never projected: its storage is the buffer's
-//! shared undo state, which undo recording reads and writes in place (GNU's
-//! `BVAR (current_buffer, undo_list)`). Its bindings stay `LetLocal` specpdl
-//! entries holding the binding in that shared state while their owner runs,
-//! and swap out when the owner leaves the baton and back in when it
-//! returns, exactly as GNU's thread switch swaps them
-//! (`specpdl_unrewind`, `src/eval.c:4134-4234`). Recording then costs a
-//! dormant owner nothing. (With several owners running at once, a binding
-//! must instead stay off the shared state, which needs recording to ask the
-//! owner; that comes with per-buffer edit ownership.)
+//! A buffer's per-buffer slots always hold the effective value of the
+//! owner running in it (design §1.3b), so every `BVAR` reader -- redisplay,
+//! insertion, undo recording -- stays a slot load. A `let` of a slot the
+//! buffer holds binds in place, a `LetLocal` entry as GNU's, and so does
+//! `buffer-undo-list`, which is never projected (its storage is the
+//! buffer's shared undo state). These bindings swap out when the owner
+//! leaves the baton ([`Context::park_owner`]) and back in when it returns,
+//! exactly as GNU's thread switch swaps them (`specpdl_unrewind`,
+//! `src/eval.c:4134-4234`); while parked, their values sit in the owner's
+//! slab. With several owners running at once, the same swap moves to buffer
+//! acquire and release.
 //!
 //! The returning continuation and the handoff exist once admission does
 //! (round 3c); tests drive them directly.
@@ -87,25 +88,47 @@ impl Context {
         self.swap_host_bindings(HostBindingSwap::Out);
     }
 
-    /// Swap each live `buffer-undo-list` binding with the shared undo state:
-    /// innermost first going out, outermost first coming back in. A binding
-    /// whose buffer is gone turns into a no-op entry, as GNU's does.
+    /// Swap each live in-place buffer binding (`LetLocal` entries: a
+    /// per-buffer slot's, `buffer-undo-list`'s) with the buffer's storage,
+    /// GNU's `specpdl_unrewind` on that channel: innermost first going out,
+    /// outermost first coming back in. A binding whose buffer or local is
+    /// gone turns into a no-op entry, as GNU's does, which drops its parked
+    /// value. While the owner is parked its binding values sit in its slab,
+    /// which the collector traces from the World (design §1.3b).
     fn swap_host_bindings(&mut self, direction: HostBindingSwap) {
-        let undo_list = super::buffer_undo_list_symbol();
         let mut entries: Vec<usize> = self
             .specpdl
             .iter()
             .enumerate()
-            .filter(|(_, entry)| {
-                matches!(entry, super::SpecBinding::LetLocal { sym_id, .. } if *sym_id == undo_list)
-            })
+            .filter(|(_, entry)| matches!(entry, super::SpecBinding::LetLocal { .. }))
             .map(|(index, _)| index)
             .collect();
+        if entries.is_empty() {
+            return;
+        }
         if direction == HostBindingSwap::Out {
             entries.reverse();
         }
-        for index in entries {
+        for &index in &entries {
             self.swap_local_let_binding_for_thread_switch(index);
+        }
+        match direction {
+            HostBindingSwap::Out => {
+                // Each live entry now saves its binding's value.
+                let parked: Vec<Value> = entries
+                    .iter()
+                    .filter_map(|&index| match self.specpdl.get(index) {
+                        Some(super::SpecBinding::LetLocal { old_value, .. }) => Some(*old_value),
+                        _ => None,
+                    })
+                    .collect();
+                self.ensure_owner_slab().park(parked);
+            }
+            HostBindingSwap::In => {
+                if let Some(slab) = self.owner.slab_mut() {
+                    slab.unpark();
+                }
+            }
         }
     }
 
