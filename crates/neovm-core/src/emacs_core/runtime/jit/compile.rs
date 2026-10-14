@@ -4191,6 +4191,9 @@ mod array_shim_tests;
 #[cfg(test)]
 #[path = "tests/call_feedback_test.rs"]
 mod call_feedback_tests;
+#[cfg(test)]
+#[path = "tests/car_cdr_split_test.rs"]
+mod car_cdr_split_tests;
 mod collection_journal;
 #[cfg(test)]
 #[path = "tests/compile_pipeline_test.rs"]
