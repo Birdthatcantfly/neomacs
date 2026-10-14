@@ -1940,6 +1940,10 @@ pub(crate) enum OptProfitMode {
     Loops,
     Lists,
     PrimitiveLists,
+    /// `PrimitiveLists` without the list-operation requirement: a loop of
+    /// primitive opcodes (no explicit bytecode call) qualifies whatever it
+    /// computes, numeric loops included.
+    PrimitiveLoops,
     Kernels,
 }
 impl OptProfitMode {
@@ -1948,6 +1952,7 @@ impl OptProfitMode {
             Some("loops") => Self::Loops,
             Some("lists") => Self::Lists,
             Some("primitive-lists") => Self::PrimitiveLists,
+            Some("primitive-loops") => Self::PrimitiveLoops,
             Some("kernels") => Self::Kernels,
             _ => Self::Off,
         }

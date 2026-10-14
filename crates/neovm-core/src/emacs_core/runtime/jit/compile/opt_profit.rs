@@ -134,6 +134,14 @@ impl Work {
     }
 }
 
+impl super::OptProfitMode {
+    /// Whether a body with an explicit bytecode call stays on the original
+    /// frontend (the primitive modes).
+    pub(crate) fn primitive_only(self) -> bool {
+        matches!(self, Self::PrimitiveLists | Self::PrimitiveLoops)
+    }
+}
+
 /// Consume the caller's existing j17 profitability verdict; do not repeat its
 /// symbol/intrinsic analysis. Numeric feedback is not execution evidence:
 /// FixnumOnly also means unseen. This policy admits floating-point kernels by
@@ -157,9 +165,7 @@ pub(crate) fn body_admitted(
         return false;
     }
     let work = Work::read(ops);
-    if work.unsupported_control
-        || (mode == super::OptProfitMode::PrimitiveLists && work.bytecode_calls)
-    {
+    if work.unsupported_control || (mode.primitive_only() && work.bytecode_calls) {
         return false;
     }
     if work.backedge {
@@ -195,6 +201,7 @@ pub(super) fn front(
         let early_profit = match jit_opt_profit() {
             super::OptProfitMode::Lists => super::OptProfitMode::Lists,
             super::OptProfitMode::PrimitiveLists => super::OptProfitMode::PrimitiveLists,
+            super::OptProfitMode::PrimitiveLoops => super::OptProfitMode::PrimitiveLoops,
             super::OptProfitMode::Off
             | super::OptProfitMode::Loops
             | super::OptProfitMode::Kernels => super::OptProfitMode::Loops,
@@ -305,7 +312,7 @@ pub(crate) fn osr_evidence_headers(
 #[cold]
 #[inline(never)]
 pub(crate) fn primitive_osr_source_admitted(source_ops: &[Op]) -> bool {
-    jit_opt_profit() != super::OptProfitMode::PrimitiveLists
+    !jit_opt_profit().primitive_only()
         || !source_ops.iter().any(|op| {
             matches!(
                 op,
@@ -386,6 +393,10 @@ mod ready_osr_tests;
 #[cfg(test)]
 #[path = "opt_profit/tests/primitive_lists_test.rs"]
 mod primitive_lists_tests;
+
+#[cfg(test)]
+#[path = "opt_profit/tests/primitive_loops_test.rs"]
+mod primitive_loops_tests;
 
 #[cfg(test)]
 #[path = "opt_profit/tests/advised_opaque_test.rs"]
