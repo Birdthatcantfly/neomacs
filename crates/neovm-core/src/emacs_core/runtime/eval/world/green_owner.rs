@@ -125,6 +125,13 @@ impl Context {
         })
     }
 
+    /// This World's Green runtime, if it started.
+    pub(in crate::emacs_core::eval) fn green_runtime_ref(
+        &self,
+    ) -> std::cell::Ref<'_, Option<Box<super::super::green::GreenRuntime>>> {
+        self.obarray.lease.0.green.borrow()
+    }
+
     /// Install the World's Green runtime (once).
     pub(in crate::emacs_core::eval) fn install_green_runtime(
         &self,

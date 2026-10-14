@@ -7738,6 +7738,7 @@ mod macroexpand;
 mod admission;
 mod green;
 pub(crate) use admission::ThreadingMode;
+pub(crate) use green::{green_make_thread, green_world};
 mod owner_bindings;
 mod owner_mirrors;
 mod variable_access;

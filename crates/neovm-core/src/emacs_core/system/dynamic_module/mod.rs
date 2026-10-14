@@ -549,6 +549,11 @@ unsafe fn set_pending_signal(env: *mut emacs_env, symbol: &str, data: Value) {
     }
 }
 
+/// Whether a module call is in progress on this thread.
+pub(crate) fn module_call_active() -> bool {
+    ACTIVE_ENVS.with(|envs| !envs.borrow().is_empty())
+}
+
 /// Active environment frames are scoped to an in-progress native call.
 /// Global references are traced separately from the Context-owned registry.
 pub(crate) fn collect_dynamic_module_gc_roots(roots: &mut Vec<Value>, heap_identity: usize) {

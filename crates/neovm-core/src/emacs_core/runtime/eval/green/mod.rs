@@ -15,20 +15,39 @@
 // Reached from Lisp once Green `make-thread` lands (3d group 4).
 #![cfg_attr(not(test), allow(dead_code))]
 
+mod api;
 mod bootstrap;
+mod scheduler;
+mod switch;
 
+pub(crate) use api::{green_make_thread, green_world};
 pub(crate) use bootstrap::GreenBootstrap;
 #[cfg(debug_assertions)]
 pub(crate) use bootstrap::debug_assert_native_tables_open;
+pub(crate) use scheduler::{ThreadKey, Wait};
+pub(crate) use switch::GreenSeat;
 
 use super::admission::AdmissionError;
 use super::{Context, ThreadingMode};
 use crate::tagged::gc::{CollectorQuiescenceError, FacadeMarkExclusionError};
 
 /// The World's Green runtime, once started: what further owners are built
-/// from. Held by the World and traced with it.
+/// from, the scheduler, and the state every Lisp thread shares. Held by the
+/// World and traced with it.
 pub(crate) struct GreenRuntime {
     pub(super) bootstrap: GreenBootstrap,
+    pub(super) control: std::sync::Arc<scheduler::Control>,
+    /// The World's threads, mutexes and condition variables (GNU keeps them
+    /// global). They travel with the Baton: the holder's `Context::threads`
+    /// is the World's manager, as in a Sim World, and this slot keeps it
+    /// from a park to the next resume (it holds a placeholder otherwise).
+    pub(super) threads: std::cell::RefCell<crate::emacs_core::threads::ThreadManager>,
+    /// Each parked thread's private roots (plan-3d §4).
+    pub(super) parked:
+        std::cell::RefCell<rustc_hash::FxHashMap<ThreadKey, Vec<crate::emacs_core::value::Value>>>,
+    /// A started thread's function until its OS thread runs it.
+    pub(super) pending_starts:
+        std::cell::RefCell<rustc_hash::FxHashMap<ThreadKey, crate::emacs_core::value::Value>>,
 }
 
 impl std::fmt::Debug for GreenRuntime {
@@ -40,7 +59,21 @@ impl std::fmt::Debug for GreenRuntime {
 impl GreenRuntime {
     /// Visit every value the runtime holds.
     pub(super) fn trace_roots(&self, visit: &mut dyn FnMut(crate::emacs_core::value::Value)) {
+        use crate::gc_trace::GcTrace;
         self.bootstrap.trace_roots(visit);
+        let mut roots = Vec::new();
+        self.threads.borrow().trace_roots(&mut roots);
+        for value in roots {
+            visit(value);
+        }
+        for values in self.parked.borrow().values() {
+            for value in values {
+                visit(*value);
+            }
+        }
+        for value in self.pending_starts.borrow().values() {
+            visit(*value);
+        }
     }
 }
 
@@ -105,7 +138,13 @@ impl Context {
         }
         let bootstrap = GreenBootstrap::capture(self);
         let baton = self.issue_green_baton()?;
-        self.install_green_runtime(Box::new(GreenRuntime { bootstrap }));
+        self.install_green_runtime(Box::new(GreenRuntime {
+            bootstrap,
+            control: Default::default(),
+            threads: Default::default(),
+            parked: Default::default(),
+            pending_starts: Default::default(),
+        }));
         Ok(baton)
     }
 
@@ -158,3 +197,7 @@ impl Context {
 #[cfg(test)]
 #[path = "../tests/green_owner_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests/green_switch_test.rs"]
+mod switch_tests;

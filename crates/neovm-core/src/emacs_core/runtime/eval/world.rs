@@ -1084,7 +1084,7 @@ impl WorldStorageBuilder {
             buffers,
             owner_slabs: Default::default(),
             thread_projections: Default::default(),
-            threading: Cell::new(super::admission::ThreadingMode::Sim),
+            threading: Cell::new(super::admission::ThreadingMode::from_env()),
             admitted: Cell::new(false),
             green: Default::default(),
             baton_holder: Cell::new(None),

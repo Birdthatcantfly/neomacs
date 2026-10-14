@@ -59,6 +59,28 @@ pub(crate) enum ThreadingMode {
     Green,
 }
 
+impl ThreadingMode {
+    /// The mode `NEOVM_THREADS` selects for a new World: `green`, or `sim`
+    /// (the default, also when unset). Any other value warns once and
+    /// selects `sim`.
+    pub(crate) fn from_env() -> Self {
+        match std::env::var("NEOVM_THREADS").as_deref() {
+            Ok("green") => Self::Green,
+            Ok("sim") | Err(_) => Self::Sim,
+            Ok(other) => {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    tracing::warn!(
+                        value = other,
+                        "NEOVM_THREADS is neither \"sim\" nor \"green\"; using sim"
+                    );
+                });
+                Self::Sim
+            }
+        }
+    }
+}
+
 /// Why admission refused. Every refusal leaves the owner and the World as
 /// they were.
 #[derive(Debug, thiserror::Error)]

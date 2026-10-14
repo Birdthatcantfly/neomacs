@@ -256,6 +256,9 @@ pub(crate) struct OwnerSlab {
     /// The values of the owner's in-place buffer bindings while it is
     /// parked: its specpdl saves them then, and the slab keeps them traced.
     parked: Vec<Value>,
+    /// This owner's seat in a Green runtime (round 3d): its Lisp thread's
+    /// key, channel and, while it runs, the World's Baton.
+    green: Option<Box<super::green::GreenSeat>>,
     _thread_confined: PhantomData<*const ()>,
 }
 
@@ -300,6 +303,7 @@ impl OwnerSlab {
             next_generation: NonZeroU32::MIN,
             debugger: None,
             parked: Vec::new(),
+            green: None,
             _thread_confined: PhantomData,
         }
     }
@@ -440,6 +444,17 @@ impl OwnerSlab {
         self.replace_undo(outermost, UndoTarget::Inherited { suspended: None });
         self.set_slot(index, channel, SlotState::Bound(SlotValue::new(value)));
         Some(hidden)
+    }
+
+    /// This owner's Green seat, if it runs in a Green runtime.
+    pub(crate) fn green_seat_mut(&mut self) -> Option<&mut super::green::GreenSeat> {
+        self.green.as_deref_mut()
+    }
+
+    /// Seat this owner in a Green runtime (once).
+    pub(crate) fn install_green_seat(&mut self, seat: Box<super::green::GreenSeat>) {
+        debug_assert!(self.green.is_none(), "an owner takes one seat");
+        self.green = Some(seat);
     }
 
     /// Whether this owner has its own `debug-on-next-call` cell.

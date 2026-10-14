@@ -798,7 +798,7 @@ fn split_signal_binding_value(value: Value) -> Option<(Value, Value)> {
 }
 
 /// Extract a thread id from a canonical thread handle object.
-fn expect_thread_id(manager: &ThreadManager, value: &Value) -> Result<u64, Flow> {
+pub(crate) fn expect_thread_id(manager: &ThreadManager, value: &Value) -> Result<u64, Flow> {
     match manager.thread_id_from_handle(value) {
         Some(id) => Ok(id),
         None => Err(signal(
@@ -839,13 +839,10 @@ fn expect_cv_id(manager: &ThreadManager, value: &Value) -> Result<u64, Flow> {
 /// In our single-threaded simulation the function is executed immediately.
 /// Returns a `(thread . ID)` object.
 pub(crate) fn builtin_make_thread(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {
-    // A Green World runs threads as owners; its runtime is not built yet,
-    // and the simulated exchange never runs beside admission.
-    if eval.threading_mode() == super::eval::ThreadingMode::Green {
-        return Err(signal(
-            LispCondition::Error,
-            vec![Value::string("Green Lisp threads are not available yet")],
-        ));
+    // A Green World runs threads as owners on their own OS threads; the
+    // simulated exchange never runs beside admission.
+    if super::eval::green_world(eval) {
+        return super::eval::green_make_thread(eval, &args);
     }
     let (thread_id, function) = prepare_make_thread(&mut eval.threads, &args)?;
     eval.threads
@@ -999,6 +996,9 @@ pub(crate) fn builtin_thread_join(
     ctx: &mut crate::emacs_core::eval::Context,
     args: Vec<Value>,
 ) -> EvalResult {
+    if ctx.green_threads_running() {
+        return ctx.green_thread_join(&args);
+    }
     expect_args("thread-join", &args, 1)?;
     let id = expect_thread_id(&ctx.threads, &args[0])?;
     if !ctx.threads.is_thread(id) {
@@ -1069,6 +1069,9 @@ pub(crate) fn builtin_thread_yield(
     ctx: &mut crate::emacs_core::eval::Context,
     args: Vec<Value>,
 ) -> EvalResult {
+    if ctx.green_threads_running() {
+        return ctx.green_thread_yield(&args);
+    }
     expect_args("thread-yield", &args, 0)?;
     if ctx.threads.current_thread_id() != 0 {
         return Err(Flow::thread_blocked(
