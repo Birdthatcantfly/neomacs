@@ -295,31 +295,64 @@ impl Context {
 pub(super) fn store_projected_runtime_binding(
     obarray: &mut crate::emacs_core::symbol::Obarray,
     buffers: &mut crate::buffer::BufferManager,
-    owner: Option<&mut super::owner_bindings::OwnerSlab>,
+    mut owner: Option<&mut super::owner_bindings::OwnerSlab>,
     specpdl: &[super::SpecBinding],
     sym_id: SymId,
     checked: super::ForwardChecked,
 ) -> Option<crate::buffer::BufferId> {
-    if let Some(slab) = owner
+    let mut shadowed = false;
+    if let Some(slab) = owner.as_deref_mut()
         && let Some(projection) = obarray.thread_projection_of(sym_id)
-        && let Some(channel) = super::owner_bindings::owner_store_channel(
+    {
+        if let Some(channel) = super::owner_bindings::owner_store_channel(
             slab,
             buffers,
             sym_id,
             projection,
             crate::emacs_core::symbol::SetInternalBind::Set,
+        ) {
+            slab.set_slot(
+                projection.index(),
+                channel,
+                super::owner_bindings::SlotState::Bound(super::owner_bindings::SlotValue::new(
+                    checked.value(),
+                )),
+            );
+            return channel.locus();
+        }
+        shadowed = slab.shadows_buffer_binding(sym_id, buffers.current_buffer_id());
+    }
+    // A default binding of this owner made in this buffer that
+    // `backtrace-eval` has set aside still shadows the buffer's binding, as
+    // its `SPECPDL_LET_DEFAULT` entry does for GNU's scan
+    // (`let_shadows_buffer_binding_p`, `src/eval.c:3593-3610`): the store
+    // lands in the default. The owner's record stands in for that entry.
+    let evidence = [super::SpecBinding::LetDefault {
+        sym_id,
+        old_value: super::SavedBindingValue::from_plain(Value::UNBOUND),
+        buffer_id: super::SavedBufferId::from_option(buffers.current_buffer_id()),
+    }];
+    let specpdl = if shadowed { &evidence[..] } else { specpdl };
+    let locus = obarray.with_revealed_projection(sym_id, |obarray| {
+        super::store_runtime_binding(obarray, buffers, None, specpdl, sym_id, checked)
+    });
+    // A `set` that made the local again gives a binding of this owner whose
+    // local was killed its storage back, as `make-local-variable` does
+    // (`Context::owner_local_made`).
+    if let Some(buffer) = locus
+        && let Some(cell) = buffers
+            .get(buffer)
+            .and_then(|buf| buf.local_variable_binding_cell(sym_id))
+        && let Some(slab) = owner
+        && let Some(projection) = obarray.thread_projection_of(sym_id)
+        && let Some(hidden) = slab.reattach_captured(
+            sym_id,
+            projection.index(),
+            super::owner_bindings::Channel::BufferLocal(buffer),
+            checked.value(),
         )
     {
-        slab.set_slot(
-            projection.index(),
-            channel,
-            super::owner_bindings::SlotState::Bound(super::owner_bindings::SlotValue::new(
-                checked.value(),
-            )),
-        );
-        return channel.locus();
+        cell.set_cdr(hidden.get());
     }
-    obarray.with_revealed_projection(sym_id, |obarray| {
-        super::store_runtime_binding(obarray, buffers, None, specpdl, sym_id, checked)
-    })
+    locus
 }

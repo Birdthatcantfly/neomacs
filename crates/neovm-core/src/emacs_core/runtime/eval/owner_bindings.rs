@@ -150,36 +150,34 @@ impl UndoTarget {
 }
 
 /// GNU `specpdl_unrewind`'s exchange of one owner binding whose record
-/// says UNDO while its slot holds SLOT: the binding's value and the value it
-/// hides trade places (`backtrace-eval`, eval.c:4177-4228). A binding that
-/// hid canonical storage is set aside rather than written there. `None` when
-/// there is nothing to exchange: a binding whose storage was killed, or a
-/// slot another binding of the owner holds.
+/// says UNDO while its slot holds SLOT (`backtrace-eval`, eval.c:4177-4228):
+/// what the record would restore and what the slot holds trade places, so
+/// the exchange is its own inverse. A record restores `NoBinding` -- the
+/// canonical value shows through -- when it hides no binding of the owner
+/// (`Inherited`), and the binding it holds otherwise; a binding set aside
+/// while canonical storage shows is `Inherited { suspended }`. `None` when
+/// there is nothing to exchange: a binding whose storage was killed or
+/// dropped.
 pub(super) fn exchanged_binding(
     undo: UndoTarget,
     slot: SlotState,
 ) -> Option<(UndoTarget, SlotState)> {
-    match (undo, slot) {
-        (UndoTarget::Previous(outer), SlotState::Bound(value)) => {
-            Some((UndoTarget::Previous(value), SlotState::Bound(outer)))
+    let restores = match undo {
+        UndoTarget::Inherited { suspended: None } => SlotState::NoBinding,
+        UndoTarget::Inherited {
+            suspended: Some(value),
         }
-        (UndoTarget::Inherited { suspended: None }, SlotState::Bound(value)) => Some((
-            UndoTarget::Inherited {
-                suspended: Some(value),
-            },
-            SlotState::NoBinding,
-        )),
-        (
-            UndoTarget::Inherited {
-                suspended: Some(value),
-            },
-            SlotState::NoBinding,
-        ) => Some((
-            UndoTarget::Inherited { suspended: None },
-            SlotState::Bound(value),
-        )),
-        _ => None,
-    }
+        | UndoTarget::Previous(value) => SlotState::Bound(value),
+        UndoTarget::Captured(_) | UndoTarget::Retired => return None,
+    };
+    let undo = match (slot, restores) {
+        (SlotState::NoBinding, _) => UndoTarget::Inherited { suspended: None },
+        (SlotState::Bound(value), SlotState::NoBinding) => UndoTarget::Inherited {
+            suspended: Some(value),
+        },
+        (SlotState::Bound(value), SlotState::Bound(_)) => UndoTarget::Previous(value),
+    };
+    Some((undo, restores))
 }
 
 /// One binding on an owner's binding stack.
@@ -416,6 +414,32 @@ impl OwnerSlab {
             }
         }
         Ok(())
+    }
+
+    /// A local of SYM was made again on CHANNEL and took VALUE: the
+    /// outermost binding of SYM there whose local had been killed takes it
+    /// back as its storage. Returns the value that binding hid, which the
+    /// new local must hold instead (GNU's entry exchanges with the local it
+    /// finds, `src/eval.c:3871-3883`, `:4204-4228`); `None` when no such
+    /// binding exists.
+    pub(crate) fn reattach_captured(
+        &mut self,
+        sym: SymId,
+        index: TlsIndex,
+        channel: Channel,
+        value: Value,
+    ) -> Option<SlotValue> {
+        let outermost = self.record_ids_of(sym).into_iter().find(|record| {
+            self.record(*record).is_some_and(|record| {
+                record.channel == channel && !matches!(record.undo, UndoTarget::Retired)
+            })
+        })?;
+        let UndoTarget::Captured(hidden) = self.record(outermost)?.undo else {
+            return None;
+        };
+        self.replace_undo(outermost, UndoTarget::Inherited { suspended: None });
+        self.set_slot(index, channel, SlotState::Bound(SlotValue::new(value)));
+        Some(hidden)
     }
 
     /// Whether this owner has its own `debug-on-next-call` cell.
@@ -1454,7 +1478,9 @@ impl Context {
         let Some(record) = slab.record(outermost).copied() else {
             return;
         };
-        if let UndoTarget::Inherited { .. } = record.undo
+        // A binding `backtrace-eval` has set aside keeps its value, as GNU's
+        // exchanged entry does; the local it hid is lost with the kill.
+        if let UndoTarget::Inherited { suspended: None } = record.undo
             && let Some(slab) = self.owner.slab_mut()
         {
             slab.replace_undo(outermost, UndoTarget::Captured(SlotValue::new(canonical)));
@@ -1575,15 +1601,30 @@ impl Context {
             return;
         };
         let default = slab.slot(projection.index(), Channel::Default).value();
+        // A retired binding is GNU's `SPECPDL_NOP`: it binds nothing.
         let outermost = slab.record_ids_of(id).into_iter().find(|record| {
-            slab.record(*record)
-                .is_some_and(|record| record.channel == channel)
+            slab.record(*record).is_some_and(|record| {
+                record.channel == channel && !matches!(record.undo, UndoTarget::Retired)
+            })
         });
         let start = match default {
             Some(default) => default.get(),
             None => self.owner_canonical_value(id, Channel::Default),
         };
+        let suspended = outermost.is_some_and(|outermost| {
+            self.owner
+                .slab()
+                .and_then(|slab| slab.record(outermost))
+                .is_some_and(|record| {
+                    matches!(record.undo, UndoTarget::Inherited { suspended: Some(_) })
+                })
+        });
         match outermost {
+            // A binding `backtrace-eval` has set aside stays aside: the new
+            // local is what it hides, and the rewind brings the binding back
+            // (GNU's exchange of an entry whose local exists again,
+            // `src/eval.c:4204-4228`).
+            Some(_) if suspended => self.owner_canonical_store(id, channel, start),
             Some(outermost) => {
                 let hidden = match self.owner.slab().and_then(|slab| slab.record(outermost)) {
                     Some(OwnerBindingRecord {
