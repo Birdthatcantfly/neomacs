@@ -1,0 +1,1 @@
+((debugger (error (wrong-type-argument number-or-marker-p a)) ((t neovm--hs-debugger (error (wrong-type-argument number-or-marker-p a)) nil) (t compiled (a) nil) (t mapc (compiled (1 2 a 4)) nil) (t neovm--hs-incs ((1 2 a 4)) nil) (t neovm--hs-entry ((1 2 a 4)) nil))) (7))

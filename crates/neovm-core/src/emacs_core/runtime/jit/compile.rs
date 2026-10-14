@@ -4217,6 +4217,9 @@ pub(crate) mod heap_inline;
 #[path = "tests/hof_default_front_test.rs"]
 mod hof_default_front_tests;
 #[cfg(test)]
+#[path = "tests/hof_default_semantics_test.rs"]
+mod hof_default_semantics_tests;
+#[cfg(test)]
 #[path = "tests/inline_heap_ops_test.rs"]
 mod inline_heap_ops_tests;
 
