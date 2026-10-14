@@ -142,6 +142,10 @@ fn an_owner_binding_of_debug_on_next_call_arms_only_this_owner() {
         crate::emacs_core::symbol::FunctionEpochBump::CompilerOverrides,
     );
     assert!(armed(&ev));
+    // So does a function-cell write, which retires the function clock only.
+    ev.obarray
+        .set_symbol_function_id(intern("tom-f"), Value::NIL);
+    assert!(armed(&ev));
     // Assignments under the binding move the owner's cell.
     ev.store_variable(id, Value::NIL);
     assert!(!armed(&ev));

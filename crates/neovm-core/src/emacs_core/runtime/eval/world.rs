@@ -231,6 +231,15 @@ impl AdmissionHeader {
         }
     }
 
+    /// The retirement of a function-cell write: only the function clock
+    /// moves. Such a write never changes the canonical debugger descriptor
+    /// (resolution and installation do, in full-dispatch phases), so the
+    /// header's debugger -- canonical, or this owner's own cell -- stays.
+    #[inline(always)]
+    fn retire_function_epoch(&self, canonical: &CanonicalDispatchCells) {
+        self.epoch.set(canonical.admission_epoch());
+    }
+
     #[inline(always)]
     fn function_epoch(&self) -> u64 {
         self.epoch.get().into()
@@ -314,7 +323,18 @@ impl PreparedDebuggerPublication<'_> {
 struct AdmissionRetirement<'phase> {
     source: NonNull<CanonicalDispatchCells>,
     destination: NonNull<AdmissionHeader>,
+    scope: RetirementScope,
     owner: PhantomData<&'phase mut ObarrayView>,
+}
+
+/// What a canonical-changing phase can have changed, so what its
+/// retirement republishes. Fixed per call site, so it folds away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetirementScope {
+    /// Anything: the function clock and the debugger descriptor.
+    Dispatch,
+    /// A function cell: the function clock alone.
+    FunctionCell,
 }
 static_assertions::assert_not_impl_any!(AdmissionRetirement<'static>: Send, Sync, Clone, Copy);
 impl fmt::Debug for AdmissionRetirement<'_> {
@@ -322,15 +342,17 @@ impl fmt::Debug for AdmissionRetirement<'_> {
         f.debug_struct("AdmissionRetirement")
             .field("source", &self.source)
             .field("destination", &self.destination)
+            .field("scope", &self.scope)
             .finish()
     }
 }
 impl<'phase> AdmissionRetirement<'phase> {
     #[inline(always)]
-    fn new(view: &'phase mut ObarrayView) -> Self {
+    fn new(view: &'phase mut ObarrayView, scope: RetirementScope) -> Self {
         Self {
             source: view.dispatch,
             destination: NonNull::from(&mut view.admission),
+            scope,
             owner: PhantomData,
         }
     }
@@ -344,9 +366,15 @@ impl Drop for AdmissionRetirement<'_> {
         // source derives from the finalized UnsafeCell root, not a temporary
         // manager reference. No callback observes this phase-local guard.
         unsafe {
-            self.destination
-                .as_ref()
-                .retire_current_admission(self.source.as_ref());
+            let destination = self.destination.as_ref();
+            match self.scope {
+                RetirementScope::Dispatch => {
+                    destination.retire_current_admission(self.source.as_ref());
+                }
+                RetirementScope::FunctionCell => {
+                    destination.retire_function_epoch(self.source.as_ref());
+                }
+            }
         }
     }
 }
@@ -456,8 +484,27 @@ impl ObarrayView {
         &mut self,
         write: impl for<'manager> FnOnce(&'manager mut Obarray) -> R,
     ) -> R {
+        self.with_retiring_write(RetirementScope::Dispatch, write)
+    }
+
+    /// [`Self::with_dispatch_write`] for a function-cell write, which moves
+    /// only the function clock ([`AdmissionHeader::retire_function_epoch`]).
+    #[inline(always)]
+    fn with_function_write<R>(
+        &mut self,
+        write: impl for<'manager> FnOnce(&'manager mut Obarray) -> R,
+    ) -> R {
+        self.with_retiring_write(RetirementScope::FunctionCell, write)
+    }
+
+    #[inline(always)]
+    fn with_retiring_write<R>(
+        &mut self,
+        scope: RetirementScope,
+        write: impl for<'manager> FnOnce(&'manager mut Obarray) -> R,
+    ) -> R {
         let mut manager = self.ptr;
-        let retirement = AdmissionRetirement::new(self);
+        let retirement = AdmissionRetirement::new(self, scope);
         // SAFETY: this sole view is exclusively borrowed; the closure's manager
         // loan cannot escape, call Lisp or overlap an admission reader. Every
         // private caller uses canonical producers, preserving manager storage.
@@ -615,6 +662,9 @@ macro_rules! obarray_write_operation {
     }};
     (dispatch, $view:expr, $name:ident, $($arg:ident),*) => {
         $view.with_dispatch_write(|manager| manager.$name($($arg),*))
+    };
+    (function, $view:expr, $name:ident, $($arg:ident),*) => {
+        $view.with_function_write(|manager| manager.$name($($arg),*))
     };
 }
 // Effect and access are independent compile-time domains. Internal-only
@@ -780,16 +830,6 @@ obarray_method_proxies! {
             fwd: &'static crate::emacs_core::forward::LispKboardObjFwd,
         );
     pub fn define_int_variable(name: &str, initial: i64);
-    pub fn set_symbol_function(name: &str, function: Value);
-    pub fn set_symbol_function_id(id: SymId, function: Value);
-    pub(crate) fn set_symbol_function_id_for(id: SymId,
-            function: Value,
-            why: FunctionEpochBump,
-        );
-    pub fn fmakunbound(name: &str);
-    pub fn fmakunbound_id(id: SymId);
-    pub fn clear_function_silent(name: &str);
-    pub fn clear_function_silent_id(id: SymId);
     pub fn unintern_name(name: &str) -> bool;
     pub fn unintern_lisp_string(name: &LispString) -> bool;
     pub fn unintern_id(id: SymId) -> bool;
@@ -800,6 +840,22 @@ obarray_method_proxies! {
 obarray_method_proxies! {
     dispatch; view_only;
     pub(crate) fn invalidate_all_function_bindings(why: FunctionEpochBump);
+}
+
+// Function-cell writes: they move the function clock and never the
+// canonical debugger descriptor.
+obarray_method_proxies! {
+    function; public_access;
+    pub fn set_symbol_function(name: &str, function: Value);
+    pub fn set_symbol_function_id(id: SymId, function: Value);
+    pub(crate) fn set_symbol_function_id_for(id: SymId,
+            function: Value,
+            why: FunctionEpochBump,
+        );
+    pub fn fmakunbound(name: &str);
+    pub fn fmakunbound_id(id: SymId);
+    pub fn clear_function_silent(name: &str);
+    pub fn clear_function_silent_id(id: SymId);
 }
 
 /// Pure Context-bound owner-header read; no manager reference spans Lisp.
