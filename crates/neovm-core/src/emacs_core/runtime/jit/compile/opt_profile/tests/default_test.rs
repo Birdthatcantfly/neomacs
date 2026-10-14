@@ -15,7 +15,7 @@ fn opt_profile_unset_selects_the_qualified_lists48_osr_stack() {
         defaults.passes,
         OptPasses::parse(Some("fold,bool,reps,reads"))
     );
-    assert_eq!(defaults.profit, OptProfitMode::PrimitiveLists);
+    assert_eq!(defaults.profit, OptProfitMode::PrimitiveLoops);
     assert_eq!(defaults.early, OptEarlyMode::Hot);
     assert_eq!(defaults.max_ops, 48);
     assert!(defaults.fast);

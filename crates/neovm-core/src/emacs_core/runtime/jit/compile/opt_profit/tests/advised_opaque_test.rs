@@ -307,7 +307,7 @@ fn opt_profit_lists48_osr_aset_ignores_collecting_advice_and_preserves_retained_
     )
     .expect("collecting advice installed on the genuine function cell");
     assert_eq!(compile::jit_opt_max_ops(), 48);
-    assert_eq!(compile::jit_opt_profit(), OptProfitMode::PrimitiveLists);
+    assert_eq!(compile::jit_opt_profit(), OptProfitMode::PrimitiveLoops);
     assert!(compile::jit_opt_require_osr());
     assert_eq!(
         compile::jit_opt_passes(),
