@@ -589,7 +589,7 @@ fn create(eval: &mut Context, args: Vec<Value>) -> EvalResult {
     // outside this noncalling phase, which cannot change canonical dispatch.
     unsafe {
         eval.obarray.with_legacy_value_write(|obarray| {
-            let mut vars = VariableStore::new(obarray, owner.slab_mut());
+            let mut vars = VariableStore::new(obarray, Some(owner));
             xwidgets.publish(&mut vars)
         });
     }
@@ -685,7 +685,7 @@ fn delete_view(eval: &mut Context, args: Vec<Value>) -> EvalResult {
     // outside this noncalling phase, which cannot change canonical dispatch.
     unsafe {
         eval.obarray.with_legacy_value_write(|obarray| {
-            let mut vars = VariableStore::new(obarray, owner.slab_mut());
+            let mut vars = VariableStore::new(obarray, Some(owner));
             xwidgets.publish(&mut vars)
         });
     }
@@ -777,7 +777,7 @@ fn kill(eval: &mut Context, args: Vec<Value>) -> EvalResult {
     // outside this noncalling phase, which cannot change canonical dispatch.
     unsafe {
         eval.obarray.with_legacy_value_write(|obarray| {
-            let mut vars = VariableStore::new(obarray, owner.slab_mut());
+            let mut vars = VariableStore::new(obarray, Some(owner));
             xwidgets.publish(&mut vars)
         });
     }

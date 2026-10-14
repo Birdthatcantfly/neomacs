@@ -97,12 +97,14 @@ const _: () = {
     }
 };
 
+/// GNU `Fbarf_if_buffer_read_only`'s test. Inlined so a writable buffer
+/// (the common one) costs its callers one slot test and no variable view.
+#[inline(always)]
 pub(crate) fn buffer_read_only_active_in_state(
     vars: VariableView<'_>,
     dynamic: &[OrderedRuntimeBindingMap],
     buf: &Buffer,
 ) -> bool {
-    let obarray = vars.obarray();
     // GNU `Fbarf_if_buffer_read_only' reads the buffer's `read_only' slot
     // first and looks at `inhibit-read-only' only when it is set. Every
     // insertion and deletion runs this check twice, and a writable buffer --
@@ -113,17 +115,19 @@ pub(crate) fn buffer_read_only_active_in_state(
     // (src/buffer.c:2464). The second lookup this used to perform could only
     // ever return the very same word -- see the assertion below -- so it asked
     // the same question twice on a path that runs four times per keystroke.
-    if !buf.get_read_only() {
-        return false;
-    }
+    buf.get_read_only() && !inhibit_read_only_in_state(vars, buf)
+}
 
+/// Whether `inhibit-read-only` lets a read-only BUF be changed.
+#[inline(never)]
+fn inhibit_read_only_in_state(vars: VariableView<'_>, buf: &Buffer) -> bool {
     let iro = inhibit_read_only_symbol();
-    if let Some(value) = buf.get_buffer_local_by_sym_id_gated(iro, obarray.is_localized(iro))
+    if let Some(value) = buf.get_buffer_local_by_sym_id_gated(iro, vars.obarray().is_localized(iro))
         && value.is_truthy()
     {
-        return false;
+        return true;
     }
-    !vars.value_or_nil(iro).is_truthy()
+    vars.value_or_nil(iro).is_truthy()
 }
 
 pub(crate) fn ensure_current_buffer_writable_in_state(

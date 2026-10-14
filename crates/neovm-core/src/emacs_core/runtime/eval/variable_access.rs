@@ -22,7 +22,7 @@
 //! of the whole Context. Writes are `Context` methods.
 
 use super::owner_bindings::{
-    Channel, OwnerSlab, SlotState, canonical_bufferless_value, per_buffer_local,
+    Channel, OwnerSlab, OwnerSlot, SlotState, canonical_bufferless_value, per_buffer_local,
 };
 use super::{Context, SymId, Value};
 use crate::emacs_core::forward::{CanonicalArm, ThreadProjectionDescriptor};
@@ -30,18 +30,30 @@ use crate::emacs_core::intern::intern;
 use crate::emacs_core::symbol::{BufferlessValue, CanonicalAccess, Obarray};
 
 /// The variables one owner sees: canonical storage under its bindings.
+///
+/// It holds the owner's slot, not its slab: making a view reads nothing, and
+/// a read reaches the slot only when canonical storage answers void.
 #[derive(Clone, Copy)]
 pub struct VariableView<'a> {
     obarray: &'a Obarray,
-    owner: Option<&'a OwnerSlab>,
+    owner: &'a OwnerSlot,
 }
+
+/// The owner slot of a view of canonical storage alone. Never written: a
+/// slot is mutated only through `&mut`.
+struct NoOwner(OwnerSlot);
+
+// SAFETY: the slot is DORMANT for good, a `None` no thread can change.
+unsafe impl Sync for NoOwner {}
+
+static NO_OWNER: NoOwner = NoOwner(OwnerSlot::DORMANT);
 
 static_assertions::assert_not_impl_any!(VariableView<'static>: Send, Sync);
 
 impl std::fmt::Debug for VariableView<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VariableView")
-            .field("owner", &self.owner.is_some())
+            .field("owner", &!self.owner.is_dormant())
             .finish_non_exhaustive()
     }
 }
@@ -50,10 +62,7 @@ impl<'a> VariableView<'a> {
     /// The view of OBARRAY for the owner OWNER names.
     #[inline(always)]
     pub(crate) fn new(obarray: &'a Obarray, owner: &'a super::owner_bindings::OwnerSlot) -> Self {
-        Self {
-            obarray,
-            owner: owner.slab(),
-        }
+        Self { obarray, owner }
     }
 
     /// The view of canonical storage alone, with no owner: bootstrap, dump
@@ -62,7 +71,7 @@ impl<'a> VariableView<'a> {
     pub fn canonical(_access: CanonicalAccess, obarray: &'a Obarray) -> Self {
         Self {
             obarray,
-            owner: None,
+            owner: &NO_OWNER.0,
         }
     }
 
@@ -72,7 +81,7 @@ impl<'a> VariableView<'a> {
     pub(crate) fn into_raw(self) -> RawVariableView {
         RawVariableView {
             obarray: self.obarray,
-            owner: self.owner.map_or(std::ptr::null(), std::ptr::from_ref),
+            owner: self.owner,
         }
     }
 
@@ -89,17 +98,33 @@ impl<'a> VariableView<'a> {
     pub fn value(self, id: SymId) -> Option<Value> {
         match self.obarray.canonical_value(CanonicalAccess::ROUTED, id) {
             Some(value) => Some(value),
-            None => match self.owner {
+            // A void answer is common for some hot reads (an unset
+            // `overriding-plist-environment` in every `get`): one owner-word
+            // test inline is cheaper than a call.
+            None => match self.owner.slab() {
                 None => None,
                 Some(slab) => owner_value(self.obarray, slab, id),
             },
         }
     }
 
-    /// [`Self::value`] by name.
-    #[inline]
+    /// [`Self::value`] by name: the canonical read by name, then the
+    /// owner's only when it answers void.
+    #[inline(always)]
     pub fn value_by_name(self, name: &str) -> Option<Value> {
-        self.value(intern(name))
+        match self
+            .obarray
+            .canonical_value_by_name(CanonicalAccess::ROUTED, name)
+        {
+            Some(value) => Some(value),
+            None => self.owner_value_by_name(name),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn owner_value_by_name(self, name: &str) -> Option<Value> {
+        owner_value(self.obarray, self.owner.slab()?, intern(name))
     }
 
     /// [`Self::value`], nil when void.
@@ -118,7 +143,7 @@ impl<'a> VariableView<'a> {
             .canonical_value_in_buffer_id(CanonicalAccess::ROUTED, buf, id)
         {
             Some(value) => Some(value),
-            None => match self.owner {
+            None => match self.owner.slab() {
                 None => None,
                 Some(slab) => owner_value_in_buffer(self.obarray, slab, buf, id),
             },
@@ -140,7 +165,7 @@ impl<'a> VariableView<'a> {
     /// `Obarray::canonical_default_value`.
     #[inline]
     pub fn default_value(self, id: SymId) -> Option<Value> {
-        match self.owner {
+        match self.owner.slab() {
             None => self
                 .obarray
                 .canonical_default_value(CanonicalAccess::ROUTED, id),
@@ -152,7 +177,7 @@ impl<'a> VariableView<'a> {
     /// `Obarray::canonical_boundp_id`.
     #[inline]
     pub fn boundp(self, id: SymId) -> bool {
-        match self.owner {
+        match self.owner.slab() {
             None => self
                 .obarray
                 .canonical_boundp_id(CanonicalAccess::ROUTED, id),
@@ -172,7 +197,7 @@ impl<'a> VariableView<'a> {
         let canonical = self
             .obarray
             .canonical_value_without_buffer_id(CanonicalAccess::ROUTED, id);
-        match (canonical, self.owner) {
+        match (canonical, self.owner.slab()) {
             (BufferlessValue::Void, Some(slab)) => match owner_value(self.obarray, slab, id) {
                 Some(value) => BufferlessValue::Global(value),
                 None => BufferlessValue::Void,
@@ -189,11 +214,11 @@ impl<'a> VariableView<'a> {
 }
 
 /// The variables one owner sees, for writing: the obarray and the owner's
-/// slab, borrowed mutably, for helpers that hold the obarray's manager
-/// rather than the Context.
+/// slot, borrowed mutably, for helpers that hold the obarray's manager
+/// rather than the Context. No owner is canonical storage alone.
 pub struct VariableStore<'a> {
     obarray: &'a mut Obarray,
-    owner: Option<&'a mut OwnerSlab>,
+    owner: Option<&'a mut OwnerSlot>,
 }
 
 static_assertions::assert_not_impl_any!(VariableStore<'static>: Send, Sync);
@@ -201,15 +226,18 @@ static_assertions::assert_not_impl_any!(VariableStore<'static>: Send, Sync);
 impl std::fmt::Debug for VariableStore<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VariableStore")
-            .field("owner", &self.owner.is_some())
+            .field(
+                "owner",
+                &self.owner.as_ref().is_some_and(|owner| !owner.is_dormant()),
+            )
             .finish_non_exhaustive()
     }
 }
 
 impl<'a> VariableStore<'a> {
-    /// The store of OBARRAY for the owner whose slab is OWNER.
+    /// The store of OBARRAY for the owner whose slot is OWNER.
     #[inline(always)]
-    pub(crate) fn new(obarray: &'a mut Obarray, owner: Option<&'a mut OwnerSlab>) -> Self {
+    pub(crate) fn new(obarray: &'a mut Obarray, owner: Option<&'a mut OwnerSlot>) -> Self {
         Self { obarray, owner }
     }
 
@@ -224,14 +252,14 @@ impl<'a> VariableStore<'a> {
     pub fn view(&self) -> VariableView<'_> {
         VariableView {
             obarray: self.obarray,
-            owner: self.owner.as_deref(),
+            owner: self.owner.as_deref().unwrap_or(&NO_OWNER.0),
         }
     }
 
     /// GNU `Vfoo = VALUE` from C (see [`Context::store_variable`]).
     #[inline]
     pub fn store(&mut self, id: SymId, value: Value) {
-        match self.owner.as_deref_mut() {
+        match self.owner.as_deref_mut().and_then(OwnerSlot::slab_mut) {
             None => self
                 .obarray
                 .set_canonical_value(CanonicalAccess::ROUTED, id, value),
@@ -242,7 +270,7 @@ impl<'a> VariableStore<'a> {
     /// [`Self::store`] by name (interning it).
     #[inline]
     pub fn store_by_name(&mut self, name: &str, value: Value) {
-        match self.owner.as_deref_mut() {
+        match self.owner.as_deref_mut().and_then(OwnerSlot::slab_mut) {
             None => self
                 .obarray
                 .set_canonical_value_by_name(CanonicalAccess::ROUTED, name, value),
@@ -283,7 +311,7 @@ fn owner_store(obarray: &mut Obarray, slab: &mut OwnerSlab, id: SymId, value: Va
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RawVariableView {
     obarray: *const Obarray,
-    owner: *const OwnerSlab,
+    owner: *const OwnerSlot,
 }
 
 impl RawVariableView {
@@ -298,7 +326,7 @@ impl RawVariableView {
         unsafe {
             VariableView {
                 obarray: &*self.obarray,
-                owner: self.owner.as_ref(),
+                owner: &*self.owner,
             }
         }
     }
@@ -413,7 +441,7 @@ impl Context {
     }
 
     /// [`VariableView::value_by_name`] of this owner's view.
-    #[inline]
+    #[inline(always)]
     pub fn variable_value_by_name(&self, name: &str) -> Option<Value> {
         self.variables().value_by_name(name)
     }

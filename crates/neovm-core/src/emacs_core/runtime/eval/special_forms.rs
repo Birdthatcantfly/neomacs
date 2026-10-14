@@ -1504,7 +1504,7 @@ impl Context {
         // no canonical function/debugger metadata or storage identity changes.
         unsafe {
             self.obarray.with_legacy_value_write(|obarray| {
-                let mut vars = VariableStore::new(obarray, owner.slab_mut());
+                let mut vars = VariableStore::new(obarray, Some(owner));
                 provide_value_in_state(&mut vars, features, feature, subfeatures, mode)
             })
         }?;

@@ -847,7 +847,7 @@ fn define_coding_system_internal(eval: &mut super::eval::Context, args: Vec<Valu
     let owner = &mut eval.owner;
     unsafe {
         eval.obarray.with_legacy_value_write(|obarray| {
-            let mut vars = super::eval::VariableStore::new(obarray, owner.slab_mut());
+            let mut vars = super::eval::VariableStore::new(obarray, Some(owner));
             super::coding::record_lisp_define_coding_system_internal(&mut vars, &args, mode);
         });
     }
@@ -866,7 +866,7 @@ fn define_coding_system_alias(eval: &mut super::eval::Context, args: Vec<Value>)
     let owner = &mut eval.owner;
     unsafe {
         eval.obarray.with_legacy_value_write(|obarray| {
-            let mut vars = super::eval::VariableStore::new(obarray, owner.slab_mut());
+            let mut vars = super::eval::VariableStore::new(obarray, Some(owner));
             super::coding::record_lisp_define_coding_system_alias(&mut vars, &args, mode);
         });
     }

@@ -5040,7 +5040,7 @@ impl Context {
         // it preserves function cells, canonical descriptors and manager identity.
         unsafe {
             self.obarray.with_legacy_value_write(|obarray| {
-                let mut vars = VariableStore::new(obarray, self.owner.slab_mut());
+                let mut vars = VariableStore::new(obarray, Some(&mut self.owner));
                 add_feature_in_state(&mut vars, &mut self.features, name, mode);
             });
         }
@@ -5057,7 +5057,7 @@ impl Context {
         // no dispatch metadata or manager authority leaves the phase.
         unsafe {
             self.obarray.with_legacy_value_write(|obarray| {
-                let mut vars = VariableStore::new(obarray, self.owner.slab_mut());
+                let mut vars = VariableStore::new(obarray, Some(&mut self.owner));
                 remove_feature_in_state(&mut vars, &mut self.features, name, mode);
             });
         }

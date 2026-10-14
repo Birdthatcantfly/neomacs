@@ -296,8 +296,7 @@ fn add_minibuffer_history_after_unwind(
         let owner = &mut eval.owner;
         unsafe {
             eval.obarray.with_legacy_value_write(|obarray| {
-                let mut vars =
-                    crate::emacs_core::eval::VariableStore::new(obarray, owner.slab_mut());
+                let mut vars = crate::emacs_core::eval::VariableStore::new(obarray, Some(owner));
                 add_to_minibuffer_history_variable(&mut vars, history_name, entry);
             });
         }
