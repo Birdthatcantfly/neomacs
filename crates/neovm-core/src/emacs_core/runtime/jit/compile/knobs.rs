@@ -2156,3 +2156,32 @@ pub(crate) fn jit_exit_path() -> Option<&'static std::path::Path> {
     })
     .as_deref()
 }
+
+/// `NEOVM_JIT_OPT_OSR_ENTRY` (default on; `off` disables): guard an opt OSR
+/// leaf's fixnum loop state once at its entry (`opt::passes::osr_entry`).
+/// Read once per process; tests override it per thread.
+pub(crate) fn jit_opt_osr_entry() -> bool {
+    #[cfg(test)]
+    if let Some(on) = OPT_OSR_ENTRY_TEST_OVERRIDE.with(std::cell::Cell::get) {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("NEOVM_JIT_OPT_OSR_ENTRY").as_deref(),
+            Ok("off")
+        )
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Scalar compiler configuration only; never Lisp or mutator state.
+    static OPT_OSR_ENTRY_TEST_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn force_opt_osr_entry_for_test(on: Option<bool>) {
+    OPT_OSR_ENTRY_TEST_OVERRIDE.with(|value| value.set(on));
+}

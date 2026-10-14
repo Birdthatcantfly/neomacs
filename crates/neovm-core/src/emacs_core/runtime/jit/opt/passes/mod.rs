@@ -5,6 +5,7 @@ pub(crate) mod cfg;
 pub(crate) mod fold;
 pub(crate) mod gvn;
 pub(crate) mod licm;
+pub(crate) mod osr_entry;
 pub(crate) mod range;
 pub(crate) mod reads;
 pub(crate) mod reps;
