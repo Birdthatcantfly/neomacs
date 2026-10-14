@@ -24,7 +24,7 @@ fn context(projected: bool) -> Context {
                         (setq tob-log (cons (list sym new op (bufferp where)) tob-log))))
                 (fset 'tob-unlet-error
                       (lambda (_sym _new op _where)
-                        (when (eq op 'unlet) (error \"tob unlet\")))))",
+                        (if (eq op 'unlet) (error \"tob unlet\")))))",
     );
     if projected {
         for name in ["tob-v", "tob-auto"] {
@@ -174,6 +174,10 @@ fn same_answers(forms: &[&str]) {
     let mut projected = context(true);
     for form in forms {
         let want = eval(&mut plain, form);
+        assert!(
+            !want.contains("void-function"),
+            "the bare harness lacks a function {form} needs: {want}"
+        );
         let got = eval(&mut projected, form);
         assert_eq!(got, want, "{form}");
     }
@@ -186,11 +190,11 @@ fn watched_bindings_notify_as_unprojected() {
         "(progn (add-variable-watcher 'tob-v 'tob-watch) nil)",
         "(let ((tob-v 7)) (let ((tob-v 8)) (setq tob-v 9)) tob-v)",
         "(prog1 (reverse tob-log) (setq tob-log nil))",
-        "(with-current-buffer \" tob-other\" (let ((tob-v 7)) tob-v))",
+        "(save-current-buffer (set-buffer \" tob-other\") (let ((tob-v 7)) tob-v))",
         "(prog1 (reverse tob-log) (setq tob-log nil))",
         "(progn (add-variable-watcher 'tob-auto 'tob-watch) nil)",
-        "(with-current-buffer \" tob-other\" (setq tob-auto 6) (let ((tob-auto 7)) tob-auto))",
-        "(let ((tob-auto 8)) (list tob-auto (with-current-buffer \" tob-other\" tob-auto)))",
+        "(save-current-buffer (set-buffer \" tob-other\") (setq tob-auto 6) (let ((tob-auto 7)) tob-auto))",
+        "(let ((tob-auto 8)) (list tob-auto (save-current-buffer (set-buffer \" tob-other\") tob-auto)))",
         "(prog1 (reverse tob-log) (setq tob-log nil))",
     ]);
 }
@@ -201,9 +205,9 @@ fn an_unlet_watcher_error_leaves_the_binding_value() {
     // still in the cell: an error there keeps the binding's value.
     same_answers(&[
         "(progn (add-variable-watcher 'tob-v 'tob-unlet-error) nil)",
-        "(condition-case e (let ((tob-v 70)) tob-v) (error (cadr e)))",
+        "(condition-case e (let ((tob-v 70)) tob-v) (error (car (cdr e))))",
         "tob-v",
-        "(condition-case e (let ((tob-v 71)) (let ((tob-v 72)) tob-v)) (error (cadr e)))",
+        "(condition-case e (let ((tob-v 71)) (let ((tob-v 72)) tob-v)) (error (car (cdr e))))",
         "tob-v",
         "(progn (remove-variable-watcher 'tob-v 'tob-unlet-error) (setq tob-v 5))",
     ]);
@@ -212,26 +216,26 @@ fn an_unlet_watcher_error_leaves_the_binding_value() {
 #[test]
 fn buffer_local_bindings_follow_their_local() {
     same_answers(&[
-        "(with-current-buffer \" tob-other\" (setq tob-auto 6))",
-        "(with-current-buffer \" tob-other\" (let ((tob-auto 17)) (list tob-auto (default-value 'tob-auto))))",
-        "(with-current-buffer \" tob-other\" tob-auto)",
-        "(with-current-buffer \" tob-other\"
+        "(save-current-buffer (set-buffer \" tob-other\") (setq tob-auto 6))",
+        "(save-current-buffer (set-buffer \" tob-other\") (let ((tob-auto 17)) (list tob-auto (default-value 'tob-auto))))",
+        "(save-current-buffer (set-buffer \" tob-other\") tob-auto)",
+        "(save-current-buffer (set-buffer \" tob-other\")
            (let ((tob-auto 18))
              (kill-local-variable 'tob-auto)
              (list tob-auto (local-variable-p 'tob-auto))))",
-        "(with-current-buffer \" tob-other\" (list tob-auto (local-variable-p 'tob-auto)))",
-        "(with-current-buffer \" tob-other\"
+        "(save-current-buffer (set-buffer \" tob-other\") (list tob-auto (local-variable-p 'tob-auto)))",
+        "(save-current-buffer (set-buffer \" tob-other\")
            (setq tob-auto 6)
            (let ((tob-auto 19))
              (kill-local-variable 'tob-auto)
              (setq tob-auto 20)
              (list tob-auto (local-variable-p 'tob-auto))))",
-        "(with-current-buffer \" tob-other\" (list tob-auto (local-variable-p 'tob-auto)))",
+        "(save-current-buffer (set-buffer \" tob-other\") (list tob-auto (local-variable-p 'tob-auto)))",
         "(let ((tob-auto 21)) (list tob-auto (default-value 'tob-auto)
-                                    (with-current-buffer \" tob-other\" tob-auto)))",
+                                    (save-current-buffer (set-buffer \" tob-other\") tob-auto)))",
         "(let ((tob-auto 22)) (setq tob-auto 23) (list tob-auto (default-value 'tob-auto)))",
         "(list tob-auto (default-value 'tob-auto) (local-variable-p 'tob-auto))",
-        "(let ((tob-v 30)) (with-temp-buffer (set (make-local-variable 'tob-v) tob-v)
+        "(let ((tob-v 30)) (save-current-buffer (set-buffer (get-buffer-create \" tob-tmp\")) (set (make-local-variable 'tob-v) tob-v)
                              (list tob-v (local-variable-p 'tob-v))))",
     ]);
 }
