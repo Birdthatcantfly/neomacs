@@ -8,9 +8,6 @@
 //! A thread waiting for a mutex, a condition, another thread's end or a
 //! deadline is not ready until another thread makes it so.
 
-// Mutex, condition and deadline waits are reached once group 4 lands.
-#![allow(dead_code)]
-
 use super::super::world::Baton;
 use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroU64;
@@ -131,14 +128,24 @@ impl Control {
         matches!(self.state().waits.get(&key), Some(Wait::Exited) | None)
     }
 
-    /// The keys of the threads that have not ended, main first.
-    pub(crate) fn live_threads(&self) -> Vec<ThreadKey> {
+    /// Whether a thread other than ME is ready to run, or will be at a
+    /// deadline.
+    pub(crate) fn others_could_run(&self, me: ThreadKey) -> bool {
         self.state()
             .waits
             .iter()
-            .filter(|(_, wait)| **wait != Wait::Exited)
-            .map(|(key, _)| *key)
-            .collect()
+            .any(|(key, wait)| *key != me && matches!(wait, Wait::Runnable | Wait::Until(_)))
+    }
+
+    /// Make KEY the next thread to run, whatever it waits for.
+    pub(crate) fn prioritize(&self, key: ThreadKey) {
+        let mut state = self.state();
+        if matches!(state.waits.get(&key), Some(Wait::Exited) | None) {
+            return;
+        }
+        state.ready.retain(|ready| *ready != key);
+        state.waits.insert(key, Wait::Runnable);
+        state.ready.push_front(key);
     }
 
     /// What KEY waits for.

@@ -261,6 +261,13 @@ pub fn init_standard_errors(obarray: &mut Obarray) {
     // --- Direct children of `error` ---
 
     register_simple(obarray, "user-error", "User error", &["error"]);
+    // GNU src/thread.c `syms_of_threads`.
+    register_simple(
+        obarray,
+        "thread-buffer-killed",
+        "Thread's current buffer killed",
+        &["error"],
+    );
     register_simple(
         obarray,
         "args-out-of-range",

@@ -12,9 +12,6 @@
 //! What a further owner shares, copies or starts fresh is the
 //! thread-local audit in design-r3.md §11.
 
-// Reached from Lisp once Green `make-thread` lands (3d group 4).
-#![cfg_attr(not(test), allow(dead_code))]
-
 mod api;
 mod bootstrap;
 mod scheduler;
@@ -48,6 +45,8 @@ pub(crate) struct GreenRuntime {
     /// A started thread's function until its OS thread runs it.
     pub(super) pending_starts:
         std::cell::RefCell<rustc_hash::FxHashMap<ThreadKey, crate::emacs_core::value::Value>>,
+    /// A `kill-emacs` run by another thread, for main to exit with.
+    pub(super) exit: std::cell::Cell<Option<super::ShutdownRequest>>,
 }
 
 impl std::fmt::Debug for GreenRuntime {
@@ -57,6 +56,27 @@ impl std::fmt::Debug for GreenRuntime {
 }
 
 impl GreenRuntime {
+    /// The process exit KEY takes on resuming, if any: main exits with a
+    /// `kill-emacs` another thread ran, and every other thread ends once
+    /// main has ended.
+    pub(super) fn exit_for(
+        &self,
+        key: ThreadKey,
+        control: &scheduler::Control,
+    ) -> Option<super::ShutdownRequest> {
+        match key {
+            ThreadKey::Main => self.exit.take(),
+            ThreadKey::Worker(_) => {
+                (control.lifecycle() == scheduler::Lifecycle::Closing).then(|| {
+                    self.exit.get().unwrap_or(super::ShutdownRequest {
+                        exit_code: 0,
+                        restart: false,
+                    })
+                })
+            }
+        }
+    }
+
     /// Visit every value the runtime holds.
     pub(super) fn trace_roots(&self, visit: &mut dyn FnMut(crate::emacs_core::value::Value)) {
         use crate::gc_trace::GcTrace;
@@ -144,6 +164,7 @@ impl Context {
             threads: Default::default(),
             parked: Default::default(),
             pending_starts: Default::default(),
+            exit: Default::default(),
         }));
         Ok(baton)
     }

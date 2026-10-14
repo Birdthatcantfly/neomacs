@@ -7,9 +7,14 @@
 
 use super::super::world::Baton;
 use super::super::{Context, Flow, Value};
-use super::scheduler::{Control, Handoff, ThreadKey, Wait};
+use super::scheduler::{Control, Handoff, Lifecycle, ThreadKey, Wait};
 use crate::emacs_core::error::signal;
 use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
+
+/// The longest a thread waiting in `thread_select` leaves its own input
+/// unwatched while other threads run.
+const SELECT_QUANTUM: Duration = Duration::from_millis(10);
 
 /// A Lisp thread's place in its Green runtime, kept in its owner slab.
 pub(crate) struct GreenSeat {
@@ -118,12 +123,14 @@ impl Context {
         roots
     }
 
-    /// GNU's `thread_select` hand-off: give the Baton up, waiting for WAIT,
-    /// and run again when it comes back. A no-op outside a Green runtime.
-    /// Signals when switching is refused here, or when no thread can run
-    /// and this one waits for something only a running thread could give
-    /// (GNU hangs there; neomacs reports the deadlock).
-    pub(crate) fn green_wait(&mut self, wait: Wait) -> Result<(), Flow> {
+    /// Give the Baton up, waiting for WAIT, and run again when it comes
+    /// back (GNU's release and re-acquisition of the global lock). A no-op
+    /// outside a Green runtime. Signals when switching is refused here, when
+    /// no thread can run and this one waits for something only a running
+    /// thread could give (GNU hangs there; neomacs reports the deadlock), or
+    /// when the process is exiting. A pending `thread-signal` stays pending:
+    /// [`Context::green_wait`] raises it.
+    pub(crate) fn green_park(&mut self, wait: Wait) -> Result<(), Flow> {
         let Some(seat) = self.green_seat() else {
             return Ok(());
         };
@@ -138,6 +145,11 @@ impl Context {
             .take()
             .expect("the running thread holds the Baton");
         let receiver = seat.receiver.take().expect("a seat keeps its channel");
+        // The thread record keeps what another thread may read or change
+        // while this one is parked: its current buffer and its errors.
+        let current = self.buffers.current_buffer_id();
+        self.threads.set_thread_current_buffer(key.id(), current);
+        self.threads.restore_deferred_thread_error(key.id());
         let parked = self.park_owner();
         self.exchange_world_threads(&baton);
         let roots = self.collect_parked_roots();
@@ -150,14 +162,38 @@ impl Context {
         self.retire_parked_roots(&baton, key);
         self.exchange_world_threads(&baton);
         self.threads.enter_thread(key.id());
+        let exit = baton
+            .green_runtime()
+            .as_ref()
+            .and_then(|runtime| runtime.exit_for(key, &control));
         let seat = self.green_seat().expect("seated above");
         seat.receiver = Some(receiver);
         seat.baton = Some(baton);
+        // GNU `post_acquire_global_lock` sets the thread's buffer again: a
+        // thread that killed it moved this one to another, which the
+        // owner's mirrors must read from as they come back.
+        let moved = self
+            .threads
+            .thread_current_buffer(key.id())
+            .filter(|buffer| current != Some(*buffer) && self.buffers.get(*buffer).is_some());
+        if let Some(buffer) = moved {
+            let _ = self.buffers.switch_current_unrecorded(buffer);
+        }
         self.resume_owner(parked);
+        if moved.is_some() {
+            let _ = self.sync_current_buffer_runtime_state();
+        }
         // Another thread may have edited strings in place or changed the
         // syntax tables these caches answer from.
         crate::emacs_core::string_pos_cache::reset_string_pos_cache();
         crate::emacs_core::regex::reset_regex_thread_locals();
+        if let Some(request) = exit {
+            // The process exits: like GNU's `exit`, no cleanup form of this
+            // thread runs on the way out.
+            self.shutdown_request = Some(request);
+            self.command_loop.running = false;
+            return Err(Flow::shutdown(request));
+        }
         if deadlocked {
             return Err(signal(
                 "error",
@@ -168,6 +204,68 @@ impl Context {
             ));
         }
         Ok(())
+    }
+
+    /// [`Context::green_park`], then raise an error another thread signalled
+    /// into this one (GNU `post_acquire_global_lock`).
+    pub(crate) fn green_wait(&mut self, wait: Wait) -> Result<(), Flow> {
+        let Some(key) = self.green_key() else {
+            return Ok(());
+        };
+        self.green_park(wait)?;
+        self.green_raise_pending_signal(key)
+    }
+
+    /// Raise the error another thread signalled into KEY, if any.
+    pub(super) fn green_raise_pending_signal(&mut self, key: ThreadKey) -> Result<(), Flow> {
+        match self.threads.take_pending_thread_signal(key.id()) {
+            Some(flow) => Err(flow),
+            None => Ok(()),
+        }
+    }
+
+    /// GNU `thread_select`: a wait of WAIT_TIME for input or a deadline lets
+    /// the other Lisp threads run. Returns true when this thread gave the
+    /// Baton up instead of blocking, for at most [`SELECT_QUANTUM`] of the
+    /// wait (it waits for its own input only while it runs); false when it
+    /// should block itself: no other thread could run meanwhile, or
+    /// switching is refused here.
+    pub(crate) fn green_select_switch(&mut self, wait_time: Duration) -> Result<bool, Flow> {
+        let Some(seat) = self.green_seat() else {
+            return Ok(false);
+        };
+        let key = seat.key;
+        let control = Arc::clone(&seat.control);
+        if wait_time.is_zero() || switch_refusal(self).is_some() || !control.others_could_run(key) {
+            return Ok(false);
+        }
+        let deadline = Instant::now() + wait_time.min(SELECT_QUANTUM);
+        self.green_wait(Wait::Until(deadline))?;
+        Ok(true)
+    }
+
+    /// Main is ending (its Context drops): every other thread ends without
+    /// running more Lisp, as GNU's process exit abandons them, and main
+    /// joins their OS threads.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn green_teardown(&mut self) {
+        let Some(seat) = self.green_seat() else {
+            return;
+        };
+        if seat.key != ThreadKey::Main {
+            return;
+        }
+        let control = Arc::clone(&seat.control);
+        control.close();
+        while control.others_could_run(ThreadKey::Main) {
+            // Each hand-off ends a thread; main's own exit flow, if any, has
+            // nowhere left to go.
+            let _ = self.green_park(Wait::Runnable);
+        }
+        for (_, os_thread) in control.take_join_handles() {
+            let _ = os_thread.join();
+        }
     }
 
     /// Move the World's `ThreadManager` between this Context and the
@@ -254,12 +352,25 @@ fn run_worker(key: ThreadKey, receiver: mpsc::Receiver<Baton>, control: Arc<Cont
         return;
     };
     baton.enter();
+    if control.lifecycle() == Lifecycle::Closing {
+        // Main ended before this thread ever ran.
+        if let Some(runtime) = baton.green_runtime().as_ref() {
+            runtime.threads.borrow_mut().mark_thread_exited(key.id());
+            runtime.pending_starts.borrow_mut().remove(&key);
+        }
+        control.finish(key, baton);
+        return;
+    }
     let mut owner = Context::new_green_owner(&baton);
     owner.exchange_world_threads(&baton);
     if let Some(buffer) = owner.threads.thread_current_buffer(key.id()) {
         owner.restore_current_buffer_if_live(buffer);
     }
     owner.threads.enter_thread(key.id());
+    owner.threads.start_thread(key.id());
+    // GNU raises an error signalled into a thread that has not run yet at
+    // its first switch, once it has handlers.
+    owner.threads.defer_thread_error(key.id());
     let function = baton
         .green_runtime()
         .as_ref()
@@ -275,18 +386,30 @@ fn run_worker(key: ThreadKey, receiver: mpsc::Receiver<Baton>, control: Arc<Cont
         }
         None => Ok(Value::NIL),
     };
-    // A kill-emacs from this thread ends the process: group 4 routes it.
+    let exit = outcome.as_ref().err().and_then(Flow::shutdown_request);
+    // A kill-emacs is the process's, not this thread's: it is not recorded.
     let _ = crate::emacs_core::threads::finish_make_thread_result(
         &mut owner.threads,
         key.id(),
         outcome,
     );
+    owner.threads.restore_deferred_thread_error(key.id());
+    owner.threads.mark_thread_exited(key.id());
     let seat = owner.green_seat().expect("seated above");
     let baton = seat
         .baton
         .take()
         .expect("a finishing thread holds the Baton");
     owner.exchange_world_threads(&baton);
+    if let Some(request) = exit
+        && control.lifecycle() == Lifecycle::Running
+        && let Some(runtime) = baton.green_runtime().as_ref()
+    {
+        // GNU's `kill-emacs` exits the process from any thread: main runs
+        // next, only to leave.
+        runtime.exit.set(Some(request));
+        control.prioritize(ThreadKey::Main);
+    }
     owner.retire_green_owner();
     control.finish(key, baton);
 }

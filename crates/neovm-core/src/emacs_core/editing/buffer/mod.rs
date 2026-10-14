@@ -595,6 +595,10 @@ pub(crate) fn builtin_kill_buffer(eval: &mut super::eval::Context, args: Vec<Val
         },
     };
 
+    // GNU buffer.c:1927: another thread's current buffer that it keeps.
+    if eval.green_buffer_held(id) {
+        return Ok(Value::NIL);
+    }
     let inhibit_buffer_hooks = eval.buffers.buffer_hooks_inhibited(id);
     // GNU `Fkill_buffer` (buffer.c:1931-1987) runs the query functions and
     // `kill-buffer-hook` with the dying buffer current inside ONE
@@ -643,6 +647,20 @@ pub(crate) fn builtin_kill_buffer(eval: &mut super::eval::Context, args: Vec<Val
         }
     }
 
+    // GNU buffer.c:2055-2059: check the threads again, in case a hook
+    // changed something, then move the other threads out of the buffers.
+    if eval.green_threads_running() {
+        if eval.green_buffer_held(id) {
+            return Ok(Value::NIL);
+        }
+        for dying in eval
+            .buffers
+            .collect_killed_buffer_ids(id)
+            .unwrap_or_default()
+        {
+            eval.green_before_buffer_killed(dying)?;
+        }
+    }
     let current_before = eval.buffers.current_buffer().map(|buf| buf.id);
     let killed_ids = eval
         .buffers

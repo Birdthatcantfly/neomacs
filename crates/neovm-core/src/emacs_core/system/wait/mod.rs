@@ -1479,6 +1479,10 @@ impl super::eval::Context {
         request: &WaitRequest,
         wait_time: Duration,
     ) -> Result<WaitBlockActivity, Flow> {
+        // GNU `thread_select`: other Lisp threads run during the wait.
+        if self.green_select_switch(wait_time)? {
+            return Ok(WaitBlockActivity::poll());
+        }
         match self.wait_block(request, wait_time) {
             WaitBlock::Poll => Ok(WaitBlockActivity::poll()),
             WaitBlock::Poller(interest) => {

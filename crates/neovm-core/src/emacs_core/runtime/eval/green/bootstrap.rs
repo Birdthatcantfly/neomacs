@@ -5,9 +5,6 @@
 //! borrow of the first owner's Context, which may be parked on another OS
 //! thread while a further owner is built.
 
-// Reached from Lisp once Green `make-thread` lands (3d group 4).
-#![cfg_attr(not(test), allow(dead_code))]
-
 use super::super::construct::{ExecutionSeed, RegistryHandles};
 use super::super::{Context, InlineSubr};
 use super::super::{CoreEvalSymbols, CustomManager, SubrEntry, Value};

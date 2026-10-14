@@ -31,7 +31,8 @@ impl Context {
     /// wait for THREAD to end and return its result. An error another
     /// thread injected into THREAD with `thread-signal` is re-raised here,
     /// as snapshotted before the wait; an error THREAD signalled itself is
-    /// only `thread-last-error`.
+    /// only `thread-last-error`. An error signalled into this thread ends
+    /// the wait.
     pub(crate) fn green_thread_join(&mut self, args: &[Value]) -> EvalResult {
         expect_args("thread-join", args, 1)?;
         let id = crate::emacs_core::threads::expect_thread_id(&self.threads, &args[0])?;
@@ -43,15 +44,165 @@ impl Context {
         }
         let pending = self.threads.pending_thread_signal(id);
         let key = ThreadKey::from_id(id);
-        let control = self.with_green_runtime(|runtime| std::sync::Arc::clone(&runtime.control));
-        while !control.exited(key) {
-            self.green_wait(Wait::Join(key))?;
+        let control = self.green_control();
+        if !control.exited(key) {
+            self.green_blocked_on(args[0], |ctx| {
+                while !control.exited(key) {
+                    ctx.green_wait(Wait::Join(key))?;
+                }
+                Ok(())
+            })?;
         }
         self.threads.join_thread(id);
         if let Some(flow) = pending {
             return Err(flow);
         }
         Ok(self.threads.thread_result(id))
+    }
+
+    /// `(thread-signal THREAD ERROR-SYMBOL DATA)` for another thread (GNU
+    /// `Fthread_signal`): THREAD raises the error when it next runs, and a
+    /// `mutex-lock`, `condition-wait` or `thread-join` it waits in ends.
+    /// The main thread gets an input event instead, which only the command
+    /// loop reads; a Green World has none, so GNU's batch behaviour holds:
+    /// nothing happens.
+    pub(crate) fn green_thread_signal(
+        &mut self,
+        id: u64,
+        symbol: Value,
+        data: Value,
+    ) -> EvalResult {
+        if id == 0 {
+            return Ok(Value::NIL);
+        }
+        self.threads.set_thread_error(id, symbol, data);
+        let key = ThreadKey::from_id(id);
+        let control = self.green_control();
+        if matches!(
+            control.wait_of(key),
+            Some(Wait::Join(_) | Wait::Mutex(_) | Wait::Condition(_))
+        ) {
+            control.wake(key);
+        }
+        Ok(Value::NIL)
+    }
+
+    /// `(mutex-lock MUTEX)` (GNU `Fmutex_lock`): take mutex ID, waiting
+    /// while another thread holds it, until this thread is signalled.
+    pub(crate) fn green_mutex_lock(&mut self, id: u64, mutex: Value) -> EvalResult {
+        if self.threads.mutex_lock(id) {
+            return Ok(Value::NIL);
+        }
+        let key = self.green_key().expect("a Green thread");
+        self.green_blocked_on(mutex, |ctx| {
+            loop {
+                // GNU `lisp_mutex_lock_for_thread`: a signal ends the wait;
+                // `post_acquire_global_lock` raises it.
+                ctx.green_raise_pending_signal(key)?;
+                ctx.green_wait(Wait::Mutex(id))?;
+                if ctx.threads.mutex_lock(id) {
+                    return Ok(());
+                }
+            }
+        })?;
+        Ok(Value::NIL)
+    }
+
+    /// `(mutex-unlock MUTEX)` once its owner is checked: a release wakes
+    /// every thread waiting for the mutex. This thread keeps running.
+    pub(crate) fn green_mutex_unlock(&mut self, id: u64) -> EvalResult {
+        self.threads.mutex_unlock(id);
+        if self.threads.mutex_free(id) {
+            self.green_control().wake_waiting_for(Wait::Mutex(id));
+        }
+        Ok(Value::NIL)
+    }
+
+    /// `(condition-wait COND)` once this thread is checked to hold COND's
+    /// mutex MUTEX-ID (GNU `condition_wait_callback`): release the mutex
+    /// whatever its count, wait for a notification unless already
+    /// signalled, take the mutex back with its count (even when signalled),
+    /// then raise a pending signal.
+    pub(crate) fn green_condition_wait(
+        &mut self,
+        id: u64,
+        mutex_id: u64,
+        cond: Value,
+    ) -> EvalResult {
+        let key = self.green_key().expect("a Green thread");
+        let control = self.green_control();
+        let count = self.threads.mutex_unlock_for_wait(mutex_id);
+        control.wake_waiting_for(Wait::Mutex(mutex_id));
+        if self.threads.pending_thread_signal(key.id()).is_none() {
+            self.green_blocked_on(cond, |ctx| ctx.green_park(Wait::Condition(id)))?;
+        }
+        while !self.threads.mutex_relock_after_wait(mutex_id, count) {
+            self.green_park(Wait::Mutex(mutex_id))?;
+        }
+        self.green_raise_pending_signal(key)?;
+        Ok(Value::NIL)
+    }
+
+    /// `(condition-notify COND ALL)` once this thread is checked to hold
+    /// COND's mutex: wake one waiting thread, or all of them. GNU releases
+    /// and retakes the mutex around the notification without letting
+    /// another thread run, so nothing else changes.
+    pub(crate) fn green_condition_notify(&mut self, id: u64, all: bool) -> EvalResult {
+        let control = self.green_control();
+        if all {
+            control.wake_waiting_for(Wait::Condition(id));
+        } else {
+            control.wake_one_waiting_for(Wait::Condition(id));
+        }
+        Ok(Value::NIL)
+    }
+
+    /// GNU `thread_check_current_buffer`, asked by `kill-buffer`: whether
+    /// another thread's current buffer is BUFFER and keeps it alive.
+    pub(crate) fn green_buffer_held(&mut self, buffer: crate::buffer::BufferId) -> bool {
+        self.green_threads_running() && self.threads.buffer_held_by_other_thread(buffer)
+    }
+
+    /// GNU `thread_all_before_buffer_killed`, before `kill-buffer` kills
+    /// BUFFER: move every other thread in it to `(other-buffer BUFFER)`.
+    pub(crate) fn green_before_buffer_killed(
+        &mut self,
+        buffer: crate::buffer::BufferId,
+    ) -> Result<(), crate::emacs_core::error::Flow> {
+        if !self.green_threads_running() || !self.threads.buffer_current_in_other_thread(buffer) {
+            return Ok(());
+        }
+        let other = crate::emacs_core::buffer::other_buffer_impl_in_state(
+            &mut self.frames,
+            &mut self.buffers,
+            vec![Value::make_buffer(buffer)],
+        )?
+        .as_buffer_id();
+        // GNU's `other-buffer` always finds one, making `*scratch*` if
+        // need be; without one the threads keep their buffer.
+        if let Some(other) = other {
+            self.threads.move_threads_off_killed_buffer(buffer, other);
+        }
+        Ok(())
+    }
+
+    /// Run WAIT with this thread's `thread--blocker` set to OBJECT (GNU's
+    /// `event_object`), cleared however it ends.
+    fn green_blocked_on(
+        &mut self,
+        object: Value,
+        wait: impl FnOnce(&mut Self) -> Result<(), crate::emacs_core::error::Flow>,
+    ) -> Result<(), crate::emacs_core::error::Flow> {
+        let id = self.green_current_id();
+        self.threads.set_thread_blocker(id, object);
+        let result = wait(self);
+        self.threads.clear_thread_blocker(id);
+        result
+    }
+
+    /// The runtime's scheduler.
+    fn green_control(&mut self) -> std::sync::Arc<super::scheduler::Control> {
+        std::sync::Arc::clone(&self.green_seat().expect("a Green thread").control)
     }
 }
 

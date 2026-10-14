@@ -33,9 +33,6 @@
 //! holder's OS thread ([`Baton::enter`]), and [`Baton::owner_views`] panics
 //! off that thread.
 
-// Reached from Lisp once Green `make-thread` lands (3d group 4).
-#![cfg_attr(not(test), allow(dead_code))]
-
 use super::*;
 
 /// The right to run Lisp in a Green World: whoever holds it is the one OS
