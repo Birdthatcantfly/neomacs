@@ -29,6 +29,7 @@ use crate::emacs_core::forward::{
 use crate::emacs_core::value::Value;
 use std::cell::RefCell;
 use std::ptr::NonNull;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// An admitted World's projection scope, keyed by its obarray's generation:
@@ -42,15 +43,27 @@ struct ProjectionScope {
     void: &'static ThreadProjectionDescriptor,
 }
 
+// SAFETY: a scope is only a key and two addresses. The table is dereferenced
+// only by the obarray of GENERATION, whose World confines it to the thread
+// running that World's owner (`materialize_void`), never by the thread that
+// happens to hold the registry lock.
+unsafe impl Send for ProjectionScope {}
+
 /// How many projection scopes exist in the process: a dormant process
 /// answers a fresh symbol with one load.
 static PROJECTION_SCOPES_LIVE: AtomicUsize = AtomicUsize::new(0);
 
-thread_local! {
-    /// The admitted Worlds whose owner runs on this thread. A World is
-    /// confined to one thread at a time; a later green-thread handoff
-    /// re-enters its scope on the thread it moves to.
-    static PROJECTION_SCOPES: RefCell<Vec<ProjectionScope>> = const { RefCell::new(Vec::new()) };
+/// The admitted Worlds' scopes. A generation names one obarray for the life
+/// of the process, so the registry is process-wide: it adds no thread-local
+/// storage, and a World's owners find its scope on any thread.
+static PROJECTION_SCOPES: Mutex<Vec<ProjectionScope>> = Mutex::new(Vec::new());
+
+fn projection_scopes() -> std::sync::MutexGuard<'static, Vec<ProjectionScope>> {
+    // A panic while held leaves a consistent Vec: every update is one push
+    // or one swap_remove.
+    PROJECTION_SCOPES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Why admission could not reserve what its commit needs.
@@ -59,17 +72,14 @@ pub(crate) struct ProjectionPlanError;
 
 /// Make room to enter one projection scope without allocating.
 pub(crate) fn reserve_projection_scope() -> Result<(), ProjectionPlanError> {
-    PROJECTION_SCOPES.with(|scopes| {
-        scopes
-            .borrow_mut()
-            .try_reserve(1)
-            .map_err(|_| ProjectionPlanError)
-    })
+    projection_scopes()
+        .try_reserve(1)
+        .map_err(|_| ProjectionPlanError)
 }
 
-/// Enter GENERATION's projection scope on this thread: from now on its
-/// obarray births symbols on VOID and materializes VOID cells through
-/// TABLE. Allocates nothing after [`reserve_projection_scope`].
+/// Enter GENERATION's projection scope: from now on its obarray births
+/// symbols on VOID and materializes VOID cells through TABLE. Allocates
+/// nothing after [`reserve_projection_scope`].
 ///
 /// # Safety
 /// TABLE is the World's, inside the shared World allocation that owns the
@@ -80,51 +90,41 @@ pub(crate) unsafe fn enter_projection_scope(
     table: &RefCell<ThreadProjectionTable>,
     void: &'static ThreadProjectionDescriptor,
 ) {
-    PROJECTION_SCOPES.with(|scopes| {
-        let mut scopes = scopes.borrow_mut();
-        if scopes.iter().any(|scope| scope.generation == generation) {
-            return;
-        }
-        scopes.push(ProjectionScope {
-            generation,
-            table: NonNull::from(table),
-            void,
-        });
-        PROJECTION_SCOPES_LIVE.fetch_add(1, Ordering::Relaxed);
+    let mut scopes = projection_scopes();
+    if scopes.iter().any(|scope| scope.generation == generation) {
+        return;
+    }
+    scopes.push(ProjectionScope {
+        generation,
+        table: NonNull::from(table),
+        void,
     });
+    PROJECTION_SCOPES_LIVE.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Leave GENERATION's projection scope on this thread, if it has one.
+/// Leave GENERATION's projection scope, if it has one.
 pub(crate) fn leave_projection_scope(generation: u64) {
     if PROJECTION_SCOPES_LIVE.load(Ordering::Relaxed) == 0 {
         return;
     }
-    let _ = PROJECTION_SCOPES.try_with(|scopes| {
-        let mut scopes = scopes.borrow_mut();
-        if let Some(position) = scopes
-            .iter()
-            .position(|scope| scope.generation == generation)
-        {
-            scopes.swap_remove(position);
-            PROJECTION_SCOPES_LIVE.fetch_sub(1, Ordering::Relaxed);
-        }
-    });
+    let mut scopes = projection_scopes();
+    if let Some(position) = scopes
+        .iter()
+        .position(|scope| scope.generation == generation)
+    {
+        scopes.swap_remove(position);
+        PROJECTION_SCOPES_LIVE.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 fn scope_for(generation: u64) -> Option<ProjectionScope> {
     if PROJECTION_SCOPES_LIVE.load(Ordering::Relaxed) == 0 {
         return None;
     }
-    PROJECTION_SCOPES
-        .try_with(|scopes| {
-            scopes
-                .borrow()
-                .iter()
-                .find(|scope| scope.generation == generation)
-                .copied()
-        })
-        .ok()
-        .flatten()
+    projection_scopes()
+        .iter()
+        .find(|scope| scope.generation == generation)
+        .copied()
 }
 
 /// The header a fresh symbol of GENERATION's obarray is born on: VOID once

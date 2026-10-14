@@ -213,8 +213,8 @@ impl Context {
         if !self.suspended_thread_bindings.is_empty() {
             return Err(AdmissionError::SimulatedThreadsLive);
         }
-        // The projection scope and the heap the collector closes are this
-        // owner's, on this thread.
+        // The heap the collector closes is this owner's, installed on this
+        // thread.
         self.setup_thread_locals();
         let phase = CollectorClosedPhase::enter(self)?;
         let plan = phase.context.plan_admission();

@@ -1265,8 +1265,8 @@ impl Context {
         });
     }
 
-    /// Enter this World's projection scope on the running thread, so its
-    /// obarray births symbols on VOID. Allocates nothing once
+    /// Enter this World's projection scope, so its obarray births symbols
+    /// on VOID. Allocates nothing once
     /// `reserve_projection_scope` and the table's reservation ran.
     pub(super) fn enter_world_projection_scope(&self) {
         let world = &self.obarray.lease.0;

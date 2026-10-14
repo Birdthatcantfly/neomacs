@@ -8,6 +8,7 @@
 //! histogram only counts under `NEOVM_JIT_COMPILE_STATS`.
 
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustc_hash::FxHashMap;
 use strum::{EnumCount, IntoEnumIterator};
@@ -16,6 +17,17 @@ use crate::emacs_core::intern::SymId;
 use crate::emacs_core::symbol::FunctionEpochBump;
 
 const BUMP_REASONS: usize = FunctionEpochBump::COUNT;
+
+/// The reasons counted per thread: every one but
+/// [`FunctionEpochBump::ThreadAdmission`], which happens once per World and
+/// is counted process-wide ([`ADMISSION_BUMPS`]), so admission adds no
+/// thread-local storage (a larger TLS block moves every TLS offset).
+const THREAD_BUMP_REASONS: usize = BUMP_REASONS - 1;
+
+const _: () = assert!(FunctionEpochBump::ThreadAdmission as usize == THREAD_BUMP_REASONS);
+
+/// [`FunctionEpochBump::ThreadAdmission`] bumps, process-wide.
+static ADMISSION_BUMPS: AtomicU64 = AtomicU64::new(0);
 
 /// What a speculated bytecode call site found when it re-validated its
 /// binding after `function_epoch` moved (the slow half of
@@ -37,8 +49,8 @@ const SPEC_KINDS: usize = SpecRevalidation::COUNT;
 
 thread_local! {
     /// Bumps per [`FunctionEpochBump`] reason.
-    static FN_EPOCH_BUMPS: [Cell<u64>; BUMP_REASONS] =
-        const { [const { Cell::new(0) }; BUMP_REASONS] };
+    static FN_EPOCH_BUMPS: [Cell<u64>; THREAD_BUMP_REASONS] =
+        const { [const { Cell::new(0) }; THREAD_BUMP_REASONS] };
     /// Function-cell writes that stored the value already there (no bump).
     static FN_CELL_UNCHANGED: Cell<u64> = const { Cell::new(0) };
     /// Redefinitions per symbol (only under `NEOVM_JIT_COMPILE_STATS`).
@@ -70,9 +82,11 @@ pub(crate) fn note_inline_evictions(n: usize) {
 /// cell write, `None` for a bump without one (subr rewrite, overrides).
 #[inline]
 pub(crate) fn note_function_epoch_bump(why: FunctionEpochBump, sym: Option<SymId>) {
-    FN_EPOCH_BUMPS.with(|c| {
-        let c = &c[why as usize];
-        c.set(c.get() + 1);
+    FN_EPOCH_BUMPS.with(|c| match c.get(why as usize) {
+        Some(c) => c.set(c.get() + 1),
+        None => {
+            ADMISSION_BUMPS.fetch_add(1, Ordering::Relaxed);
+        }
     });
     if let Some(sym) = sym
         && super::summary_enabled()
@@ -113,6 +127,7 @@ impl EpochCounters {
                 *slot = cell.get();
             }
         });
+        bumps[THREAD_BUMP_REASONS] = ADMISSION_BUMPS.load(Ordering::Relaxed);
         let mut spec = [0u64; SPEC_KINDS];
         SPEC_REVALIDATIONS.with(|c| {
             for (slot, cell) in spec.iter_mut().zip(c.iter()) {
@@ -254,6 +269,7 @@ pub(crate) fn report_token(name: &str) -> String {
 #[cfg(test)]
 pub(crate) fn reset_epoch_counters_for_test() {
     FN_EPOCH_BUMPS.with(|c| c.iter().for_each(|cell| cell.set(0)));
+    ADMISSION_BUMPS.store(0, Ordering::Relaxed);
     FN_CELL_UNCHANGED.with(|c| c.set(0));
     FN_REDEFINED.with(|m| m.borrow_mut().clear());
     SPEC_REVALIDATIONS.with(|c| c.iter().for_each(|cell| cell.set(0)));
