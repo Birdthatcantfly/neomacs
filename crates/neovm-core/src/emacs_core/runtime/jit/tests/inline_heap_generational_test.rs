@@ -152,9 +152,10 @@ fn pure_runtime_lowering_does_not_read_an_owner_dropped_context_heap() {
     assert!(!crate::tagged::gc::tagged_heap_is_installed());
 }
 
-/// Card-mark S3: an old owner's compiled store marks its card inline, with
-/// no shim and no log, every time; the next minor finds the young child
-/// through the card and cleans it.
+/// Card-mark S3e: an old owner's compiled store marks its card inline; only
+/// the first mark of a clean chunk takes the shim, which logs the chunk once
+/// per cycle. The next minor finds the young child through the card and
+/// cleans it.
 #[test]
 fn old_cons_stores_mark_their_card_inline() {
     let mut context = context(true);
@@ -173,8 +174,13 @@ fn old_cons_stores_mark_their_card_inline() {
             assert!(!context.tagged_heap.value_is_old_for_test(child));
             let before = cons_shims();
             assert_eq!(native(&mut context, &leaf, &[owner, child]), child);
+            assert_eq!(cons_shims(), before + 1, "a clean chunk's mark logs it");
             assert_eq!(native(&mut context, &leaf, &[owner, child]), child);
-            assert_eq!(cons_shims(), before, "card marks never take the shim");
+            assert_eq!(
+                cons_shims(),
+                before + 1,
+                "a logged chunk's mark stays inline"
+            );
             assert!(context.tagged_heap.owner_card_is_dirty_for_test(owner));
             assert_eq!(context.tagged_heap.remembered_log_len_for_test(), 0);
             context.restore_specpdl_roots(roots);
@@ -247,6 +253,8 @@ fn young_cons_and_fixnum_or_character_stores_stay_inline() {
 
         context.gc_collect_exact();
         assert!(context.tagged_heap.value_is_old_for_test(owner));
+        // An unproven immediate into an old owner of a clean chunk creates
+        // no edge, so it stays inline instead of logging the chunk.
         for immediate in [Value::make_int(-17), Value::char('λ')] {
             assert_eq!(native(&mut context, &leaf, &[owner, immediate]), immediate);
             assert_eq!(cons_shims(), before);
@@ -287,7 +295,7 @@ fn bare_uninterned_symbol_store_marks_the_owner_card_before_a_minor() {
         context.tagged_heap.owner_card_is_dirty_for_test(owner),
         "storing a bare symbol must dirty the old owner's card"
     );
-    assert_eq!(cons_shims(), before, "the card mark stays inline");
+    assert_eq!(cons_shims(), before + 1, "a clean chunk's mark logs it");
     context.assign("u34-inline-key", Value::NIL);
     minor(&mut context);
     assert_eq!(owner.cons_car(), key);
@@ -402,7 +410,11 @@ fn blv_default_and_current_cell_stores_remember_young_children() {
         let before = VARSET_SHIM_CALLS.with(|count| count.get());
         assert_eq!(native(&mut context, &leaf, &[child]), child);
         assert_eq!(native(&mut context, &leaf, &[child]), child);
-        assert_eq!(VARSET_SHIM_CALLS.with(|count| count.get()), before);
+        assert_eq!(
+            VARSET_SHIM_CALLS.with(|count| count.get()),
+            before + 1,
+            "only the clean chunk's first mark takes the shim"
+        );
         assert!(context.tagged_heap.owner_card_is_dirty_for_test(owner));
         context.restore_specpdl_roots(roots);
 
@@ -451,10 +463,17 @@ fn blv_bind_and_restore_use_the_cons_gate_across_an_explicit_major() {
         let bind_before = VARBIND_SHIM_CALLS.with(|count| count.get());
         let unbind_before = UNBIND_SHIM_CALLS.with(|count| count.get());
         assert_eq!(native(&mut context, &leaf, &[child]), restored);
-        // Bind and restore both mark the owner's card inline; the body's
-        // major cleans every card between them, so the restore re-marks it.
-        assert_eq!(VARBIND_SHIM_CALLS.with(|count| count.get()), bind_before);
-        assert_eq!(UNBIND_SHIM_CALLS.with(|count| count.get()), unbind_before);
+        // Bind and restore both mark the owner's card; each finds its chunk
+        // clean (the body's major cleans every card between them), so each
+        // takes its shim once to log the chunk.
+        assert_eq!(
+            VARBIND_SHIM_CALLS.with(|count| count.get()),
+            bind_before + 1
+        );
+        assert_eq!(
+            UNBIND_SHIM_CALLS.with(|count| count.get()),
+            unbind_before + 1
+        );
         assert_eq!(context.gc_count, collections + 1);
         assert_eq!(context.specpdl.len(), bindings);
         assert_eq!(context.jit_bind_stack.len(), bind_stack);
@@ -687,7 +706,11 @@ fn gen1_optimized_heap_value_stores_remember_their_young_children() {
         let before = cons_shims();
         native(&mut context, &leaf, &[owner, child]);
         native(&mut context, &leaf, &[owner, child]);
-        assert_eq!(cons_shims(), before, "card marks stay inline");
+        assert_eq!(
+            cons_shims(),
+            before + 1,
+            "only the chunk's first mark logs it"
+        );
         assert!(context.tagged_heap.owner_card_is_dirty_for_test(owner));
         context.restore_specpdl_roots(roots);
 

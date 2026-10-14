@@ -2,6 +2,7 @@
 //! Mutator-owned logs and caches are reached through MutatorGcState.
 
 use super::*;
+use smallvec::SmallVec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum GenerationCycle {
@@ -143,12 +144,18 @@ impl TaggedHeap {
             return;
         }
         self.publish_persistent_remembered_world_stopped();
-        // Cons stores mark cards without logging their owner, so every cons
-        // chunk's cards are cleaned here, with the claims. Only conses have
-        // cards; slot owners leave through their logged headers below.
+        // Cons stores mark cards without logging their owner; every dirty
+        // chunk's slot was logged when its summary went dirty, so cleaning
+        // the logged slots cleans every card. Only conses have cards; slot
+        // owners leave through their logged headers below.
+        self.absorb_dirty_card_slots_world_stopped();
+        let slots = self
+            .card_slots_mut()
+            .map(CardSlots::take_dirty)
+            .unwrap_or_default();
         if let Some(cards) = self.card_table() {
-            for block in &self.cons_blocks {
-                cards.clear_chunk(block.base_addr());
+            for slot in slots {
+                cards.clear_slot(slot);
             }
         }
         let mut owners = std::mem::take(&mut self.generational.r_seed);
@@ -275,6 +282,7 @@ impl TaggedHeap {
             // complete. Check before promotion could hide a missing mark and
             // before any sweep can reclaim the missed young child.
             self.verify_remembered_owner_cards_world_stopped();
+            self.verify_dirty_card_slots_logged_world_stopped();
             self.verify_dump_partition();
         }
         let partition_first = self.partition_dump && !self.dump_blackened;
@@ -411,13 +419,57 @@ impl TaggedHeap {
             .and_then(|carrier| carrier.cards.as_ref())
     }
 
-    /// Mark the card of OWNER_ADDR. Mutator side, GEN1 only: one Relaxed
-    /// byte store into the table `install_card_table` built.
+    /// Mark the card of OWNER_ADDR. Mutator side, GEN1 only: Relaxed byte
+    /// stores into the table `install_card_table` built, and a log entry
+    /// when the chunk's summary was clean.
     #[inline]
     pub(super) fn mark_owner_card(&self, owner_addr: usize) {
-        self.card_table()
-            .expect("a GEN1 heap installs its card table")
-            .mark(owner_addr);
+        let carrier = self
+            .census
+            .as_deref()
+            .expect("a GEN1 heap installs its card table");
+        let cards = carrier
+            .cards
+            .as_ref()
+            .expect("a GEN1 heap installs its card table");
+        if let Some(slot) = cards.mark(owner_addr) {
+            carrier.card_slots.log(slot);
+        }
+    }
+
+    /// Re-register the surviving cons blocks under their card chunk slots
+    /// after a release. GEN1 only.
+    pub(super) fn rebuild_card_slot_blocks(&mut self) {
+        if !self.generational.enabled {
+            return;
+        }
+        let Some(census) = self.census.as_deref_mut() else {
+            return;
+        };
+        census
+            .card_slots
+            .rebuild(self.cons_blocks.iter().map(ConsBlock::base_addr));
+    }
+
+    /// Move the logged slots into the collector's sorted set. With every
+    /// mutator stopped.
+    pub(super) fn absorb_dirty_card_slots_world_stopped(&mut self) {
+        if let Some(slots) = self.card_slots_mut() {
+            slots.absorb_logged();
+        }
+    }
+
+    /// The collector's card chunk slot index (GEN1 heaps).
+    #[inline]
+    pub(super) fn card_slots(&self) -> Option<&CardSlots> {
+        self.census.as_deref().map(|carrier| &carrier.card_slots)
+    }
+
+    #[inline]
+    pub(super) fn card_slots_mut(&mut self) -> Option<&mut CardSlots> {
+        self.census
+            .as_deref_mut()
+            .map(|carrier| &mut carrier.card_slots)
     }
 
     /// Turn generations on or off. A GEN1 heap builds its card table here,
@@ -471,47 +523,82 @@ impl TaggedHeap {
         true
     }
 
-    /// Trace the old objects that start in a dirty card: every old cell of a
-    /// cons block (32 per card, two children each) and the logged tenured
-    /// slots of every arena page (retired pages included), straight onto the
-    /// gray stack. Each chunk's cards are read
-    /// once and copied only when one is dirty; blocks and pages are re-borrowed
-    /// per owner, so nothing is collected first. With every mutator stopped;
-    /// an aliased card only adds owners.
+    /// Trace the old cells that start in a dirty card, straight onto the
+    /// gray stack: for every logged chunk slot with a dirty card, each cons
+    /// block of that slot (more than one only 4 GiB apart), 32 cells per
+    /// card, two children each. The work follows the dirty chunks, not the
+    /// heap; blocks are re-borrowed per cell, so nothing is collected first.
+    /// With every mutator stopped; an aliased card only adds owners.
     #[cold]
     #[inline(never)]
     fn trace_dirty_card_owners_world_stopped(&mut self) {
         if self.card_table().is_none() {
             return;
         }
-        for block in 0..self.cons_blocks.len() {
-            let Some(chunk) = self.dirty_chunk(self.cons_blocks[block].base_addr()) else {
+        self.absorb_dirty_card_slots_world_stopped();
+        let slots = self.card_slots().map_or(0, |slots| slots.dirty().len());
+        for slot_index in 0..slots {
+            let Some((chunk, blocks)) = self.dirty_slot_blocks(slot_index) else {
                 continue;
             };
-            for offset in chunk.dirty_offsets() {
-                let (first, mut old) = self.cons_blocks[block].old_cells_in_card(offset);
-                while old != 0 {
-                    let index = first + old.trailing_zeros() as usize;
-                    old &= old - 1;
-                    // SAFETY: an old cell of an owned block is a live cons.
-                    let children = unsafe {
-                        let cell = self.cons_blocks[block].cells_ptr().add(index);
-                        [(*cell).load_car(), (*cell).load_cdr()]
-                    };
-                    for child in children {
-                        // An old cell is black in a minor: skip it unpushed.
-                        if !self.cons_blocks[block].holds_old_cell(child) {
-                            self.mark_or_push_child(child, "generational-card");
-                        }
+            for block in blocks {
+                self.trace_dirty_cards_of_block(block, chunk);
+            }
+        }
+    }
+
+    /// The cards of the SLOT_INDEXth dirty slot when one is dirty, and the
+    /// indices of the owned cons blocks that use the slot.
+    fn dirty_slot_blocks(&self, slot_index: usize) -> Option<(ChunkCards, SmallVec<[usize; 1]>)> {
+        let slots = self.card_slots()?;
+        let slot = slots.dirty()[slot_index];
+        let chunk = self.card_table()?.dirty_cards(slot)?;
+        let blocks = slots
+            .blocks(slot)
+            .iter()
+            .filter_map(|base| self.cons_block_index_by_base.get(base).copied())
+            .collect();
+        Some((chunk, blocks))
+    }
+
+    #[inline]
+    fn trace_dirty_cards_of_block(&mut self, block: usize, chunk: ChunkCards) {
+        for offset in chunk.dirty_offsets() {
+            let (first, mut old) = self.cons_blocks[block].old_cells_in_card(offset);
+            while old != 0 {
+                let index = first + old.trailing_zeros() as usize;
+                old &= old - 1;
+                // SAFETY: an old cell of an owned block is a live cons.
+                let children = unsafe {
+                    let cell = self.cons_blocks[block].cells_ptr().add(index);
+                    [(*cell).load_car(), (*cell).load_cdr()]
+                };
+                for child in children {
+                    // An old cell is black in a minor: skip it unpushed.
+                    if !self.cons_blocks[block].holds_old_cell(child) {
+                        self.mark_or_push_child(child, "generational-card");
                     }
                 }
             }
         }
     }
 
-    #[inline]
-    fn dirty_chunk(&self, chunk_base: usize) -> Option<ChunkCards> {
-        self.card_table()?.dirty_chunk(chunk_base)
+    /// Every dirty chunk summary was logged: the minor reaches a dirty card
+    /// only through its logged slot. With every mutator stopped, after the
+    /// minor absorbed the logs.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn verify_dirty_card_slots_logged_world_stopped(&self) {
+        let Some(cards) = self.card_table() else {
+            return;
+        };
+        let logged = self.card_slots().map_or(&[][..], CardSlots::dirty);
+        for slot in cards.dirty_slots() {
+            assert!(
+                logged.binary_search(&slot).is_ok(),
+                "GC verify: dirty card chunk slot {slot:?} was never logged"
+            );
+        }
     }
 
     /// Every unmapped cons in R_seed or a mutator R log has a dirty card: the

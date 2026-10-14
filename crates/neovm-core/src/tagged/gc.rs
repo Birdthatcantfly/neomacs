@@ -2804,7 +2804,7 @@ pub(crate) use card_table::{
     CARD_CHUNK_SHIFT, CARD_DIRTY, CARD_INDEX_MASK, CARD_SHIFT, CHUNK_SUMMARY_OFFSET,
     HEAP_JIT_CARD_TABLE,
 };
-use card_table::{CardTable, ChunkCards};
+use card_table::{CardSlots, CardTable, ChunkCards, ChunkSlot};
 mod cons_block_trailer;
 use cons_block_trailer::*;
 mod collection_observed;

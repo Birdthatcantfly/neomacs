@@ -143,6 +143,8 @@ pub(super) struct GenCensus {
     pub(super) facade_mark: Option<std::sync::Arc<super::facade_mark::FacadeMarkState>>,
     /// GEN1 card table (card-mark S1), built by the first logged owner.
     pub(super) cards: Option<super::card_table::CardTable>,
+    /// Cons blocks by card chunk slot, and the slots dirty this cycle.
+    pub(super) card_slots: super::card_table::CardSlots,
 }
 
 /// Only measurement history leaves the carrier during a census. Concurrent
@@ -177,6 +179,7 @@ impl GenCensus {
             concurrent: None,
             facade_mark: None,
             cards: None,
+            card_slots: Default::default(),
         }))
     }
 
@@ -194,6 +197,7 @@ impl GenCensus {
             concurrent: None,
             facade_mark: None,
             cards: None,
+            card_slots: Default::default(),
         }
     }
 

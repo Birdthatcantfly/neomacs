@@ -2,7 +2,7 @@
 //! card, which the stop-all reset cleans with every cons card. Slot owners
 //! (vectors, records, Box objects) stay on the remembered set, precisely.
 
-use super::card_table::{CARD_INDEX_MASK, CARD_SHIFT, CardTable, card_index};
+use super::card_table::{CARD_INDEX_MASK, CARD_SHIFT, CardTable, ChunkSlot, card_index};
 use super::*;
 use crate::emacs_core::eval::{
     push_scratch_gc_root, restore_scratch_gc_roots, save_scratch_gc_roots,
@@ -72,7 +72,7 @@ fn card_index_masks_and_aliases_without_losing_marks() {
 
 fn dirty_offsets(cards: &CardTable, chunk: usize) -> Vec<usize> {
     cards
-        .dirty_chunk(chunk)
+        .dirty_cards(ChunkSlot::of(chunk))
         .map_or_else(Vec::new, |cards| cards.dirty_offsets().collect())
 }
 
@@ -352,27 +352,70 @@ fn same_block_old_cells_are_skipped_children() {
     assert!(!block(old).holds_old_cell(float));
 }
 
-/// The chunk summary byte is marked with every card and cleaned with the
-/// chunk; a chunk whose summary is clean is never read card by card.
+/// The first mark of a clean chunk reports its slot, for the mutator to
+/// log; later marks of the chunk do not, until the collector cleans it.
 #[test]
-fn chunk_summary_follows_marks_and_clears() {
+fn first_mark_of_a_chunk_reports_its_slot_once() {
     use super::card_table::{CARD_BYTES, CHUNK_BYTES};
     let cards = CardTable::new();
     let chunk = 0x7f00_0000_0000usize;
     let neighbour = chunk + CHUNK_BYTES;
-    assert!(cards.dirty_chunk(chunk).is_none());
-    cards.mark(chunk + 5 * CARD_BYTES);
-    assert_eq!(dirty_offsets(&cards, chunk), [5 * CARD_BYTES]);
-    assert!(
-        cards.dirty_chunk(neighbour).is_none(),
-        "one summary per chunk"
+    assert_eq!(cards.dirty_slots().count(), 0);
+    assert_eq!(
+        cards.mark(chunk + 5 * CARD_BYTES),
+        Some(ChunkSlot::of(chunk))
     );
-    cards.clear_chunk(chunk);
-    assert!(cards.dirty_chunk(chunk).is_none());
+    assert_eq!(cards.mark(chunk + 9 * CARD_BYTES), None, "already logged");
+    assert_eq!(
+        dirty_offsets(&cards, chunk),
+        [5 * CARD_BYTES, 9 * CARD_BYTES]
+    );
+    assert_ne!(ChunkSlot::of(chunk), ChunkSlot::of(neighbour));
+    assert!(
+        dirty_offsets(&cards, neighbour).is_empty(),
+        "one slot per chunk"
+    );
+    assert_eq!(
+        cards.dirty_slots().collect::<Vec<_>>(),
+        [ChunkSlot::of(chunk)]
+    );
+    cards.clear_slot(ChunkSlot::of(chunk));
+    assert!(dirty_offsets(&cards, chunk).is_empty());
     assert!(!cards.is_dirty(chunk + 5 * CARD_BYTES));
-    // A card cleaned alone leaves a dirty summary over clean cards: the walk
-    // reads them and finds nothing.
-    cards.mark(neighbour);
-    cards.clear(neighbour);
-    assert!(cards.dirty_chunk(neighbour).is_none());
+    assert_eq!(cards.dirty_slots().count(), 0);
+    assert_eq!(
+        cards.mark(chunk + 5 * CARD_BYTES),
+        Some(ChunkSlot::of(chunk)),
+        "a cleaned chunk reports again"
+    );
+}
+
+/// Chunks 4 GiB apart share a slot, so the slot index keeps every block
+/// of a slot: the minor scans the shared cards against each of them.
+#[test]
+fn aliased_chunks_share_a_slot_and_both_are_indexed() {
+    use super::card_table::{CARD_INDEX_MASK, CARD_SHIFT, CHUNK_BYTES, CardSlots};
+    let chunk = 0x7f00_0000_0000usize;
+    let alias = chunk + ((CARD_INDEX_MASK + 1) << CARD_SHIFT);
+    assert_eq!(ChunkSlot::of(chunk), ChunkSlot::of(alias));
+    let mut slots = CardSlots::default();
+    slots.insert_block(chunk);
+    slots.insert_block(alias);
+    slots.insert_block(chunk + CHUNK_BYTES);
+    assert_eq!(slots.blocks(ChunkSlot::of(chunk)), [chunk, alias]);
+    slots.rebuild([alias]);
+    assert_eq!(slots.blocks(ChunkSlot::of(chunk)), [alias]);
+    assert!(slots.blocks(ChunkSlot::of(chunk + CHUNK_BYTES)).is_empty());
+    // Mutator logs arrive unordered and repeated; the collector keeps one
+    // sorted entry each.
+    slots.log(ChunkSlot::of(chunk + CHUNK_BYTES));
+    slots.log(ChunkSlot::of(chunk));
+    slots.log(ChunkSlot::of(chunk + CHUNK_BYTES));
+    slots.absorb_logged();
+    assert_eq!(
+        slots.dirty(),
+        [ChunkSlot::of(chunk), ChunkSlot::of(chunk + CHUNK_BYTES)]
+    );
+    assert_eq!(slots.take_dirty().len(), 2);
+    assert!(slots.dirty().is_empty());
 }

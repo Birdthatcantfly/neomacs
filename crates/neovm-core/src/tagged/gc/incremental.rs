@@ -1187,6 +1187,7 @@ impl TaggedHeap {
                     );
                 }
             }
+            self.rebuild_card_slot_blocks();
         }
 
         self.cons_live_count = new_live;
@@ -1272,6 +1273,7 @@ impl TaggedHeap {
             };
         }
         debug_assert_eq!(rebuilt_live, self.cons_live_count);
+        self.rebuild_card_slot_blocks();
 
         old_len - self.cons_blocks.len()
     }

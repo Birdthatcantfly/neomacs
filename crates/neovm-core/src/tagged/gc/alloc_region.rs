@@ -213,6 +213,11 @@ impl TaggedHeap {
         let block_index = self.cons_blocks.len() - 1;
         self.cons_block_index_by_base
             .insert(block_base, block_index);
+        if self.generational.enabled
+            && let Some(slots) = self.card_slots_mut()
+        {
+            slots.insert_block(block_base);
+        }
         if let Some(map) = self.chunk_map.as_deref() {
             map.set(block_base, ChunkEntry::new(ChunkClass::Cons, block_index));
         }
