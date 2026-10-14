@@ -21,10 +21,131 @@
 //! (`eval::owner_bindings`), and no Lisp runs while a cell is revealed.
 
 use super::cell::{ArmMut, RevealedCell};
-use super::{Obarray, SymId};
+use super::{Obarray, SymId, SymbolTrappedWrite};
 use crate::emacs_core::forward::{
-    BuiltinForwarder, CanonicalArm, CanonicalBlv, ThreadProjectionDescriptor,
+    BuiltinForwarder, CanonicalArm, CanonicalBlv, LispFwd, ThreadProjectionDescriptor,
+    ThreadProjectionTable,
 };
+use crate::emacs_core::value::Value;
+use std::cell::RefCell;
+use std::ptr::NonNull;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// An admitted World's projection scope, keyed by its obarray's generation:
+/// where obarray-level code that is not handed the World (a fresh symbol, a
+/// VOID cell's first write) finds the World's table and VOID descriptor.
+#[derive(Clone, Copy, Debug)]
+struct ProjectionScope {
+    generation: u64,
+    /// The World's table; the World removes the scope before it drops.
+    table: NonNull<RefCell<ThreadProjectionTable>>,
+    void: &'static ThreadProjectionDescriptor,
+}
+
+/// How many projection scopes exist in the process: a dormant process
+/// answers a fresh symbol with one load.
+static PROJECTION_SCOPES_LIVE: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    /// The admitted Worlds whose owner runs on this thread. A World is
+    /// confined to one thread at a time; a later green-thread handoff
+    /// re-enters its scope on the thread it moves to.
+    static PROJECTION_SCOPES: RefCell<Vec<ProjectionScope>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Why admission could not reserve what its commit needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectionPlanError;
+
+/// Make room to enter one projection scope without allocating.
+pub(crate) fn reserve_projection_scope() -> Result<(), ProjectionPlanError> {
+    PROJECTION_SCOPES.with(|scopes| {
+        scopes
+            .borrow_mut()
+            .try_reserve(1)
+            .map_err(|_| ProjectionPlanError)
+    })
+}
+
+/// Enter GENERATION's projection scope on this thread: from now on its
+/// obarray births symbols on VOID and materializes VOID cells through
+/// TABLE. Allocates nothing after [`reserve_projection_scope`].
+///
+/// # Safety
+/// TABLE is the World's, inside the shared World allocation that owns the
+/// obarray of GENERATION, and the World leaves the scope
+/// ([`leave_projection_scope`]) before it drops.
+pub(crate) unsafe fn enter_projection_scope(
+    generation: u64,
+    table: &RefCell<ThreadProjectionTable>,
+    void: &'static ThreadProjectionDescriptor,
+) {
+    PROJECTION_SCOPES.with(|scopes| {
+        let mut scopes = scopes.borrow_mut();
+        if scopes.iter().any(|scope| scope.generation == generation) {
+            return;
+        }
+        scopes.push(ProjectionScope {
+            generation,
+            table: NonNull::from(table),
+            void,
+        });
+        PROJECTION_SCOPES_LIVE.fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+/// Leave GENERATION's projection scope on this thread, if it has one.
+pub(crate) fn leave_projection_scope(generation: u64) {
+    if PROJECTION_SCOPES_LIVE.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let _ = PROJECTION_SCOPES.try_with(|scopes| {
+        let mut scopes = scopes.borrow_mut();
+        if let Some(position) = scopes
+            .iter()
+            .position(|scope| scope.generation == generation)
+        {
+            scopes.swap_remove(position);
+            PROJECTION_SCOPES_LIVE.fetch_sub(1, Ordering::Relaxed);
+        }
+    });
+}
+
+fn scope_for(generation: u64) -> Option<ProjectionScope> {
+    if PROJECTION_SCOPES_LIVE.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    PROJECTION_SCOPES
+        .try_with(|scopes| {
+            scopes
+                .borrow()
+                .iter()
+                .find(|scope| scope.generation == generation)
+                .copied()
+        })
+        .ok()
+        .flatten()
+}
+
+/// The header a fresh symbol of GENERATION's obarray is born on: VOID once
+/// its World admitted threads, none before. One load in a dormant process.
+#[inline]
+pub(super) fn born_projected(generation: u64) -> Option<&'static LispFwd> {
+    if PROJECTION_SCOPES_LIVE.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    scope_for(generation).map(|scope| scope.void.header())
+}
+
+/// What admission does with one cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AdmissionPlanCell {
+    /// Storage of its own: a value, a buffer-local record, a builtin, or the
+    /// host-projection bit. It gets its own descriptor and index.
+    Owned,
+    /// A void, unflagged cell: the World's shared VOID descriptor.
+    Void,
+}
 
 /// A projected cell an operation has revealed, to be concealed again with
 /// [`Obarray::conceal_projection`]. Neither `Copy` nor `Clone`: one reveal,
@@ -61,7 +182,7 @@ impl Obarray {
     /// Give ID's projected cell its logical arm, word and host-projection
     /// bit back. `None`, changing nothing, unless ID is projected.
     pub(crate) fn reveal_projection(&mut self, id: SymId) -> Option<RevealedProjection> {
-        let projection = self.thread_projection_of(id)?;
+        let projection = self.owned_thread_projection(id)?;
         let logical = match projection.arm() {
             CanonicalArm::Plain => RevealedCell::Plain(projection.plain_value()),
             CanonicalArm::Localized(blv) => RevealedCell::Localized(blv.blv()),
@@ -112,33 +233,120 @@ impl Obarray {
         ConcealOutcome::Concealed
     }
 
-    /// Project `id`'s variable to owner-local bindings: its cell becomes
-    /// `Forwarded` over a descriptor TABLE issues, whose canonical storage
-    /// keeps the cell's logical arm and word, and its host-projection bit
-    /// is set so every checked writer refuses it, as stopped admission will
-    /// require. `None`, changing nothing, for an alias (it resolves to its
-    /// base) or a variable already projected.
-    ///
-    /// Test-only: no production path converts a symbol yet.
-    #[cfg(test)]
-    pub(crate) fn project_thread_variable_for_test(
+    /// The projection ID's cell heads, materialized onto a descriptor of its
+    /// own if it is on the World's shared VOID descriptor: what a bind or a
+    /// canonical write needs, since neither may touch VOID. Cold: a cell
+    /// leaves VOID once.
+    pub(crate) fn owned_thread_projection(
         &mut self,
         id: SymId,
-        table: &mut crate::emacs_core::forward::ThreadProjectionTable,
     ) -> Option<&'static ThreadProjectionDescriptor> {
-        use crate::emacs_core::value::Value;
+        let projection = self.thread_projection_of(id)?;
+        if !projection.is_void() {
+            return Some(projection);
+        }
+        self.materialize_void(id)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn materialize_void(&mut self, id: SymId) -> Option<&'static ThreadProjectionDescriptor> {
+        let scope = scope_for(self.generation)?;
+        // SAFETY: the scope names the World that owns this obarray, alive
+        // while the obarray is; the table is borrowed for this issue only.
+        let table = unsafe { scope.table.as_ref() };
+        let projection = table
+            .borrow_mut()
+            .issue(CanonicalArm::Plain, Value::UNBOUND, false);
+        {
+            let mut write = self.cell_write_ensure(id);
+            let ArmMut::Forwarded(forwarded) = write.arm() else {
+                unreachable!("a projected cell is forwarded");
+            };
+            forwarded.conceal_projection(projection);
+        }
+        self.register_value_fwd(projection.plain_root());
+        Some(projection)
+    }
+
+    /// What admission does with ID's cell: `None` for a cell it leaves alone
+    /// (empty, an alias, a constant, already projected).
+    pub(crate) fn admission_plan(&self, id: SymId) -> Option<AdmissionPlanCell> {
+        let sym = self.slot(id)?;
+        if sym.trapped_write() == SymbolTrappedWrite::NoWrite {
+            return None;
+        }
+        let host_projected = sym.flags().runtime_projected();
+        match sym.value_cell() {
+            super::ValueCell::Plain(value) => Some(if value.is_unbound() && !host_projected {
+                AdmissionPlanCell::Void
+            } else {
+                AdmissionPlanCell::Owned
+            }),
+            super::ValueCell::Localized(_) => Some(AdmissionPlanCell::Owned),
+            super::ValueCell::Forwarded(fwd) => {
+                BuiltinForwarder::new(fwd).map(|_| AdmissionPlanCell::Owned)
+            }
+            super::ValueCell::Alias(_) => None,
+        }
+    }
+
+    /// Make room for N more registered forwarder roots without allocating.
+    pub(crate) fn try_reserve_value_fwds(&mut self, n: usize) -> Result<(), ProjectionPlanError> {
+        self.value_fwds
+            .try_reserve(n)
+            .map_err(|_| ProjectionPlanError)
+    }
+
+    /// Admission's projection of ID's cell, as PLAN said: onto a descriptor
+    /// TABLE issues (complete before the cell is redirected), or onto VOID.
+    /// Allocates nothing once TABLE and the forwarder roots are reserved.
+    pub(crate) fn project_admitted_cell(
+        &mut self,
+        id: SymId,
+        plan: AdmissionPlanCell,
+        table: &mut ThreadProjectionTable,
+    ) {
+        match plan {
+            AdmissionPlanCell::Owned => {
+                let _ = self.project_owned(id, table);
+            }
+            AdmissionPlanCell::Void => {
+                let void = table.void_descriptor();
+                {
+                    let mut write = self.cell_write_ensure(id);
+                    let ArmMut::Plain(plain) = write.arm() else {
+                        unreachable!("admission plans VOID only for a plain cell");
+                    };
+                    plain.conceal_projection(void);
+                }
+                self.mark_runtime_projected_id(id);
+            }
+        }
+    }
+
+    /// Project `id`'s variable onto a descriptor of its own from TABLE: its
+    /// cell becomes `Forwarded` over it, its canonical storage keeps the
+    /// cell's logical arm and word, and its host-projection bit is set so
+    /// every checked writer refuses it. `None`, changing nothing, for an
+    /// alias or a variable already projected.
+    fn project_owned(
+        &mut self,
+        id: SymId,
+        table: &mut ThreadProjectionTable,
+    ) -> Option<&'static ThreadProjectionDescriptor> {
         let host_projected = self.ensure_slot(id).flags().runtime_projected();
         let projection = {
             let mut write = self.cell_write_ensure(id);
             match write.arm() {
                 ArmMut::Plain(plain) => {
                     let projection =
-                        table.project_for_test(CanonicalArm::Plain, plain.value(), host_projected);
+                        table.issue(CanonicalArm::Plain, plain.value(), host_projected);
                     plain.conceal_projection(projection);
                     projection
                 }
                 ArmMut::Localized(local) => {
-                    let projection = table.project_for_test(
+                    let projection = table.issue(
                         CanonicalArm::Localized(CanonicalBlv::new(local.blv())),
                         Value::UNBOUND,
                         host_projected,
@@ -148,7 +356,7 @@ impl Obarray {
                 }
                 ArmMut::Forwarded(forwarded) => {
                     let builtin = BuiltinForwarder::new(forwarded.descriptor())?;
-                    let projection = table.project_for_test(
+                    let projection = table.issue(
                         CanonicalArm::Forwarded(builtin),
                         Value::UNBOUND,
                         host_projected,
@@ -163,6 +371,17 @@ impl Obarray {
         self.register_value_fwd(projection.plain_root());
         Some(projection)
     }
+
+    /// [`Self::project_owned`] of one variable, for tests that project
+    /// without admitting.
+    #[cfg(test)]
+    pub(crate) fn project_thread_variable_for_test(
+        &mut self,
+        id: SymId,
+        table: &mut ThreadProjectionTable,
+    ) -> Option<&'static ThreadProjectionDescriptor> {
+        self.project_owned(id, table)
+    }
 }
 
 impl Obarray {
@@ -176,7 +395,6 @@ impl Obarray {
         blv: CanonicalBlv,
         buffer: Option<&crate::buffer::Buffer>,
     ) -> crate::emacs_core::value::Value {
-        use crate::emacs_core::value::Value;
         let blv_ptr = blv.blv().as_ptr();
         match buffer {
             // SAFETY: a projection's localized arm names a record this

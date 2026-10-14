@@ -839,6 +839,14 @@ fn expect_cv_id(manager: &ThreadManager, value: &Value) -> Result<u64, Flow> {
 /// In our single-threaded simulation the function is executed immediately.
 /// Returns a `(thread . ID)` object.
 pub(crate) fn builtin_make_thread(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {
+    // A Green World runs threads as owners; its runtime is not built yet,
+    // and the simulated exchange never runs beside admission.
+    if eval.threading_mode() == super::eval::ThreadingMode::Green {
+        return Err(signal(
+            LispCondition::Error,
+            vec![Value::string("Green Lisp threads are not available yet")],
+        ));
+    }
     let (thread_id, function) = prepare_make_thread(&mut eval.threads, &args)?;
     eval.threads
         .set_thread_current_buffer(thread_id, eval.buffers.current_buffer_id());

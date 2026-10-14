@@ -7735,6 +7735,8 @@ mod pdump_reconstruct;
 
 mod macroexpand;
 
+mod admission;
+pub(crate) use admission::ThreadingMode;
 mod owner_bindings;
 mod owner_mirrors;
 mod variable_access;

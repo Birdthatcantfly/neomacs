@@ -490,6 +490,20 @@ impl LispSymbol {
         sym
     }
 
+    /// A detached symbol for ID born into an admitted World: its cell is
+    /// projected onto the World's VOID descriptor (`HEADER`), carrying the
+    /// host-projection bit every checked writer refuses, as admission leaves
+    /// every void cell.
+    pub(super) fn new_projected(id: SymId, header: &'static LispFwd) -> Self {
+        let mut sym = Self::new(id);
+        // A detached symbol: no other thread can see it, so the cell is
+        // written without the seqlock or a pre-image note.
+        sym.flags.set_redirect(SymbolRedirect::Forwarded);
+        sym.val = CellWord::forwarded(header);
+        sym.flags.set_runtime_projected(true);
+        sym
+    }
+
     /// A detached symbol rebuilt from a portable dump: the redirect and its
     /// word come in as one [`DumpedCell`], so the loader cannot pair a tag
     /// with another arm's word.

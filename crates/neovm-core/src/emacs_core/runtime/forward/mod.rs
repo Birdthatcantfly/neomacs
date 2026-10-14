@@ -70,12 +70,11 @@ use crate::buffer::buffer::BufferSlotPredicateError;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-#[cfg(test)]
-pub use thread_projection::ThreadProjectionTable;
 pub use thread_projection::{
     BuiltinForwarder, CanonicalArm, CanonicalBlv, THREAD_PROJECTION_OFFSET,
     ThreadProjectionDescriptor, TlsIndex,
 };
+pub use thread_projection::{ProjectionCapacityError, ThreadProjectionTable};
 
 /// Discriminant for [`LispFwd`]. Mirrors GNU `enum Lisp_Fwd_Type`
 /// (`src/lisp.h:3046-3055`). Always read the first field of any `*Fwd`
@@ -1068,11 +1067,17 @@ pub(crate) fn alloc_owner_debugger_cell(initial: bool) -> &'static LispBoolFwd {
 /// installer must also register it as a GC root; `Obarray::install_objfwd`
 /// performs that registration.
 pub fn alloc_objfwd(initial: Value) -> &'static LispObjFwd {
-    Box::leak(Box::new(LispObjFwd {
+    Box::leak(Box::new(new_objfwd(initial)))
+}
+
+/// A Lisp-object forwarder by value, for a body that embeds one (a thread
+/// projection's canonical plain word).
+pub(crate) fn new_objfwd(initial: Value) -> LispObjFwd {
+    LispObjFwd {
         ty: LispFwdType::Obj,
         value: AtomicValue::new(initial),
         _mutator: PhantomData,
-    }))
+    }
 }
 
 /// Allocate a process-lifetime keyboard-object forwarder, GNU's

@@ -96,7 +96,8 @@ fn project(ev: &mut Context, name: &str) {
     let projection = ev
         .project_thread_variable_for_test(intern(name))
         .unwrap_or_else(|| panic!("{name} projects"));
-    assert_eq!(projection.index().slot(), issued, "{name}: dense slot");
+    // Slot 0 is the shared VOID descriptor's.
+    assert_eq!(projection.index().slot(), issued + 1, "{name}: dense slot");
     assert_eq!(ev.thread_projection_count_for_test(), issued + 1);
     assert!(std::ptr::eq(projection_of(ev, intern(name)), projection));
 }

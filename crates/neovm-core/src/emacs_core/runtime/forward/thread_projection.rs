@@ -70,6 +70,9 @@ pub struct TlsIndex(NonZeroU32);
 static_assertions::assert_eq_size!(TlsIndex, Option<TlsIndex>, u32);
 
 impl TlsIndex {
+    /// The VOID descriptor's index: reserved, never bound in any slab.
+    pub const VOID: Self = Self(NonZeroU32::MIN);
+
     /// The slot's position in a zero-based owner vector.
     #[inline]
     pub fn slot(self) -> usize {
@@ -160,7 +163,7 @@ pub struct ThreadProjectionDescriptor {
     /// roots, so the existing root scan traces it and every store notes the
     /// overwritten word first ([`LispObjFwd::set`]). It holds UNBOUND for a
     /// void variable.
-    plain: &'static LispObjFwd,
+    plain: LispObjFwd,
     /// The logical redirect. A projected variable can change arm the way an
     /// unprojected one does (`make-local-variable` localizes a plain or
     /// forwarded variable) without leaving its projection.
@@ -215,11 +218,19 @@ impl ThreadProjectionDescriptor {
 
     /// The forwarder whose slot is the plain word, for root registration
     /// by the obarray that projects the variable.
-    #[cfg(test)]
     #[inline]
-    pub(crate) fn plain_root(&self) -> &'static LispFwd {
+    pub(crate) fn plain_root(&'static self) -> &'static LispFwd {
         use super::FwdDescriptor;
         self.plain.header()
+    }
+
+    /// Whether this is the World's shared VOID descriptor: the projection of
+    /// every void, unflagged cell admission found, which no owner binds and
+    /// no write changes -- a bind or a canonical write materializes the cell
+    /// onto its own descriptor first ([`ThreadProjectionTable::issue`]).
+    #[inline]
+    pub fn is_void(&self) -> bool {
+        self.index == TlsIndex::VOID
     }
 
     /// Whether the logical cell carries the host-projection bit.
@@ -294,25 +305,37 @@ impl std::fmt::Debug for ThreadProjectionDescriptor {
 /// The World's registry of thread projections: slot allocation, and the one
 /// authority that maps a cell's header back to its descriptor.
 ///
-/// Descriptors are leaked like every forwarder body, since symbol cells hold
-/// `&'static LispFwd`; the table owns the variable-to-slot assignment.
+/// Descriptors live in leaked arena pages (symbol cells hold
+/// `&'static LispFwd`, and compiled code may hold one), never freed and
+/// never moved. Indices are dense and monotonic: SymIds are never reused, so
+/// neither are indices. Index 1 is [`TlsIndex::VOID`].
 ///
-/// Test-only, like the World field that owns it, until stopped admission
-/// exists.
-#[cfg(test)]
+/// Admission reserves first ([`Self::try_reserve`]), so its commit issues
+/// without allocating; a later materialization (the first bind or write of a
+/// cell admission left on VOID) may grow the arena.
 #[derive(Debug, Default)]
 pub struct ThreadProjectionTable {
+    /// The descriptors issued, by `index.slot() - 1` (VOID is not listed).
     issued: Vec<&'static ThreadProjectionDescriptor>,
+    /// The unused tail of the current arena page.
+    free: Vec<&'static mut std::mem::MaybeUninit<ThreadProjectionDescriptor>>,
+    /// The shared VOID descriptor, once made.
+    void: Option<&'static ThreadProjectionDescriptor>,
     // The table lives in a confined World.
     _thread_confined: std::marker::PhantomData<*const ()>,
 }
 
-#[cfg(test)]
 static_assertions::assert_not_impl_any!(ThreadProjectionTable: Send, Sync, Clone);
 
-#[cfg(test)]
+/// Why the table refused to reserve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectionCapacityError;
+
+/// Descriptors per arena page.
+const DESCRIPTOR_PAGE: usize = 256;
+
 impl ThreadProjectionTable {
-    /// How many projections the table has issued.
+    /// How many projections the table has issued (VOID not counted).
     #[inline]
     pub(crate) fn len(&self) -> usize {
         self.issued.len()
@@ -324,60 +347,116 @@ impl ThreadProjectionTable {
         self.issued.is_empty()
     }
 
-    /// The projection FWD heads, if this table issued it.
+    /// The projection FWD heads, if this table issued it (VOID included).
     ///
     /// Safe by construction: the marker is checked first (one compare a
-    /// real per-buffer header always fails), then the address is matched
-    /// against the descriptors this table issued, so a header copied out of
-    /// a projection is never mistaken for one.
+    /// real per-buffer header always fails), then the descriptor's index is
+    /// matched against this table's, so a header copied out of a projection
+    /// is never mistaken for one.
     pub(crate) fn projection(&self, fwd: &LispFwd) -> Option<&'static ThreadProjectionDescriptor> {
         if fwd.as_buffer_obj_fwd()?.offset != THREAD_PROJECTION_OFFSET {
             return None;
         }
-        self.issued
-            .iter()
-            .copied()
-            .find(|issued| std::ptr::eq(issued.header(), fwd))
+        let candidate = fwd.thread_projection()?;
+        let issued = if candidate.is_void() {
+            self.void?
+        } else {
+            self.get(candidate.index)?
+        };
+        std::ptr::eq(issued.header(), fwd).then_some(issued)
     }
-}
 
-#[cfg(test)]
-impl ThreadProjectionTable {
+    /// The descriptor issued for INDEX, if any (never VOID).
+    pub(crate) fn get(&self, index: TlsIndex) -> Option<&'static ThreadProjectionDescriptor> {
+        self.issued.get(index.slot().checked_sub(1)?).copied()
+    }
+
+    /// Make room for N more descriptors and the VOID one without allocating
+    /// later: arena pages and the issued list. A refusal changes nothing a
+    /// reader can see (pages reserved before it stay reserved).
+    pub(crate) fn try_reserve(&mut self, n: usize) -> Result<(), ProjectionCapacityError> {
+        let needed = n.saturating_add(usize::from(self.void.is_none()));
+        self.issued
+            .try_reserve(n)
+            .map_err(|_| ProjectionCapacityError)?;
+        while self.free.len() < needed {
+            let mut page: Vec<std::mem::MaybeUninit<ThreadProjectionDescriptor>> = Vec::new();
+            page.try_reserve_exact(DESCRIPTOR_PAGE)
+                .map_err(|_| ProjectionCapacityError)?;
+            self.free
+                .try_reserve(DESCRIPTOR_PAGE)
+                .map_err(|_| ProjectionCapacityError)?;
+            page.resize_with(DESCRIPTOR_PAGE, std::mem::MaybeUninit::uninit);
+            self.free.extend(page.leak().iter_mut());
+        }
+        Ok(())
+    }
+
+    /// The World's shared VOID descriptor, made on first use.
+    pub(crate) fn void_descriptor(&mut self) -> &'static ThreadProjectionDescriptor {
+        if let Some(void) = self.void {
+            return void;
+        }
+        let void = self.place(TlsIndex::VOID, CanonicalArm::Plain, Value::UNBOUND, false);
+        self.void = Some(void);
+        void
+    }
+
     /// Issue the next slot over logical redirect ARM, with PLAIN as the
-    /// canonical plain word (UNBOUND unless ARM is `Plain`). Test-only until
-    /// stopped admission exists: no production path builds a projection.
-    /// The caller registers [`ThreadProjectionDescriptor::plain_root`] with
-    /// its obarray's forwarder roots.
+    /// canonical plain word (UNBOUND unless ARM is `Plain`). The descriptor
+    /// is complete before the caller redirects a cell to it. The caller
+    /// registers [`ThreadProjectionDescriptor::plain_root`] with its
+    /// obarray's forwarder roots.
+    pub(crate) fn issue(
+        &mut self,
+        arm: CanonicalArm,
+        plain: Value,
+        host_projected: bool,
+    ) -> &'static ThreadProjectionDescriptor {
+        let next = u32::try_from(self.issued.len() + 2)
+            .ok()
+            .and_then(NonZeroU32::new)
+            .expect("thread-projection index space exhausted");
+        let descriptor = self.place(TlsIndex(next), arm, plain, host_projected);
+        self.issued.push(descriptor);
+        descriptor
+    }
+
+    fn place(
+        &mut self,
+        index: TlsIndex,
+        arm: CanonicalArm,
+        plain: Value,
+        host_projected: bool,
+    ) -> &'static ThreadProjectionDescriptor {
+        if self.free.is_empty() {
+            self.try_reserve(1)
+                .expect("thread-projection descriptor allocation failed");
+        }
+        let slot = self.free.pop().expect("a reserved descriptor slot");
+        slot.write(ThreadProjectionDescriptor {
+            header: LispBufferObjFwd {
+                ty: super::LispFwdType::BufferObj,
+                offset: THREAD_PROJECTION_OFFSET,
+                local_flags_idx: -1,
+                predicate: crate::buffer::buffer::BufferSlotPredicate::Unrestricted,
+                default: Value::UNBOUND,
+            },
+            index,
+            plain: super::new_objfwd(plain),
+            arm: std::cell::Cell::new(arm),
+            host_projected,
+        })
+    }
+
+    /// [`Self::issue`] under its pre-3c name, for the table's unit tests.
+    #[cfg(test)]
     pub(crate) fn project_for_test(
         &mut self,
         arm: CanonicalArm,
         plain: Value,
         host_projected: bool,
     ) -> &'static ThreadProjectionDescriptor {
-        let next = u32::try_from(self.issued.len() + 1)
-            .ok()
-            .and_then(NonZeroU32::new)
-            .expect("thread-projection index space exhausted");
-        let descriptor: &'static ThreadProjectionDescriptor =
-            Box::leak(Box::new(ThreadProjectionDescriptor {
-                header: LispBufferObjFwd {
-                    ty: super::LispFwdType::BufferObj,
-                    offset: THREAD_PROJECTION_OFFSET,
-                    local_flags_idx: -1,
-                    predicate: crate::buffer::buffer::BufferSlotPredicate::Unrestricted,
-                    default: Value::UNBOUND,
-                },
-                index: TlsIndex(next),
-                plain: super::alloc_objfwd(plain),
-                arm: std::cell::Cell::new(arm),
-                host_projected,
-            }));
-        self.issued.push(descriptor);
-        descriptor
-    }
-
-    /// The descriptor issued for INDEX, if any.
-    pub(crate) fn get(&self, index: TlsIndex) -> Option<&'static ThreadProjectionDescriptor> {
-        self.issued.get(index.slot()).copied()
+        self.issue(arm, plain, host_projected)
     }
 }

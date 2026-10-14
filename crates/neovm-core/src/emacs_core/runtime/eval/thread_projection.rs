@@ -177,7 +177,9 @@ impl Context {
     #[cold]
     #[inline(never)]
     pub(super) fn specbind_projected(&mut self, resolved: SymId, value: Value) -> Result<(), Flow> {
-        match self.obarray.thread_projection_of(resolved) {
+        // A bind never touches the shared VOID descriptor: the cell gets
+        // its own first.
+        match self.obarray.owned_thread_projection(resolved) {
             Some(projection) => self.specbind_owner(resolved, projection, value),
             // Only a projection's header reaches here.
             None => self.specbind_uncached(resolved, value),

@@ -45,10 +45,24 @@ struct World {
     /// Every owner's slab of dynamic bindings (Phase 0 step 2), for
     /// allocation and the collector's root phase.
     owner_slabs: std::cell::RefCell<super::owner_bindings::OwnerSlabRegistry>,
-    /// Owner-local variable slot assignments (Phase 0 step 2). Test-only
-    /// until stopped admission exists; no view or Context field reaches it.
-    #[cfg(test)]
+    /// Owner-local variable slot assignments (Phase 0 step 2): the
+    /// descriptors admission and later materialization issue. Its stable
+    /// address (inside the shared World allocation) is what a projection
+    /// scope names (`symbol::ProjectionScope`).
     thread_projections: std::cell::RefCell<crate::emacs_core::forward::ThreadProjectionTable>,
+    /// How this World runs Lisp threads, fixed at construction.
+    threading: Cell<super::admission::ThreadingMode>,
+    /// Whether thread admission has run: sticky, never reset.
+    admitted: Cell<bool>,
+}
+
+impl Drop for World {
+    fn drop(&mut self) {
+        // The obarray's projection scope names this World's table; it goes
+        // with the World, on the World's own thread.
+        let generation = self.obarray.get_mut().generation();
+        crate::emacs_core::symbol::leave_projection_scope(generation);
+    }
 }
 
 impl fmt::Debug for World {
@@ -787,6 +801,8 @@ obarray_method_proxies! {
     pub(crate) fn set_plain_untrapped_value_id(id: SymId, value: Value) -> bool;
     pub(crate) fn mark_runtime_projected_id(id: SymId);
     pub(crate) fn reveal_projection(id: SymId) -> Option<RevealedProjection>;
+    pub(crate) fn owned_thread_projection(id: SymId)
+        -> Option<&'static crate::emacs_core::forward::ThreadProjectionDescriptor>;
     pub(crate) fn conceal_projection(revealed: RevealedProjection) -> ConcealOutcome;
     pub(crate) fn store_plain_value_id(id: SymId, value: Value) -> Result<(), NotPlain>;
     pub(crate) fn set_internal_localized(sym_id: SymId,
@@ -1060,8 +1076,9 @@ impl WorldStorageBuilder {
             macro_perf_stats: Box::new(UnsafeCell::new(self.macro_perf_stats)),
             buffers,
             owner_slabs: Default::default(),
-            #[cfg(test)]
             thread_projections: Default::default(),
+            threading: Cell::new(super::admission::ThreadingMode::Sim),
+            admitted: Cell::new(false),
         }));
         // SAFETY: rederive the upstream TLS installation from the finalized
         // heap cell before any allocation-capable Context setup resumes. All
@@ -1167,6 +1184,47 @@ impl Context {
             .owner_slabs
             .borrow()
             .trace_roots(heap, visit);
+    }
+}
+
+/// Threading mode and admission state (Phase 0 step 2).
+impl Context {
+    /// How this Context's World runs Lisp threads.
+    #[inline]
+    pub(crate) fn threading_mode(&self) -> super::admission::ThreadingMode {
+        self.obarray.lease.0.threading.get()
+    }
+
+    /// Fix the World's threading mode. Only construction calls this, before
+    /// any Lisp runs (`Context::new_with_threading`).
+    #[cold]
+    pub(super) fn set_threading_mode_at_construction(
+        &mut self,
+        mode: super::admission::ThreadingMode,
+    ) {
+        debug_assert!(
+            !self.threads_admitted(),
+            "the mode is fixed before admission"
+        );
+        self.obarray.lease.0.threading.set(mode);
+    }
+
+    /// Whether thread admission has run in this World.
+    #[inline]
+    pub(crate) fn threads_admitted(&self) -> bool {
+        self.obarray.lease.0.admitted.get()
+    }
+
+    /// Record that admission has committed: sticky.
+    pub(super) fn mark_threads_admitted(&mut self) {
+        self.obarray.lease.0.admitted.set(true);
+    }
+
+    /// The World's projection table.
+    pub(super) fn thread_projection_table(
+        &self,
+    ) -> &std::cell::RefCell<crate::emacs_core::forward::ThreadProjectionTable> {
+        &self.obarray.lease.0.thread_projections
     }
 }
 

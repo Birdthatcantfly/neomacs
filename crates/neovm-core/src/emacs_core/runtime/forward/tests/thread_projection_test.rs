@@ -94,7 +94,8 @@ fn table_issues_dense_indices_and_resolves_only_its_own_headers() {
     let first = plain_projection(&mut table, Value::fixnum(1));
     let second = plain_projection(&mut table, Value::fixnum(2));
     assert_eq!(table.len(), 2);
-    assert_eq!((first.index().slot(), second.index().slot()), (0, 1));
+    // Slot 0 is reserved for the shared VOID descriptor.
+    assert_eq!((first.index().slot(), second.index().slot()), (1, 2));
     assert!(std::ptr::eq(table.get(first.index()).unwrap(), first));
     assert!(std::ptr::eq(
         table.projection(second.header()).unwrap(),

@@ -50,7 +50,10 @@ pub(crate) use cell::{
 pub use cell::{LispSymbol, SymbolFlags};
 #[cfg(test)]
 pub(crate) use fn_stamps::force_fn_stamps_for_test;
-pub(crate) use projection::{ConcealOutcome, RevealedProjection};
+pub(crate) use projection::{
+    AdmissionPlanCell, ConcealOutcome, ProjectionPlanError, RevealedProjection,
+    enter_projection_scope, leave_projection_scope,
+};
 pub use property_revision::SymbolPropertyRevision;
 
 use super::defvar_bool::ByteBooleanVars;
@@ -1632,7 +1635,7 @@ impl Obarray {
         let idx = Self::slot_index(id);
         let slot = self.symbols.ensure(idx);
         if !slot.is_present() {
-            Self::publish_fresh_slot(slot, id);
+            Self::publish_fresh_slot(slot, id, self.generation);
         }
         slot
     }
@@ -1645,10 +1648,18 @@ impl Obarray {
     /// a half-written slot's arms (see [`LispSymbol::publish_fill`]). Matches
     /// the old `get_or_insert_with(|| LispSymbol::new(id))` semantics — only
     /// an empty slot is written.
+    ///
+    /// In a World thread admission has run, a fresh cell is born projected
+    /// onto the VOID descriptor (`projection::born_projected`), as admission
+    /// left every void cell; a dormant World pays one load and branch here.
     #[cold]
     #[inline(never)]
-    fn publish_fresh_slot(slot: &mut LispSymbol, id: SymId) {
-        slot.publish_fill(LispSymbol::new(id));
+    fn publish_fresh_slot(slot: &mut LispSymbol, id: SymId, generation: u64) {
+        let fresh = match projection::born_projected(generation) {
+            None => LispSymbol::new(id),
+            Some(header) => LispSymbol::new_projected(id, header),
+        };
+        slot.publish_fill(fresh);
     }
 
     /// Begin a write of `id`'s value cell, interning the slot if it is
