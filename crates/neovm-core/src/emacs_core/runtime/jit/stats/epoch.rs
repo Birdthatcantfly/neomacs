@@ -110,8 +110,10 @@ pub(crate) fn note_function_cell_unchanged() {
 /// A copy of this thread's epoch counters (the report's data).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct EpochCounters {
-    /// Indexed by `FunctionEpochBump as usize`.
-    pub(crate) bumps: [u64; BUMP_REASONS],
+    /// Indexed by `FunctionEpochBump as usize`, thread admission excepted:
+    /// it is a process-wide count ([`Self::bumps_for`]), so this copy -- kept
+    /// in thread-local marks -- did not grow with it.
+    pub(crate) bumps: [u64; THREAD_BUMP_REASONS],
     pub(crate) unchanged_writes: u64,
     /// Indexed by `SpecRevalidation as usize`.
     pub(crate) spec: [u64; SPEC_KINDS],
@@ -121,13 +123,12 @@ pub(crate) struct EpochCounters {
 impl EpochCounters {
     /// This thread's counters now.
     pub(crate) fn snapshot() -> Self {
-        let mut bumps = [0u64; BUMP_REASONS];
+        let mut bumps = [0u64; THREAD_BUMP_REASONS];
         FN_EPOCH_BUMPS.with(|c| {
             for (slot, cell) in bumps.iter_mut().zip(c.iter()) {
                 *slot = cell.get();
             }
         });
-        bumps[THREAD_BUMP_REASONS] = ADMISSION_BUMPS.load(Ordering::Relaxed);
         let mut spec = [0u64; SPEC_KINDS];
         SPEC_REVALIDATIONS.with(|c| {
             for (slot, cell) in spec.iter_mut().zip(c.iter()) {
@@ -144,7 +145,7 @@ impl EpochCounters {
 
     /// Counts accumulated since `base` (an earlier snapshot).
     pub(crate) fn since(&self, base: &EpochCounters) -> EpochCounters {
-        let mut bumps = [0u64; BUMP_REASONS];
+        let mut bumps = [0u64; THREAD_BUMP_REASONS];
         for (i, slot) in bumps.iter_mut().enumerate() {
             *slot = self.bumps[i].saturating_sub(base.bumps[i]);
         }
@@ -167,12 +168,16 @@ impl EpochCounters {
         self.spec[kind as usize]
     }
 
-    /// Bumps for one reason.
+    /// Bumps for one reason; for thread admission, the process-wide count.
     pub(crate) fn bumps_for(&self, why: FunctionEpochBump) -> u64 {
-        self.bumps[why as usize]
+        self.bumps
+            .get(why as usize)
+            .copied()
+            .unwrap_or_else(|| ADMISSION_BUMPS.load(Ordering::Relaxed))
     }
 
-    /// Total bumps over every reason.
+    /// Total bumps over every per-thread reason (thread admission is
+    /// process-wide and outside it).
     pub(crate) fn total(&self) -> u64 {
         self.bumps.iter().sum()
     }
