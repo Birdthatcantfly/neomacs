@@ -134,8 +134,10 @@ impl CclRegistry {
 }
 
 thread_local! {
-    static CCL_VARIABLES: Cell<Option<crate::emacs_core::eval::RawVariableView>> =
-        const { Cell::new(None) };
+    /// The view [`with_ccl_obarray`] holds on its stack for its body; a
+    /// pointer, so the thread-local block keeps its layout.
+    static CCL_VARIABLES: Cell<*const crate::emacs_core::eval::RawVariableView> =
+        const { Cell::new(std::ptr::null()) };
 }
 
 /// Run `body` while CCL symbol resolution can see these variables' obarray
@@ -144,10 +146,11 @@ pub(crate) fn with_ccl_obarray<R>(
     vars: crate::emacs_core::eval::VariableView<'_>,
     body: impl FnOnce() -> R,
 ) -> R {
+    let raw = vars.into_raw();
     CCL_VARIABLES.with(|cell| {
         struct RestoreVariables<'a> {
-            cell: &'a Cell<Option<crate::emacs_core::eval::RawVariableView>>,
-            previous: Option<crate::emacs_core::eval::RawVariableView>,
+            cell: &'a Cell<*const crate::emacs_core::eval::RawVariableView>,
+            previous: *const crate::emacs_core::eval::RawVariableView,
         }
         impl Drop for RestoreVariables<'_> {
             fn drop(&mut self) {
@@ -156,7 +159,7 @@ pub(crate) fn with_ccl_obarray<R>(
         }
         let _restore = RestoreVariables {
             cell,
-            previous: cell.replace(Some(vars.into_raw())),
+            previous: cell.replace(&raw),
         };
         body()
     })
@@ -164,11 +167,12 @@ pub(crate) fn with_ccl_obarray<R>(
 
 /// The variables [`with_ccl_obarray`] published, for the body it runs.
 fn ccl_variables<'a>() -> Option<crate::emacs_core::eval::VariableView<'a>> {
-    let raw = CCL_VARIABLES.with(|cell| cell.get())?;
-    // SAFETY: with_ccl_obarray keeps the view's borrows alive for the body,
-    // on this thread, and restores the prior view before they end; callers
-    // only copy Values out.
-    Some(unsafe { raw.view() })
+    let raw = CCL_VARIABLES.with(Cell::get);
+    // SAFETY: a non-null pointer names the view with_ccl_obarray holds on
+    // its stack while its body runs, on this thread; it restores the prior
+    // pointer before that frame and the view's borrows end, and callers only
+    // copy Values out.
+    (!raw.is_null()).then(|| unsafe { (*raw).view() })
 }
 
 thread_local! {

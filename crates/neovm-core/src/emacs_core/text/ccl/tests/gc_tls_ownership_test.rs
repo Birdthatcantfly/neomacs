@@ -60,15 +60,15 @@ fn gc_tls_ownership_ccl_excludes_another_live_heap() {
 #[test]
 fn gc_tls_ownership_ccl_obarray_is_retracted_on_unwind() {
     let first = Context::new();
-    let before = CCL_VARIABLES.with(|cell| cell.get().map(|raw| raw.obarray_ptr()));
+    let before = CCL_VARIABLES.with(Cell::get);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         with_ccl_obarray(first.variables(), || panic!("unwind CCL callback"));
     }));
     assert!(result.is_err());
     assert_eq!(
-        CCL_VARIABLES.with(|cell| cell.get().map(|raw| raw.obarray_ptr())),
+        CCL_VARIABLES.with(Cell::get),
         before,
-        "CCL obarray pointer survived the dynamic scope after an unwind"
+        "CCL variables pointer survived the dynamic scope after an unwind"
     );
 }
 

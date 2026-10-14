@@ -330,12 +330,6 @@ impl RawVariableView {
             }
         }
     }
-
-    /// The obarray these parts name.
-    #[inline]
-    pub(crate) fn obarray_ptr(self) -> *const Obarray {
-        self.obarray
-    }
 }
 
 /// The projection behind ID, through its aliases.
