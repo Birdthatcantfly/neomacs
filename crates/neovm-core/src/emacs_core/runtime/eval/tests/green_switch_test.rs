@@ -627,6 +627,34 @@ fn every_thread_shares_the_standard_case_table() {
     );
 }
 
+/// Callgrind micro for the 3f baseline: `(Ir(N) - Ir(0)) / N` is one yield
+/// round trip, main to a worker and back: two Baton hand-offs (park, root
+/// publication, channel transfer, resume) plus one iteration of the
+/// worker's interpreted `(while (not stop) (thread-yield))`.
+#[test]
+#[ignore = "callgrind micro; run explicitly"]
+fn green_yield_switch_micro() {
+    let n: usize = std::env::var("TGY_MICRO_N")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(1000);
+    let mut ev = green();
+    eval(
+        &mut ev,
+        "(progn
+           (setq tgy-stop nil)
+           (setq tgy-th (make-thread (lambda () (while (not tgy-stop) (thread-yield)))))
+           (thread-yield))",
+    );
+    for _ in 0..n {
+        ev.green_wait(super::Wait::Runnable).expect("yield");
+    }
+    assert_eq!(
+        eval(&mut ev, "(progn (setq tgy-stop t) (thread-join tgy-th))"),
+        "nil"
+    );
+}
+
 #[test]
 fn the_standard_case_table_is_one_table_after_admission() {
     let mut ev = green();
@@ -643,5 +671,165 @@ fn the_standard_case_table_is_one_table_after_admission() {
                             (list (upcase \"abc\") (eq (standard-case-table) tgsa-old)))))"
         ),
         "(t t t (\"ABC\" t))"
+    );
+}
+
+#[test]
+fn an_uncaught_throw_ends_a_thread_as_its_last_error() {
+    let mut ev = green();
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn
+               (thread-last-error t)
+               (let ((th (make-thread (lambda () (throw 'tgu-tag 7)))))
+                 (list (thread-join th) (thread-live-p th) (thread-last-error t))))"
+        ),
+        "(nil nil (no-catch tgu-tag 7))"
+    );
+}
+
+#[test]
+fn a_thread_starts_in_its_creators_buffer_and_keeps_its_own() {
+    let mut ev = green();
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn
+               (setq tgo-a (get-buffer-create \"tgo-a\") tgo-b (get-buffer-create \"tgo-b\"))
+               (set-buffer tgo-a)
+               (let ((th (make-thread (lambda ()
+                                        (let ((start (buffer-name)))
+                                          (set-buffer tgo-b)
+                                          (thread-yield)
+                                          (list start (buffer-name)))))))
+                 (thread-yield)
+                 (list (buffer-name) (thread-join th) (buffer-name))))"
+        ),
+        "(\"tgo-a\" (\"tgo-a\" \"tgo-b\") \"tgo-a\")"
+    );
+}
+
+/// A documented neomacs deviation (design-r3.md section 13): GNU switches
+/// threads from an `unwind-protect` cleanup; neomacs refuses there, because
+/// a cleanup's restoration state lives on the native stack, which parking
+/// does not publish.
+#[test]
+fn a_switch_inside_an_unwind_cleanup_is_refused() {
+    let mut ev = green();
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn
+               (thread-join (make-thread (lambda () nil)))
+               (condition-case e (unwind-protect 'body (thread-yield))
+                 (error (car (cdr e)))))"
+        ),
+        "\"Cannot switch threads inside an unwind cleanup\""
+    );
+}
+
+#[test]
+fn main_ending_also_ends_threads_created_by_threads() {
+    let mut ev = green();
+    eval(
+        &mut ev,
+        "(progn
+           (setq tgg-m (make-mutex) tgg-child nil)
+           (mutex-lock tgg-m)
+           (setq tgg-parent
+                 (make-thread (lambda ()
+                                (setq tgg-child (make-thread (lambda () (mutex-lock tgg-m))))
+                                (thread-join tgg-child))))
+           (thread-yield)
+           (thread-yield)
+           (list (thread-live-p tgg-parent) (thread-live-p tgg-child)))",
+    );
+    ev.green_teardown();
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(list (thread-live-p tgg-parent) (thread-live-p tgg-child))"
+        ),
+        "(nil nil)"
+    );
+}
+
+// Known Green 3d gaps (design-r3.md section 11, class D1): state GNU keeps
+// global lives in a per-OS-thread static here, so a Lisp thread sees it
+// fresh. Round 3w moves these into the World. Each pin states GNU 31.1's
+// answer (sandboxed GNU run, 2026-10-14).
+
+/// The composition is a text property of the string, which every thread
+/// reads; the registry behind it being per OS thread (D1) does not show.
+#[test]
+fn a_thread_sees_a_composition_made_by_another() {
+    let mut ev = green();
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn
+               (setq tgd1-s (copy-sequence \"ab\"))
+               (compose-string-internal tgd1-s 0 2)
+               (list (find-composition-internal 0 nil tgd1-s t)
+                     (thread-join (make-thread
+                                   (lambda () (find-composition-internal 0 nil tgd1-s t))))))"
+        ),
+        "((0 2 [97 98] t nil 1) (0 2 [97 98] t nil 1))"
+    );
+}
+
+#[test]
+#[ignore = "3w: TIME_ZONE_RULE is per OS thread (design-r3.md section 11, D1)"]
+fn d1_a_thread_sees_the_time_zone_rule_set_by_another() {
+    let mut ev = green();
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn
+               (set-time-zone-rule \"XXX-5\")
+               (list (current-time-zone)
+                     (thread-join (make-thread (lambda () (current-time-zone))))))"
+        ),
+        "((18000 \"XXX\") (18000 \"XXX\"))"
+    );
+}
+
+#[test]
+#[ignore = "3w: PROCESS_NAME_REGISTRY and the ProcessManager are per owner (design-r3.md section 11, D1)"]
+fn d1_a_thread_sees_a_process_made_by_another() {
+    let mut ev = green();
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn
+               (setq tgd1-p (make-pipe-process :name \"tgp\"))
+               (prog1 (thread-join (make-thread
+                                    (lambda ()
+                                      (list (format \"%S\" tgd1-p) (process-name tgd1-p)
+                                            (and (memq tgd1-p (process-list)) t)))))
+                 (delete-process tgd1-p)))"
+        ),
+        "(\"#<process tgp>\" \"tgp\" t)"
+    );
+}
+
+#[test]
+#[ignore = "3w: sqlite DB_HANDLES are per OS thread (design-r3.md section 11, D1)"]
+fn d1_a_thread_uses_a_sqlite_handle_opened_by_another() {
+    let mut ev = green();
+    // GNU 31.1 here was built without sqlite; any GNU with sqlite answers
+    // the row the other thread inserted.
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn
+               (setq tgd1-db (sqlite-open))
+               (sqlite-execute tgd1-db \"create table t (x)\")
+               (sqlite-execute tgd1-db \"insert into t values (42)\")
+               (thread-join (make-thread
+                             (lambda () (sqlite-select tgd1-db \"select x from t\")))))"
+        ),
+        "((42))"
     );
 }
