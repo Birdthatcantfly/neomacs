@@ -2232,6 +2232,48 @@ impl Obarray {
         }
     }
 
+    /// [`Self::canonical_value`]'s read, with PROJECTED answering a void
+    /// forwarded cell that is a thread projection, or a void alias chain
+    /// (which may end at one): only those arms call it, so a caller that
+    /// routes it to an owner pays nothing on an ordinary cell, void or not.
+    #[inline(always)]
+    pub(crate) fn value_with(
+        &self,
+        id: SymId,
+        projected: impl FnOnce(SymId) -> Option<Value>,
+    ) -> Option<Value> {
+        let sym = match self.symbols.get(Self::slot_index(id)) {
+            Some(sym) => sym,
+            _ => return None,
+        };
+        match sym.value_cell() {
+            ValueCell::Plain(value) => {
+                if value.is_unbound() {
+                    None
+                } else {
+                    Some(value)
+                }
+            }
+            ValueCell::Alias(current) => match self.symbol_value_id_copied_slow(current, 49) {
+                Some(value) => Some(value),
+                None => projected(id),
+            },
+            ValueCell::Localized(_) => {
+                let value = self.blv(id)?.defcell.cons_cdr();
+                if value.is_unbound() {
+                    None
+                } else {
+                    Some(value)
+                }
+            }
+            ValueCell::Forwarded(fwd) => match fwd.load() {
+                Some(value) => Some(value),
+                None if fwd.thread_projection().is_some() => projected(id),
+                None => None,
+            },
+        }
+    }
+
     #[cold]
     fn symbol_value_id_copied_slow(
         &self,

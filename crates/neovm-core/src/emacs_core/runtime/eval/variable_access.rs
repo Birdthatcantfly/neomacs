@@ -107,19 +107,22 @@ impl<'a> VariableView<'a> {
     /// owner-aware form of `Obarray::canonical_value`.
     #[inline(always)]
     pub fn value(self, id: SymId) -> Option<Value> {
-        match self.obarray.canonical_value(CanonicalAccess::ROUTED, id) {
-            Some(value) => Some(value),
-            // A void answer is common for some hot reads (an unset
-            // `overriding-plist-environment` in every `get`): one owner-word
-            // test inline is cheaper than a call.
-            None => match self.owner.slab() {
-                None => {
-                    self.debug_assert_owner_free(id);
-                    None
-                }
-                Some(slab) => owner_value(self.obarray, slab, id),
-            },
-        }
+        // The owner is asked only from the arms a thread projection takes
+        // (a void forwarded projection, a void alias chain): a dormant read,
+        // void or not, executes the canonical read alone.
+        self.obarray.value_with(id, |id| self.owner_void_value(id))
+    }
+
+    /// [`Self::value`] of a projected cell canonical storage answered void
+    /// for: this owner's binding.
+    #[cold]
+    #[inline(never)]
+    fn owner_void_value(self, id: SymId) -> Option<Value> {
+        let Some(slab) = self.owner.slab() else {
+            self.debug_assert_owner_free(id);
+            return None;
+        };
+        owner_value(self.obarray, slab, id)
     }
 
     /// [`Self::value`] by name: the canonical read by name, then the
@@ -146,10 +149,20 @@ impl<'a> VariableView<'a> {
         owner_value(self.obarray, slab, id)
     }
 
-    /// [`Self::value`], nil when void.
+    /// [`Self::value`], nil when void. The former `symbol_value_id_or_nil`
+    /// shape -- the canonical read, then one inline owner-word test on a
+    /// void answer -- keeps the register use of its hot callers (`get`'s
+    /// `overriding-plist-environment` read) where [`Self::value`]'s routed
+    /// walk measured +6 Ir per command-execute.
     #[inline(always)]
     pub fn value_or_nil(self, id: SymId) -> Value {
-        self.value(id).unwrap_or(Value::NIL)
+        match self.obarray.canonical_value(CanonicalAccess::ROUTED, id) {
+            Some(value) => value,
+            None => match self.owner.slab() {
+                None => Value::NIL,
+                Some(slab) => owner_value(self.obarray, slab, id).unwrap_or(Value::NIL),
+            },
+        }
     }
 
     /// GNU `BVAR (BUF, foo)` / `Vfoo` with BUF current: BUF's slot or local
