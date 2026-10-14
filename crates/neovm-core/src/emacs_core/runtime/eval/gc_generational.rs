@@ -20,7 +20,7 @@ impl Context {
     /// state and only appends roots to the collector's gray worklist.
     #[cold]
     #[inline(never)]
-    pub(super) unsafe fn seed_registered_mutator_roots_world_stopped(
+    pub(in crate::emacs_core::eval) unsafe fn seed_registered_mutator_roots_world_stopped(
         &mut self,
         heap_ptr: *mut crate::tagged::gc::TaggedHeap,
     ) -> crate::tagged::gc::RootSeedBreakdown {

@@ -337,12 +337,14 @@ const DESCRIPTOR_PAGE: usize = 256;
 impl ThreadProjectionTable {
     /// How many projections the table has issued (VOID not counted).
     #[inline]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn len(&self) -> usize {
         self.issued.len()
     }
 
     /// Whether no projection has been issued.
     #[inline]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_empty(&self) -> bool {
         self.issued.is_empty()
     }
@@ -353,6 +355,7 @@ impl ThreadProjectionTable {
     /// real per-buffer header always fails), then the descriptor's index is
     /// matched against this table's, so a header copied out of a projection
     /// is never mistaken for one.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn projection(&self, fwd: &LispFwd) -> Option<&'static ThreadProjectionDescriptor> {
         if fwd.as_buffer_obj_fwd()?.offset != THREAD_PROJECTION_OFFSET {
             return None;
@@ -366,7 +369,21 @@ impl ThreadProjectionTable {
         std::ptr::eq(issued.header(), fwd).then_some(issued)
     }
 
+    /// The index the ORDINAL-th next [`Self::issue`] will give (0 = the
+    /// next): admission sizes an owner's slab before it issues.
+    pub(crate) fn upcoming_index(&self, ordinal: usize) -> TlsIndex {
+        self.issued
+            .len()
+            .checked_add(ordinal)
+            .and_then(|slot| slot.checked_add(2))
+            .and_then(|next| u32::try_from(next).ok())
+            .and_then(NonZeroU32::new)
+            .map(TlsIndex)
+            .expect("thread-projection index space exhausted")
+    }
+
     /// The descriptor issued for INDEX, if any (never VOID).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn get(&self, index: TlsIndex) -> Option<&'static ThreadProjectionDescriptor> {
         self.issued.get(index.slot().checked_sub(1)?).copied()
     }

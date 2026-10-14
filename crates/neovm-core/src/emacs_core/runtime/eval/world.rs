@@ -803,6 +803,8 @@ obarray_method_proxies! {
     pub(crate) fn reveal_projection(id: SymId) -> Option<RevealedProjection>;
     pub(crate) fn owned_thread_projection(id: SymId)
         -> Option<&'static crate::emacs_core::forward::ThreadProjectionDescriptor>;
+    pub(crate) fn try_reserve_value_fwds(n: usize)
+        -> Result<(), crate::emacs_core::symbol::ProjectionPlanError>;
     pub(crate) fn conceal_projection(revealed: RevealedProjection) -> ConcealOutcome;
     pub(crate) fn store_plain_value_id(id: SymId, value: Value) -> Result<(), NotPlain>;
     pub(crate) fn set_internal_localized(sym_id: SymId,
@@ -1220,11 +1222,64 @@ impl Context {
         self.obarray.lease.0.admitted.set(true);
     }
 
-    /// The World's projection table.
-    pub(super) fn thread_projection_table(
+    /// Make room for admission to project OWNED variables onto descriptors
+    /// of their own, plus the VOID one: arena pages, the issued list and the
+    /// obarray's forwarder roots. A refusal changes nothing a reader sees.
+    pub(super) fn reserve_thread_projections(&mut self, owned: usize) -> Result<(), ()> {
+        self.obarray
+            .lease
+            .0
+            .thread_projections
+            .borrow_mut()
+            .try_reserve(owned)
+            .map_err(|_| ())?;
+        self.obarray.try_reserve_value_fwds(owned).map_err(|_| ())
+    }
+
+    /// The index the ORDINAL-th next projection this World issues will get.
+    pub(super) fn upcoming_thread_projection(
         &self,
-    ) -> &std::cell::RefCell<crate::emacs_core::forward::ThreadProjectionTable> {
-        &self.obarray.lease.0.thread_projections
+        ordinal: usize,
+    ) -> crate::emacs_core::forward::TlsIndex {
+        self.obarray
+            .lease
+            .0
+            .thread_projections
+            .borrow()
+            .upcoming_index(ordinal)
+    }
+
+    /// Admission's projection of CELLS, each as its plan says, in one
+    /// canonical-changing phase. Allocates nothing once
+    /// [`Self::reserve_thread_projections`] covered them.
+    pub(super) fn project_admitted_cells(
+        &mut self,
+        cells: &[(SymId, crate::emacs_core::symbol::AdmissionPlanCell)],
+    ) {
+        let world = Arc::clone(&self.obarray.lease.0);
+        let mut table = world.thread_projections.borrow_mut();
+        self.obarray.with_dispatch_write(|obarray| {
+            for &(id, plan) in cells {
+                obarray.project_admitted_cell(id, plan, &mut table);
+            }
+        });
+    }
+
+    /// Enter this World's projection scope on the running thread, so its
+    /// obarray births symbols on VOID. Allocates nothing once
+    /// `reserve_projection_scope` and the table's reservation ran.
+    pub(super) fn enter_world_projection_scope(&self) {
+        let world = &self.obarray.lease.0;
+        let void = world.thread_projections.borrow_mut().void_descriptor();
+        // SAFETY: the table is this World's, which owns the obarray of this
+        // generation and leaves the scope when it drops (`World::drop`).
+        unsafe {
+            crate::emacs_core::symbol::enter_projection_scope(
+                self.obarray.generation(),
+                &world.thread_projections,
+                void,
+            );
+        }
     }
 }
 

@@ -149,6 +149,39 @@ impl UndoTarget {
     }
 }
 
+/// GNU `specpdl_unrewind`'s exchange of one owner binding whose record
+/// says UNDO while its slot holds SLOT: the binding's value and the value it
+/// hides trade places (`backtrace-eval`, eval.c:4177-4228). A binding that
+/// hid canonical storage is set aside rather than written there. `None` when
+/// there is nothing to exchange: a binding whose storage was killed, or a
+/// slot another binding of the owner holds.
+pub(super) fn exchanged_binding(
+    undo: UndoTarget,
+    slot: SlotState,
+) -> Option<(UndoTarget, SlotState)> {
+    match (undo, slot) {
+        (UndoTarget::Previous(outer), SlotState::Bound(value)) => {
+            Some((UndoTarget::Previous(value), SlotState::Bound(outer)))
+        }
+        (UndoTarget::Inherited { suspended: None }, SlotState::Bound(value)) => Some((
+            UndoTarget::Inherited {
+                suspended: Some(value),
+            },
+            SlotState::NoBinding,
+        )),
+        (
+            UndoTarget::Inherited {
+                suspended: Some(value),
+            },
+            SlotState::NoBinding,
+        ) => Some((
+            UndoTarget::Inherited { suspended: None },
+            SlotState::Bound(value),
+        )),
+        _ => None,
+    }
+}
+
 /// One binding on an owner's binding stack.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct OwnerBindingRecord {
@@ -188,6 +221,12 @@ pub(crate) struct OwnerBindingRef {
 }
 
 impl OwnerBindingRef {
+    /// The specpdl's handle on RECORD, a binding of SYM.
+    #[inline]
+    pub(super) fn new(sym: SymId, record: OwnerRecordId) -> Self {
+        Self { sym, record }
+    }
+
     /// The symbol the binding binds (alias-resolved, as GNU records it).
     #[inline]
     pub(crate) fn symbol(self) -> SymId {
@@ -346,6 +385,50 @@ impl OwnerSlab {
                 cell
             }
         }
+    }
+
+    /// Make room for admission's commit to push RECORDS records, bind
+    /// LOCALS buffer-local channels and fill the default-channel SLOTS
+    /// without allocating: their pages are made now, empty.
+    pub(crate) fn try_reserve_admission(
+        &mut self,
+        records: usize,
+        locals: usize,
+        slots: impl Iterator<Item = usize>,
+    ) -> Result<(), std::collections::TryReserveError> {
+        self.records.try_reserve(records)?;
+        self.locals.try_reserve(locals)?;
+        for slot in slots {
+            let page = slot / SLOT_PAGE;
+            if page >= self.pages.len() {
+                self.pages.try_reserve(page + 1 - self.pages.len())?;
+                self.pages.resize_with(page + 1, || None);
+            }
+            if self.pages[page].is_none() {
+                let mut fresh = Vec::new();
+                fresh.try_reserve_exact(SLOT_PAGE)?;
+                fresh.resize(SLOT_PAGE, SlotState::NoBinding);
+                let fresh: Box<[SlotState; SLOT_PAGE]> = fresh
+                    .into_boxed_slice()
+                    .try_into()
+                    .expect("a page holds SLOT_PAGE slots");
+                self.pages[page] = Some(fresh);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether this owner has its own `debug-on-next-call` cell.
+    pub(crate) fn has_debugger_cell(&self) -> bool {
+        self.debugger.is_some()
+    }
+
+    /// Take CELL, made before admission's commit, as this owner's
+    /// `debug-on-next-call` cell for the variable INDEX names.
+    pub(crate) fn adopt_debugger_cell(&mut self, index: TlsIndex, cell: &'static LispBoolFwd) {
+        debug_assert!(self.debugger.is_none(), "one debug-on-next-call per owner");
+        cell.set(debugger_armed(self.slot(index, Channel::Default)));
+        self.debugger = Some((index, cell));
     }
 
     /// The page holding default-channel SLOT, made on first use.
@@ -1171,28 +1254,8 @@ impl Context {
             return;
         }
         let current = slab.slot(record.index, record.channel);
-        let (undo, slot) = match (record.undo, current) {
-            (UndoTarget::Previous(outer), SlotState::Bound(value)) => {
-                (UndoTarget::Previous(value), SlotState::Bound(outer))
-            }
-            (UndoTarget::Inherited { suspended: None }, SlotState::Bound(value)) => (
-                UndoTarget::Inherited {
-                    suspended: Some(value),
-                },
-                SlotState::NoBinding,
-            ),
-            (
-                UndoTarget::Inherited {
-                    suspended: Some(value),
-                },
-                SlotState::NoBinding,
-            ) => (
-                UndoTarget::Inherited { suspended: None },
-                SlotState::Bound(value),
-            ),
-            // A binding whose storage was killed, or a slot another binding
-            // of this owner holds: nothing to exchange.
-            _ => return,
+        let Some((undo, slot)) = exchanged_binding(record.undo, current) else {
+            return;
         };
         slab.set_slot(record.index, record.channel, slot);
         slab.replace_undo(binding.record, undo);

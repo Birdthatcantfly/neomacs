@@ -52,7 +52,7 @@ pub use cell::{LispSymbol, SymbolFlags};
 pub(crate) use fn_stamps::force_fn_stamps_for_test;
 pub(crate) use projection::{
     AdmissionPlanCell, ConcealOutcome, ProjectionPlanError, RevealedProjection,
-    enter_projection_scope, leave_projection_scope,
+    enter_projection_scope, leave_projection_scope, reserve_projection_scope,
 };
 pub use property_revision::SymbolPropertyRevision;
 
@@ -661,6 +661,9 @@ pub(crate) enum FunctionEpochBump {
     /// The `compiler_function_overrides` toggle
     /// (`sync_cached_runtime_binding_by_id`), no cell write.
     CompilerOverrides,
+    /// Thread admission projected the World's variable cells
+    /// (`Context::admit_threads`), no function-cell write.
+    ThreadAdmission,
 }
 
 /// A function-cell write that stored the value already there: no epoch

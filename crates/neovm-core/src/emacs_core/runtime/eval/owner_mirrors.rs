@@ -56,23 +56,25 @@ impl Context {
     pub(crate) fn refresh_owner_mirrors(&mut self) {
         self.swap_host_bindings(HostBindingSwap::In);
         self.retire_dead_owner_locals();
-        let mirrored: Vec<SymId> = self
-            .runtime_projection_mask()
-            .iter()
-            .enumerate()
-            .flat_map(|(word_index, &word)| {
-                (0..64)
-                    .filter(move |bit| word & (1u64 << bit) != 0)
-                    .map(move |bit| SymId((word_index * 64 + bit) as u32))
-            })
-            .collect();
-        for id in mirrored {
-            let visible = match self.find_symbol_value_by_id(id) {
-                Ok(SymbolValueLookup::Bound(value)) => value,
-                _ => Value::NIL,
-            };
-            self.sync_cached_runtime_binding_by_id(id, visible);
-            self.sync_keyboard_runtime_binding_by_id(id, visible);
+        self.republish_owner_mirrors();
+    }
+
+    /// Republish every host mirror and the debugger header from what this
+    /// owner sees now. Allocates nothing, so admission's commit runs it too.
+    pub(super) fn republish_owner_mirrors(&mut self) {
+        for word_index in 0..self.runtime_projection_mask().len() {
+            let mut word = self.runtime_projection_mask()[word_index];
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= word - 1;
+                let id = SymId((word_index * 64 + bit) as u32);
+                let visible = match self.find_symbol_value_by_id(id) {
+                    Ok(SymbolValueLookup::Bound(value)) => value,
+                    _ => Value::NIL,
+                };
+                self.sync_cached_runtime_binding_by_id(id, visible);
+                self.sync_keyboard_runtime_binding_by_id(id, visible);
+            }
         }
         self.sync_gc_threshold_from_runtime_settings();
         self.point_owner_debugger();

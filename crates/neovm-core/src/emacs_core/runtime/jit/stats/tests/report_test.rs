@@ -145,6 +145,7 @@ fn jit_final_report_renders_every_section() {
         body_of(&lines, ReportTag::FinalFnEpoch),
         "epoch=91234 total=9918 fset=41 defalias=9877 internal-cell-write=0 pdump-restore=0 \
          fmakunbound=0 silent-clear=0 unintern=0 subr-rewrite=0 compiler-overrides=0 \
+         thread-admission=0 \
          unchanged-writes=233 inline-evicted-leaves=0 spec-rearm=88 spec-rebind=2 \
          | since_command_loop: total=500 defalias=500 spec-rearm=40"
     );
