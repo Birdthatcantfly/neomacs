@@ -144,18 +144,60 @@ fn opt_osr_entry_guards_the_counter_once_and_the_loop_guards_fold() {
     }
 }
 
+/// The first integer past the fixnum range, a bignum.
+fn first_bignum() -> LispValue {
+    let value = LispValue::make_integer(
+        malachite::Integer::from(LispValue::MOST_POSITIVE_FIXNUM) + malachite::Integer::from(1),
+    );
+    assert!(value.is_bignum());
+    value
+}
+
 #[test]
 fn opt_osr_entry_non_fixnum_slot_deoptimizes_at_the_entry() {
     let mut func = osr_plan(&count_loop_ops(), 1, 2);
     run(&mut func).expect("speculated");
     fold::run(&mut func).expect("folded");
-    let stack = [LispValue::make_int(10), LispValue::NIL];
-    let Outcome::Deopt(snapshot) = run_osr(&func, &stack) else {
-        panic!("a nil counter cannot enter the fixnum loop");
-    };
-    assert_eq!(snapshot.pc, 1);
-    let expected: Vec<_> = stack.iter().copied().map(ValueBits::from_value).collect();
-    assert_eq!(snapshot.stack, expected, "the slots as they came");
+    let float = LispValue::make_float(1.5);
+    let bignum = first_bignum();
+    for counter in [LispValue::NIL, float, bignum] {
+        let stack = [LispValue::make_int(10), counter];
+        let Outcome::Deopt(snapshot) = run_osr(&func, &stack) else {
+            panic!("a non-fixnum counter cannot enter the fixnum loop");
+        };
+        assert_eq!(snapshot.pc, 1);
+        let expected: Vec<_> = stack.iter().copied().map(ValueBits::from_value).collect();
+        assert_eq!(snapshot.stack, expected, "the slots as they came");
+    }
+}
+
+/// Values the entry does not guard, and a fixnum counter that leaves the
+/// fixnum range inside the loop, behave exactly as without the pass.
+#[test]
+fn opt_osr_entry_matches_the_unguarded_loop_at_the_fixnum_boundary() {
+    let mut plain = osr_plan(&count_loop_ops(), 1, 2);
+    let mut func = plain.clone();
+    run(&mut func).expect("speculated");
+    fold::run(&mut plain).expect("folded");
+    fold::run(&mut func).expect("folded");
+    let last = LispValue::make_int(LispValue::MOST_POSITIVE_FIXNUM);
+    let near = LispValue::make_int(LispValue::MOST_POSITIVE_FIXNUM - 2);
+    for stack in [
+        [LispValue::make_float(4.5), LispValue::make_int(1)],
+        [first_bignum(), near],
+        [first_bignum(), last],
+    ] {
+        match (run_osr(&func, &stack), run_osr(&plain, &stack)) {
+            (Outcome::Returned(guarded), Outcome::Returned(unguarded)) => {
+                assert_eq!(guarded, unguarded);
+            }
+            (Outcome::Deopt(guarded), Outcome::Deopt(unguarded)) => {
+                assert_eq!(guarded.pc, unguarded.pc);
+                assert_eq!(guarded.stack, unguarded.stack);
+            }
+            _ => panic!("the entry guard changed how {stack:?} leaves the loop"),
+        }
+    }
 }
 
 #[test]
