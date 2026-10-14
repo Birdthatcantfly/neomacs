@@ -5,7 +5,7 @@
 //! leading manager pointer. No mutable aggregate World reference reaches Lisp.
 
 use super::*;
-use crate::buffer::buffer::{BufferStorage, OwnedBufferStorageParts};
+use crate::buffer::buffer::{BufferSelection, BufferStorage, OwnedBufferStorageParts};
 use crate::emacs_core::defvar_bool::ByteBooleanVars;
 use crate::emacs_core::symbol::CanonicalAccess;
 use crate::emacs_core::symbol::{
@@ -22,7 +22,9 @@ use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::sync::Arc;
 
+mod green_owner;
 mod sole_owner;
+pub(crate) use green_owner::Baton;
 pub(crate) use sole_owner::{
     PublishedSoleOwnerDriver, SoleOwnerDriver, SoleOwnerRegistration, SoleOwnerVm,
 };
@@ -54,6 +56,11 @@ struct World {
     threading: Cell<super::admission::ThreadingMode>,
     /// Whether thread admission has run: sticky, never reset.
     admitted: Cell<bool>,
+    /// The Green runtime (round 3d), once started.
+    green: std::cell::RefCell<Option<Box<super::green::GreenRuntime>>>,
+    /// The OS thread holding the World's Baton, in a Green World
+    /// (`green_owner`'s safety argument; checked in debug builds).
+    baton_holder: Cell<Option<std::thread::ThreadId>>,
 }
 
 impl Drop for World {
@@ -1079,6 +1086,8 @@ impl WorldStorageBuilder {
             thread_projections: Default::default(),
             threading: Cell::new(super::admission::ThreadingMode::Sim),
             admitted: Cell::new(false),
+            green: Default::default(),
+            baton_holder: Cell::new(None),
         }));
         // SAFETY: rederive the upstream TLS installation from the finalized
         // heap cell before any allocation-capable Context setup resumes. All
@@ -1088,6 +1097,13 @@ impl WorldStorageBuilder {
         unsafe {
             crate::tagged::gc::set_tagged_heap(&mut *lease.0.tagged_heap.get());
         }
+        Self::publish_views(&lease, selection)
+    }
+
+    /// The unique set of manager views one owner Context holds over the
+    /// World LEASE names, with SELECTION as its current buffer.
+    #[cold]
+    fn publish_views(lease: &WorldLease, selection: BufferSelection) -> ReadyWorld {
         let ptr = cell_ptr(&lease.0.obarray);
         // SAFETY: final stable UnsafeCell allocation root, not a temporary
         // manager reference. Embedded repr(C) canonical pair has this const
@@ -1182,6 +1198,9 @@ impl Context {
         let world = &self.obarray.lease.0;
         world.owner_slabs.borrow().trace_roots(heap, visit);
         world.thread_projections.borrow().trace_roots(visit);
+        if let Some(runtime) = world.green.borrow().as_ref() {
+            runtime.trace_roots(visit);
+        }
     }
 }
 

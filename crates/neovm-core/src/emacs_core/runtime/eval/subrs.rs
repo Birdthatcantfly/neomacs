@@ -232,6 +232,8 @@ impl Context {
         interactive_spec: Option<crate::emacs_core::interactive::BuiltinInteractiveSpec>,
     ) {
         let sym_id = intern(name);
+        #[cfg(debug_assertions)]
+        super::green::debug_assert_native_tables_open(name);
 
         register_global_subr_entry(
             sym_id,

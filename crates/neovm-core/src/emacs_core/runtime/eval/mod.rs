@@ -7736,6 +7736,7 @@ mod pdump_reconstruct;
 mod macroexpand;
 
 mod admission;
+mod green;
 pub(crate) use admission::ThreadingMode;
 mod owner_bindings;
 mod owner_mirrors;

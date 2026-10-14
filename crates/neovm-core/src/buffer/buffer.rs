@@ -5652,6 +5652,17 @@ pub(crate) struct BufferSelection {
     owner: PhantomData<*const ()>,
 }
 
+impl BufferSelection {
+    /// A further owner's selection over an existing World's buffers (a Green
+    /// Lisp thread), starting in CURRENT.
+    pub(crate) fn for_owner(current: Option<BufferId>) -> Self {
+        Self {
+            current,
+            owner: PhantomData,
+        }
+    }
+}
+
 /// Owned construction payload; cannot contain a borrowed World view.
 /// Only consuming conversion exposes its parts to the World constructor.
 #[derive(Debug)]

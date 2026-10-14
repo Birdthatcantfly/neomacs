@@ -356,6 +356,16 @@ thread_local! {
     static LEAF_BY_SUBR: RefCell<Vec<Option<&'static LeafSpec>>> = const { RefCell::new(Vec::new()) };
 }
 
+/// This thread's leaf table, for a Green Lisp thread to install.
+pub(crate) fn snapshot_subr_leaves() -> Vec<Option<&'static LeafSpec>> {
+    LEAF_BY_SUBR.with(|table| table.borrow().clone())
+}
+
+/// Install LEAVES as this thread's leaf table.
+pub(crate) fn install_subr_leaves(leaves: Vec<Option<&'static LeafSpec>>) {
+    LEAF_BY_SUBR.with(|table| *table.borrow_mut() = leaves);
+}
+
 /// What [`record_subr_leaf`] found for the symbol before this registration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LeafChange {
