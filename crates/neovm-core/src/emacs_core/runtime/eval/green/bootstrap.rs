@@ -74,7 +74,6 @@ pub(crate) struct GreenBootstrap {
     standard_syntax_table: Value,
     syntax_code_objects: Value,
     standard_category_table: Value,
-    pub(super) cached_standard_case_table: Option<Value>,
     /// The buffer a new Lisp thread starts in.
     pub(super) current_buffer: Option<BufferId>,
     noninteractive: bool,
@@ -109,7 +108,6 @@ impl GreenBootstrap {
             standard_syntax_table: owner.standard_syntax_table,
             syntax_code_objects: owner.syntax_code_objects,
             standard_category_table: owner.standard_category_table,
-            cached_standard_case_table: owner.cached_standard_case_table,
             current_buffer: owner.buffers.current_buffer_id(),
             noninteractive: owner.noninteractive,
             symbols_with_pos_enabled: owner.symbols_with_pos_enabled,
@@ -178,9 +176,6 @@ impl GreenBootstrap {
             self.inhibit_quit,
             self.throw_on_input,
         ] {
-            visit(value);
-        }
-        if let Some(value) = self.cached_standard_case_table {
             visit(value);
         }
         visit(

@@ -254,8 +254,11 @@ pub(crate) fn builtin_downcase_char(args: Vec<Value>) -> EvalResult {
 // Reads/writes happen through `(current-case-table)` / `(set-case-table)`.
 const STANDARD_CASE_TABLE_SYMBOL: &str = "neovm--standard-case-table-object";
 
+/// The variable holding the standard case table: storage for what GNU
+/// keeps in C globals (`Vascii_downcase_table`, casetab.c), so never a
+/// thread projection (admission leaves it as it is).
 #[inline(always)]
-fn standard_case_table_object_symbol_id() -> SymId {
+pub(crate) fn standard_case_table_object_symbol_id() -> SymId {
     static SYMBOL: std::sync::OnceLock<SymId> = std::sync::OnceLock::new();
     *SYMBOL.get_or_init(|| intern(STANDARD_CASE_TABLE_SYMBOL))
 }
@@ -410,6 +413,7 @@ pub(crate) fn builtin_set_standard_case_table(
         *slot.borrow_mut() = Some(args[0]);
     });
     ctx.cached_standard_case_table = Some(args[0]);
+    ctx.green_set_standard_case_table(args[0]);
     STANDARD_CASE_TABLE_HEAP.with(|owner| owner.set(ctx.tagged_heap.identity()));
     let table = args[0];
     ensure_case_table_derived_slots_with_symbols(table, mode)?;

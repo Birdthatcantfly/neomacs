@@ -428,12 +428,10 @@ fn install_system_name(eval: &mut Context, name: String) {
     // GNU sysdep.c:init_system_name retains Vsystem_name when its bytes still
     // equal the current hostname.  This preserves object identity across
     // unchanged refreshes; only the refresh permission check below uses `eq`.
+    // Read as the running owner's variable: a refresh also runs after a
+    // World admitted threads, when a raw canonical read answers nothing.
     let value = eval
-        .obarray()
-        .canonical_value_by_name(
-            crate::emacs_core::symbol::CanonicalAccess::BOOTSTRAP,
-            "system-name",
-        )
+        .variable_value_by_name("system-name")
         .filter(|value| value.as_utf8_str() == Some(name.as_str()))
         .unwrap_or_else(|| Value::string(name));
     eval.set_variable("system-name", value);

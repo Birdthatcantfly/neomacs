@@ -157,6 +157,14 @@ impl Context {
         Ok(Value::NIL)
     }
 
+    /// `set-standard-case-table` set TABLE: every thread uses it from its
+    /// next resume on.
+    pub(crate) fn green_set_standard_case_table(&mut self, table: Value) {
+        if self.green_threads_running() {
+            self.with_green_runtime(|runtime| runtime.standard_case_table.set(Some(table)));
+        }
+    }
+
     /// GNU `thread_check_current_buffer`, asked by `kill-buffer`: whether
     /// another thread's current buffer is BUFFER and keeps it alive.
     pub(crate) fn green_buffer_held(&mut self, buffer: crate::buffer::BufferId) -> bool {

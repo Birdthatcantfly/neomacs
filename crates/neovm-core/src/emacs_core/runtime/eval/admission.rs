@@ -31,8 +31,9 @@
 //!
 //! Left as they are: a per-buffer variable binds in place on both channels
 //! (design §1.3b), so its `LetLocal` and `LetDefault` entries stay legacy; `buffer-undo-list`, whose
-//! storage is the buffer's undo state, is never projected; nor are constants
-//! and aliases.
+//! storage is the buffer's undo state, is never projected; nor is the
+//! standard case table's variable, storage for C globals in GNU; nor are
+//! constants and aliases.
 
 use super::owner_bindings::{
     BindingKind, Channel, OwnerBindingRef, OwnerSlab, SlotState, SlotValue, UndoTarget,
@@ -249,6 +250,10 @@ impl Context {
     /// channel publishes and keeps, and the cells it projects.
     fn plan_admission(&mut self) -> AdmissionPlan {
         let undo_list = super::buffer_undo_list_symbol();
+        // Made now if it was not yet: its cell must exist before admission,
+        // as a fresh cell after it is born projected.
+        let _ = crate::emacs_core::casetab::builtin_standard_case_table(self, Vec::new());
+        let case_table = crate::emacs_core::casetab::standard_case_table_object_symbol_id();
         let mut bindings = Vec::new();
         let mut chains: Vec<PlannedChain> = Vec::new();
         let mut chain_of: FxHashMap<(SymId, Channel), usize> = FxHashMap::default();
@@ -303,7 +308,7 @@ impl Context {
                 }
                 _ => continue,
             };
-            if sym == undo_list || self.obarray.admission_plan(sym).is_none() {
+            if sym == undo_list || sym == case_table || self.obarray.admission_plan(sym).is_none() {
                 continue;
             }
             let chain = *chain_of.entry((sym, channel)).or_insert_with(|| {
@@ -344,7 +349,7 @@ impl Context {
         let mut cells = Vec::new();
         let mut owned = 0;
         for (id, _) in self.obarray.iter_symbols() {
-            if id == undo_list {
+            if id == undo_list || id == case_table {
                 continue;
             }
             let Some(mut plan) = self.obarray.admission_plan(id) else {

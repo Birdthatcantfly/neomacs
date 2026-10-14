@@ -602,3 +602,46 @@ fn eight_threads_yield_and_collect_without_losing_values() {
         "(8700 608700 1208700 1808700 2408700 3008700 3608700 4208700)"
     );
 }
+
+#[test]
+fn every_thread_shares_the_standard_case_table() {
+    let mut ev = green();
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn
+               (setq tgct-old (standard-case-table)
+                     tgct-new (make-char-table 'case-table))
+               (let ((early (make-thread (lambda ()
+                                           (thread-yield)
+                                           (eq (standard-case-table) tgct-new)))))
+                 (thread-yield)
+                 (set-standard-case-table tgct-new)
+                 (prog1 (list (thread-join early)
+                              (thread-join (make-thread
+                                            (lambda () (eq (standard-case-table) tgct-new))))
+                              (eq (standard-case-table) tgct-new))
+                   (set-standard-case-table tgct-old))))"
+        ),
+        "(t t t)"
+    );
+}
+
+#[test]
+fn the_standard_case_table_is_one_table_after_admission() {
+    let mut ev = green();
+    ev.admit_threads().expect("admit");
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn
+               (setq tgsa-old (standard-case-table) tgsa-new (make-char-table 'case-table))
+               (list (eq (standard-case-table) tgsa-old)
+                     (eq (set-standard-case-table tgsa-new) tgsa-new)
+                     (eq (standard-case-table) tgsa-new)
+                     (progn (set-standard-case-table tgsa-old)
+                            (list (upcase \"abc\") (eq (standard-case-table) tgsa-old)))))"
+        ),
+        "(t t t (\"ABC\" t))"
+    );
+}

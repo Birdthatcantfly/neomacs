@@ -162,10 +162,16 @@ impl Context {
         self.retire_parked_roots(&baton, key);
         self.exchange_world_threads(&baton);
         self.threads.enter_thread(key.id());
-        let exit = baton
+        let (exit, case_table) = baton
             .green_runtime()
             .as_ref()
-            .and_then(|runtime| runtime.exit_for(key, &control));
+            .map(|runtime| {
+                (
+                    runtime.exit_for(key, &control),
+                    runtime.standard_case_table.get(),
+                )
+            })
+            .unwrap_or((None, self.cached_standard_case_table));
         let seat = self.green_seat().expect("seated above");
         seat.receiver = Some(receiver);
         seat.baton = Some(baton);
@@ -179,7 +185,13 @@ impl Context {
         if let Some(buffer) = moved {
             let _ = self.buffers.switch_current_unrecorded(buffer);
         }
+        let case_table_changed =
+            case_table.map(Value::bits) != self.cached_standard_case_table.map(Value::bits);
+        self.cached_standard_case_table = case_table;
         self.resume_owner(parked);
+        if case_table_changed {
+            crate::emacs_core::casetab::activate_casetab_thread_locals(case_table);
+        }
         if moved.is_some() {
             let _ = self.sync_current_buffer_runtime_state();
         }

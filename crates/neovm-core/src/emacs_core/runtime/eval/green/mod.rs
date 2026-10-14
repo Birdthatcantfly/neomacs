@@ -47,6 +47,10 @@ pub(crate) struct GreenRuntime {
         std::cell::RefCell<rustc_hash::FxHashMap<ThreadKey, crate::emacs_core::value::Value>>,
     /// A `kill-emacs` run by another thread, for main to exit with.
     pub(super) exit: std::cell::Cell<Option<super::ShutdownRequest>>,
+    /// The standard case table, one for every thread as in GNU:
+    /// `set-standard-case-table` sets it here, and each thread installs it
+    /// as it resumes.
+    pub(super) standard_case_table: std::cell::Cell<Option<crate::emacs_core::value::Value>>,
 }
 
 impl std::fmt::Debug for GreenRuntime {
@@ -93,6 +97,9 @@ impl GreenRuntime {
         }
         for value in self.pending_starts.borrow().values() {
             visit(*value);
+        }
+        if let Some(table) = self.standard_case_table.get() {
+            visit(table);
         }
     }
 }
@@ -165,6 +172,7 @@ impl Context {
             parked: Default::default(),
             pending_starts: Default::default(),
             exit: Default::default(),
+            standard_case_table: std::cell::Cell::new(self.cached_standard_case_table),
         }));
         Ok(baton)
     }
@@ -186,7 +194,9 @@ impl Context {
             (
                 bootstrap.seed(),
                 bootstrap.current_buffer,
-                bootstrap.cached_standard_case_table,
+                runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.standard_case_table.get()),
             )
         };
         let mut views = baton.owner_views(current);
