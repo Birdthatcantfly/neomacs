@@ -2137,20 +2137,68 @@ impl Obarray {
         buf: Option<&crate::buffer::Buffer>,
         id: SymId,
     ) -> Option<Value> {
-        if let Some(buf) = buf {
-            // A `struct buffer` slot is read UNCONDITIONALLY, including a
-            // conditional slot whose local-flags bit is clear: GNU's
-            // `set-default` propagation leaves the live default in that same
-            // slot, so it is the right answer in both cases, where
-            // `get_buffer_local` would answer `None` and lose it.
-            if let Some(info) = crate::buffer::buffer::lookup_buffer_slot_by_sym_id(id) {
-                return Some(buf.slots[info.offset.index()]);
-            }
-            if let Some(value) = buf.get_buffer_local_by_sym_id_gated(id, self.is_localized(id)) {
-                return Some(value);
-            }
+        match self.buffer_value(buf, id) {
+            Some(value) => Some(value),
+            None => self.canonical_value(CanonicalAccess::STORAGE, id),
         }
-        self.canonical_value(CanonicalAccess::STORAGE, id)
+    }
+
+    /// [`Self::canonical_value_in_buffer_id`]'s read, with PROJECTED
+    /// answering the arms [`Self::value_with`] gives it: BUF's slot and
+    /// local binding are canonical storage, which no projection changes.
+    #[inline(always)]
+    pub(crate) fn value_in_buffer_with(
+        &self,
+        buf: Option<&crate::buffer::Buffer>,
+        id: SymId,
+        projected: impl FnOnce(&Self, SymId) -> Option<Value>,
+    ) -> Option<Value> {
+        if let Some(value) = buf.and_then(|buf| Self::buffer_slot_value(buf, id)) {
+            return Some(value);
+        }
+        self.unslotted_value_with(buf, id, projected)
+    }
+
+    /// [`Self::value_in_buffer_with`] once ID is known not to be one of
+    /// BUF's slots: BUF's local binding, else the global read.
+    #[inline(always)]
+    pub(crate) fn unslotted_value_with(
+        &self,
+        buf: Option<&crate::buffer::Buffer>,
+        id: SymId,
+        projected: impl FnOnce(&Self, SymId) -> Option<Value>,
+    ) -> Option<Value> {
+        if let Some(buf) = buf
+            && let Some(value) = buf.get_buffer_local_by_sym_id_gated(id, self.is_localized(id))
+        {
+            return Some(value);
+        }
+        self.value_with(id, projected)
+    }
+
+    /// BUF's slot or local binding of ID, if it has one. A plain match, not
+    /// a closure for the global read: LLVM outlined that closure, storing
+    /// its captures on every call.
+    #[inline(always)]
+    fn buffer_value(&self, buf: Option<&crate::buffer::Buffer>, id: SymId) -> Option<Value> {
+        let buf = buf?;
+        if let Some(value) = Self::buffer_slot_value(buf, id) {
+            return Some(value);
+        }
+        buf.get_buffer_local_by_sym_id_gated(id, self.is_localized(id))
+    }
+
+    /// BUF's `struct buffer` slot of ID, when ID names one.
+    ///
+    /// A slot is read UNCONDITIONALLY, including a conditional slot whose
+    /// local-flags bit is clear: GNU's `set-default` propagation leaves the
+    /// live default in that same slot, so it is the right answer in both
+    /// cases, where `get_buffer_local` would answer `None` and lose it. No
+    /// projection changes it: an owner's binding of a slot stays in the slot.
+    #[inline(always)]
+    pub(crate) fn buffer_slot_value(buf: &crate::buffer::Buffer, id: SymId) -> Option<Value> {
+        crate::buffer::buffer::lookup_buffer_slot_by_sym_id(id)
+            .map(|info| buf.slots[info.offset.index()])
     }
 
     /// A deliberate buffer-less read, with the disagreement with GNU named.
@@ -2236,11 +2284,14 @@ impl Obarray {
     /// forwarded cell that is a thread projection, or a void alias chain
     /// (which may end at one): only those arms call it, so a caller that
     /// routes it to an owner pays nothing on an ordinary cell, void or not.
+    /// PROJECTED is handed this obarray, so it need capture no more than
+    /// two words: a larger closure is passed to the cold alias arm through
+    /// memory, built on every read.
     #[inline(always)]
     pub(crate) fn value_with(
         &self,
         id: SymId,
-        projected: impl FnOnce(SymId) -> Option<Value>,
+        projected: impl FnOnce(&Self, SymId) -> Option<Value>,
     ) -> Option<Value> {
         let sym = match self.symbols.get(Self::slot_index(id)) {
             Some(sym) => sym,
@@ -2254,10 +2305,9 @@ impl Obarray {
                     Some(value)
                 }
             }
-            ValueCell::Alias(current) => match self.symbol_value_id_copied_slow(current, 49) {
-                Some(value) => Some(value),
-                None => projected(id),
-            },
+            // One cold call for the whole chain: nothing stays live across
+            // a call in the hot arms, as in `canonical_value`.
+            ValueCell::Alias(current) => self.alias_value_with(id, current, projected),
             ValueCell::Localized(_) => {
                 let value = self.blv(id)?.defcell.cons_cdr();
                 if value.is_unbound() {
@@ -2268,18 +2318,39 @@ impl Obarray {
             }
             ValueCell::Forwarded(fwd) => match fwd.load() {
                 Some(value) => Some(value),
-                None if fwd.thread_projection().is_some() => projected(id),
+                None if fwd.thread_projection().is_some() => projected(self, id),
                 None => None,
             },
         }
     }
 
+    /// [`Self::value_with`]'s alias arm: the chain from CURRENT, then
+    /// PROJECTED for ID when the chain ends void.
     #[cold]
-    fn symbol_value_id_copied_slow(
+    #[inline(never)]
+    fn alias_value_with(
         &self,
-        mut current: SymId,
-        mut remaining: usize,
+        id: SymId,
+        current: SymId,
+        projected: impl FnOnce(&Self, SymId) -> Option<Value>,
     ) -> Option<Value> {
+        // The walk inline: one frame for the whole arm, as the old
+        // `symbol_value_id_copied_slow` call was.
+        match self.alias_chain_value(current, 49) {
+            Some(value) => Some(value),
+            None => projected(self, id),
+        }
+    }
+
+    #[cold]
+    fn symbol_value_id_copied_slow(&self, current: SymId, remaining: usize) -> Option<Value> {
+        self.alias_chain_value(current, remaining)
+    }
+
+    /// The value at the end of the alias chain from CURRENT, following at
+    /// most REMAINING more links.
+    #[inline(always)]
+    fn alias_chain_value(&self, mut current: SymId, mut remaining: usize) -> Option<Value> {
         while remaining > 0 {
             remaining -= 1;
             let sym = match self.symbols.get(Self::slot_index(current)) {

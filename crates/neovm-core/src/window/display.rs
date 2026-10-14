@@ -543,8 +543,7 @@ impl crate::emacs_core::eval::Context {
         };
         for variable in crate::window::WindowLayoutVariable::VARIANTS {
             source_layout_variables.values[*variable as usize] = self
-                .variables()
-                .value_in_buffer(Some(source_buffer), variable.sym_id())
+                .variable_value_in_buffer(Some(source_buffer), variable.sym_id())
                 .map(crate::window::WindowLayoutValueIdentity::of);
         }
         Some(crate::window::WindowLayoutAttemptFreshness {
@@ -793,8 +792,7 @@ impl crate::emacs_core::eval::Context {
     ) -> Option<super::LayoutDisplayTableInput> {
         let buffer = self.buffers.get(buffer_id)?;
         let value = |variable: super::WindowLayoutVariable| {
-            self.variables()
-                .value_in_buffer(Some(buffer), variable.sym_id())
+            self.variable_value_in_buffer(Some(buffer), variable.sym_id())
         };
         let table = value(super::WindowLayoutVariable::BufferDisplayTable)
             .filter(|value| !value.is_nil())
@@ -810,12 +808,11 @@ impl crate::emacs_core::eval::Context {
     ) -> Option<super::LayoutInvisibilityInput> {
         let buffer = self.buffers.get(buffer_id)?;
         Some(super::LayoutInvisibilityInput::capture(
-            self.variables()
-                .value_in_buffer(
-                    Some(buffer),
-                    super::WindowLayoutVariable::BufferInvisibilitySpec.sym_id(),
-                )
-                .unwrap_or(Value::NIL),
+            self.variable_value_in_buffer(
+                Some(buffer),
+                super::WindowLayoutVariable::BufferInvisibilitySpec.sym_id(),
+            )
+            .unwrap_or(Value::NIL),
         ))
     }
 
@@ -825,8 +822,7 @@ impl crate::emacs_core::eval::Context {
         let buffer = self.buffers.get(buffer_id)?;
         let capture = |variable: super::WindowLayoutVariable| {
             super::LayoutPrefixInput::capture(
-                self.variables()
-                    .value_in_buffer(Some(buffer), variable.sym_id()),
+                self.variable_value_in_buffer(Some(buffer), variable.sym_id()),
             )
         };
         Some(super::LayoutPrefixInputs {

@@ -1537,20 +1537,20 @@ impl TabWidth {
 }
 
 fn tab_width_in_state(
-    vars: VariableView<'_>,
+    ctx: &super::eval::Context,
     _dynamic: &[OrderedRuntimeBindingMap],
     buf: Option<&Buffer>,
 ) -> TabWidth {
     // Resolve by identity while retaining GNU's validated tab-width fallback.
     TabWidth::from(
-        vars.value_in_buffer(buf, tab_width_sym_id())
+        ctx.variable_value_in_buffer(buf, tab_width_sym_id())
             .unwrap_or(Value::NIL),
     )
 }
 
 /// GNU SANE_TAB_WIDTH, shared with char-width and string formatting.
 pub(crate) fn current_buffer_tab_width(ctx: &crate::emacs_core::eval::Context) -> usize {
-    tab_width_in_state(ctx.variables(), &[], ctx.buffers.current_buffer()).get()
+    tab_width_in_state(ctx, &[], ctx.buffers.current_buffer()).get()
 }
 
 fn indent_tabs_mode_in_state(
@@ -1784,19 +1784,28 @@ struct DisplayCharacterHeaders {
 static_assertions::assert_not_impl_any!(DisplayCharacterHeaders: Send, Sync);
 
 impl DisplayCharacterHeaders {
-    #[inline(always)]
-    fn read(vars: VariableView<'_>, buf: &Buffer) -> Self {
+    /// One out-of-line call per character reads all three variables, in the
+    /// original order and at the original time: the two per-buffer slots
+    /// inline as leaves, the standard table by the canonical walk, the owner
+    /// only from a projected arm. Separate calls per variable kept the
+    /// Context and the first answer live across the others (elb-scroll).
+    #[inline(never)]
+    fn read(ctx: &super::eval::Context, buf: &Buffer) -> Self {
         // Read both tables by cached identity, preserving canonical aliases,
-        // forwarders and the nil-override policy. One Obarray loan serves all
+        // forwarders and the nil-override policy. One Context loan serves all
         // three reads, and ends before the caller enters a mutable stop probe.
-        let display_table = vars
-            .value_in_buffer(Some(buf), buffer_display_table_sym_id())
+        let display_table = ctx
+            .variable_value_in_buffer_inline(Some(buf), buffer_display_table_sym_id())
             .filter(|v| !v.is_nil())
-            .or_else(|| vars.value(standard_display_table_sym_id()))
+            .or_else(|| ctx.variable_value(standard_display_table_sym_id()))
             .filter(|v| !v.is_nil());
         Self {
             end: buf.accessible_emacs_byte_region().end(),
-            tab_width: tab_width_in_state(vars, &[], Some(buf)),
+            // `tab_width_in_state`'s read, inline.
+            tab_width: TabWidth::from(
+                ctx.variable_value_in_buffer_inline(Some(buf), tab_width_sym_id())
+                    .unwrap_or(Value::NIL),
+            ),
             display_table,
         }
     }
@@ -1890,7 +1899,7 @@ impl<'read> DisplayCharacterPhase<'read> {
 
     #[inline(always)]
     fn advance(self, byte: EmacsBytePos, column: DisplayColumn) -> Option<DisplayAdvance> {
-        let headers = DisplayCharacterHeaders::read(self.ctx.variables(), self.buffer);
+        let headers = DisplayCharacterHeaders::read(self.ctx, self.buffer);
         if byte >= headers.end {
             return None;
         }
@@ -1917,12 +1926,12 @@ pub(crate) fn display_advance_at(
     let headers = {
         // Header loans end before any mutable stop/property probe. The copied
         // headers deliberately retain the original pre-probe value timing.
-        let vars = ctx.variables();
+        let ctx: &super::eval::Context = ctx;
         let buf = match ctx.buffers.get(buffer_id) {
             Some(buf) => buf,
             None => return Ok(None),
         };
-        DisplayCharacterHeaders::read(vars, buf)
+        DisplayCharacterHeaders::read(ctx, buf)
     };
     let end = headers.end.get();
     if byte >= end {
@@ -2561,8 +2570,7 @@ fn scan_for_column(
     // Read by cached identity -- see the well-known-symbol block above.
     let display_table = {
         let buf = ctx.buffers.get(buffer_id);
-        ctx.variables()
-            .value_in_buffer(buf, buffer_display_table_sym_id())
+        ctx.variable_value_in_buffer(buf, buffer_display_table_sym_id())
             .filter(|v| !v.is_nil())
             .or_else(|| ctx.variable_value(standard_display_table_sym_id()))
             .filter(|v| !v.is_nil())
@@ -2844,7 +2852,7 @@ pub(crate) fn current_indentation(
         (
             line.start().get(),
             buf.accessible_emacs_byte_region().end().get(),
-            tab_width_in_state(ctx.variables(), &[], Some(buf)),
+            tab_width_in_state(ctx, &[], Some(buf)),
             !buf.overlays.is_empty()
                 || buf.text_props_property_name_presence(Value::symbol("invisible"))
                     != crate::buffer::text_props::PropertyNamePresence::DefinitelyAbsent,
@@ -3103,7 +3111,7 @@ pub(crate) fn indent_to(
             vec![Value::string("No current buffer")],
         )
     })?;
-    let tab_width = tab_width_in_state(ctx.variables(), &[], Some(buf)).get();
+    let tab_width = tab_width_in_state(ctx, &[], Some(buf)).get();
 
     let mincol = column.max(
         fromcol

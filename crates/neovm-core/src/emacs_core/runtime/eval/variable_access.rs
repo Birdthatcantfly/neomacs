@@ -110,7 +110,10 @@ impl<'a> VariableView<'a> {
         // The owner is asked only from the arms a thread projection takes
         // (a void forwarded projection, a void alias chain): a dormant read,
         // void or not, executes the canonical read alone.
-        self.obarray.value_with(id, |id| self.owner_void_value(id))
+        let owner = self.owner;
+        self.obarray.value_with(id, move |obarray, id| {
+            VariableView { obarray, owner }.owner_void_value(id)
+        })
     }
 
     /// [`Self::value`] of a projected cell canonical storage answered void
@@ -168,21 +171,38 @@ impl<'a> VariableView<'a> {
     /// GNU `BVAR (BUF, foo)` / `Vfoo` with BUF current: BUF's slot or local
     /// binding, else the default. The owner-aware form of
     /// `Obarray::canonical_value_in_buffer_id`.
-    #[inline]
     pub fn value_in_buffer(self, buf: Option<&crate::buffer::Buffer>, id: SymId) -> Option<Value> {
-        match self
-            .obarray
-            .canonical_value_in_buffer_id(CanonicalAccess::ROUTED, buf, id)
-        {
-            Some(value) => Some(value),
-            None => match self.owner.slab() {
-                None => {
-                    self.debug_assert_owner_free(id);
-                    None
-                }
-                Some(slab) => owner_value_in_buffer(self.obarray, slab, buf, id),
-            },
-        }
+        self.read_in_buffer(buf, id)
+    }
+
+    /// [`Self::value_in_buffer`]'s body: the former `value_in_buffer_id`
+    /// read, asking the owner only from the arms a thread projection takes
+    /// (as [`Self::value`] does). A slot or local binding of BUF is
+    /// canonical storage, so a dormant read executes the canonical read
+    /// alone, with no owner test on its answer.
+    #[inline(always)]
+    fn read_in_buffer(self, buf: Option<&crate::buffer::Buffer>, id: SymId) -> Option<Value> {
+        let owner = self.owner;
+        self.obarray
+            .value_in_buffer_with(buf, id, move |obarray, id| {
+                VariableView { obarray, owner }.owner_void_value_in_buffer(buf, id)
+            })
+    }
+
+    /// [`Self::value_in_buffer`] of a projected cell canonical storage
+    /// answered void for: this owner's binding in BUF.
+    #[cold]
+    #[inline(never)]
+    fn owner_void_value_in_buffer(
+        self,
+        buf: Option<&crate::buffer::Buffer>,
+        id: SymId,
+    ) -> Option<Value> {
+        let Some(slab) = self.owner.slab() else {
+            self.debug_assert_owner_free(id);
+            return None;
+        };
+        owner_value_in_buffer(self.obarray, slab, buf, id)
     }
 
     /// [`Self::value_in_buffer`] by name.
@@ -498,6 +518,50 @@ impl Context {
     #[inline(always)]
     pub fn variable_value_or_nil(&self, id: SymId) -> Value {
         self.variables().value_or_nil(id)
+    }
+
+    /// [`VariableView::value_in_buffer`] of this owner's view, called with
+    /// the Context alone: the former `Obarray::value_in_buffer_id` call
+    /// shape, one pointer for the whole view, where a two-pointer view kept
+    /// live across the call cost a register (elb-scroll).
+    #[inline(never)]
+    pub fn variable_value_in_buffer(
+        &self,
+        buf: Option<&crate::buffer::Buffer>,
+        id: SymId,
+    ) -> Option<Value> {
+        self.variable_value_in_buffer_inline(buf, id)
+    }
+
+    /// [`Self::variable_value_in_buffer`]'s body, for a caller that reads
+    /// several variables per character: a slot of BUF is a leaf -- no
+    /// frame, no owner -- and everything else is one out-of-line call.
+    #[inline(always)]
+    pub(crate) fn variable_value_in_buffer_inline(
+        &self,
+        buf: Option<&crate::buffer::Buffer>,
+        id: SymId,
+    ) -> Option<Value> {
+        if let Some(value) = buf.and_then(|buf| Obarray::buffer_slot_value(buf, id)) {
+            return Some(value);
+        }
+        self.unslotted_variable_value(buf, id)
+    }
+
+    /// [`Self::variable_value_in_buffer`] of an ID that is not one of BUF's
+    /// slots: BUF's local binding, else the default, asking the owner only
+    /// from the arms a thread projection takes.
+    #[inline(never)]
+    fn unslotted_variable_value(
+        &self,
+        buf: Option<&crate::buffer::Buffer>,
+        id: SymId,
+    ) -> Option<Value> {
+        let owner = &self.owner;
+        self.obarray
+            .unslotted_value_with(buf, id, move |obarray, id| {
+                VariableView::new(obarray, owner).owner_void_value_in_buffer(buf, id)
+            })
     }
 
     /// [`VariableView::value_in_buffer`] in the current buffer.
