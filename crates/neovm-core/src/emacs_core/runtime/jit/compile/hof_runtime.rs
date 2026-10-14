@@ -314,6 +314,12 @@ pub(crate) fn resume_mapping(
 #[path = "../tests/inline_hof_runtime_test.rs"]
 mod tests;
 
+// The same tests through the production front: the default profile's
+// HOF-only path, without the OPT=legacy / INLINE2=hof pins.
+#[cfg(test)]
+#[path = "../tests/inline_hof_runtime_test.rs"]
+mod tests_default_profile_tests;
+
 #[cfg(test)]
 #[path = "../tests/inline_hof_length_test.rs"]
 mod hof_length_tests;

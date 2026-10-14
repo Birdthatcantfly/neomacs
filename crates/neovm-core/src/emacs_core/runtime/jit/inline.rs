@@ -54,7 +54,8 @@ pub(crate) use census::{CensusSite, census_callee_verdict, census_sites};
 #[path = "compile/inline_v2.rs"]
 mod v2;
 pub(crate) use v2::{
-    FusedV2, HofKind, HofSite, RegionKind, fuse_calls_v2, fuse_named_calls_v2, hof_profit_credit_at,
+    FusedV2, HofKind, HofSite, RegionKind, fuse_calls_v2, fuse_hof_calls_v2, fuse_named_calls_v2,
+    hof_profit_credit_at,
 };
 
 #[cfg(test)]

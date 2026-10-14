@@ -213,7 +213,76 @@ pub(super) fn fuse_static(
     arity: usize,
     feedback: &[NumericFeedback],
 ) -> Option<StaticFront> {
-    fuse_front(ops, constants, offset_map, arity, feedback, None)
+    fuse_front(
+        ops,
+        constants,
+        offset_map,
+        arity,
+        feedback,
+        None,
+        Producers::from_mode(),
+    )
+}
+
+/// Only `mapc`/`mapcar` sites with an admitted literal callback: no static,
+/// named or closure region. The default profile's Legacy front uses this so
+/// a body without such a site compiles exactly as before.
+pub(super) fn fuse_hof_only(
+    ops: &[Op],
+    constants: &[Value],
+    offset_map: Option<&[GnuByteOffsetMapEntry]>,
+    arity: usize,
+    feedback: &[NumericFeedback],
+) -> Option<StaticFront> {
+    fuse_front(
+        ops,
+        constants,
+        offset_map,
+        arity,
+        feedback,
+        None,
+        Producers::HOF_ONLY,
+    )
+}
+
+/// Whether the constant pool names `mapc` or `mapcar`: a body without
+/// either cannot have a HOF site, so the HOF-only front skips its analyses.
+pub(super) fn mentions_hof(constants: &[Value]) -> bool {
+    constants.iter().any(|value| {
+        value.as_bare_symbol_id().is_some_and(|id| {
+            matches!(
+                crate::emacs_core::intern::resolve_sym(id),
+                "mapc" | "mapcar"
+            )
+        })
+    })
+}
+
+/// Which region producers one front run admits. Threading: compiler-local
+/// scalar configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Producers {
+    /// Constant and named callees.
+    statics: bool,
+    closures: bool,
+    hofs: bool,
+}
+
+impl Producers {
+    const HOF_ONLY: Self = Self {
+        statics: false,
+        closures: false,
+        hofs: true,
+    };
+
+    fn from_mode() -> Self {
+        let mode = compile::jit_inline2_mode();
+        Self {
+            statics: true,
+            closures: matches!(mode, Inline2Mode::Closure | Inline2Mode::All),
+            hofs: matches!(mode, Inline2Mode::Hof | Inline2Mode::All),
+        }
+    }
 }
 
 /// The same front admits named cells at a T2 compile, preserving static
@@ -227,7 +296,15 @@ pub(super) fn fuse_named(
     feedback: &[NumericFeedback],
     obarray: &crate::emacs_core::symbol::Obarray,
 ) -> Option<StaticFront> {
-    fuse_front(ops, constants, offset_map, arity, feedback, Some(obarray))
+    fuse_front(
+        ops,
+        constants,
+        offset_map,
+        arity,
+        feedback,
+        Some(obarray),
+        Producers::from_mode(),
+    )
 }
 
 fn fuse_front(
@@ -237,6 +314,7 @@ fn fuse_front(
     arity: usize,
     feedback: &[NumericFeedback],
     obarray: Option<&crate::emacs_core::symbol::Obarray>,
+    producers: Producers,
 ) -> Option<StaticFront> {
     if offset_map.is_none() && ops.iter().any(|op| matches!(op, Op::Switch)) {
         return None;
@@ -244,14 +322,11 @@ fn fuse_front(
     let cfg = compile::analyze_cfg(ops, constants, offset_map, arity).ok()?;
     let depth = inline::op_depths(ops, &cfg)?;
     let entries = entry_states(ops, constants, &cfg.leaders);
-    let closures = matches!(
-        compile::jit_inline2_mode(),
-        Inline2Mode::Closure | Inline2Mode::All
-    );
-    let hofs = matches!(
-        compile::jit_inline2_mode(),
-        Inline2Mode::Hof | Inline2Mode::All
-    );
+    let Producers {
+        statics,
+        closures,
+        hofs,
+    } = producers;
     let mut tags = Vec::new();
     let mut sites = Vec::new();
     let mut kinds = Vec::new();
@@ -312,6 +387,7 @@ fn fuse_front(
                 }
             }
             let candidate = match tag {
+                _ if !statics => None,
                 Tag::Constant(i) => constants.get(i as usize).and_then(|&target| {
                     if target.is_bytecode() {
                         return Some((i, RegionKind::Constant, target));

@@ -20,6 +20,12 @@ mod captures;
 #[path = "../tests/inline_hof_headers_test.rs"]
 mod tests;
 
+// The same tests through the production front: the default profile's
+// HOF-only path, without the OPT=legacy / INLINE2=hof pins.
+#[cfg(test)]
+#[path = "../tests/inline_hof_headers_test.rs"]
+mod tests_default_profile_tests;
+
 /// Emit one admitted map call, including its internal callback CFG. All
 /// exits before Start resume the caller's original Call. Later guards spill
 /// the caller, mapping state and the callback's exact next instruction.

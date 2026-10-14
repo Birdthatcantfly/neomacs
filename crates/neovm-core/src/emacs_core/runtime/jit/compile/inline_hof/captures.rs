@@ -129,3 +129,9 @@ impl Captures {
 #[cfg(test)]
 #[path = "../../tests/inline_hof_captures_test.rs"]
 mod tests;
+
+// The same tests through the production front: the default profile's
+// HOF-only path, without the OPT=legacy / INLINE2=hof pins.
+#[cfg(test)]
+#[path = "../../tests/inline_hof_captures_test.rs"]
+mod tests_default_profile_tests;

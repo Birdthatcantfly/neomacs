@@ -1138,7 +1138,15 @@ fn compile_bytecode_function_inner(
     // cannot preserve the v2 annotations, so a fused-v2 body stays on the
     // baseline until the opt builder consumes its frame states. Off keeps
     // the original MIR-first, late-fuser path below.
-    let inline2 = if matches!(
+    // The default profile leaves call-heavy bodies on Legacy, which would
+    // drop their `mapc`/`mapcar` callback loops; the HOF-only front keeps
+    // exactly those (and nothing else) on the v2 path.
+    let hof_only = (front == opt_profit::FrontChoice::Legacy)
+        .then(|| inline_planning::hof_only_fused(f, constants, native_arity))
+        .flatten();
+    let inline2 = if hof_only.is_some() {
+        Inline2Mode::Hof
+    } else if matches!(
         front,
         opt_profit::FrontChoice::Legacy | opt_profit::FrontChoice::SelectedAfterMir
     ) {
@@ -1146,12 +1154,14 @@ fn compile_bytecode_function_inner(
     } else {
         jit_inline2_mode()
     };
-    let early_fused = (!matches!(
-        front,
-        opt_profit::FrontChoice::Legacy | opt_profit::FrontChoice::SelectedAfterMir
-    ))
-    .then(|| inline_planning::early_fused(f, constants, obarray, native_arity, named_t2))
-    .flatten();
+    let early_fused = hof_only.or_else(|| {
+        (!matches!(
+            front,
+            opt_profit::FrontChoice::Legacy | opt_profit::FrontChoice::SelectedAfterMir
+        ))
+        .then(|| inline_planning::early_fused(f, constants, obarray, native_arity, named_t2))
+        .flatten()
+    });
     opt_backend::build_census(f, early_fused.as_deref());
     let fused_v2 = early_fused.as_ref().is_some_and(|body| body.is_v2());
     let (ops, constants) = early_fused.as_ref().map_or((ops, constants), |body| {
@@ -4202,6 +4212,9 @@ pub(crate) mod compile_pipeline_tests;
 #[path = "tests/declared_string_guards.rs"]
 mod declared_string_guard_tests;
 pub(crate) mod heap_inline;
+#[cfg(test)]
+#[path = "tests/hof_default_front_test.rs"]
+mod hof_default_front_tests;
 #[cfg(test)]
 #[path = "tests/inline_heap_ops_test.rs"]
 mod inline_heap_ops_tests;

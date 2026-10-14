@@ -135,6 +135,24 @@ pub(crate) fn fuse_calls_v2(
     annotate(front)
 }
 
+/// Only `mapc`/`mapcar` sites with an admitted literal callback, for the
+/// default profile's Legacy front: `None` when the body has no such site,
+/// so the caller compiles exactly as without it.
+pub(crate) fn fuse_hof_calls_v2(
+    ops: &[Op],
+    constants: &[Value],
+    offset_map: Option<&[GnuByteOffsetMapEntry]>,
+    arity: usize,
+    feedback: &[NumericFeedback],
+) -> Option<FusedBody> {
+    if !tags::mentions_hof(constants) {
+        return None;
+    }
+    annotate(tags::fuse_hof_only(
+        ops, constants, offset_map, arity, feedback,
+    )?)
+}
+
 /// Named callees are selected only by a T2/re-tier compile. All borrowed
 /// function cells belong to the compiling mutator; the resulting immutable
 /// body roots each observed bytecode object in its constant pool.

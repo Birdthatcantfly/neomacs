@@ -19,11 +19,23 @@ struct Knobs;
 
 impl Knobs {
     fn enter() -> (Self, impl Drop) {
-        let backend = compile::opt_mode_scope_for_test(compile::OptMode::Legacy);
+        // Mounted twice: the `default_profile` mount keeps the production
+        // front (Opt backend, INLINE2 off, profit gate on), so these HOF
+        // loops are reached through the default profile's HOF-only front.
+        let production = module_path!().ends_with("default_profile_tests");
+        let backend = compile::opt_mode_scope_for_test(if production {
+            compile::OptMode::Opt
+        } else {
+            compile::OptMode::Legacy
+        });
         crate::test_utils::init_test_tracing();
         inline::force_inline_for_test(Some(true));
-        compile::force_inline2_for_test(Some(Inline2Mode::Hof));
-        compile::force_profit_gate_for_test(false);
+        compile::force_inline2_for_test(Some(if production {
+            Inline2Mode::Off
+        } else {
+            Inline2Mode::Hof
+        }));
+        compile::force_profit_gate_for_test(production);
         compile::force_deopt_for_test(false);
         (Self, backend)
     }
@@ -138,7 +150,13 @@ fn inline_hof_captures_noncons_declines_without_an_early_branch_error() {
         // reference branch may widen its feedback, but must keep the already
         // compiled witness's refusal equivalent to the original callback.
         let source = caller(callback);
-        let fused = inline::fuse_calls_v2(
+        // The production mount's front is the HOF-only one.
+        let fuse = if module_path!().ends_with("default_profile_tests") {
+            inline::fuse_hof_calls_v2
+        } else {
+            inline::fuse_calls_v2
+        };
+        let fused = fuse(
             source.executable_ops(),
             &source.constants,
             None,
