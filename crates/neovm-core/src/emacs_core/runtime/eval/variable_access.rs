@@ -469,3 +469,7 @@ impl Context {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/variable_access_test.rs"]
+mod tests;
