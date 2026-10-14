@@ -117,6 +117,8 @@ pub(crate) fn leave_projection_scope(generation: u64) {
     }
 }
 
+#[cold]
+#[inline(never)]
 fn scope_for(generation: u64) -> Option<ProjectionScope> {
     if PROJECTION_SCOPES_LIVE.load(Ordering::Relaxed) == 0 {
         return None;
@@ -134,6 +136,12 @@ pub(super) fn born_projected(generation: u64) -> Option<&'static LispFwd> {
     if PROJECTION_SCOPES_LIVE.load(Ordering::Relaxed) == 0 {
         return None;
     }
+    born_projected_slow(generation)
+}
+
+#[cold]
+#[inline(never)]
+fn born_projected_slow(generation: u64) -> Option<&'static LispFwd> {
     scope_for(generation).map(|scope| scope.void.header())
 }
 
