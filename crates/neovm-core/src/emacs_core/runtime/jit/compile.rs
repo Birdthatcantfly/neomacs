@@ -4174,6 +4174,7 @@ mod inline_frames;
 mod inline_hof;
 mod inline_physical;
 mod inline_planning;
+pub(crate) use inline_planning::hof_caller_selectable;
 pub(crate) mod inline_regalloc;
 mod named_frames;
 pub(crate) mod resumed_chain;

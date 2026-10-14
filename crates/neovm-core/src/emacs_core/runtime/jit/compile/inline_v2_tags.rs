@@ -247,7 +247,7 @@ pub(super) fn fuse_hof_only(
 
 /// Whether the constant pool names `mapc` or `mapcar`: a body without
 /// either cannot have a HOF site, so the HOF-only front skips its analyses.
-pub(super) fn mentions_hof(constants: &[Value]) -> bool {
+pub(crate) fn mentions_hof(constants: &[Value]) -> bool {
     constants.iter().any(|value| {
         value.as_bare_symbol_id().is_some_and(|id| {
             matches!(

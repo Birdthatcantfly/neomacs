@@ -509,6 +509,10 @@ pub(crate) fn builtin_mapcar_2(
     let result_list =
         map_result.map(|mapped| Value::list_from_slice(eval.vm_frame_root_slots(base, mapped)));
     eval.restore_vm_roots(roots);
+    #[cfg(feature = "jit")]
+    if result_list.is_ok() {
+        crate::emacs_core::jit::hof_credit::note_mapping(eval, len);
+    }
     result_list
 }
 
@@ -533,6 +537,8 @@ pub(crate) fn builtin_mapc_2(
     let result = mapcar1_with_callee(eval, len, MapSink::Discard, seq, &callee, checked_epoch);
     eval.restore_vm_roots(roots);
     result.map(|_| ())?;
+    #[cfg(feature = "jit")]
+    crate::emacs_core::jit::hof_credit::note_mapping(eval, len);
     Ok(seq)
 }
 

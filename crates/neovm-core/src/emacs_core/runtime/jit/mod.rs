@@ -223,6 +223,8 @@ pub(crate) mod bg;
 /// Per-source feedback (`SourceFeedback`). Always built: `RuntimeState`
 /// holds it.
 pub(crate) mod feedback;
+#[cfg(feature = "jit")]
+pub(crate) mod hof_credit;
 #[cfg(all(test, feature = "jit"))]
 #[path = "tests/test_support.rs"]
 pub(crate) mod test_support;
@@ -650,6 +652,11 @@ pub struct RuntimeState {
     /// MIR-inlined or intrinsified ([`retreat::RetreatBit::NoInline`]).
     #[cfg_attr(not(feature = "jit"), allow(dead_code))]
     site_retreat: retreat::SiteRetreatTable,
+    /// [`HofCallerBit`] as `u8`, computed once on the first callback credit:
+    /// whether this source has a `mapc`/`mapcar` site the default front's
+    /// HOF-only path would select, so callback work may count as its heat.
+    #[cfg_attr(not(feature = "jit"), allow(dead_code))]
+    hof_caller: std::sync::atomic::AtomicU8,
     /// Test-only: pin this function to the Tier-0 interpreter regardless of
     /// hotness (the benchmark harness measures native vs interpreter in ONE
     /// process — a hot copy and a forced-cold copy — to cancel the
@@ -657,6 +664,15 @@ pub struct RuntimeState {
     /// Absent from the production library (only the test binary carries it).
     #[cfg(test)]
     force_interpret: std::sync::atomic::AtomicBool,
+}
+
+/// [`RuntimeState::hof_caller`]'s cached answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum HofCallerBit {
+    Unknown = 0,
+    No = 1,
+    Yes = 2,
 }
 
 /// Source of process-unique [`Runtime::compiled_id`] values. Ids are
@@ -1010,6 +1026,7 @@ impl RuntimeState {
             aot_retiered: std::sync::atomic::AtomicBool::new(false),
             reopt_level: std::sync::atomic::AtomicU8::new(0),
             site_retreat: retreat::SiteRetreatTable::new(),
+            hof_caller: std::sync::atomic::AtomicU8::new(HofCallerBit::Unknown as u8),
             #[cfg(test)]
             force_interpret: std::sync::atomic::AtomicBool::new(false),
         }
@@ -1426,6 +1443,39 @@ impl RuntimeState {
         let prev = self.heat.load(Ordering::Relaxed);
         self.heat
             .store(prev.saturating_add(credit), Ordering::Relaxed);
+    }
+
+    /// Credit callback work a `mapc`/`mapcar` call ran for this caller: its
+    /// heat rises as if it had been entered `credit` more times, so a caller
+    /// driving many callbacks tiers up with its loop inlined at its next
+    /// entry. Relaxed and observational, like [`note_loop_work`](Self::note_loop_work);
+    /// a racing credit may be lost.
+    #[cfg(feature = "jit")]
+    pub(crate) fn note_callback_work(&self, credit: u32) {
+        let prev = self.heat.load(Ordering::Relaxed);
+        self.heat
+            .store(prev.saturating_add(credit), Ordering::Relaxed);
+    }
+
+    /// Whether this caller may take callback credit, deciding once with
+    /// `selectable` (the default front's HOF-only predicate) and caching the
+    /// answer. Concurrent first calls may both compute it; they agree.
+    #[cfg(feature = "jit")]
+    pub(crate) fn hof_caller(&self, selectable: impl FnOnce() -> bool) -> bool {
+        match self.hof_caller.load(Ordering::Relaxed) {
+            bit if bit == HofCallerBit::Yes as u8 => true,
+            bit if bit == HofCallerBit::No as u8 => false,
+            _ => {
+                let yes = selectable();
+                let bit = if yes {
+                    HofCallerBit::Yes
+                } else {
+                    HofCallerBit::No
+                };
+                self.hof_caller.store(bit as u8, Ordering::Relaxed);
+                yes
+            }
+        }
     }
 
     /// Test-only: force this function "hot" so the next [`dispatch`](Self::dispatch)

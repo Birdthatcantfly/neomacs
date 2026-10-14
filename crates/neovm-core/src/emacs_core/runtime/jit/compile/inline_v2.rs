@@ -18,6 +18,7 @@ use crate::emacs_core::value::Value;
 
 #[path = "inline_v2_tags.rs"]
 mod tags;
+pub(crate) use tags::mentions_hof;
 
 /// How a flat static region obtains its executing callee and constants.
 /// Immutable compile-local metadata, never shared mutable Lisp state.
