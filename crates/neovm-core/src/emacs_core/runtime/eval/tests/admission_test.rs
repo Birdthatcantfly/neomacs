@@ -168,7 +168,13 @@ fn a_collection_right_after_admission_keeps_hidden_values() {
     ev.try_specbind(id, Value::NIL).expect("bind");
     ev.admit_threads().expect("admission");
     ev.gc_collect_exact();
-    eval(&mut ev, "(dotimes (_ 2000) (make-list 10 'garbage))");
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(let ((i 0)) (while (< i 2000) (make-list 10 'garbage) (setq i (1+ i))))"
+        ),
+        "nil"
+    );
     ev.gc_collect_exact();
     assert_eq!(eval(&mut ev, "tad-gc"), "nil");
     ev.unbind_to(0);
@@ -330,4 +336,41 @@ fn an_owner_binding_of_debug_on_next_call_takes_the_header() {
     assert_eq!(canonical(&mut ev, id, Channel::Default), "nil");
     ev.unbind_to(0);
     assert!(!ev.debug_on_next_call_is_armed());
+}
+
+#[test]
+fn symbols_born_after_admission_behave_as_before() {
+    // Each form runs on symbols no cell exists for yet, in a Sim World and
+    // in an admitted Green one; the results must agree.
+    let forms = [
+        "(let ((tfr-a 1)) (list tfr-a (boundp 'tfr-a)))",
+        "(list (boundp 'tfr-a) (let ((tfr-b 2)) (let ((tfr-b 3)) tfr-b)))",
+        "(progn (defvar tfr-c 4) (list tfr-c (let ((tfr-c 5)) tfr-c) tfr-c))",
+        "(progn (set 'tfr-d 6) (list tfr-d (let ((tfr-d 7)) tfr-d) tfr-d))",
+        "(progn (set-default 'tfr-e 8) (list tfr-e (default-value 'tfr-e)))",
+        "(progn (make-local-variable 'tfr-f) (setq tfr-f 9)
+                (list tfr-f (local-variable-p 'tfr-f) (default-boundp 'tfr-f)))",
+        "(progn (make-variable-buffer-local 'tfr-g) (setq tfr-g 10)
+                (list tfr-g (local-variable-p 'tfr-g) (default-value 'tfr-g)))",
+        "(progn (defvaralias 'tfr-h 'tfr-i) (setq tfr-h 11) (list tfr-h tfr-i))",
+        "(funcall (lambda (tfr-j) (list tfr-j (symbol-value 'tfr-j))) 12)",
+        "(progn (defvar tfr-k) (let ((tfr-k 13)) (list tfr-k (boundp 'tfr-k))))",
+        "(list (boundp 'tfr-a) (boundp 'tfr-b) (boundp 'tfr-j) (boundp 'tfr-k))",
+        // Variables valued before admission, aliased after it.
+        "(progn (defvaralias 'tfr-pre 'tfr-pre-base) (list tfr-pre tfr-pre-base))",
+        "(progn (setq tfr-pre 14) (list tfr-pre-base (indirect-variable 'tfr-pre)))",
+        "(condition-case e (defvaralias 'tfr-pre-local 'tfr-a) (error (car e)))",
+    ];
+    let setup = "(progn (defvar tfr-pre 1) (defvar tfr-pre-local 2)
+                        (make-variable-buffer-local 'tfr-pre-local))";
+    let mut sim = Context::new();
+    let mut ev = green();
+    eval(&mut sim, setup);
+    eval(&mut ev, setup);
+    ev.admit_threads().expect("admission");
+    for form in forms {
+        let expected = eval(&mut sim, form);
+        assert!(!expected.starts_with("ERR"), "{form} => {expected}");
+        assert_eq!(eval(&mut ev, form), expected, "{form}");
+    }
 }

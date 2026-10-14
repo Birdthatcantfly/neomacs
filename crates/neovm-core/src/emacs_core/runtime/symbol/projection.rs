@@ -170,6 +170,13 @@ pub(crate) enum ConcealOutcome {
 }
 
 impl Obarray {
+    /// Whether a cell made now is born projected: this obarray's World has
+    /// admitted threads. One load in a dormant process.
+    #[inline]
+    pub(crate) fn births_projected(&self) -> bool {
+        born_projected(self.generation).is_some()
+    }
+
     /// The thread projection ID's cell heads, if it is projected.
     #[inline]
     pub(crate) fn thread_projection_of(
@@ -182,6 +189,11 @@ impl Obarray {
     /// Give ID's projected cell its logical arm, word and host-projection
     /// bit back. `None`, changing nothing, unless ID is projected.
     pub(crate) fn reveal_projection(&mut self, id: SymId) -> Option<RevealedProjection> {
+        if self.slot(id).is_none() && self.births_projected() {
+            // The operation would make the cell; it is born projected, so
+            // make it now and let the operation see it unprojected.
+            self.ensure_slot(id);
+        }
         let projection = self.owned_thread_projection(id)?;
         let logical = match projection.arm() {
             CanonicalArm::Plain => RevealedCell::Plain(projection.plain_value()),
@@ -289,6 +301,51 @@ impl Obarray {
             }
             super::ValueCell::Alias(_) => None,
         }
+    }
+
+    /// A storage-level write of VALUE to the projected variable ID: its
+    /// canonical storage takes it, as the unprojected cell would have. A
+    /// cell born on VOID in the middle of the operation (its slot did not
+    /// exist when the caller looked) gets a descriptor of its own first.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn set_projected_canonical_value(&mut self, id: SymId, value: Value) {
+        let Some(revealed) = self.reveal_projection(id) else {
+            return;
+        };
+        self.set_symbol_value_id_inner(id, value);
+        let _ = self.conceal_projection(revealed);
+    }
+
+    /// `defvaralias` of the projected variable ID onto TARGET: a plain
+    /// variable becomes the alias, and an alias resolves to its base, so
+    /// the projection retires. A buffer-local or built-in variable is
+    /// refused as its unprojected cell would be.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn make_projected_alias(
+        &mut self,
+        id: SymId,
+        target: SymId,
+    ) -> Result<(), super::MakeAliasError> {
+        let projection = self
+            .thread_projection_of(id)
+            .expect("the caller saw a projection");
+        match projection.arm() {
+            CanonicalArm::Plain => {}
+            CanonicalArm::Localized(_) => return Err(super::MakeAliasError::Localized),
+            CanonicalArm::Forwarded(_) => return Err(super::MakeAliasError::Forwarded),
+        }
+        let revealed = self
+            .reveal_projection(id)
+            .expect("a projected plain variable reveals");
+        let made = self.make_alias(id, target);
+        let outcome = self.conceal_projection(revealed);
+        debug_assert!(
+            made.is_err() || outcome == ConcealOutcome::RetiredToAlias,
+            "an alias retires its projection"
+        );
+        made
     }
 
     /// Make room for N more registered forwarder roots without allocating.

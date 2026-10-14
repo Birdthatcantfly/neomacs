@@ -3758,7 +3758,13 @@ impl Obarray {
     fn set_symbol_value_id_inner(&mut self, id: SymId, value: Value) {
         let target = self.resolve_alias_for_write(id);
         let blv = match self.cell_write_ensure(target).arm() {
-            ArmMut::Localized(local) => local.blv(),
+            ArmMut::Localized(local) => Some(local.blv()),
+            // A projected variable's canonical storage takes the write.
+            ArmMut::Forwarded(forwarded)
+                if forwarded.descriptor().thread_projection().is_some() =>
+            {
+                None
+            }
             ArmMut::Forwarded(forwarded) => {
                 let fwd = forwarded.descriptor();
                 // This is the storage-level entry point, below the evaluator,
@@ -3787,6 +3793,9 @@ impl Obarray {
                 alias.unalias(value);
                 return;
             }
+        };
+        let Some(blv) = blv else {
+            return self.set_projected_canonical_value(target, value);
         };
         // LOCALIZED: write to BLV defcell (the default). The cell keeps
         // its arm -- replacing it would orphan the BLV record.
@@ -4562,6 +4571,9 @@ impl Obarray {
     /// buffer-local cell is refused with GNU `Fdefvaralias`'s reason
     /// (`src/eval.c:665-679`) and left as it is.
     pub fn make_alias(&mut self, id: SymId, target: SymId) -> Result<(), MakeAliasError> {
+        if self.thread_projection_of(id).is_some() {
+            return self.make_projected_alias(id, target);
+        }
         match self.cell_write_ensure(id).arm() {
             ArmMut::Plain(plain) => plain.alias_to(target),
             ArmMut::Alias(alias) => alias.alias_to(target),
@@ -4707,6 +4719,18 @@ impl Obarray {
 
         if let Some(sym) = self.slot(new_alias) {
             match sym.value_cell() {
+                // A projected variable answers by the variable it projects.
+                ValueCell::Forwarded(fwd) if let Some(projection) = fwd.thread_projection() => {
+                    match projection.arm() {
+                        crate::emacs_core::forward::CanonicalArm::Plain => {}
+                        crate::emacs_core::forward::CanonicalArm::Localized(_) => {
+                            return Err(MakeAliasError::Localized);
+                        }
+                        crate::emacs_core::forward::CanonicalArm::Forwarded(_) => {
+                            return Err(MakeAliasError::Forwarded);
+                        }
+                    }
+                }
                 ValueCell::Forwarded(_) => return Err(MakeAliasError::Forwarded),
                 ValueCell::Localized(_) => return Err(MakeAliasError::Localized),
                 ValueCell::Plain(_) | ValueCell::Alias(_) => {}

@@ -796,6 +796,11 @@ impl Context {
         use crate::emacs_core::symbol::SymbolRedirect;
         let (redirect, forwarded) = match self.obarray.get_by_id(resolved) {
             Some(sym) => (sym.redirect(), sym.forwarded_descriptor()),
+            // After admission a fresh cell is born projected: make it first,
+            // so the binding is the owner's.
+            None if self.obarray.births_projected() => {
+                return self.specbind_fresh_projected(resolved, value);
+            }
             None => (SymbolRedirect::Plainval, None),
         };
 
@@ -995,6 +1000,15 @@ impl Context {
         self.sync_cached_runtime_binding_by_id(resolved, stored);
         self.sync_user_test_gc_binding_by_id(resolved);
         Ok(())
+    }
+
+    /// `specbind` of RESOLVED, which has no cell yet, in an admitted World:
+    /// the cell is born on VOID, and the binding is this owner's.
+    #[cold]
+    #[inline(never)]
+    fn specbind_fresh_projected(&mut self, resolved: SymId, value: Value) -> Result<(), Flow> {
+        self.obarray.ensure_symbol_id(resolved);
+        self.specbind_projected(resolved, value)
     }
 
     /// GNU-compatible checked entry point for dynamic binding.
