@@ -111,6 +111,50 @@ impl Context {
         result
     }
 
+    /// [`Self::with_revealed_projection`] for several variables at once;
+    /// IDS that are not projected are skipped.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn with_revealed_projections<R>(
+        &mut self,
+        ids: &[SymId],
+        op: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let revealed: Vec<_> = ids
+            .iter()
+            .filter_map(|id| self.reveal_projection(*id))
+            .collect();
+        let result = op(self);
+        for revealed in revealed.into_iter().rev() {
+            self.conceal_projection(revealed);
+        }
+        result
+    }
+
+    /// The projected variables BUFFER holds a `Localized` local of: what a
+    /// reset of BUFFER's locals must see unprojected, so their buffer-local
+    /// caches reset with them.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn projected_locals_of(&self, buffer: crate::buffer::BufferId) -> Vec<SymId> {
+        let Some(buffer) = self.buffers.get(buffer) else {
+            return Vec::new();
+        };
+        let mut ids = Vec::new();
+        let mut tail = buffer.local_var_alist_value();
+        while tail.is_cons() {
+            let entry = tail.cons_car();
+            if entry.is_cons()
+                && let Some(id) = entry.cons_car().as_symbol_id(self.symbol_mode())
+                && self.obarray.thread_projection_of(id).is_some()
+            {
+                ids.push(id);
+            }
+            tail = tail.cons_cdr();
+        }
+        ids
+    }
+
     #[cold]
     #[inline(never)]
     fn reveal_projection(

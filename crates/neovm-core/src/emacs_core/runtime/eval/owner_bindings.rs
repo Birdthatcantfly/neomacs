@@ -1296,6 +1296,18 @@ impl Context {
             return;
         };
         let channel = Channel::BufferLocal(buffer);
+        if self.owner.slab().is_none() {
+            return;
+        }
+        let canonical = self.owner_canonical_value(id, channel);
+        self.capture_owner_local(id, buffer, canonical);
+    }
+
+    /// The local of ID in BUFFER, which held CANONICAL, is gone: this owner's
+    /// outermost binding of it keeps CANONICAL to restore if the local is
+    /// made again, and the owner's slot for it goes.
+    fn capture_owner_local(&mut self, id: SymId, buffer: BufferId, canonical: Value) {
+        let channel = Channel::BufferLocal(buffer);
         let Some(slab) = self.owner.slab() else {
             return;
         };
@@ -1309,13 +1321,92 @@ impl Context {
         let Some(record) = slab.record(outermost).copied() else {
             return;
         };
-        if let UndoTarget::Inherited { .. } = record.undo {
-            let canonical = self.owner_canonical_value(id, channel);
-            if let Some(slab) = self.owner.slab_mut() {
-                slab.replace_undo(outermost, UndoTarget::Captured(SlotValue::new(canonical)));
-            }
+        if let UndoTarget::Inherited { .. } = record.undo
+            && let Some(slab) = self.owner.slab_mut()
+        {
+            slab.replace_undo(outermost, UndoTarget::Captured(SlotValue::new(canonical)));
         }
         self.clear_owner_slot(record.index, channel);
+    }
+
+    /// Before `kill-all-local-variables` resets BUFFER's locals: the
+    /// variables this owner binds there and the canonical local each binding
+    /// hides, for [`Self::owner_locals_reset`].
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn owner_locals_before_reset(&mut self, buffer: BufferId) -> Vec<(SymId, Value)> {
+        let channel = Channel::BufferLocal(buffer);
+        let Some(slab) = self.owner.slab() else {
+            return Vec::new();
+        };
+        let mut bound: Vec<SymId> = slab
+            .live_records()
+            .filter(|(_, record)| record.channel == channel)
+            .map(|(_, record)| record.sym)
+            .collect();
+        bound.sort_unstable_by_key(|id| id.0);
+        bound.dedup();
+        bound
+            .into_iter()
+            .map(|id| (id, self.owner_canonical_value(id, channel)))
+            .collect()
+    }
+
+    /// `kill-all-local-variables` reset BUFFER's locals: each binding of
+    /// this owner whose local is gone captures what the local held, as
+    /// `kill-local-variable` makes it do (GNU's entry keeps its saved value,
+    /// `src/eval.c:3871-3883`). BEFORE comes from
+    /// [`Self::owner_locals_before_reset`]; no Lisp ran in between, so its
+    /// values are still reachable from nothing a collection could miss.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn owner_locals_reset(&mut self, buffer: BufferId, before: Vec<(SymId, Value)>) {
+        let channel = Channel::BufferLocal(buffer);
+        for (id, canonical) in before {
+            let Some(projection) = self.obarray.thread_projection_of(id) else {
+                continue;
+            };
+            if !self.owner_channel_live(id, projection, channel) {
+                self.capture_owner_local(id, buffer, canonical);
+            }
+        }
+    }
+
+    /// BUFFERS were killed: this owner's bindings of their locals restore
+    /// nothing at their pops (GNU's `Flocal_variable_p` test fails on a dead
+    /// buffer, `src/eval.c:3871`), and their slots go.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn owner_buffers_killed(&mut self, buffers: &[BufferId]) {
+        let Some(slab) = self.owner.slab() else {
+            return;
+        };
+        let dead: Vec<_> = slab
+            .live_records()
+            .filter(|(_, record)| {
+                matches!(record.channel, Channel::BufferLocal(buffer) if buffers.contains(&buffer))
+            })
+            .map(|(id, record)| (id, record.index, record.channel))
+            .collect();
+        for (id, index, channel) in dead {
+            if let Some(slab) = self.owner.slab_mut() {
+                slab.replace_undo(id, UndoTarget::Retired);
+            }
+            self.clear_owner_slot(index, channel);
+        }
+    }
+
+    /// This owner's binding of the projected variable ID in BUFFER's local,
+    /// if it binds one: what `buffer-local-value` answers for BUFFER, as GNU's
+    /// local cell holds the running thread's binding.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn owner_local_binding(&self, id: SymId, buffer: BufferId) -> Option<SlotValue> {
+        let projection = self.obarray.thread_projection_of(id)?;
+        self.owner
+            .slab()?
+            .slot(projection.index(), Channel::BufferLocal(buffer))
+            .value()
     }
 
     /// Whether the current buffer has a local binding of the projected

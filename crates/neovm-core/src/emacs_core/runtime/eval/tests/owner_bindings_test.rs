@@ -241,6 +241,50 @@ fn buffer_local_bindings_follow_their_local() {
 }
 
 #[test]
+fn buffer_local_value_answers_the_owner_local_binding() {
+    same_answers(&[
+        "(save-current-buffer (set-buffer \" tob-other\") (setq tob-auto 6)
+           (let ((tob-auto 31))
+             (list (buffer-local-value 'tob-auto (current-buffer)) tob-auto
+                   (default-value 'tob-auto))))",
+        "(let ((tob-auto 36))
+           (list (buffer-local-value 'tob-auto (get-buffer \" tob-other\"))
+                 (buffer-local-value 'tob-auto (current-buffer))))",
+        "(buffer-local-value 'tob-auto (get-buffer \" tob-other\"))",
+    ]);
+}
+
+#[test]
+fn kill_all_local_variables_captures_owner_local_bindings() {
+    same_answers(&[
+        "(save-current-buffer (set-buffer \" tob-other\") (setq tob-auto 6)
+           (let ((tob-auto 32))
+             (kill-all-local-variables)
+             (list tob-auto (local-variable-p 'tob-auto))))",
+        "(save-current-buffer (set-buffer \" tob-other\") (list tob-auto (local-variable-p 'tob-auto)))",
+        "(save-current-buffer (set-buffer \" tob-other\") (setq tob-auto 6)
+           (let ((tob-auto 33))
+             (kill-all-local-variables)
+             (setq tob-auto 34)
+             (list tob-auto (local-variable-p 'tob-auto))))",
+        "(save-current-buffer (set-buffer \" tob-other\") (list tob-auto (local-variable-p 'tob-auto)))",
+    ]);
+}
+
+#[test]
+fn killing_a_buffer_drops_owner_bindings_of_its_locals() {
+    same_answers(&[
+        "(let ((b (get-buffer-create \" tob-k\")))
+           (save-current-buffer (set-buffer b)
+             (setq tob-auto 7)
+             (let ((tob-auto 35))
+               (kill-buffer b)
+               (list tob-auto (default-value 'tob-auto) (buffer-live-p b)))))",
+        "(list tob-auto (default-value 'tob-auto))",
+    ]);
+}
+
+#[test]
 fn defvaralias_refuses_an_owner_bound_variable() {
     same_answers(&[
         "(let ((tob-v 1)) (condition-case e (defvaralias 'tob-v 'tob-log) (error (car e))))",

@@ -703,6 +703,9 @@ pub(crate) fn builtin_kill_buffer(eval: &mut super::eval::Context, args: Vec<Val
         .buffers
         .kill_buffer_collect(id)
         .ok_or_else(|| signal("error", vec![Value::string("Buffer does not exist")]))?;
+    if !eval.owner.is_dormant() {
+        eval.owner_buffers_killed(&killed_ids);
+    }
 
     // Ensure dead-buffer windows continue to point at a live fallback buffer.
     let scratch = if let Some(scratch) = eval.buffers.find_buffer_by_name("*scratch*") {
@@ -1573,14 +1576,18 @@ pub(crate) fn builtin_kill_all_local_variables(
     // - resets only a small fixed reset-on-kill-all subset
     // - clears conditional slot locals unless they are permanent-local
     // - walks local_var_alist for LOCALIZED entries (Phase 10E)
-    let buffers = &mut eval.buffers;
-    // SAFETY: the major-mode hook has returned. This local-value/cache reset
-    // invokes no Lisp and preserves canonical dispatch metadata and storage.
-    let _ = unsafe {
-        eval.obarray.with_legacy_value_write(|obarray| {
-            buffers.clear_buffer_local_properties(current_id, obarray, kill_permanent)
-        })
-    };
+    if eval.owner.is_dormant() {
+        reset_buffer_local_variables(eval, current_id, kill_permanent);
+    } else {
+        // Projected locals reset as the variables they project, and this
+        // owner's bindings of the locals that go capture what they held.
+        let before = eval.owner_locals_before_reset(current_id);
+        let projected = eval.projected_locals_of(current_id);
+        eval.with_revealed_projections(&projected, |eval| {
+            reset_buffer_local_variables(eval, current_id, kill_permanent)
+        });
+        eval.owner_locals_reset(current_id, before);
+    }
     // GNU performs this after the hook and local reset. `bset_update_mode_line`
     // raises global `update_mode_lines` even for an offscreen buffer, ensuring
     // the menu and mode line are rebuilt if this major-mode transition is
@@ -1594,6 +1601,23 @@ pub(crate) fn builtin_kill_all_local_variables(
         eval.request_global_mode_line_update();
     }
     Ok(Value::NIL)
+}
+
+/// `kill-all-local-variables`' reset of BUFFER's locals.
+#[inline(always)]
+fn reset_buffer_local_variables(
+    eval: &mut super::eval::Context,
+    buffer: crate::buffer::BufferId,
+    kill_permanent: bool,
+) {
+    let buffers = &mut eval.buffers;
+    // SAFETY: the major-mode hook has returned. This local-value/cache reset
+    // invokes no Lisp and preserves canonical dispatch metadata and storage.
+    let _ = unsafe {
+        eval.obarray.with_legacy_value_write(|obarray| {
+            buffers.clear_buffer_local_properties(buffer, obarray, kill_permanent)
+        })
+    };
 }
 
 /// `(ntake N LIST)` -> LIST
@@ -5449,6 +5473,15 @@ pub(crate) fn buffer_local_value_in(
         .buffers
         .get_any(id)
         .ok_or_else(|| signal("error", vec![Value::string("No such buffer")]))?;
+
+    // GNU's local cell holds the running thread's binding of it.
+    if !eval.owner.is_dormant()
+        && let Some(binding) = eval.owner_local_binding(resolved_id, buf.id)
+    {
+        return binding
+            .bound()
+            .ok_or_else(|| signal(LispCondition::VoidVariable, vec![original_arg]));
+    }
 
     // Phase 10E: route LOCALIZED reads through the BLV machinery
     // (immutable walker — buffer-local-value never swaps the cache).
