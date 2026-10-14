@@ -45,6 +45,7 @@ pub(crate) const CARD_CHUNK_SHIFT: u32 = CHUNK_CARDS.trailing_zeros();
 pub(crate) const CHUNK_SUMMARY_OFFSET: usize = CARD_TABLE_BYTES;
 const CHUNK_SUMMARY_BYTES: usize = CARD_TABLE_BYTES >> CARD_CHUNK_SHIFT;
 const _: () = assert!(CHUNK_SUMMARY_BYTES == 1 << u16::BITS);
+const _: () = assert!(CHUNK_SUMMARY_OFFSET % 64 == 0);
 pub(crate) const CARD_CLEAN: u8 = 0;
 pub(crate) const CARD_DIRTY: u8 = 1;
 
@@ -191,25 +192,37 @@ impl CardTable {
         }
     }
 
-    /// Every slot whose summary is dirty, in slot order: the 64 KiB of
-    /// summaries are read a word at a time and clean words skipped. With
-    /// every mutator stopped.
-    pub(crate) fn dirty_slots(&self) -> impl Iterator<Item = ChunkSlot> + '_ {
+    /// Append every slot whose summary is dirty to OUT, in slot order. The
+    /// 64 KiB of summaries are read a cache line (eight words) at a time
+    /// and clean lines skipped. With every mutator stopped.
+    pub(crate) fn collect_dirty_slots(&self, out: &mut Vec<ChunkSlot>) {
+        const LINE_WORDS: usize = 8;
         // SAFETY: the summaries are CHUNK_SUMMARY_BYTES in-table bytes at a
-        // word-aligned offset of the 64-byte-aligned allocation.
+        // 64-byte-aligned offset of the 64-byte-aligned allocation, so the
+        // words are aligned and in bounds; no mutator runs.
         let words = unsafe { self.bytes.as_ptr().add(CHUNK_SUMMARY_OFFSET).cast::<u64>() };
-        (0..CHUNK_SUMMARY_BYTES / size_of::<u64>()).flat_map(move |word_index| {
-            // SAFETY: see above; no mutator runs, so no store races.
-            let mut bytes = u64::from_le(unsafe { words.add(word_index).read() });
-            std::iter::from_fn(move || {
-                if bytes == 0 {
-                    return None;
+        let word = |index: usize| u64::from_le(unsafe { words.add(index).read() });
+        for line in (0..CHUNK_SUMMARY_BYTES / size_of::<u64>()).step_by(LINE_WORDS) {
+            if (line..line + LINE_WORDS).fold(0, |any, index| any | word(index)) == 0 {
+                continue;
+            }
+            for index in line..line + LINE_WORDS {
+                let mut bytes = word(index);
+                while bytes != 0 {
+                    let byte = bytes.trailing_zeros() as usize / 8;
+                    bytes &= !(0xff << (byte * 8));
+                    out.push(ChunkSlot((index * size_of::<u64>() + byte) as u16));
                 }
-                let byte = bytes.trailing_zeros() as usize / 8;
-                bytes &= !(0xff << (byte * 8));
-                Some(ChunkSlot((word_index * size_of::<u64>() + byte) as u16))
-            })
-        })
+            }
+        }
+    }
+
+    /// Every slot whose summary is dirty, in slot order.
+    #[cfg(test)]
+    pub(crate) fn dirty_slots(&self) -> Vec<ChunkSlot> {
+        let mut slots = Vec::new();
+        self.collect_dirty_slots(&mut slots);
+        slots
     }
 
     /// Clean one card, leaving its chunk summary dirty (tests: the collector
@@ -283,7 +296,7 @@ impl CardSlots {
     /// mutator stopped.
     pub(crate) fn scan(&mut self, cards: &CardTable) {
         self.dirty.clear();
-        self.dirty.extend(cards.dirty_slots());
+        cards.collect_dirty_slots(&mut self.dirty);
     }
 
     pub(crate) fn dirty(&self) -> &[ChunkSlot] {

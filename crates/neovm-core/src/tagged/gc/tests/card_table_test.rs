@@ -361,7 +361,7 @@ fn summary_scan_finds_exactly_the_dirty_chunks() {
     let chunk = 0x7f00_0000_0000usize;
     let neighbour = chunk + CHUNK_BYTES;
     let far = chunk + 4093 * CHUNK_BYTES;
-    assert_eq!(cards.dirty_slots().count(), 0);
+    assert!(cards.dirty_slots().is_empty());
     cards.mark(chunk + 5 * CARD_BYTES);
     cards.mark(chunk + 9 * CARD_BYTES);
     cards.mark(far + 3 * CARD_BYTES);
@@ -375,14 +375,11 @@ fn summary_scan_finds_exactly_the_dirty_chunks() {
     );
     let mut expected = vec![ChunkSlot::of(chunk), ChunkSlot::of(far)];
     expected.sort();
-    assert_eq!(cards.dirty_slots().collect::<Vec<_>>(), expected);
+    assert_eq!(cards.dirty_slots(), expected);
     cards.clear_slot(ChunkSlot::of(chunk));
     assert!(dirty_offsets(&cards, chunk).is_empty());
     assert!(!cards.is_dirty(chunk + 5 * CARD_BYTES));
-    assert_eq!(
-        cards.dirty_slots().collect::<Vec<_>>(),
-        [ChunkSlot::of(far)]
-    );
+    assert_eq!(cards.dirty_slots(), [ChunkSlot::of(far)]);
 }
 
 /// Chunks 4 GiB apart share a slot, so the slot index keeps every block
