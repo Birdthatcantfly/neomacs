@@ -426,8 +426,7 @@ fn stored_value_proofs_shape_only_the_gen1_card_mark() {
             .filter(|inst| clif.dfg.insts[*inst].opcode() == opcode)
             .count()
     };
-    // A card mark is the byte-wide store of a cons store; the chunk summary
-    // is only read.
+    // A card mark is the byte-wide stores of a cons store: card and summary.
     let card_marks = |clif: &Function| {
         clif.layout
             .blocks()
@@ -466,7 +465,7 @@ fn stored_value_proofs_shape_only_the_gen1_card_mark() {
                 assert_eq!(card_marks(&dynamic), 0);
                 continue;
             }
-            assert_eq!(card_marks(&dynamic), 1, "the card byte");
+            assert_eq!(card_marks(&dynamic), 2, "the card and its chunk summary");
             assert_eq!(
                 card_marks(&fixnum),
                 0,
@@ -474,19 +473,18 @@ fn stored_value_proofs_shape_only_the_gen1_card_mark() {
             );
             assert_eq!(
                 count(&fixnum, Opcode::Brif),
-                count(&dynamic, Opcode::Brif) - 3,
-                "the owner-age, chunk-summary and cold immediate tests go with the mark"
+                count(&dynamic, Opcode::Brif) - 1,
+                "the owner-age test goes with the mark"
             );
             assert_eq!(
-                count(&non_fixnum, Opcode::Brif),
-                count(&dynamic, Opcode::Brif) - 1,
-                "a non-fixnum proof drops only the clean-summary immediate test"
+                text(&non_fixnum),
+                text(&dynamic),
+                "with the tag filter off, a non-fixnum proof changes nothing"
             );
-            assert_eq!(card_marks(&non_fixnum), card_marks(&dynamic));
             assert_eq!(
                 count(&fixnum, Opcode::Load),
-                count(&dynamic, Opcode::Load) - 3,
-                "the old-bitmap word, the table base and the chunk summary"
+                count(&dynamic, Opcode::Load) - 2,
+                "the old-bitmap word and the table base"
             );
         }
     }

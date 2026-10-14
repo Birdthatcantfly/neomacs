@@ -148,7 +148,7 @@ impl TaggedHeap {
         // chunk's slot was logged when its summary went dirty, so cleaning
         // the logged slots cleans every card. Only conses have cards; slot
         // owners leave through their logged headers below.
-        self.absorb_dirty_card_slots_world_stopped();
+        self.scan_dirty_card_slots_world_stopped();
         let slots = self
             .card_slots_mut()
             .map(CardSlots::take_dirty)
@@ -282,7 +282,6 @@ impl TaggedHeap {
             // complete. Check before promotion could hide a missing mark and
             // before any sweep can reclaim the missed young child.
             self.verify_remembered_owner_cards_world_stopped();
-            self.verify_dirty_card_slots_logged_world_stopped();
             self.verify_dump_partition();
         }
         let partition_first = self.partition_dump && !self.dump_blackened;
@@ -419,22 +418,13 @@ impl TaggedHeap {
             .and_then(|carrier| carrier.cards.as_ref())
     }
 
-    /// Mark the card of OWNER_ADDR. Mutator side, GEN1 only: Relaxed byte
-    /// stores into the table `install_card_table` built, and a log entry
-    /// when the chunk's summary was clean.
+    /// Mark the card of OWNER_ADDR. Mutator side, GEN1 only: two Relaxed
+    /// byte stores into the table `install_card_table` built.
     #[inline]
     pub(super) fn mark_owner_card(&self, owner_addr: usize) {
-        let carrier = self
-            .census
-            .as_deref()
-            .expect("a GEN1 heap installs its card table");
-        let cards = carrier
-            .cards
-            .as_ref()
-            .expect("a GEN1 heap installs its card table");
-        if let Some(slot) = cards.mark(owner_addr) {
-            carrier.card_slots.log(slot);
-        }
+        self.card_table()
+            .expect("a GEN1 heap installs its card table")
+            .mark(owner_addr);
     }
 
     /// Re-register the surviving cons blocks under their card chunk slots
@@ -451,11 +441,14 @@ impl TaggedHeap {
             .rebuild(self.cons_blocks.iter().map(ConsBlock::base_addr));
     }
 
-    /// Move the logged slots into the collector's sorted set. With every
+    /// Find the dirty chunk slots by scanning the summaries. With every
     /// mutator stopped.
-    pub(super) fn absorb_dirty_card_slots_world_stopped(&mut self) {
-        if let Some(slots) = self.card_slots_mut() {
-            slots.absorb_logged();
+    pub(super) fn scan_dirty_card_slots_world_stopped(&mut self) {
+        let Some(census) = self.census.as_deref_mut() else {
+            return;
+        };
+        if let Some(cards) = census.cards.as_ref() {
+            census.card_slots.scan(cards);
         }
     }
 
@@ -524,7 +517,7 @@ impl TaggedHeap {
     }
 
     /// Trace the old cells that start in a dirty card, straight onto the
-    /// gray stack: for every logged chunk slot with a dirty card, each cons
+    /// gray stack: for every dirty chunk slot with a dirty card, each cons
     /// block of that slot (more than one only 4 GiB apart), 32 cells per
     /// card, two children each. The work follows the dirty chunks, not the
     /// heap; blocks are re-borrowed per cell, so nothing is collected first.
@@ -535,7 +528,7 @@ impl TaggedHeap {
         if self.card_table().is_none() {
             return;
         }
-        self.absorb_dirty_card_slots_world_stopped();
+        self.scan_dirty_card_slots_world_stopped();
         let slots = self.card_slots().map_or(0, |slots| slots.dirty().len());
         for slot_index in 0..slots {
             let Some((chunk, blocks)) = self.dirty_slot_blocks(slot_index) else {
@@ -580,24 +573,6 @@ impl TaggedHeap {
                     }
                 }
             }
-        }
-    }
-
-    /// Every dirty chunk summary was logged: the minor reaches a dirty card
-    /// only through its logged slot. With every mutator stopped, after the
-    /// minor absorbed the logs.
-    #[cold]
-    #[inline(never)]
-    pub(super) fn verify_dirty_card_slots_logged_world_stopped(&self) {
-        let Some(cards) = self.card_table() else {
-            return;
-        };
-        let logged = self.card_slots().map_or(&[][..], CardSlots::dirty);
-        for slot in cards.dirty_slots() {
-            assert!(
-                logged.binary_search(&slot).is_ok(),
-                "GC verify: dirty card chunk slot {slot:?} was never logged"
-            );
         }
     }
 

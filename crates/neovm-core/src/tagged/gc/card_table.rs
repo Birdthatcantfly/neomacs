@@ -8,15 +8,16 @@
 //! lazily zero-filled pages.
 //!
 //! A second level of one byte per 64 KiB chunk (128 cards), right after the
-//! cards in the same allocation, names the chunk's [`ChunkSlot`]. The store
-//! that turns a clean summary dirty also logs the slot (a cold path), so
-//! the minor visits only logged slots and their cons blocks: its card work is
-//! proportional to the dirty chunks, not to the heap.
+//! cards in the same allocation, is marked with every card and names the
+//! chunk's [`ChunkSlot`]. The minor scans the 64 KiB of summaries a word at
+//! a time, then visits only the dirty slots and the cons blocks indexed
+//! under them: its card work is a fixed table scan plus the dirty chunks,
+//! never a walk of the heap's blocks, and the mutator's mark stays two
+//! unconditional byte stores.
 //!
 //! Threading: mutators only ever store [`CARD_DIRTY`] into a byte (idempotent,
-//! Relaxed, no read-modify-write). Two mutators that both see a clean summary
-//! both log its slot; the collector drops the duplicate. The collector reads
-//! and clears bytes only with every mutator stopped.
+//! Relaxed, no read-modify-write); the collector reads and clears bytes only
+//! with every mutator stopped.
 
 use std::alloc::{self, Layout};
 use std::mem::size_of;
@@ -25,7 +26,6 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Mutex, PoisonError};
 
 /// log2 of the card size: 512 bytes, 32 cons cells.
 pub(crate) const CARD_SHIFT: u32 = 9;
@@ -141,27 +141,14 @@ impl CardTable {
         self.byte(CHUNK_SUMMARY_OFFSET + slot.0 as usize)
     }
 
-    /// Mark the card of OWNER_ADDR, and its chunk's summary when clean.
-    /// Returns the slot whose summary this store turned dirty, which the
-    /// caller logs. Mutator side: Relaxed byte stores and one load.
+    /// Mark the card of OWNER_ADDR and its chunk's summary. Mutator side:
+    /// two Relaxed byte stores.
     #[inline(always)]
-    pub(crate) fn mark(&self, owner_addr: usize) -> Option<ChunkSlot> {
+    pub(crate) fn mark(&self, owner_addr: usize) {
         self.byte(card_index(owner_addr))
             .store(CARD_DIRTY, Ordering::Relaxed);
-        self.dirty_summary(owner_addr)
-    }
-
-    /// Dirty the summary of OWNER_ADDR's chunk when clean, returning the
-    /// slot to log.
-    #[inline(always)]
-    fn dirty_summary(&self, owner_addr: usize) -> Option<ChunkSlot> {
-        let slot = ChunkSlot::of(owner_addr);
-        let summary = self.summary(slot);
-        if summary.load(Ordering::Relaxed) != CARD_CLEAN {
-            return None;
-        }
-        summary.store(CARD_DIRTY, Ordering::Relaxed);
-        Some(slot)
+        self.summary(ChunkSlot::of(owner_addr))
+            .store(CARD_DIRTY, Ordering::Relaxed);
     }
 
     #[inline]
@@ -204,13 +191,25 @@ impl CardTable {
         }
     }
 
-    /// Every slot whose summary is dirty, in slot order: a full scan for
-    /// the verifier, which checks each one was logged.
-    #[cold]
+    /// Every slot whose summary is dirty, in slot order: the 64 KiB of
+    /// summaries are read a word at a time and clean words skipped. With
+    /// every mutator stopped.
     pub(crate) fn dirty_slots(&self) -> impl Iterator<Item = ChunkSlot> + '_ {
-        (0..=u16::MAX)
-            .map(ChunkSlot)
-            .filter(|&slot| self.summary(slot).load(Ordering::Relaxed) != CARD_CLEAN)
+        // SAFETY: the summaries are CHUNK_SUMMARY_BYTES in-table bytes at a
+        // word-aligned offset of the 64-byte-aligned allocation.
+        let words = unsafe { self.bytes.as_ptr().add(CHUNK_SUMMARY_OFFSET).cast::<u64>() };
+        (0..CHUNK_SUMMARY_BYTES / size_of::<u64>()).flat_map(move |word_index| {
+            // SAFETY: see above; no mutator runs, so no store races.
+            let mut bytes = u64::from_le(unsafe { words.add(word_index).read() });
+            std::iter::from_fn(move || {
+                if bytes == 0 {
+                    return None;
+                }
+                let byte = bytes.trailing_zeros() as usize / 8;
+                bytes &= !(0xff << (byte * 8));
+                Some(ChunkSlot((word_index * size_of::<u64>() + byte) as u16))
+            })
+        })
     }
 
     /// Clean one card, leaving its chunk summary dirty (tests: the collector
@@ -250,15 +249,11 @@ impl ChunkCards {
 }
 
 /// The collector's index of chunk slots: which cons blocks share each one,
-/// and the slots logged dirty since the last clean.
+/// and the slots found dirty by the last scan.
 #[derive(Default)]
 pub(crate) struct CardSlots {
     blocks: FxHashMap<ChunkSlot, SmallVec<[usize; 1]>>,
-    /// Mutator side: slots whose summary a mark turned dirty. Appended at
-    /// most once per chunk and cycle by each mutator, so a lock costs
-    /// nothing measurable and keeps N mutators safe.
-    logged: Mutex<Vec<ChunkSlot>>,
-    /// Collector side: the logged slots, sorted and duplicate-free.
+    /// Sorted and duplicate-free.
     dirty: Vec<ChunkSlot>,
 }
 
@@ -284,28 +279,11 @@ impl CardSlots {
         self.blocks.get(&slot).map_or(&[], |bases| bases.as_slice())
     }
 
-    /// Log SLOT, whose summary this mutator's mark just turned dirty.
-    #[cold]
-    pub(crate) fn log(&self, slot: ChunkSlot) {
-        self.logged
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(slot);
-    }
-
-    /// Collect the logged slots; `dirty` stays sorted and duplicate-free.
-    /// With every mutator stopped.
-    pub(crate) fn absorb_logged(&mut self) {
-        let logged = self
-            .logged
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner);
-        if logged.is_empty() {
-            return;
-        }
-        self.dirty.append(logged);
-        self.dirty.sort_unstable();
-        self.dirty.dedup();
+    /// Replace `dirty` with the slots CARDS reports dirty now. With every
+    /// mutator stopped.
+    pub(crate) fn scan(&mut self, cards: &CardTable) {
+        self.dirty.clear();
+        self.dirty.extend(cards.dirty_slots());
     }
 
     pub(crate) fn dirty(&self) -> &[ChunkSlot] {

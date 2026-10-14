@@ -319,7 +319,8 @@ pub(crate) fn emit_cons_store_barrier(
     fb.ins().brif(old, mark, &[], store, &[]);
     fb.switch_to_block(mark);
     fb.seal_block(mark);
-    emit_card_mark(fb, heap, owner, value, class, store, slow);
+    emit_card_mark(fb, heap, owner);
+    fb.ins().jump(store, &[]);
     fb.switch_to_block(store);
     fb.seal_block(store);
     if journal {
@@ -358,22 +359,13 @@ fn emit_cons_old_bit(fb: &mut FunctionBuilder, owner: ClifValue) -> ClifValue {
 }
 
 /// Mark the GEN1 card of the untagged OWNER in HEAP's card table,
-/// `card[(owner >> CARD_SHIFT) & CARD_INDEX_MASK] = CARD_DIRTY`, then
-/// continue at STORE when the chunk's summary is already dirty, else at SLOW,
-/// whose mark dirties and logs the chunk. The table address is loaded from the heap, not
+/// `card[(owner >> CARD_SHIFT) & CARD_INDEX_MASK] = CARD_DIRTY`, and its
+/// chunk's summary byte, with no slow path. The table address is loaded from the heap, not
 /// baked, so AOT and preloaded code stay valid; it is fixed for the heap's
 /// life, which `install_card_table` publishes before any GEN1 leaf runs.
 /// The mark precedes the store and no safe point separates them, so a
 /// stop-all card clear can never fall between the two.
-fn emit_card_mark(
-    fb: &mut FunctionBuilder,
-    heap: ClifValue,
-    owner: ClifValue,
-    value: ClifValue,
-    class: Option<StoredValueClass>,
-    store: Block,
-    slow: Block,
-) {
+fn emit_card_mark(fb: &mut FunctionBuilder, heap: ClifValue, owner: ClifValue) {
     use super::jit_layout::heap::{
         CARD_CHUNK_SHIFT, CARD_DIRTY, CARD_INDEX_MASK, CARD_SHIFT, CHUNK_SUMMARY_OFFSET,
         HEAP_JIT_CARD_TABLE,
@@ -389,30 +381,15 @@ fn emit_card_mark(
     let address = fb.ins().iadd(table, card);
     let dirty = fb.ins().iconst(types::I8, CARD_DIRTY as i64);
     fb.ins().store(MemFlagsData::trusted(), dirty, address, 0);
-    // A clean chunk summary takes the slow path, whose mark dirties the
-    // summary and logs the chunk for the minor; the minor visits logged
-    // chunks only.
+    // The chunk summary byte, so the minor reads cards of dirty chunks only.
     let chunk = ushr_imm_p(fb, card, CARD_CHUNK_SHIFT as i64);
     let summary = fb.ins().iadd(table, chunk);
-    let logged = fb.ins().load(
-        types::I8,
+    fb.ins().store(
         MemFlagsData::trusted(),
+        dirty,
         summary,
         CHUNK_SUMMARY_OFFSET as i32,
     );
-    if class.is_some() {
-        fb.ins().brif(logged, store, &[], slow, &[]);
-        return;
-    }
-    // An unproven value may be an immediate, which creates no edge and which
-    // the slow path would not log: it stores inline, and its card stays a
-    // harmless false-dirty one under the clean summary.
-    let unlogged = fb.create_block();
-    fb.ins().brif(logged, store, &[], unlogged, &[]);
-    fb.switch_to_block(unlogged);
-    fb.seal_block(unlogged);
-    let immediate = super::lowering::fixnum_tag_test(fb, value);
-    fb.ins().brif(immediate, store, &[], slow, &[]);
 }
 
 /// The non-cons half of the same store sequence. The OFF arm emits the
