@@ -23,12 +23,29 @@
 //! slab. With several owners running at once, the same swap moves to buffer
 //! acquire and release.
 //!
-//! The returning continuation and the handoff exist once admission does
-//! (round 3c); tests drive them directly.
+//! The handoff is typed: [`Context::park_owner`] gives a [`ParkedOwner`],
+//! and only [`Context::resume_owner`] takes it back, so an owner cannot
+//! run again without its returning continuation. The green-thread runtime
+//! (round 3d) calls them at its baton's release and acquire; until then,
+//! tests drive them.
 
 use super::owner_bindings::{Channel, UndoTarget};
 use super::{Context, SymId, SymbolValueLookup, Value};
 use crate::emacs_core::intern::intern;
+
+/// An owner that left the baton: its in-place buffer bindings are swapped
+/// out and its host mirrors may be stale. Neither `Copy` nor `Clone`, and
+/// only [`Context::resume_owner`] consumes it, so each park has exactly one
+/// returning continuation.
+#[must_use = "a parked owner runs again only through `Context::resume_owner`"]
+#[derive(Debug)]
+pub(crate) struct ParkedOwner {
+    /// The obarray generation of the World the owner belongs to.
+    generation: u64,
+    _thread_confined: std::marker::PhantomData<*const ()>,
+}
+
+static_assertions::assert_not_impl_any!(ParkedOwner: Copy, Clone, Send, Sync);
 
 /// Which way a handoff moves an owner's bindings held in shared storage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,12 +64,12 @@ pub(super) fn debug_on_next_call_symbol() -> SymId {
 }
 
 impl Context {
-    /// Republish every host mirror from what this owner sees now, and drop
-    /// its bindings whose buffer-local storage is gone. Cold: an owner runs
-    /// it once per return to the baton.
+    /// Swap this owner's parked in-place bindings back in, drop its
+    /// bindings whose buffer-local storage is gone, and republish every
+    /// host mirror from what it sees now: [`Self::resume_owner`]'s work,
+    /// also run alone by tests that simulate another owner's write.
     #[cold]
     #[inline(never)]
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn refresh_owner_mirrors(&mut self) {
         self.swap_host_bindings(HostBindingSwap::In);
         self.retire_dead_owner_locals();
@@ -86,8 +103,32 @@ impl Context {
     #[cold]
     #[inline(never)]
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn park_owner(&mut self) {
+    pub(crate) fn park_owner(&mut self) -> ParkedOwner {
         self.swap_host_bindings(HostBindingSwap::Out);
+        ParkedOwner {
+            generation: self.obarray.generation(),
+            _thread_confined: std::marker::PhantomData,
+        }
+    }
+
+    /// The returning continuation of a PARKED owner, on the thread it runs
+    /// on now: the World's projection scope is entered there, the owner's
+    /// in-place buffer bindings swap back in, its bindings whose local
+    /// another owner killed retire (design §5.4), and every host mirror
+    /// shows what it sees again.
+    #[cold]
+    #[inline(never)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn resume_owner(&mut self, parked: ParkedOwner) {
+        debug_assert_eq!(
+            parked.generation,
+            self.obarray.generation(),
+            "an owner resumes in its own World"
+        );
+        if self.threads_admitted() {
+            self.enter_world_projection_scope();
+        }
+        self.refresh_owner_mirrors();
     }
 
     /// Swap each live in-place buffer binding (`LetLocal` entries: a

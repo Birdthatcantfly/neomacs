@@ -82,7 +82,7 @@ fn refresh_installs_the_owner_gc_threshold() {
 }
 
 #[test]
-fn refresh_retires_a_binding_whose_buffer_died() {
+fn resume_retires_a_binding_whose_buffer_died() {
     let mut ev = projected(&["tom-auto"]);
     let id: SymId = intern("tom-auto");
     let other = ev
@@ -105,11 +105,13 @@ fn refresh_retires_a_binding_whose_buffer_died() {
         "a let of the local binds its channel"
     );
     eval(&mut ev, &format!("(set-buffer {home})"));
+    let parked = ev.park_owner();
     assert!(
         ev.buffers.kill_buffer(other),
         "another owner kills the buffer"
     );
-    ev.refresh_owner_mirrors();
+    // The returning continuation validates the owner's local bindings.
+    ev.resume_owner(parked);
     let slab = ev.owner.slab().expect("slab");
     assert!(
         slab.records_of(id).all(|record| matches!(
@@ -196,13 +198,13 @@ fn undo_list_bindings_swap_with_their_owner() {
         .expect("bind");
     assert_eq!(eval(&mut ev, "buffer-undo-list"), "t");
     // Another owner runs: it sees, and records into, what the binding hides.
-    ev.park_owner();
+    let parked = ev.park_owner();
     assert_eq!(eval(&mut ev, "buffer-undo-list"), outer);
     eval(&mut ev, "(insert \"b\")");
     let recorded = eval(&mut ev, "buffer-undo-list");
     assert_ne!(recorded, outer, "the other owner's edit is recorded");
     // This owner returns: its binding is back, so its edit is not recorded.
-    ev.refresh_owner_mirrors();
+    ev.resume_owner(parked);
     assert_eq!(eval(&mut ev, "buffer-undo-list"), "t");
     eval(&mut ev, "(insert \"c\")");
     ev.unbind_to(count);
@@ -245,7 +247,7 @@ fn a_buffer_slot_binding_lives_in_the_slot_and_parks_in_the_slab() {
         "(60 \"inner-7\")"
     );
     // Another owner runs: it sees what the bindings hide, and writes it.
-    ev.park_owner();
+    let parked = ev.park_owner();
     eval(&mut ev, "(makunbound 'tom-name)");
     assert_eq!(
         eval(&mut ev, "(list fill-column mode-name)"),
@@ -254,7 +256,7 @@ fn a_buffer_slot_binding_lives_in_the_slot_and_parks_in_the_slab() {
     eval(&mut ev, "(setq fill-column 55)");
     // The parked binding values stay rooted through the slab.
     ev.gc_collect_exact();
-    ev.refresh_owner_mirrors();
+    ev.resume_owner(parked);
     assert_eq!(
         eval(&mut ev, "(list fill-column mode-name)"),
         "(60 \"inner-7\")"
