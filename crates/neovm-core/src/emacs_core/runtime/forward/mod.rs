@@ -644,6 +644,9 @@ impl LispIntFwd {
 pub struct LispBoolFwd {
     ty: LispFwdType,
     value: AtomicBool,
+    /// Not GNU's: an owner's own `debug-on-next-call` cell
+    /// ([`alloc_owner_debugger_cell`]), which no symbol forwards to.
+    owner: bool,
 }
 
 /// Byte offset of a [`LispBoolFwd`]'s flag, for compiled code's inline read.
@@ -656,6 +659,7 @@ pub(crate) const LISP_BOOL_FWD_VALUE_OFFSET: usize = std::mem::offset_of!(LispBo
 pub(crate) static DEBUG_ON_NEXT_CALL_UNRESOLVED: LispBoolFwd = LispBoolFwd {
     ty: LispFwdType::Bool,
     value: AtomicBool::new(true),
+    owner: false,
 };
 
 /// What the pointer names once the obarray found no `DEFVAR_BOOL` for
@@ -664,6 +668,7 @@ pub(crate) static DEBUG_ON_NEXT_CALL_UNRESOLVED: LispBoolFwd = LispBoolFwd {
 pub(crate) static DEBUG_ON_NEXT_CALL_ABSENT: LispBoolFwd = LispBoolFwd {
     ty: LispFwdType::Bool,
     value: AtomicBool::new(false),
+    owner: false,
 };
 
 static_assertions::assert_impl_all!(LispBoolFwd: std::fmt::Debug, Send, Sync);
@@ -691,6 +696,12 @@ impl LispBoolFwd {
     pub(crate) fn is_debug_on_next_call_stand_in(&self) -> bool {
         std::ptr::eq(self, &DEBUG_ON_NEXT_CALL_UNRESOLVED)
             || std::ptr::eq(self, &DEBUG_ON_NEXT_CALL_ABSENT)
+    }
+
+    /// Whether this is an owner's own `debug-on-next-call` cell.
+    #[inline(always)]
+    pub(crate) fn is_owner_cell(&self) -> bool {
+        self.owner
     }
 }
 
@@ -896,7 +907,8 @@ const _: () = {
     assert!(offset_of!(LispIntFwd, _mutator) == 16);
     assert!(offset_of!(LispObjFwd, _mutator) == 16);
     assert!(offset_of!(LispKboardObjFwd, _mutator) == 16);
-    assert!(size_of::<LispBoolFwd>() == 2);
+    // The owner flag follows the baked Boolean; nothing generated reads past it.
+    assert!(size_of::<LispBoolFwd>() == 3);
     // Immutable buffer metadata retains its original repr(C) offsets too.
     assert!(offset_of!(LispBufferObjFwd, offset) == 2);
     assert!(offset_of!(LispBufferObjFwd, local_flags_idx) == 4);
@@ -1013,6 +1025,20 @@ pub fn alloc_boolfwd(initial: bool) -> &'static LispBoolFwd {
     Box::leak(Box::new(LispBoolFwd {
         ty: LispFwdType::Bool,
         value: AtomicBool::new(initial),
+        owner: false,
+    }))
+}
+
+/// Allocate an owner's own `debug-on-next-call` cell: the storage of the
+/// owner's binding of that `DEFVAR_BOOL`, which the owner's admission header
+/// names while the binding lasts, as GNU's `globals.f_debug_on_next_call`
+/// holds the running thread's binding. One per owner slab, leaked like every
+/// Boolean forwarder, because compiled code may hold its address.
+pub(crate) fn alloc_owner_debugger_cell(initial: bool) -> &'static LispBoolFwd {
+    Box::leak(Box::new(LispBoolFwd {
+        ty: LispFwdType::Bool,
+        value: AtomicBool::new(initial),
+        owner: true,
     }))
 }
 

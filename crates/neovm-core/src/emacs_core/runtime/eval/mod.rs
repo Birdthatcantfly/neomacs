@@ -7744,6 +7744,7 @@ mod pdump_reconstruct;
 mod macroexpand;
 
 mod owner_bindings;
+mod owner_mirrors;
 mod variable_access;
 pub(crate) use variable_access::RawVariableView;
 pub use variable_access::{VariableStore, VariableView};

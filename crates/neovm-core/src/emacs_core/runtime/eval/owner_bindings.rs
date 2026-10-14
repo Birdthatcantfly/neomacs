@@ -27,7 +27,7 @@ use super::{Context, NativeUnwindAction, SpecBinding};
 use crate::buffer::{BufferId, BufferManager};
 use crate::emacs_core::error::Flow;
 use crate::emacs_core::forward::{
-    CanonicalArm, LispBufferObjFwd, ThreadProjectionDescriptor, TlsIndex,
+    CanonicalArm, LispBoolFwd, LispBufferObjFwd, ThreadProjectionDescriptor, TlsIndex,
 };
 use crate::emacs_core::intern::SymId;
 use crate::emacs_core::symbol::{CanonicalAccess, SetInternalBind};
@@ -211,6 +211,11 @@ pub(crate) struct OwnerSlab {
     /// until every record above it is popped too.
     records: Vec<Option<OwnerBindingRecord>>,
     next_generation: NonZeroU32,
+    /// `debug-on-next-call`'s slot index and the owner's own cell for it,
+    /// once the owner binds it: the cell mirrors the default-channel slot,
+    /// so compiled code's armed test (one load through the admission
+    /// header) reads the owner's binding.
+    debugger: Option<(TlsIndex, &'static LispBoolFwd)>,
     _thread_confined: PhantomData<*const ()>,
 }
 
@@ -225,6 +230,15 @@ impl std::fmt::Debug for OwnerSlab {
             .field("locals", &self.locals.len())
             .finish_non_exhaustive()
     }
+}
+
+/// What a `DEFVAR_BOOL` cell holds for a binding STATE: GNU's `!NILP`.
+#[inline]
+fn debugger_armed(state: SlotState) -> bool {
+    state
+        .value()
+        .and_then(SlotValue::bound)
+        .is_some_and(|value| !value.is_nil())
 }
 
 /// Note a value leaving the slab for a running mark: the snapshot taken at
@@ -244,6 +258,7 @@ impl OwnerSlab {
             locals: FxHashMap::default(),
             records: Vec::new(),
             next_generation: NonZeroU32::MIN,
+            debugger: None,
             _thread_confined: PhantomData,
         }
     }
@@ -291,6 +306,29 @@ impl OwnerSlab {
             },
         };
         note_dropped(old);
+        if let Some((debugger, cell)) = self.debugger
+            && debugger == index
+            && channel == Channel::Default
+        {
+            cell.set(debugger_armed(state));
+        }
+    }
+
+    /// This owner's own `debug-on-next-call` cell for the variable INDEX
+    /// names, made on first use and holding the default-channel slot.
+    pub(crate) fn debugger_cell(&mut self, index: TlsIndex) -> &'static LispBoolFwd {
+        match self.debugger {
+            Some((debugger, cell)) => {
+                debug_assert_eq!(debugger, index, "one debug-on-next-call per owner");
+                cell
+            }
+            None => {
+                let armed = debugger_armed(self.slot(index, Channel::Default));
+                let cell = crate::emacs_core::forward::alloc_owner_debugger_cell(armed);
+                self.debugger = Some((index, cell));
+                cell
+            }
+        }
     }
 
     /// The page holding default-channel SLOT, made on first use.
@@ -403,18 +441,30 @@ impl OwnerSlab {
 
     /// The live records binding SYM, with their ids, outermost first.
     fn record_ids_of(&self, sym: SymId) -> Vec<OwnerRecordId> {
+        self.live_records()
+            .filter(|(_, record)| record.sym == sym)
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Every live record with its id, outermost first.
+    pub(crate) fn live_records(
+        &self,
+    ) -> impl Iterator<Item = (OwnerRecordId, &OwnerBindingRecord)> {
         self.records
             .iter()
             .enumerate()
             .filter_map(|(position, record)| {
-                let record = record.as_ref().filter(|record| record.sym == sym)?;
+                let record = record.as_ref()?;
                 let depth = u32::try_from(position + 1).ok().and_then(NonZeroU32::new)?;
-                Some(OwnerRecordId {
-                    depth,
-                    generation: record.generation,
-                })
+                Some((
+                    OwnerRecordId {
+                        depth,
+                        generation: record.generation,
+                    },
+                    record,
+                ))
             })
-            .collect()
     }
 
     /// Whether this owner binds SYM at all (GNU's `kind >= SPECPDL_LET` scan
@@ -735,6 +785,9 @@ impl Context {
     /// Republish host mirrors of RESOLVED after an owner binding changed.
     #[inline]
     fn publish_owner_binding(&mut self, resolved: SymId) {
+        if resolved == super::owner_mirrors::debug_on_next_call_symbol() {
+            self.point_owner_debugger();
+        }
         // The mask includes the GC settings, so an unmirrored variable needs
         // neither publication nor the GC-binding sync.
         if self.runtime_binding_has_projection(resolved) {
@@ -922,7 +975,7 @@ impl Context {
         self.publish_owner_binding(record.sym);
     }
 
-    fn clear_owner_slot(&mut self, index: TlsIndex, channel: Channel) {
+    pub(super) fn clear_owner_slot(&mut self, index: TlsIndex, channel: Channel) {
         if let Some(slab) = self.owner.slab_mut() {
             slab.set_slot(index, channel, SlotState::NoBinding);
         }
@@ -930,7 +983,7 @@ impl Context {
 
     /// Whether CHANNEL still names storage of the variable: a buffer-local
     /// channel only while its buffer has the local.
-    fn owner_channel_live(
+    pub(super) fn owner_channel_live(
         &self,
         id: SymId,
         projection: &ThreadProjectionDescriptor,

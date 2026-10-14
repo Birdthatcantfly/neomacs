@@ -207,7 +207,11 @@ impl Context {
 
     #[cold]
     #[inline(never)]
-    fn arm_for_specpdl_top(&self, code: DebugOnCallCode) -> DebugOnCallArm {
+    fn arm_for_specpdl_top(&mut self, code: DebugOnCallCode) -> DebugOnCallArm {
+        // The cell just cleared may be this owner's binding's own.
+        if !self.owner.is_dormant() {
+            self.owner_debugger_disarmed();
+        }
         let frame = self.specpdl.len().saturating_sub(1);
         debug_assert!(
             self.specpdl_entry_is_backtrace(frame),
@@ -223,6 +227,9 @@ impl Context {
     fn disarm_debug_on_next_call(&mut self) {
         if let Some(cell) = self.debug_on_next_call_cell() {
             cell.set(false);
+        }
+        if !self.owner.is_dormant() {
+            self.owner_debugger_disarmed();
         }
     }
 

@@ -218,10 +218,17 @@ impl AdmissionHeader {
 
     /// The ONE retirement hook. It never resolves, allocates, asserts, calls
     /// Lisp, increments a clock, takes a lock, or waits for marker completion.
+    ///
+    /// An owner's own debugger cell stays: it names the owner's binding of
+    /// `debug-on-next-call`, which no canonical write changes, and only the
+    /// owner's unbind gives the canonical descriptor back
+    /// ([`ObarrayView::point_debugger`]).
     #[inline(always)]
     fn retire_current_admission(&self, canonical: &CanonicalDispatchCells) {
         self.epoch.set(canonical.admission_epoch());
-        self.debugger.set(canonical.admission_debugger());
+        if !self.debugger.get().is_owner() {
+            self.debugger.set(canonical.admission_debugger());
+        }
     }
 
     #[inline(always)]
@@ -416,6 +423,21 @@ impl ObarrayView {
         // canonical source and current destination are kept by one view/lease.
         self.admission
             .retire_current_admission(unsafe { self.dispatch.as_ref() });
+    }
+
+    /// Name OWNER_CELL as this owner's `debug-on-next-call` while the owner
+    /// binds it, or the canonical descriptor again (`None`).
+    #[cold]
+    pub(crate) fn point_debugger(
+        &mut self,
+        owner_cell: Option<&'static crate::emacs_core::forward::LispBoolFwd>,
+    ) {
+        let descriptor = match owner_cell {
+            Some(cell) => DebuggerDescriptor::owner(cell),
+            // SAFETY: as in `refresh_admission`.
+            None => unsafe { self.dispatch.as_ref() }.admission_debugger(),
+        };
+        self.admission.debugger.set(descriptor);
     }
 
     /// Test the actual descriptor identity, not just two equal Boolean values.

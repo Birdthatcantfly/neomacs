@@ -704,6 +704,23 @@ impl DebuggerDescriptor {
     pub(crate) fn resolved(self) -> Option<&'static crate::emacs_core::forward::LispBoolFwd> {
         (!self.0.is_debug_on_next_call_stand_in()).then_some(self.0)
     }
+
+    /// The descriptor of an owner's own cell
+    /// (`forward::alloc_owner_debugger_cell`).
+    #[inline]
+    pub(crate) fn owner(cell: &'static crate::emacs_core::forward::LispBoolFwd) -> Self {
+        debug_assert!(
+            cell.is_owner_cell(),
+            "an owner descriptor names an owner cell"
+        );
+        Self(cell)
+    }
+
+    /// Whether this names an owner's own cell rather than the canonical one.
+    #[inline(always)]
+    pub(crate) fn is_owner(self) -> bool {
+        self.0.is_owner_cell()
+    }
 }
 
 static_assertions::assert_impl_all!(DebuggerDescriptor: Send, Sync, Clone, Copy, Eq, PartialEq, std::fmt::Debug);

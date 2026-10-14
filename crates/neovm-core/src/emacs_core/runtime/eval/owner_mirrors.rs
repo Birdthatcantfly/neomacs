@@ -1,0 +1,138 @@
+//! What an owner republishes when it runs again (Phase 0 step 2, round 3b).
+//!
+//! The Context mirrors a few variables in host state (quit and inhibit
+//! flags, compiler overrides, the keyboard maps, the GC threshold) and
+//! names one Boolean cell in its admission header (`debug-on-next-call`).
+//! Each owner write publishes its own effective value at the write. A
+//! canonical write by another owner does not reach this Context, so the
+//! owner refreshes on its returning continuation, under the baton:
+//! [`Context::refresh_owner_mirrors`]. That is also where it drops bindings
+//! whose buffer-local storage another owner killed while it was parked, as
+//! GNU's thread switch zaps a `SPECPDL_LET_LOCAL` whose local is gone
+//! (`src/eval.c:4204-4228`).
+//!
+//! The returning continuation exists once admission does (round 3c);
+//! tests drive it directly.
+
+use super::owner_bindings::{Channel, UndoTarget};
+use super::{Context, SymId, SymbolValueLookup, Value};
+use crate::emacs_core::intern::intern;
+
+/// `debug-on-next-call`, whose `DEFVAR_BOOL` cell the admission header
+/// names.
+pub(super) fn debug_on_next_call_symbol() -> SymId {
+    static SYMBOL: std::sync::OnceLock<SymId> = std::sync::OnceLock::new();
+    *SYMBOL.get_or_init(|| intern("debug-on-next-call"))
+}
+
+impl Context {
+    /// Republish every host mirror from what this owner sees now, and drop
+    /// its bindings whose buffer-local storage is gone. Cold: an owner runs
+    /// it once per return to the baton.
+    #[cold]
+    #[inline(never)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn refresh_owner_mirrors(&mut self) {
+        self.retire_dead_owner_locals();
+        let mirrored: Vec<SymId> = self
+            .runtime_projection_mask()
+            .iter()
+            .enumerate()
+            .flat_map(|(word_index, &word)| {
+                (0..64)
+                    .filter(move |bit| word & (1u64 << bit) != 0)
+                    .map(move |bit| SymId((word_index * 64 + bit) as u32))
+            })
+            .collect();
+        for id in mirrored {
+            let visible = match self.find_symbol_value_by_id(id) {
+                Ok(SymbolValueLookup::Bound(value)) => value,
+                _ => Value::NIL,
+            };
+            self.sync_cached_runtime_binding_by_id(id, visible);
+            self.sync_keyboard_runtime_binding_by_id(id, visible);
+        }
+        self.sync_gc_threshold_from_runtime_settings();
+        self.point_owner_debugger();
+    }
+
+    /// GNU's thread-switch zap of a `let` whose buffer-local binding is
+    /// gone (`src/eval.c:4204-4228`): the record restores nothing at its
+    /// pop, and the owner's slot for it goes.
+    fn retire_dead_owner_locals(&mut self) {
+        let Some(slab) = self.owner.slab() else {
+            return;
+        };
+        let dead: Vec<_> = slab
+            .live_records()
+            .filter(|(_, record)| {
+                matches!(record.channel, Channel::BufferLocal(_))
+                    && !matches!(record.undo, UndoTarget::Retired)
+                    && self
+                        .obarray
+                        .thread_projection_of(record.sym)
+                        .is_some_and(|projection| {
+                            !self.owner_channel_live(record.sym, projection, record.channel)
+                        })
+            })
+            .map(|(id, record)| (id, record.index, record.channel))
+            .collect();
+        for (id, index, channel) in dead {
+            if let Some(slab) = self.owner.slab_mut() {
+                slab.replace_undo(id, UndoTarget::Retired);
+            }
+            self.clear_owner_slot(index, channel);
+        }
+    }
+
+    /// Name this owner's own `debug-on-next-call` cell in its admission
+    /// header while the owner binds the variable's default, and the
+    /// canonical cell otherwise.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn point_owner_debugger(&mut self) {
+        let id = debug_on_next_call_symbol();
+        let index = self
+            .obarray
+            .thread_projection_of(id)
+            .map(|projection| projection.index());
+        let cell = match (index, self.owner.slab_mut()) {
+            (Some(index), Some(slab)) if slab.slot(index, Channel::Default).value().is_some() => {
+                Some(slab.debugger_cell(index))
+            }
+            _ => None,
+        };
+        self.obarray.point_debugger(cell);
+    }
+
+    /// The debugger disarmed `debug-on-next-call` through the header's
+    /// cell (GNU `debug_on_next_call = 0`, `src/eval.c:298, 338`). When the
+    /// cell is this owner's, its binding becomes nil too.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn owner_debugger_disarmed(&mut self) {
+        let id = debug_on_next_call_symbol();
+        let Some(index) = self
+            .obarray
+            .thread_projection_of(id)
+            .map(|projection| projection.index())
+        else {
+            return;
+        };
+        if let Some(slab) = self.owner.slab_mut()
+            && slab.slot(index, Channel::Default).value().is_some()
+        {
+            slab.set_slot(
+                index,
+                Channel::Default,
+                super::owner_bindings::SlotState::Bound(super::owner_bindings::SlotValue::new(
+                    Value::NIL,
+                )),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/owner_mirrors_test.rs"]
+mod tests;
