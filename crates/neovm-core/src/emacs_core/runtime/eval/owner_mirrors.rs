@@ -130,7 +130,8 @@ impl Context {
     }
 
     /// Swap each live in-place buffer binding (`LetLocal` entries: a
-    /// per-buffer slot's, `buffer-undo-list`'s) with the buffer's storage,
+    /// per-buffer slot's, `buffer-undo-list`'s; `LetDefault` entries of a
+    /// per-buffer variable: its default) with the buffer's storage,
     /// GNU's `specpdl_unrewind` on that channel: innermost first going out,
     /// outermost first coming back in. A binding whose buffer or local is
     /// gone turns into a no-op entry, as GNU's does, which drops its parked
@@ -141,7 +142,11 @@ impl Context {
             .specpdl
             .iter()
             .enumerate()
-            .filter(|(_, entry)| matches!(entry, super::SpecBinding::LetLocal { .. }))
+            .filter(|(_, entry)| match entry {
+                super::SpecBinding::LetLocal { .. } => true,
+                super::SpecBinding::LetDefault { sym_id, .. } => self.binds_in_place(*sym_id),
+                _ => false,
+            })
             .map(|(index, _)| index)
             .collect();
         if entries.is_empty() {
@@ -151,7 +156,17 @@ impl Context {
             entries.reverse();
         }
         for &index in &entries {
-            self.swap_local_let_binding_for_thread_switch(index);
+            if matches!(
+                self.specpdl.get(index),
+                Some(super::SpecBinding::LetDefault { .. })
+            ) {
+                // GNU's thread switch never fails for a value the variable
+                // already held.
+                let swapped = self.swap_let_binding_for_thread_switch(index);
+                debug_assert!(swapped.is_ok(), "a default binding swaps back");
+            } else {
+                self.swap_local_let_binding_for_thread_switch(index);
+            }
         }
         match direction {
             HostBindingSwap::Out => {
@@ -160,6 +175,9 @@ impl Context {
                     .iter()
                     .filter_map(|&index| match self.specpdl.get(index) {
                         Some(super::SpecBinding::LetLocal { old_value, .. }) => Some(*old_value),
+                        Some(super::SpecBinding::LetDefault { old_value, .. }) => {
+                            Some(old_value.as_plain())
+                        }
                         _ => None,
                     })
                     .collect();

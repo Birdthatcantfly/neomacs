@@ -441,14 +441,12 @@ fn admission_inventory_probe() {
     assert_eq!(eval(&mut ev, "tad-probe"), "1");
 }
 
-/// Pins the BUFFER_OBJFWD default-channel gap: in an admitted World a `let`
-/// of a per-buffer variable in a buffer with no local binds an owner slot,
-/// so a direct slot reader (redisplay's `BVAR`) still sees the default. GNU
-/// binds through `set_default`, which every non-local buffer's slot shows.
-/// 3d binds it in place (a legacy `LetDefault`, swapped at park/resume)
-/// before Green `make-thread` becomes Lisp-reachable.
+/// A `let` of a per-buffer variable in a buffer with no local binds its
+/// default in place (design §1.3b): GNU's `set_default`, which every
+/// non-local buffer's slot -- and so every direct slot reader (redisplay's
+/// `BVAR`) -- shows. The entry is a legacy `LetDefault`, swapped at
+/// park/resume.
 #[test]
-#[ignore = "3d: BUFFER_OBJFWD default-channel binding in place"]
 fn a_default_binding_of_a_per_buffer_variable_reaches_direct_slot_readers() {
     let mut ev = green();
     eval(&mut ev, "(set-buffer (get-buffer-create \"tad-truncate\"))");
@@ -474,4 +472,99 @@ fn a_default_binding_of_a_per_buffer_variable_reaches_direct_slot_readers() {
 #[ignore = "3e: needs a second owner (3d) and the GNU oracle"]
 fn defvaralias_of_a_variable_another_owner_binds_follows_the_gnu_oracle() {
     unimplemented!("3e: two owners, one binding tad-alias-base; the other runs defvaralias")
+}
+
+fn truncate_slot(ev: &Context, buffer: crate::buffer::BufferId) -> Value {
+    let info = crate::buffer::buffer::lookup_buffer_slot_by_sym_id(intern("truncate-lines"))
+        .expect("a per-buffer slot");
+    ev.buffers.get(buffer).expect("live").slots[info.offset.index()]
+}
+
+#[test]
+fn a_parked_default_binding_lets_another_owner_set_the_default() {
+    let mut ev = green();
+    eval(
+        &mut ev,
+        "(set-buffer (get-buffer-create \"tad-park-default\"))",
+    );
+    ev.admit_threads().expect("admission");
+    let buffer = ev.buffers.current_buffer_id().expect("a current buffer");
+    ev.try_specbind(intern("truncate-lines"), Value::T)
+        .expect("bind");
+    assert!(matches!(ev.specpdl[..], [SpecBinding::LetDefault { .. }]));
+    assert_eq!(truncate_slot(&ev, buffer), Value::T);
+    let parked = ev.park_owner();
+    // The other owner sees the outer default and sets it.
+    assert_eq!(truncate_slot(&ev, buffer), Value::NIL);
+    eval(&mut ev, "(set-default 'truncate-lines 'other)");
+    ev.resume_owner(parked);
+    assert_eq!(truncate_slot(&ev, buffer), Value::T, "the binding is back");
+    assert_eq!(eval(&mut ev, "truncate-lines"), "t");
+    ev.unbind_to(0);
+    // The other owner's write is what the binding hid when it popped.
+    assert_eq!(eval(&mut ev, "(default-value 'truncate-lines)"), "other");
+    assert_eq!(eval(&mut ev, "truncate-lines"), "other");
+}
+
+#[test]
+fn a_buffer_made_inside_a_default_binding_starts_with_it() {
+    let mut ev = green();
+    eval(
+        &mut ev,
+        "(set-buffer (get-buffer-create \"tad-made-inside\"))",
+    );
+    ev.admit_threads().expect("admission");
+    ev.try_specbind(intern("truncate-lines"), Value::T)
+        .expect("bind");
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(save-current-buffer (set-buffer (get-buffer-create \"tad-made-inside-2\")) truncate-lines)"
+        ),
+        "t"
+    );
+    ev.unbind_to(0);
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(save-current-buffer (set-buffer \"tad-made-inside-2\") truncate-lines)"
+        ),
+        "nil"
+    );
+}
+
+#[test]
+fn killing_a_buffer_inside_a_default_binding_keeps_the_restore() {
+    let mut ev = green();
+    eval(
+        &mut ev,
+        "(progn (get-buffer-create \"tad-kill-other\")
+                (set-buffer (get-buffer-create \"tad-kill-home\")))",
+    );
+    ev.admit_threads().expect("admission");
+    ev.try_specbind(intern("truncate-lines"), Value::T)
+        .expect("bind");
+    eval(&mut ev, "(kill-buffer \"tad-kill-other\")");
+    let parked = ev.park_owner();
+    ev.resume_owner(parked);
+    ev.unbind_to(0);
+    assert_eq!(eval(&mut ev, "(default-value 'truncate-lines)"), "nil");
+    assert_eq!(eval(&mut ev, "truncate-lines"), "nil");
+}
+
+#[test]
+fn admission_leaves_a_per_buffer_default_binding_legacy() {
+    let mut ev = green();
+    eval(
+        &mut ev,
+        "(set-buffer (get-buffer-create \"tad-legacy-default\"))",
+    );
+    ev.try_specbind(intern("truncate-lines"), Value::T)
+        .expect("bind");
+    ev.admit_threads().expect("admission");
+    assert!(matches!(ev.specpdl[..], [SpecBinding::LetDefault { .. }]));
+    let buffer = ev.buffers.current_buffer_id().expect("a current buffer");
+    assert_eq!(truncate_slot(&ev, buffer), Value::T);
+    ev.unbind_to(0);
+    assert_eq!(truncate_slot(&ev, buffer), Value::NIL);
 }

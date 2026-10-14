@@ -29,8 +29,8 @@
 //! `Captured`, restored only if the local is made again (GNU,
 //! `src/eval.c:3871-3883`).
 //!
-//! Left as they are: a buffer's own per-buffer slot binds in place (design
-//! §1.3b), so its `LetLocal` entries stay legacy; `buffer-undo-list`, whose
+//! Left as they are: a per-buffer variable binds in place on both channels
+//! (design §1.3b), so its `LetLocal` and `LetDefault` entries stay legacy; `buffer-undo-list`, whose
 //! storage is the buffer's undo state, is never projected; nor are constants
 //! and aliases.
 
@@ -243,14 +243,19 @@ impl Context {
                     sym_id,
                     old_value,
                     buffer_id,
-                } => (
-                    sym_id,
-                    BindingKind::LetDefault {
-                        where_buf: buffer_id.get(),
-                    },
-                    Channel::Default,
-                    old_value.as_plain(),
-                ),
+                } => {
+                    if self.binds_in_place(sym_id) {
+                        continue;
+                    }
+                    (
+                        sym_id,
+                        BindingKind::LetDefault {
+                            where_buf: buffer_id.get(),
+                        },
+                        Channel::Default,
+                        old_value.as_plain(),
+                    )
+                }
                 SpecBinding::LetLocal {
                     sym_id,
                     old_value,
@@ -354,9 +359,9 @@ impl Context {
         }
     }
 
-    /// Whether a `LetLocal` of ID binds a buffer's own per-buffer slot,
-    /// which stays in place (design §1.3b).
-    fn binds_in_place(&self, id: SymId) -> bool {
+    /// Whether a binding of ID is a per-buffer variable's, which binds in
+    /// place on both channels and stays legacy (design §1.3b).
+    pub(super) fn binds_in_place(&self, id: SymId) -> bool {
         self.obarray
             .get_by_id(id)
             .is_some_and(|symbol| match symbol.value_cell() {

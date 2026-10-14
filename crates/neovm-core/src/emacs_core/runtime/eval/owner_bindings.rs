@@ -870,6 +870,13 @@ impl Context {
         {
             return self.specbind_slot_in_place(resolved, builtin.descriptor(), buffer, value);
         }
+        // So does its default, in every buffer without a local (§1.3b).
+        if let (BindingKind::LetDefault { where_buf }, CanonicalArm::Forwarded(builtin)) =
+            (kind, projection.arm())
+            && let Some(buf_fwd) = builtin.descriptor().as_buffer_obj_fwd()
+        {
+            return self.specbind_default_in_place(resolved, buf_fwd, where_buf, value);
+        }
         let index = projection.index();
         let slab = self.ensure_owner_slab();
         let undo = match slab.slot(index, channel) {
@@ -956,6 +963,40 @@ impl Context {
         if let Some(buf) = self.buffers.get_mut(buffer) {
             buf.slots[off] = stored;
         }
+        Ok(())
+    }
+
+    /// GNU `specbind`'s `SPECPDL_LET_DEFAULT` of a per-buffer variable the
+    /// current buffer has no local of (`src/eval.c:3678-3700`), for a
+    /// projected variable: `set_default` in place, so every buffer without
+    /// a local -- and every direct slot reader in it -- sees the binding, as
+    /// GNU's shared default does. The legacy entry restores the default at
+    /// its pop; an owner leaving the baton swaps it out (design §1.3b).
+    #[cold]
+    #[inline(never)]
+    fn specbind_default_in_place(
+        &mut self,
+        resolved: SymId,
+        buf_fwd: &LispBufferObjFwd,
+        where_buf: Option<BufferId>,
+        value: Value,
+    ) -> Result<(), Flow> {
+        let old_default = buf_fwd
+            .buffer_slot()
+            .map(|slot| slot.index())
+            .filter(|&off| off < self.buffers.buffer_defaults.len())
+            .map_or(buf_fwd.default, |off| self.buffers.buffer_defaults[off]);
+        self.push_specpdl_with(|| SpecBinding::LetDefault {
+            sym_id: resolved,
+            old_value: super::SavedBindingValue::from_plain(old_default),
+            buffer_id: super::SavedBufferId::from_option(where_buf),
+        });
+        super::super::data::set_default_internal_resolved(
+            self,
+            resolved,
+            value,
+            SetInternalBind::Bind,
+        )?;
         Ok(())
     }
 

@@ -493,3 +493,44 @@ fn a_backtrace_eval_in_progress_rewinds_after_admission() {
     ev.unbind_to(0);
     assert_eq!(eval(&mut ev, "tab-r"), "1");
 }
+
+/// Two Worlds on one OS thread share the process's one collector thread
+/// (`tagged/gc/gc_thread.rs` `GC_THREAD`): a concurrent mark World A leaves
+/// running occupies it until A's mutator stops the job, so World B's
+/// synchronous collection (`mark_all_on_gc_thread`) waits forever. See
+/// tmp/tls-r3/two-world-collector-hazard.md. One World -- production, and
+/// the Green runtime -- cannot reach it. Passes once the collector serves
+/// another heap's request while a concurrent job is idle.
+#[test]
+#[ignore = "two Worlds share the process collector thread: a concurrent mark left running by one World deadlocks the other's sync collection (peer task, P2)"]
+fn a_second_worlds_sync_collection_completes_while_the_first_marks() {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut first = Context::new();
+        let mut second = Context::new();
+        first.setup_thread_locals();
+        let mut started = false;
+        for _ in 0..64 {
+            eval(
+                &mut first,
+                "(let ((i 0)) (while (< i 2000) (make-list 8 i) (setq i (1+ i))))",
+            );
+            first.gc_collect_from_current_roots_impl(false);
+            if first.tagged_heap.concurrent_mark_running() {
+                started = true;
+                break;
+            }
+        }
+        assert!(started, "the first World never launched a concurrent mark");
+        // The first World's mutator moves on without stopping its job.
+        second.setup_thread_locals();
+        second.gc_collect_from_current_roots_impl(true);
+        let _ = done_tx.send(());
+    });
+    assert!(
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .is_ok(),
+        "the second World's synchronous collection is stuck behind the first World's concurrent mark"
+    );
+}
