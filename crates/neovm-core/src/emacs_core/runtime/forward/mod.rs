@@ -419,6 +419,23 @@ impl LispFwd {
     /// Perform the store for the variants whose storage is the descriptor.
     /// Returns the canonical value so callers that also mirror the write into
     /// buffer-local storage do not have to recompute it.
+    /// [`Self::commit`] for an owner-routed write: `false` when the slot is
+    /// per-buffer, whose storage the caller writes -- the arm a thread
+    /// projection's header takes.
+    #[inline(always)]
+    pub(crate) fn commit_unless_per_buffer(&self, store: ForwardStore) -> bool {
+        match self.slot() {
+            ForwardSlot::BufferObj(_) => false,
+            ForwardSlot::Int(_)
+            | ForwardSlot::Bool(_)
+            | ForwardSlot::Obj(_)
+            | ForwardSlot::KboardObj(_) => {
+                self.commit(store);
+                true
+            }
+        }
+    }
+
     pub fn commit(&self, store: ForwardStore) -> Value {
         match (store, self.slot()) {
             (ForwardStore::Int(integer), ForwardSlot::Int(int_fwd)) => int_fwd.set(integer),

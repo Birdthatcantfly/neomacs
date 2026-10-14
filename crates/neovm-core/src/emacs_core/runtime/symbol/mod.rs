@@ -31,6 +31,17 @@ mod fn_stamps;
 mod projection;
 mod property_revision;
 pub use canonical_access::CanonicalAccess;
+
+/// Where an owner-routed canonical write went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub(crate) enum CanonicalWrite {
+    /// Canonical storage took it, or kept its value as the plain write does
+    /// (a per-buffer slot, a constant).
+    Done,
+    /// The cell is a thread projection: the owner-aware caller routes it.
+    Projected,
+}
 use cell::{ArmMut, CellWrite, MarkGate, RevealedCell, read_symbol_children};
 pub(crate) use cell::{
     BlvPtr, DumpedCell, DumpedSymbolFlags, LISP_SYMBOL_FLAGS_OFFSET,
@@ -2279,6 +2290,52 @@ impl Obarray {
         self.set_canonical_value_by_name(CanonicalAccess::BOOTSTRAP, name, value);
     }
 
+    /// [`Self::set_canonical_value`] for the owner-aware API
+    /// (`Context::store_variable`): the same write, except that a thread
+    /// projection answers [`CanonicalWrite::Projected`] from the per-buffer
+    /// arm its header already takes, where the plain write commits nothing.
+    /// Every other cell executes the canonical write.
+    #[inline(always)]
+    pub(crate) fn set_canonical_value_routed(&mut self, id: SymId, value: Value) -> CanonicalWrite {
+        self.ensure_global_member_if_canonical(id);
+        let target = self.resolve_alias_for_write(id);
+        let blv = match self.cell_write_ensure(target).arm() {
+            ArmMut::Localized(local) => local.blv(),
+            ArmMut::Forwarded(forwarded) => {
+                let fwd = forwarded.descriptor();
+                match fwd.store(value) {
+                    Ok(store) => {
+                        if !fwd.commit_unless_per_buffer(store) && fwd.thread_projection().is_some()
+                        {
+                            return CanonicalWrite::Projected;
+                        }
+                    }
+                    Err(error) => {
+                        debug_assert!(false, "forwarded slot refused an internal write: {error:?}")
+                    }
+                }
+                return CanonicalWrite::Done;
+            }
+            ArmMut::Plain(plain) => {
+                plain.store(value);
+                return CanonicalWrite::Done;
+            }
+            ArmMut::Alias(alias) => {
+                alias.unalias(value);
+                return CanonicalWrite::Done;
+            }
+        };
+        // Safety: a `Localized` cell names a record owned by self.blvs.
+        unsafe {
+            let blv = &mut *blv.as_ptr();
+            blv.defcell.set_cdr(value);
+            if super::value::eq_value(&blv.valcell, &blv.defcell) {
+                blv.valcell.set_cdr(value);
+            }
+        }
+        CanonicalWrite::Done
+    }
+
     /// Set the value cell of a symbol. Interns if needed.
     pub fn set_canonical_value_by_name(
         &mut self,
@@ -3955,6 +4012,52 @@ impl Obarray {
         if super::value::eq_value(&blv.valcell, &blv.defcell) {
             blv.valcell.set_cdr(Value::UNBOUND);
         }
+    }
+
+    /// [`Self::makunbound_canonical`] for the owner-aware API: a thread
+    /// projection answers [`CanonicalWrite::Projected`] from the forwarded
+    /// arm, which leaves every forwarder as it is.
+    #[inline(always)]
+    pub(crate) fn makunbound_canonical_routed(&mut self, id: SymId) -> CanonicalWrite {
+        self.ensure_global_member_if_canonical(id);
+        let target = self.resolve_alias_for_write(id);
+        if self
+            .slot(target)
+            .is_none_or(|sym| sym.trapped_write() == SymbolTrappedWrite::NoWrite)
+        {
+            return CanonicalWrite::Done;
+        }
+        let blv = match self.cell_write_ensure(target).arm() {
+            ArmMut::Plain(plain) => {
+                plain.store(Value::UNBOUND);
+                return CanonicalWrite::Done;
+            }
+            // `resolve_alias_for_write` stops on an alias only when the chain
+            // does not end; GNU `Fmakunbound` on an alias undoes it
+            // (`src/data.c:781-784`).
+            ArmMut::Alias(alias) => {
+                alias.unalias(Value::UNBOUND);
+                return CanonicalWrite::Done;
+            }
+            ArmMut::Forwarded(forwarded) => {
+                return if forwarded.descriptor().thread_projection().is_some() {
+                    CanonicalWrite::Projected
+                } else {
+                    CanonicalWrite::Done
+                };
+            }
+            ArmMut::Localized(local) => local.blv(),
+        };
+        // Safety: a `Localized` cell names a record self.blvs owns.
+        let blv = unsafe { &mut *blv.as_ptr() };
+        if blv.fwd.is_some() {
+            return CanonicalWrite::Done;
+        }
+        blv.defcell.set_cdr(Value::UNBOUND);
+        if super::value::eq_value(&blv.valcell, &blv.defcell) {
+            blv.valcell.set_cdr(Value::UNBOUND);
+        }
+        CanonicalWrite::Done
     }
 
     /// Check if a symbol is bound (has a value cell).

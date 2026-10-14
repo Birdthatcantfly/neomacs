@@ -1503,10 +1503,14 @@ impl Context {
         Some((base, self.obarray.thread_projection_of(base)?))
     }
 
-    /// [`Context::store_variable`] for a Context with owner bindings.
+    /// [`Context::store_variable`] of a projected cell.
     #[cold]
     #[inline(never)]
     pub(super) fn store_owner_variable(&mut self, id: SymId, value: Value) {
+        debug_assert!(
+            self.owner.slab().is_some(),
+            "a Context that sees a projected cell has an owner slab"
+        );
         let Some((base, projection)) = self.projection_behind(id) else {
             self.obarray
                 .set_canonical_value(CanonicalAccess::ROUTED, id, value);
@@ -1529,10 +1533,14 @@ impl Context {
         });
     }
 
-    /// [`Context::makunbound_variable`] for a Context with owner bindings.
+    /// [`Context::makunbound_variable`] of a projected cell.
     #[cold]
     #[inline(never)]
     pub(super) fn makunbound_owner_variable(&mut self, id: SymId) {
+        debug_assert!(
+            self.owner.slab().is_some(),
+            "a Context that sees a projected cell has an owner slab"
+        );
         let Some((base, projection)) = self.projection_behind(id) else {
             self.obarray
                 .makunbound_canonical(CanonicalAccess::ROUTED, id);

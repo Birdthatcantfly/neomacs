@@ -27,7 +27,7 @@ use super::owner_bindings::{
 use super::{Context, SymId, Value};
 use crate::emacs_core::forward::{CanonicalArm, ThreadProjectionDescriptor};
 use crate::emacs_core::intern::intern;
-use crate::emacs_core::symbol::{BufferlessValue, CanonicalAccess, Obarray};
+use crate::emacs_core::symbol::{BufferlessValue, CanonicalAccess, CanonicalWrite, Obarray};
 
 /// The variables one owner sees: canonical storage under its bindings.
 ///
@@ -85,6 +85,17 @@ impl<'a> VariableView<'a> {
         }
     }
 
+    /// A Context that can see a projected cell holds an owner slab; only a
+    /// canonical view reads one without an owner.
+    #[inline(always)]
+    fn debug_assert_owner_free(self, id: SymId) {
+        debug_assert!(
+            std::ptr::eq(self.owner, &NO_OWNER.0) || projection_behind(self.obarray, id).is_none(),
+            "a Context that sees a projected cell has an owner slab"
+        );
+        let _ = id;
+    }
+
     /// The obarray, for what a view does not cover (functions, plists).
     #[inline(always)]
     pub fn obarray(self) -> &'a Obarray {
@@ -102,7 +113,10 @@ impl<'a> VariableView<'a> {
             // `overriding-plist-environment` in every `get`): one owner-word
             // test inline is cheaper than a call.
             None => match self.owner.slab() {
-                None => None,
+                None => {
+                    self.debug_assert_owner_free(id);
+                    None
+                }
                 Some(slab) => owner_value(self.obarray, slab, id),
             },
         }
@@ -124,7 +138,12 @@ impl<'a> VariableView<'a> {
     #[cold]
     #[inline(never)]
     fn owner_value_by_name(self, name: &str) -> Option<Value> {
-        owner_value(self.obarray, self.owner.slab()?, intern(name))
+        let id = intern(name);
+        let Some(slab) = self.owner.slab() else {
+            self.debug_assert_owner_free(id);
+            return None;
+        };
+        owner_value(self.obarray, slab, id)
     }
 
     /// [`Self::value`], nil when void.
@@ -144,7 +163,10 @@ impl<'a> VariableView<'a> {
         {
             Some(value) => Some(value),
             None => match self.owner.slab() {
-                None => None,
+                None => {
+                    self.debug_assert_owner_free(id);
+                    None
+                }
                 Some(slab) => owner_value_in_buffer(self.obarray, slab, buf, id),
             },
         }
@@ -259,26 +281,28 @@ impl<'a> VariableStore<'a> {
     /// GNU `Vfoo = VALUE` from C (see [`Context::store_variable`]).
     #[inline]
     pub fn store(&mut self, id: SymId, value: Value) {
-        match self.owner.as_deref_mut().and_then(OwnerSlot::slab_mut) {
-            None => self
-                .obarray
-                .set_canonical_value(CanonicalAccess::ROUTED, id, value),
-            Some(slab) => owner_store(self.obarray, slab, id, value),
+        if self.obarray.set_canonical_value_routed(id, value) == CanonicalWrite::Projected {
+            self.store_projected(id, value);
         }
     }
 
     /// [`Self::store`] by name (interning it).
     #[inline]
     pub fn store_by_name(&mut self, name: &str, value: Value) {
-        match self.owner.as_deref_mut().and_then(OwnerSlot::slab_mut) {
-            None => self
-                .obarray
-                .set_canonical_value_by_name(CanonicalAccess::ROUTED, name, value),
-            Some(slab) => {
-                let id = intern(name);
-                self.obarray.ensure_interned_global_id(id);
-                owner_store(self.obarray, slab, id, value);
-            }
+        self.store(intern(name), value);
+    }
+
+    /// [`Self::store`] of a projected cell: the owner's write.
+    #[cold]
+    #[inline(never)]
+    fn store_projected(&mut self, id: SymId, value: Value) {
+        let slab = self.owner.as_deref_mut().and_then(OwnerSlot::slab_mut);
+        debug_assert!(
+            slab.is_some(),
+            "a store that sees a projected cell has an owner slab"
+        );
+        if let Some(slab) = slab {
+            owner_store(self.obarray, slab, id, value);
         }
     }
 }
@@ -457,36 +481,30 @@ impl Context {
     /// variable's default when it has one, the canonical default otherwise.
     /// No watchers, no type rule: the storage the obarray's
     /// `set_canonical_value` writes.
-    #[inline]
+    ///
+    /// A dormant write executes the canonical write alone: only a thread
+    /// projection, from the per-buffer arm its header already takes, reaches
+    /// the owner.
+    #[inline(never)]
     pub fn store_variable(&mut self, id: SymId, value: Value) {
-        if self.owner.is_dormant() {
-            self.obarray
-                .set_canonical_value(CanonicalAccess::ROUTED, id, value);
-        } else {
+        if self.obarray.set_canonical_value_routed(id, value) == CanonicalWrite::Projected {
             self.store_owner_variable(id, value);
         }
     }
 
     /// [`Self::store_variable`] by name (interning it).
-    #[inline]
+    #[inline(never)]
     pub fn store_variable_by_name(&mut self, name: &str, value: Value) {
-        if self.owner.is_dormant() {
-            self.obarray
-                .set_canonical_value_by_name(CanonicalAccess::ROUTED, name, value);
-        } else {
-            let id = intern(name);
-            self.obarray.ensure_interned_global_id(id);
+        let id = intern(name);
+        if self.obarray.set_canonical_value_routed(id, value) == CanonicalWrite::Projected {
             self.store_owner_variable(id, value);
         }
     }
 
     /// Make the variable void the way [`Self::store_variable`] writes it.
-    #[inline]
+    #[inline(never)]
     pub fn makunbound_variable(&mut self, id: SymId) {
-        if self.owner.is_dormant() {
-            self.obarray
-                .makunbound_canonical(CanonicalAccess::ROUTED, id);
-        } else {
+        if self.obarray.makunbound_canonical_routed(id) == CanonicalWrite::Projected {
             self.makunbound_owner_variable(id);
         }
     }

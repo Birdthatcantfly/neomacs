@@ -133,3 +133,26 @@ fn buffer_reads_answer_the_owner_local_binding() {
         "6"
     );
 }
+
+#[test]
+fn the_reader_shorthand_cell_read_falls_through_to_the_owner() {
+    // `read_symbol_shorthands_value` reads the variable's cell directly; a
+    // projected cell answers void there, so the read takes the general,
+    // owner-aware lookup.
+    let mut ev = context(false);
+    let id = intern("read-symbol-shorthands");
+    ev.project_thread_variable_for_test(id)
+        .expect("read-symbol-shorthands projects");
+    let shorthands = |ev: &Context| {
+        print_value(&crate::emacs_core::builtins::symbols::read_symbol_shorthands_value(ev))
+    };
+    assert_eq!(shorthands(&ev), "nil");
+    let count = ev.specpdl.len();
+    let binding = ev
+        .eval_str("'((\"tva-\" . \"tvb-\"))")
+        .expect("shorthand alist");
+    ev.try_specbind(id, binding).expect("bind");
+    assert_eq!(shorthands(&ev), "((\"tva-\" . \"tvb-\"))");
+    ev.unbind_to(count);
+    assert_eq!(shorthands(&ev), "nil");
+}

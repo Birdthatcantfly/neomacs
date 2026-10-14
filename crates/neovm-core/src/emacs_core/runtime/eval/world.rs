@@ -702,6 +702,10 @@ obarray_method_proxies! {
             name: &str,
         );
     pub fn makunbound_canonical(access: CanonicalAccess, id: SymId);
+    pub(crate) fn set_canonical_value_routed(id: SymId,
+            value: Value,
+        ) -> crate::emacs_core::symbol::CanonicalWrite;
+    pub(crate) fn makunbound_canonical_routed(id: SymId) -> crate::emacs_core::symbol::CanonicalWrite;
     pub fn put_property(name: &str, prop: &str, value: Value) -> Result<(), Flow>;
     pub fn put_property_id(symbol: SymId,
             prop: SymId,
