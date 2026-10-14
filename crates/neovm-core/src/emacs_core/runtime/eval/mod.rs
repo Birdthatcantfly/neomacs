@@ -2011,11 +2011,7 @@ struct CoreEvalSymbols {
 fn install_core_eval_symbols(obarray: &mut Obarray, reset_runtime_values: bool) -> CoreEvalSymbols {
     obarray.intern("internal-interpreter-environment");
     let internal_interpreter_environment_symbol = hidden_internal_interpreter_environment_symbol();
-    obarray.set_canonical_value(
-        CanonicalAccess::BOOTSTRAP,
-        internal_interpreter_environment_symbol,
-        Value::NIL,
-    );
+    obarray.seed_value_id(internal_interpreter_environment_symbol, Value::NIL);
     obarray.make_special_id(internal_interpreter_environment_symbol);
     let load_read_stream_token = hidden_load_read_stream_token();
 
@@ -2023,23 +2019,19 @@ fn install_core_eval_symbols(obarray: &mut Obarray, reset_runtime_values: bool) 
 
     let quit_flag_symbol = intern("quit-flag");
     if reset_runtime_values {
-        obarray.set_canonical_value(CanonicalAccess::BOOTSTRAP, quit_flag_symbol, Value::NIL);
+        obarray.seed_value_id(quit_flag_symbol, Value::NIL);
     }
     obarray.make_special_id(quit_flag_symbol);
 
     let inhibit_quit_symbol = intern("inhibit-quit");
     if reset_runtime_values {
-        obarray.set_canonical_value(CanonicalAccess::BOOTSTRAP, inhibit_quit_symbol, Value::NIL);
+        obarray.seed_value_id(inhibit_quit_symbol, Value::NIL);
     }
     obarray.make_special_id(inhibit_quit_symbol);
 
     let throw_on_input_symbol = intern("throw-on-input");
     if reset_runtime_values {
-        obarray.set_canonical_value(
-            CanonicalAccess::BOOTSTRAP,
-            throw_on_input_symbol,
-            Value::NIL,
-        );
+        obarray.seed_value_id(throw_on_input_symbol, Value::NIL);
     }
     obarray.make_special_id(throw_on_input_symbol);
 

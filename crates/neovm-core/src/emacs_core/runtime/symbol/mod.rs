@@ -2290,6 +2290,12 @@ impl Obarray {
         self.set_canonical_value_by_name(CanonicalAccess::BOOTSTRAP, name, value);
     }
 
+    /// [`Self::seed_value`] by identity.
+    #[inline]
+    pub fn seed_value_id(&mut self, id: SymId, value: Value) {
+        self.set_canonical_value(CanonicalAccess::BOOTSTRAP, id, value);
+    }
+
     /// [`Self::set_canonical_value`] for the owner-aware API
     /// (`Context::store_variable`): the same write, except that a thread
     /// projection answers [`CanonicalWrite::Projected`] from the per-buffer
@@ -4587,6 +4593,18 @@ impl Obarray {
     /// Aliases and localized variables retain the same resolution rules as a
     /// global read. No returned value borrows a symbol, BLV or descriptor slot.
     pub fn canonical_default_value(&self, _access: CanonicalAccess, id: SymId) -> Option<Value> {
+        self.default_value_with(id, |projection| self.projected_default_value(projection))
+    }
+
+    /// [`Self::canonical_default_value`]'s walk, with PROJECTED answering a
+    /// thread projection: only that arm calls it, so a caller that routes it
+    /// to an owner pays nothing on any other cell.
+    #[inline(always)]
+    pub(crate) fn default_value_with(
+        &self,
+        id: SymId,
+        projected: impl FnOnce(&crate::emacs_core::forward::ThreadProjectionDescriptor) -> Option<Value>,
+    ) -> Option<Value> {
         let mut current = id;
         for _ in 0..50 {
             let sym = self.slot(current)?;
@@ -4602,7 +4620,7 @@ impl Obarray {
                         let buf_fwd = fwd.as_buffer_obj_fwd()?;
                         match buf_fwd.thread_projection() {
                             None => Some(buf_fwd.default),
-                            Some(projection) => self.projected_default_value(projection),
+                            Some(projection) => projected(projection),
                         }
                     });
                 }

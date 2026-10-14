@@ -187,11 +187,35 @@ impl<'a> VariableView<'a> {
     /// `Obarray::canonical_default_value`.
     #[inline]
     pub fn default_value(self, id: SymId) -> Option<Value> {
+        // The owner is asked only from the arm a thread projection takes.
+        self.obarray
+            .default_value_with(id, |projection| self.owner_default_value(projection))
+    }
+
+    /// [`Self::default_value`] of a thread projection: this owner's default
+    /// binding when it has one, the canonical default otherwise.
+    #[cold]
+    #[inline(never)]
+    fn owner_default_value(self, projection: &ThreadProjectionDescriptor) -> Option<Value> {
+        match self.owner_default_slot(projection) {
+            SlotState::Bound(binding) => binding.bound(),
+            SlotState::NoBinding => self.obarray.projected_default_value(projection),
+        }
+    }
+
+    /// This owner's default-channel slot of PROJECTION (none for a view
+    /// without an owner).
+    #[inline]
+    fn owner_default_slot(self, projection: &ThreadProjectionDescriptor) -> SlotState {
         match self.owner.slab() {
-            None => self
-                .obarray
-                .canonical_default_value(CanonicalAccess::ROUTED, id),
-            Some(slab) => owner_default_value(self.obarray, slab, id),
+            Some(slab) => slab.slot(projection.index(), Channel::Default),
+            None => {
+                debug_assert!(
+                    std::ptr::eq(self.owner, &NO_OWNER.0),
+                    "a Context that sees a projected cell has an owner slab"
+                );
+                SlotState::NoBinding
+            }
         }
     }
 
@@ -199,11 +223,22 @@ impl<'a> VariableView<'a> {
     /// `Obarray::canonical_boundp_id`.
     #[inline]
     pub fn boundp(self, id: SymId) -> bool {
-        match self.owner.slab() {
-            None => self
-                .obarray
-                .canonical_boundp_id(CanonicalAccess::ROUTED, id),
-            Some(slab) => owner_boundp(self.obarray, slab, id),
+        // The owner is asked only from the arm a host-projected forwarded
+        // cell takes, and only for a thread projection there.
+        self.obarray
+            .boundp_id_with(id, |fwd| self.projected_boundp(fwd))
+    }
+
+    /// [`Self::boundp`] of a host-projected forwarded cell.
+    #[cold]
+    #[inline(never)]
+    fn projected_boundp(self, fwd: &crate::emacs_core::forward::LispFwd) -> bool {
+        let Some(projection) = fwd.thread_projection() else {
+            return true;
+        };
+        match self.owner_default_slot(projection) {
+            SlotState::Bound(binding) => binding.bound().is_some(),
+            SlotState::NoBinding => self.obarray.projected_default_value(projection).is_some(),
         }
     }
 
@@ -219,12 +254,18 @@ impl<'a> VariableView<'a> {
         let canonical = self
             .obarray
             .canonical_value_without_buffer_id(CanonicalAccess::ROUTED, id);
-        match (canonical, self.owner.slab()) {
-            (BufferlessValue::Void, Some(slab)) => match owner_value(self.obarray, slab, id) {
-                Some(value) => BufferlessValue::Global(value),
-                None => BufferlessValue::Void,
+        match canonical {
+            BufferlessValue::Void => match self.owner.slab() {
+                Some(slab) => match owner_value(self.obarray, slab, id) {
+                    Some(value) => BufferlessValue::Global(value),
+                    None => BufferlessValue::Void,
+                },
+                None => {
+                    self.debug_assert_owner_free(id);
+                    BufferlessValue::Void
+                }
             },
-            (canonical, _) => canonical,
+            canonical => canonical,
         }
     }
 
@@ -419,30 +460,6 @@ fn owner_value_in_buffer(
         },
         _ => canonical_bufferless_value(projection),
     }
-}
-
-/// [`VariableView::default_value`] for an owner.
-#[cold]
-#[inline(never)]
-fn owner_default_value(obarray: &Obarray, slab: &OwnerSlab, id: SymId) -> Option<Value> {
-    if let Some((_, projection)) = projection_behind(obarray, id)
-        && let SlotState::Bound(binding) = slab.slot(projection.index(), Channel::Default)
-    {
-        return binding.bound();
-    }
-    obarray.canonical_default_value(CanonicalAccess::ROUTED, id)
-}
-
-/// [`VariableView::boundp`] for an owner.
-#[cold]
-#[inline(never)]
-fn owner_boundp(obarray: &Obarray, slab: &OwnerSlab, id: SymId) -> bool {
-    if let Some((_, projection)) = projection_behind(obarray, id)
-        && let SlotState::Bound(binding) = slab.slot(projection.index(), Channel::Default)
-    {
-        return binding.bound().is_some();
-    }
-    obarray.canonical_boundp_id(CanonicalAccess::ROUTED, id)
 }
 
 impl Context {
