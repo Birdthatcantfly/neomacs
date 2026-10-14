@@ -1121,6 +1121,12 @@ impl Context {
         &mut self,
         id: SymId,
     ) -> Option<&'static crate::emacs_core::forward::ThreadProjectionDescriptor> {
+        // `buffer-undo-list` keeps its storage in the buffer's shared undo
+        // state, not a cell; its bindings swap with their owner instead
+        // (`owner_mirrors`).
+        if id == super::buffer_undo_list_symbol() {
+            return None;
+        }
         // A Context that can see a projected cell holds an owner slab: the
         // owner-aware variable API's dormant answer relies on it.
         self.ensure_owner_slab();

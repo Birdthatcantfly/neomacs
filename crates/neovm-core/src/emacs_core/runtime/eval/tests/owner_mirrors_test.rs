@@ -172,3 +172,35 @@ fn a_canonical_arm_under_no_owner_binding_stays_canonical() {
     ev.owner_canonical_store(id, Channel::Default, Value::NIL);
     assert!(!armed(&ev));
 }
+
+#[test]
+fn undo_list_bindings_swap_with_their_owner() {
+    let mut ev = projected(&[]);
+    assert!(
+        ev.project_thread_variable_for_test(intern("buffer-undo-list"))
+            .is_none(),
+        "buffer-undo-list's storage is the buffer's undo state, never a cell"
+    );
+    eval(
+        &mut ev,
+        "(progn (set-buffer (get-buffer-create \" tom-u\"))
+                (setq buffer-undo-list nil) (insert \"a\"))",
+    );
+    let outer = eval(&mut ev, "buffer-undo-list");
+    let count = ev.specpdl.len();
+    ev.try_specbind(intern("buffer-undo-list"), Value::T)
+        .expect("bind");
+    assert_eq!(eval(&mut ev, "buffer-undo-list"), "t");
+    // Another owner runs: it sees, and records into, what the binding hides.
+    ev.park_owner();
+    assert_eq!(eval(&mut ev, "buffer-undo-list"), outer);
+    eval(&mut ev, "(insert \"b\")");
+    let recorded = eval(&mut ev, "buffer-undo-list");
+    assert_ne!(recorded, outer, "the other owner's edit is recorded");
+    // This owner returns: its binding is back, so its edit is not recorded.
+    ev.refresh_owner_mirrors();
+    assert_eq!(eval(&mut ev, "buffer-undo-list"), "t");
+    eval(&mut ev, "(insert \"c\")");
+    ev.unbind_to(count);
+    assert_eq!(eval(&mut ev, "buffer-undo-list"), recorded);
+}

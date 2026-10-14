@@ -11,12 +11,32 @@
 //! GNU's thread switch zaps a `SPECPDL_LET_LOCAL` whose local is gone
 //! (`src/eval.c:4204-4228`).
 //!
-//! The returning continuation exists once admission does (round 3c);
-//! tests drive it directly.
+//! `buffer-undo-list` is never projected: its storage is the buffer's
+//! shared undo state, which undo recording reads and writes in place (GNU's
+//! `BVAR (current_buffer, undo_list)`). Its bindings stay `LetLocal` specpdl
+//! entries holding the binding in that shared state while their owner runs,
+//! and swap out when the owner leaves the baton and back in when it
+//! returns, exactly as GNU's thread switch swaps them
+//! (`specpdl_unrewind`, `src/eval.c:4134-4234`). Recording then costs a
+//! dormant owner nothing. (With several owners running at once, a binding
+//! must instead stay off the shared state, which needs recording to ask the
+//! owner; that comes with per-buffer edit ownership.)
+//!
+//! The returning continuation and the handoff exist once admission does
+//! (round 3c); tests drive them directly.
 
 use super::owner_bindings::{Channel, UndoTarget};
 use super::{Context, SymId, SymbolValueLookup, Value};
 use crate::emacs_core::intern::intern;
+
+/// Which way a handoff moves an owner's bindings held in shared storage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostBindingSwap {
+    /// The owner returns: its bindings go back into shared storage.
+    In,
+    /// The owner leaves: what its bindings hide goes back.
+    Out,
+}
 
 /// `debug-on-next-call`, whose `DEFVAR_BOOL` cell the admission header
 /// names.
@@ -33,6 +53,7 @@ impl Context {
     #[inline(never)]
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn refresh_owner_mirrors(&mut self) {
+        self.swap_host_bindings(HostBindingSwap::In);
         self.retire_dead_owner_locals();
         let mirrored: Vec<SymId> = self
             .runtime_projection_mask()
@@ -54,6 +75,38 @@ impl Context {
         }
         self.sync_gc_threshold_from_runtime_settings();
         self.point_owner_debugger();
+    }
+
+    /// This owner leaves the baton: its bindings held in shared host
+    /// storage swap out, so the next owner sees what they hide (GNU's
+    /// `unbind_for_thread_switch`, `src/thread.c:95-99`).
+    #[cold]
+    #[inline(never)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn park_owner(&mut self) {
+        self.swap_host_bindings(HostBindingSwap::Out);
+    }
+
+    /// Swap each live `buffer-undo-list` binding with the shared undo state:
+    /// innermost first going out, outermost first coming back in. A binding
+    /// whose buffer is gone turns into a no-op entry, as GNU's does.
+    fn swap_host_bindings(&mut self, direction: HostBindingSwap) {
+        let undo_list = super::buffer_undo_list_symbol();
+        let mut entries: Vec<usize> = self
+            .specpdl
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                matches!(entry, super::SpecBinding::LetLocal { sym_id, .. } if *sym_id == undo_list)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if direction == HostBindingSwap::Out {
+            entries.reverse();
+        }
+        for index in entries {
+            self.swap_local_let_binding_for_thread_switch(index);
+        }
     }
 
     /// GNU's thread-switch zap of a `let` whose buffer-local binding is
