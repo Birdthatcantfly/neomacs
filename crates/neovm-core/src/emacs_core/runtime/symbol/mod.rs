@@ -51,8 +51,8 @@ pub use cell::{LispSymbol, SymbolFlags};
 #[cfg(test)]
 pub(crate) use fn_stamps::force_fn_stamps_for_test;
 pub(crate) use projection::{
-    AdmissionPlanCell, ConcealOutcome, ProjectionPlanError, RevealedProjection,
-    enter_projection_scope, leave_projection_scope, reserve_projection_scope,
+    AdmissionPlanCell, ConcealOutcome, RevealedProjection, enter_projection_scope,
+    leave_projection_scope, reserve_projection_scope,
 };
 pub use property_revision::SymbolPropertyRevision;
 
@@ -1658,6 +1658,16 @@ impl Obarray {
     #[cold]
     #[inline(never)]
     fn publish_fresh_slot(slot: &mut LispSymbol, id: SymId, generation: u64) {
+        if projection::scopes_live() {
+            return Self::publish_fresh_slot_admitted(slot, id, generation);
+        }
+        slot.publish_fill(LispSymbol::new(id));
+    }
+
+    /// [`Self::publish_fresh_slot`] once some World admitted threads.
+    #[cold]
+    #[inline(never)]
+    fn publish_fresh_slot_admitted(slot: &mut LispSymbol, id: SymId, generation: u64) {
         let fresh = match projection::born_projected(generation) {
             None => LispSymbol::new(id),
             Some(header) => LispSymbol::new_projected(id, header),
@@ -3758,15 +3768,14 @@ impl Obarray {
     fn set_symbol_value_id_inner(&mut self, id: SymId, value: Value) {
         let target = self.resolve_alias_for_write(id);
         let blv = match self.cell_write_ensure(target).arm() {
-            ArmMut::Localized(local) => Some(local.blv()),
-            // A projected variable's canonical storage takes the write.
-            ArmMut::Forwarded(forwarded)
-                if forwarded.descriptor().thread_projection().is_some() =>
-            {
-                None
-            }
+            ArmMut::Localized(local) => local.blv(),
             ArmMut::Forwarded(forwarded) => {
                 let fwd = forwarded.descriptor();
+                // A projected variable's canonical storage takes the write.
+                if let Some(projection) = fwd.thread_projection() {
+                    projection::store_projected_canonical(forwarded, projection, value);
+                    return;
+                }
                 // This is the storage-level entry point, below the evaluator,
                 // so a refusal has no way to become a Lisp signal here; the
                 // Lisp-visible check runs in `set_runtime_binding_in_state`.
@@ -3793,9 +3802,6 @@ impl Obarray {
                 alias.unalias(value);
                 return;
             }
-        };
-        let Some(blv) = blv else {
-            return self.set_projected_canonical_value(target, value);
         };
         // LOCALIZED: write to BLV defcell (the default). The cell keeps
         // its arm -- replacing it would orphan the BLV record.

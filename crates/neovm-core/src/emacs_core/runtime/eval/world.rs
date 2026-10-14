@@ -803,8 +803,6 @@ obarray_method_proxies! {
     pub(crate) fn reveal_projection(id: SymId) -> Option<RevealedProjection>;
     pub(crate) fn owned_thread_projection(id: SymId)
         -> Option<&'static crate::emacs_core::forward::ThreadProjectionDescriptor>;
-    pub(crate) fn try_reserve_value_fwds(n: usize)
-        -> Result<(), crate::emacs_core::symbol::ProjectionPlanError>;
     pub(crate) fn conceal_projection(revealed: RevealedProjection) -> ConcealOutcome;
     pub(crate) fn store_plain_value_id(id: SymId, value: Value) -> Result<(), NotPlain>;
     pub(crate) fn set_internal_localized(sym_id: SymId,
@@ -1176,16 +1174,14 @@ impl Context {
         self.obarray.lease.0.owner_slabs.borrow_mut().register(heap)
     }
 
-    /// Visit every owner slab's values: each owner's bindings are roots,
-    /// whether or not that owner is running.
+    /// Visit every owner slab's values -- each owner's bindings are roots,
+    /// whether or not that owner is running -- and the canonical plain word
+    /// of every projected variable, which the World's table roots.
     pub(super) fn trace_owner_slabs(&self, visit: &mut dyn FnMut(Value)) {
         let heap = self.tagged_heap.identity();
-        self.obarray
-            .lease
-            .0
-            .owner_slabs
-            .borrow()
-            .trace_roots(heap, visit);
+        let world = &self.obarray.lease.0;
+        world.owner_slabs.borrow().trace_roots(heap, visit);
+        world.thread_projections.borrow().trace_roots(visit);
     }
 }
 
@@ -1223,8 +1219,8 @@ impl Context {
     }
 
     /// Make room for admission to project OWNED variables onto descriptors
-    /// of their own, plus the VOID one: arena pages, the issued list and the
-    /// obarray's forwarder roots. A refusal changes nothing a reader sees.
+    /// of their own, plus the VOID one: arena pages and the issued list. A
+    /// refusal changes nothing a reader sees.
     pub(super) fn reserve_thread_projections(&mut self, owned: usize) -> Result<(), ()> {
         self.obarray
             .lease
@@ -1232,8 +1228,7 @@ impl Context {
             .thread_projections
             .borrow_mut()
             .try_reserve(owned)
-            .map_err(|_| ())?;
-        self.obarray.try_reserve_value_fwds(owned).map_err(|_| ())
+            .map_err(|_| ())
     }
 
     /// The index the ORDINAL-th next projection this World issues will get.

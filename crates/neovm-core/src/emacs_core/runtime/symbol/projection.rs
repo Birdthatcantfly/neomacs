@@ -129,6 +129,12 @@ fn scope_for(generation: u64) -> Option<ProjectionScope> {
         .copied()
 }
 
+/// Whether any World in the process has admitted threads: one load.
+#[inline(always)]
+pub(super) fn scopes_live() -> bool {
+    PROJECTION_SCOPES_LIVE.load(Ordering::Relaxed) != 0
+}
+
 /// The header a fresh symbol of GENERATION's obarray is born on: VOID once
 /// its World admitted threads, none before. One load in a dormant process.
 #[inline]
@@ -143,6 +149,84 @@ pub(super) fn born_projected(generation: u64) -> Option<&'static LispFwd> {
 #[inline(never)]
 fn born_projected_slow(generation: u64) -> Option<&'static LispFwd> {
     scope_for(generation).map(|scope| scope.void.header())
+}
+
+/// The scope whose VOID descriptor is VOID.
+#[cold]
+#[inline(never)]
+fn scope_of_void(void: &ThreadProjectionDescriptor) -> Option<ProjectionScope> {
+    projection_scopes()
+        .iter()
+        .find(|scope| std::ptr::eq(scope.void, void))
+        .copied()
+}
+
+/// Give the cell FORWARDED writes, projected on its World's VOID, a
+/// descriptor of its own from that World's table: complete before the
+/// cell is redirected, rooted by the table. `None` if the World has no
+/// scope.
+fn materialize_in_place(
+    forwarded: super::cell::ForwardedArm<'_, '_>,
+    void: &'static ThreadProjectionDescriptor,
+) -> Option<&'static ThreadProjectionDescriptor> {
+    let scope = scope_of_void(void)?;
+    // SAFETY: the scope names the World that owns this cell's obarray,
+    // alive while the obarray is; the table is borrowed for this issue only.
+    let table = unsafe { scope.table.as_ref() };
+    let projection = table
+        .borrow_mut()
+        .issue(CanonicalArm::Plain, Value::UNBOUND, false);
+    forwarded.conceal_projection(projection);
+    Some(projection)
+}
+
+/// A storage-level write of VALUE to a projected variable, whose cell
+/// FORWARDED writes: its canonical storage takes it in place, as the
+/// unprojected cell would have. A cell on VOID (born by this write) gets a
+/// descriptor of its own first. Needs no obarray, so the writer's own path
+/// stays as it was.
+#[cold]
+#[inline(never)]
+pub(super) fn store_projected_canonical(
+    forwarded: super::cell::ForwardedArm<'_, '_>,
+    projection: &'static ThreadProjectionDescriptor,
+    value: Value,
+) {
+    let projection = if projection.is_void() {
+        match materialize_in_place(forwarded, projection) {
+            Some(projection) => projection,
+            None => {
+                debug_assert!(false, "a VOID cell outside any admitted World");
+                return;
+            }
+        }
+    } else {
+        projection
+    };
+    match projection.arm() {
+        CanonicalArm::Plain => projection.set_plain_value(value),
+        // SAFETY: a projection's localized arm names a live record of the
+        // obarray's BLV pool; its default cell is written as the
+        // unprojected `Localized` arm writes it.
+        CanonicalArm::Localized(blv) => unsafe {
+            let blv = &mut *blv.blv().as_ptr();
+            blv.defcell.set_cdr(value);
+            if super::super::value::eq_value(&blv.valcell, &blv.defcell) {
+                blv.valcell.set_cdr(value);
+            }
+        },
+        CanonicalArm::Forwarded(builtin) => {
+            let fwd = builtin.descriptor();
+            match fwd.store(value) {
+                Ok(store) => {
+                    fwd.commit(store);
+                }
+                Err(error) => {
+                    debug_assert!(false, "forwarded slot refused an internal write: {error:?}")
+                }
+            }
+        }
+    }
 }
 
 /// What admission does with one cell.
@@ -271,24 +355,13 @@ impl Obarray {
     #[cold]
     #[inline(never)]
     fn materialize_void(&mut self, id: SymId) -> Option<&'static ThreadProjectionDescriptor> {
-        let scope = scope_for(self.generation)?;
-        // SAFETY: the scope names the World that owns this obarray, alive
-        // while the obarray is; the table is borrowed for this issue only.
-        let table = unsafe { scope.table.as_ref() };
-        let projection = table
-            .borrow_mut()
-            .issue(CanonicalArm::Plain, Value::UNBOUND, false);
-        {
-            let mut write = self.cell_write_ensure(id);
-            let ArmMut::Forwarded(forwarded) = write.arm() else {
-                unreachable!("a projected cell is forwarded");
-            };
-            forwarded.conceal_projection(projection);
-        }
-        self.register_value_fwd(projection.plain_root());
-        Some(projection)
+        let void = self.thread_projection_of(id)?;
+        let mut write = self.cell_write_ensure(id);
+        let ArmMut::Forwarded(forwarded) = write.arm() else {
+            unreachable!("a projected cell is forwarded");
+        };
+        materialize_in_place(forwarded, void)
     }
-
     /// What admission does with ID's cell: `None` for a cell it leaves alone
     /// (empty, an alias, a constant, already projected).
     pub(crate) fn admission_plan(&self, id: SymId) -> Option<AdmissionPlanCell> {
@@ -309,20 +382,6 @@ impl Obarray {
             }
             super::ValueCell::Alias(_) => None,
         }
-    }
-
-    /// A storage-level write of VALUE to the projected variable ID: its
-    /// canonical storage takes it, as the unprojected cell would have. A
-    /// cell born on VOID in the middle of the operation (its slot did not
-    /// exist when the caller looked) gets a descriptor of its own first.
-    #[cold]
-    #[inline(never)]
-    pub(super) fn set_projected_canonical_value(&mut self, id: SymId, value: Value) {
-        let Some(revealed) = self.reveal_projection(id) else {
-            return;
-        };
-        self.set_symbol_value_id_inner(id, value);
-        let _ = self.conceal_projection(revealed);
     }
 
     /// `defvaralias` of the projected variable ID onto TARGET: a plain
@@ -356,16 +415,9 @@ impl Obarray {
         made
     }
 
-    /// Make room for N more registered forwarder roots without allocating.
-    pub(crate) fn try_reserve_value_fwds(&mut self, n: usize) -> Result<(), ProjectionPlanError> {
-        self.value_fwds
-            .try_reserve(n)
-            .map_err(|_| ProjectionPlanError)
-    }
-
     /// Admission's projection of ID's cell, as PLAN said: onto a descriptor
     /// TABLE issues (complete before the cell is redirected), or onto VOID.
-    /// Allocates nothing once TABLE and the forwarder roots are reserved.
+    /// Allocates nothing once TABLE is reserved.
     pub(crate) fn project_admitted_cell(
         &mut self,
         id: SymId,
@@ -433,7 +485,6 @@ impl Obarray {
             }
         };
         self.mark_runtime_projected_id(id);
-        self.register_value_fwd(projection.plain_root());
         Some(projection)
     }
 

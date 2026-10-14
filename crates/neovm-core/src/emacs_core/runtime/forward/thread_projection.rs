@@ -216,9 +216,8 @@ impl ThreadProjectionDescriptor {
         self.plain.set(value);
     }
 
-    /// The forwarder whose slot is the plain word, for root registration
-    /// by the obarray that projects the variable.
-    #[inline]
+    /// The forwarder whose slot is the plain word.
+    #[cfg(test)]
     pub(crate) fn plain_root(&'static self) -> &'static LispFwd {
         use super::FwdDescriptor;
         self.plain.header()
@@ -369,6 +368,15 @@ impl ThreadProjectionTable {
         std::ptr::eq(issued.header(), fwd).then_some(issued)
     }
 
+    /// Visit the canonical plain word of every descriptor issued: the table
+    /// roots them, as the World's owner slabs are rooted, so making a
+    /// descriptor never needs the obarray (VOID's word is always void).
+    pub(crate) fn trace_roots(&self, visit: &mut dyn FnMut(Value)) {
+        for projection in &self.issued {
+            visit(projection.plain_value());
+        }
+    }
+
     /// The index the ORDINAL-th next [`Self::issue`] will give (0 = the
     /// next): admission sizes an owner's slab before it issues.
     pub(crate) fn upcoming_index(&self, ordinal: usize) -> TlsIndex {
@@ -421,9 +429,8 @@ impl ThreadProjectionTable {
 
     /// Issue the next slot over logical redirect ARM, with PLAIN as the
     /// canonical plain word (UNBOUND unless ARM is `Plain`). The descriptor
-    /// is complete before the caller redirects a cell to it. The caller
-    /// registers [`ThreadProjectionDescriptor::plain_root`] with its
-    /// obarray's forwarder roots.
+    /// is complete before the caller redirects a cell to it; the table
+    /// roots its plain word ([`Self::trace_roots`]).
     pub(crate) fn issue(
         &mut self,
         arm: CanonicalArm,
