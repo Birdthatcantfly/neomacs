@@ -1290,16 +1290,15 @@ impl FrameManager {
 /// every Lisp thread sees one value, as in GNU. (N-mutator mode needs shared
 /// storage instead: a recorded obligation.)
 #[cold]
-pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
-    Box::new((
-        CHAR_TABLE_LAYOUT_MUTATION_EPOCH.with(Cell::get),
-        WINDOW_PARAMETERS_LAYOUT_GENERATION.with(Cell::get),
-    ))
+pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
+    Box::new((0_u64, 0_u64))
 }
 
 #[cold]
-pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
-    let (epoch, generation) = *state.downcast::<(u64, u64)>().expect("carried World state");
-    CHAR_TABLE_LAYOUT_MUTATION_EPOCH.with(|cell| cell.set(epoch));
-    WINDOW_PARAMETERS_LAYOUT_GENERATION.with(|cell| cell.set(generation));
+pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
+    let slot = slot
+        .downcast_mut::<(u64, u64)>()
+        .expect("carried World state");
+    CHAR_TABLE_LAYOUT_MUTATION_EPOCH.with(|cell| slot.0 = cell.replace(slot.0));
+    WINDOW_PARAMETERS_LAYOUT_GENERATION.with(|cell| slot.1 = cell.replace(slot.1));
 }

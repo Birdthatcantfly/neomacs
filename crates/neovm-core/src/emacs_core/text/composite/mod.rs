@@ -1744,25 +1744,20 @@ pub fn register_bootstrap_vars(obarray: &mut crate::emacs_core::symbol::Obarray)
 /// next resume, so every Lisp thread sees one value, as in GNU. (N-mutator
 /// mode needs shared storage instead: a recorded obligation.)
 #[cold]
-pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
-    Box::new(COMPOSITION_REGISTRY.with(|registry| {
-        std::mem::replace(
-            &mut *registry.borrow_mut(),
-            CompositionRegistry {
-                next_id: 0,
-                dedup: std::collections::HashMap::new(),
-                relative_by_id: Vec::new(),
-            },
-        )
-    }))
+pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
+    Box::new(CompositionRegistry {
+        next_id: 0,
+        dedup: std::collections::HashMap::new(),
+        relative_by_id: Vec::new(),
+    })
 }
 
 #[cold]
-pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
-    let state = *state
-        .downcast::<CompositionRegistry>()
-        .expect("the composition registry's carried state");
-    COMPOSITION_REGISTRY.with(|registry| *registry.borrow_mut() = state);
+pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
+    let slot = slot
+        .downcast_mut::<CompositionRegistry>()
+        .expect("carried World state");
+    COMPOSITION_REGISTRY.with(|registry| std::mem::swap(&mut *registry.borrow_mut(), slot));
 }
 
 #[cfg(test)]

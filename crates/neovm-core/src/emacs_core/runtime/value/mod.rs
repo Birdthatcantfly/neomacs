@@ -5700,18 +5700,16 @@ mod heap_mut_closure_guard;
 /// every Lisp thread sees one value, as in GNU. (N-mutator mode needs shared
 /// storage instead: a recorded obligation.)
 #[cold]
-pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
-    Box::new(
-        THREAD_LOCAL_ALLOCATION_COUNTS.with(|counts| counts.replace([0; MEMORY_USE_COUNT_LEN])),
-    )
+pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
+    Box::new([0_u64; MEMORY_USE_COUNT_LEN])
 }
 
 #[cold]
-pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
-    let state = *state
-        .downcast::<[u64; MEMORY_USE_COUNT_LEN]>()
+pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
+    let slot = slot
+        .downcast_mut::<[u64; MEMORY_USE_COUNT_LEN]>()
         .expect("carried World state");
-    THREAD_LOCAL_ALLOCATION_COUNTS.with(|counts| counts.set(state));
+    THREAD_LOCAL_ALLOCATION_COUNTS.with(|counts| *slot = counts.replace(*slot));
 }
 
 #[cfg(test)]

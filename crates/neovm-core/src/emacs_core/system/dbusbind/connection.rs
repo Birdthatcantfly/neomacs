@@ -177,12 +177,14 @@ fn string_arg(value: Value) -> Result<String, Flow> {
 /// every Lisp thread sees one value, as in GNU. (N-mutator mode needs shared
 /// storage instead: a recorded obligation.)
 #[cold]
-pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
-    Box::new(BUSES.with(|buses| std::mem::take(&mut *buses.borrow_mut())))
+pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
+    Box::new(HashMap::<BusKey, BusConnection>::new())
 }
 
 #[cold]
-pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
-    let state = *state.downcast::<HashMap<BusKey, BusConnection>>().expect("carried World state");
-    BUSES.with(|buses| *buses.borrow_mut() = state);
+pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
+    let slot = slot
+        .downcast_mut::<HashMap<BusKey, BusConnection>>()
+        .expect("carried World state");
+    BUSES.with(|buses| std::mem::swap(&mut *buses.borrow_mut(), slot));
 }

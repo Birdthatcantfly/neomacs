@@ -6952,14 +6952,14 @@ pub(crate) fn builtin_make_interpreted_closure(args: Vec<Value>) -> EvalResult {
 /// every Lisp thread sees one value, as in GNU. (N-mutator mode needs shared
 /// storage instead: a recorded obligation.)
 #[cold]
-pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
-    Box::new(LOSSAGE_SIZE.with(|slot| *slot.borrow()))
+pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
+    Box::new(300_i64)
 }
 
 #[cold]
-pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
-    let state = *state.downcast::<i64>().expect("carried World state");
-    LOSSAGE_SIZE.with(|slot| *slot.borrow_mut() = state);
+pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
+    let slot = slot.downcast_mut::<i64>().expect("carried World state");
+    LOSSAGE_SIZE.with(|size| std::mem::swap(&mut *size.borrow_mut(), slot));
 }
 
 #[cfg(test)]

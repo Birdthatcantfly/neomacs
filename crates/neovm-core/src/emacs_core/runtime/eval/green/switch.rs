@@ -498,18 +498,14 @@ fn run_worker(key: ThreadKey, receiver: mpsc::Receiver<Baton>, control: Arc<Cont
 /// (`carried`).
 fn stow_carried_state(baton: &Baton) {
     if let Some(runtime) = baton.green_runtime().as_ref() {
-        let mut slot = runtime.carried.borrow_mut();
-        debug_assert!(slot.is_none(), "the World's carried state is in two places");
-        *slot = Some(super::carried::CarriedState::take());
+        runtime.carried.borrow_mut().stow();
     }
 }
 
 /// The World's thread-local state arrives on this OS thread with the Baton.
 fn unstow_carried_state(baton: &Baton) {
-    if let Some(runtime) = baton.green_runtime().as_ref()
-        && let Some(state) = runtime.carried.borrow_mut().take()
-    {
-        state.restore();
+    if let Some(runtime) = baton.green_runtime().as_ref() {
+        runtime.carried.borrow_mut().unstow();
     }
 }
 

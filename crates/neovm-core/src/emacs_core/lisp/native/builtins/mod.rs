@@ -473,8 +473,8 @@ pub(crate) mod search;
 mod stubs;
 pub(crate) use byte_code::builtin_byte_code;
 pub(crate) use stubs::{
-    restore_world_state as restore_selection_world_state,
-    take_world_state as take_selection_world_state,
+    swap_world_state as swap_selection_world_state,
+    world_state_placeholder as selection_world_state_placeholder,
 };
 
 mod subrs;

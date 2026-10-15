@@ -41,9 +41,9 @@ pub(crate) struct GreenRuntime {
     /// A started thread's function until its OS thread runs it.
     pub(super) pending_starts:
         std::cell::RefCell<rustc_hash::FxHashMap<ThreadKey, crate::emacs_core::value::Value>>,
-    /// The World's thread-local state while its holder is parked
-    /// (`carried`, plan-3w.md section 7).
-    pub(super) carried: std::cell::RefCell<Option<carried::CarriedState>>,
+    /// The World's thread-local state while its holder is parked, and
+    /// placeholders for it otherwise (`carried`, plan-3w.md section 7).
+    pub(super) carried: std::cell::RefCell<carried::CarriedState>,
     /// The World's profiler (profiler.c's logs and switches) while its
     /// holder is parked. The running owner keeps it inline, so the safe
     /// points' `profiler_poll` test reads it at a fixed offset.
@@ -191,7 +191,7 @@ impl Context {
             parked: Default::default(),
             pending_starts: Default::default(),
             exit: Default::default(),
-            carried: Default::default(),
+            carried: std::cell::RefCell::new(carried::CarriedState::placeholders()),
             profiler: Default::default(),
             standard_case_table: std::cell::Cell::new(self.cached_standard_case_table),
             deferred_errors: Default::default(),

@@ -253,14 +253,14 @@ pub(crate) fn set_last_boundary_cause_explicit(ctx: &mut super::eval::Context) -
 /// every Lisp thread sees one value, as in GNU. (N-mutator mode needs shared
 /// storage instead: a recorded obligation.)
 #[cold]
-pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
-    Box::new(COMPACTION_IN_PROGRESS.with(std::cell::Cell::get))
+pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
+    Box::new(false)
 }
 
 #[cold]
-pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
-    let state = *state.downcast::<bool>().expect("carried World state");
-    COMPACTION_IN_PROGRESS.with(|latch| latch.set(state));
+pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
+    let slot = slot.downcast_mut::<bool>().expect("carried World state");
+    COMPACTION_IN_PROGRESS.with(|latch| *slot = latch.replace(*slot));
 }
 
 #[cfg(test)]

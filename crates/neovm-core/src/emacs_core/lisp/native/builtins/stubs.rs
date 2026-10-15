@@ -1565,20 +1565,20 @@ pub(crate) fn builtin_remember_mouse_glyph(
 /// every Lisp thread sees one value, as in GNU. (N-mutator mode needs shared
 /// storage instead: a recorded obligation.)
 #[cold]
-pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
+pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
     Box::new((
-        NEOMACS_CLIPBOARD_TEXT.with(|t| t.borrow_mut().take()),
-        NEOMACS_PRIMARY_SELECTION_TEXT.with(|t| t.borrow_mut().take()),
-        NEOMACS_MONITORS.with(|m| std::mem::take(&mut *m.borrow_mut())),
+        None::<String>,
+        None::<String>,
+        Vec::<NeomacsMonitorInfo>::new(),
     ))
 }
 
 #[cold]
-pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
-    let state = *state
-        .downcast::<(Option<String>, Option<String>, Vec<NeomacsMonitorInfo>)>()
+pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
+    let slot = slot
+        .downcast_mut::<(Option<String>, Option<String>, Vec<NeomacsMonitorInfo>)>()
         .expect("carried World state");
-    NEOMACS_CLIPBOARD_TEXT.with(|t| *t.borrow_mut() = state.0);
-    NEOMACS_PRIMARY_SELECTION_TEXT.with(|t| *t.borrow_mut() = state.1);
-    NEOMACS_MONITORS.with(|m| *m.borrow_mut() = state.2);
+    NEOMACS_CLIPBOARD_TEXT.with(|t| std::mem::swap(&mut *t.borrow_mut(), &mut slot.0));
+    NEOMACS_PRIMARY_SELECTION_TEXT.with(|t| std::mem::swap(&mut *t.borrow_mut(), &mut slot.1));
+    NEOMACS_MONITORS.with(|m| std::mem::swap(&mut *m.borrow_mut(), &mut slot.2));
 }

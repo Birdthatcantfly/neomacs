@@ -116,14 +116,14 @@ fn close_fd(raw: i64) -> bool {
 /// every Lisp thread sees one value, as in GNU. (N-mutator mode needs shared
 /// storage instead: a recorded obligation.)
 #[cold]
-pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
-    Box::new(REGISTERED.with(|fds| std::mem::take(&mut *fds.borrow_mut())))
+pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
+    Box::new(Vec::<(i64, String)>::new())
 }
 
 #[cold]
-pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
-    let state = *state
-        .downcast::<Vec<(i64, String)>>()
+pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
+    let slot = slot
+        .downcast_mut::<Vec<(i64, String)>>()
         .expect("carried World state");
-    REGISTERED.with(|fds| *fds.borrow_mut() = state);
+    REGISTERED.with(|fds| std::mem::swap(&mut *fds.borrow_mut(), slot));
 }

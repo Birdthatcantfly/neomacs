@@ -9935,14 +9935,14 @@ impl super::super::eval::Context {
 /// next resume, so every Lisp thread sees one value, as in GNU. (N-mutator
 /// mode needs shared storage instead: a recorded obligation.)
 #[cold]
-pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
-    Box::new(PROCESS_NAME_REGISTRY.with(|names| std::mem::take(&mut *names.borrow_mut())))
+pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
+    Box::new(rustc_hash::FxHashMap::<ProcessId, String>::default())
 }
 
 #[cold]
-pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
-    let state = *state
-        .downcast::<rustc_hash::FxHashMap<ProcessId, String>>()
-        .expect("the process names' carried state");
-    PROCESS_NAME_REGISTRY.with(|names| *names.borrow_mut() = state);
+pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
+    let slot = slot
+        .downcast_mut::<rustc_hash::FxHashMap<ProcessId, String>>()
+        .expect("carried World state");
+    PROCESS_NAME_REGISTRY.with(|names| std::mem::swap(&mut *names.borrow_mut(), slot));
 }

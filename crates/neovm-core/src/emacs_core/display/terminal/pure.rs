@@ -1694,34 +1694,28 @@ mod gc_context_migration_tests;
 /// every Lisp thread sees one value, as in GNU. (N-mutator mode needs shared
 /// storage instead: a recorded obligation.)
 #[cold]
-pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
-    Box::new(TERMINAL_MANAGER.with(|manager| {
-        manager.get().map(|m| {
-            std::mem::replace(
-                &mut *m.borrow_mut(),
-                TerminalManager {
-                    terminals: Vec::new(),
-                },
-            )
-        })
-    }))
+pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
+    Box::new(None::<TerminalManager>)
 }
 
 #[cold]
-pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
-    let state = *state
-        .downcast::<Option<TerminalManager>>()
+pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
+    let slot = slot
+        .downcast_mut::<Option<TerminalManager>>()
         .expect("carried World state");
-    if let Some(state) = state {
-        TERMINAL_MANAGER.with(|manager| {
-            let manager = manager.get_or_init(|| {
-                RefCell::new(TerminalManager {
-                    terminals: Vec::new(),
-                })
+    TERMINAL_MANAGER.with(|manager| match manager.get() {
+        Some(manager) => {
+            let incoming = slot.take().unwrap_or(TerminalManager {
+                terminals: Vec::new(),
             });
-            *manager.borrow_mut() = state;
-        });
-    }
+            *slot = Some(std::mem::replace(&mut *manager.borrow_mut(), incoming));
+        }
+        None => {
+            if let Some(state) = slot.take() {
+                let _ = manager.set(RefCell::new(state));
+            }
+        }
+    });
 }
 
 #[cfg(test)]

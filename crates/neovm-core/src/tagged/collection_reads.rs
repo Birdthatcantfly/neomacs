@@ -846,20 +846,17 @@ mod tests;
 /// cleared instead: it only ever answers again. (N-mutator mode needs shared
 /// storage instead: a recorded obligation.)
 #[cold]
-pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
-    Box::new((
-        ACTIVE.with(Cell::get),
-        STATE.with(|state| std::mem::take(&mut *state.borrow_mut())),
-    ))
+pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
+    Box::new((false, State::default()))
 }
 
 #[cold]
-pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
-    let (active, state) = *state
-        .downcast::<(bool, State)>()
+pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
+    let slot = slot
+        .downcast_mut::<(bool, State)>()
         .expect("carried World state");
-    ACTIVE.with(|cell| cell.set(active));
-    STATE.with(|slot| *slot.borrow_mut() = state);
+    ACTIVE.with(|active| slot.0 = active.replace(slot.0));
+    STATE.with(|state| std::mem::swap(&mut *state.borrow_mut(), &mut slot.1));
     reset_recent_reads_for_heap_installation();
 }
 

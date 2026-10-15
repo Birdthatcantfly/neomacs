@@ -60,20 +60,20 @@ mod enabled {
     /// next resume, so every Lisp thread sees one value, as in GNU. (N-mutator
     /// mode needs shared storage instead: a recorded obligation.)
     #[cold]
-    pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
+    pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
         Box::new((
-            DB_HANDLES.with(|handles| std::mem::take(&mut *handles.borrow_mut())),
-            RESULT_SETS.with(|sets| std::mem::take(&mut *sets.borrow_mut())),
+            HashMap::<i64, Rc<Connection>>::new(),
+            HashMap::<i64, ResultSet>::new(),
         ))
     }
 
     #[cold]
-    pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
-        let (handles, sets) = *state
-            .downcast::<(HashMap<i64, Rc<Connection>>, HashMap<i64, ResultSet>)>()
-            .expect("sqlite's carried state");
-        DB_HANDLES.with(|slot| *slot.borrow_mut() = handles);
-        RESULT_SETS.with(|slot| *slot.borrow_mut() = sets);
+    pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
+        let slot = slot
+            .downcast_mut::<(HashMap<i64, Rc<Connection>>, HashMap<i64, ResultSet>)>()
+            .expect("carried World state");
+        DB_HANDLES.with(|handles| std::mem::swap(&mut *handles.borrow_mut(), &mut slot.0));
+        RESULT_SETS.with(|sets| std::mem::swap(&mut *sets.borrow_mut(), &mut slot.1));
     }
 
     /// A live SQLite result set for incremental iteration.
@@ -1007,17 +1007,17 @@ pub(crate) use enabled::{
     load_extension, more_p, next, open, pragma, rollback, select, transaction, version,
 };
 #[cfg(feature = "sqlite")]
-pub(crate) use enabled::{restore_world_state, take_world_state};
+pub(crate) use enabled::{swap_world_state, world_state_placeholder};
 
 #[cfg(not(feature = "sqlite"))]
 #[cold]
-pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
+pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
     Box::new(())
 }
 
 #[cfg(not(feature = "sqlite"))]
 #[cold]
-pub(crate) fn restore_world_state(_state: Box<dyn std::any::Any>) {}
+pub(crate) fn swap_world_state(_slot: &mut dyn std::any::Any) {}
 
 #[cfg(not(feature = "sqlite"))]
 pub(crate) fn is_sqlite_object(

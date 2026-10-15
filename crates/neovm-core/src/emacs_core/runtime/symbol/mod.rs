@@ -32,8 +32,8 @@ mod projection;
 mod property_revision;
 pub use canonical_access::CanonicalAccess;
 pub(crate) use property_revision::{
-    restore_world_state as restore_property_revision_world_state,
-    take_world_state as take_property_revision_world_state,
+    swap_world_state as swap_property_revision_world_state,
+    world_state_placeholder as property_revision_world_state_placeholder,
 };
 
 /// Where an owner-routed canonical write went.

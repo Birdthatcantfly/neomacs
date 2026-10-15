@@ -34,34 +34,34 @@ std::cfg_select! {
 }
 
 /// D-Bus's carried World state (connections and registered fds; see
-/// `connection::take_world_state`).
+/// `connection::swap_world_state`).
 #[cold]
-pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
+pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
     std::cfg_select! {
         neomacs_have_dbus => {
-            Box::new((connection::take_world_state(), fd::take_world_state()))
+            Box::new((connection::world_state_placeholder(), fd::world_state_placeholder()))
         }
         _ => {
-            Box::new(((), fd::take_world_state()))
+            Box::new(((), fd::world_state_placeholder()))
         }
     }
 }
 
 #[cold]
-pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
+pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
     std::cfg_select! {
         neomacs_have_dbus => {
-            let (buses, fds) = *state
-                .downcast::<(Box<dyn std::any::Any>, Box<dyn std::any::Any>)>()
+            let (buses, fds) = slot
+                .downcast_mut::<(Box<dyn std::any::Any>, Box<dyn std::any::Any>)>()
                 .expect("D-Bus's carried state");
-            connection::restore_world_state(buses);
-            fd::restore_world_state(fds);
+            connection::swap_world_state(&mut **buses);
+            fd::swap_world_state(&mut **fds);
         }
         _ => {
-            let ((), fds) = *state
-                .downcast::<((), Box<dyn std::any::Any>)>()
+            let ((), fds) = slot
+                .downcast_mut::<((), Box<dyn std::any::Any>)>()
                 .expect("D-Bus's carried state");
-            fd::restore_world_state(fds);
+            fd::swap_world_state(&mut **fds);
         }
     }
 }

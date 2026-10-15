@@ -1039,14 +1039,16 @@ thread_local! {
 /// it is parked, so reads take no lock; the Green runtime moves it at each
 /// park and resume. Several Worlds in one process each keep their own rule.
 #[cold]
-pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
-    Box::new(TIME_ZONE_RULE.with(|slot| slot.replace(ZoneRule::Local)))
+pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
+    Box::new(ZoneRule::Local)
 }
 
 #[cold]
-pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
-    let state = *state.downcast::<ZoneRule>().expect("carried World state");
-    TIME_ZONE_RULE.with(|slot| *slot.borrow_mut() = state);
+pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
+    let slot = slot
+        .downcast_mut::<ZoneRule>()
+        .expect("carried World state");
+    TIME_ZONE_RULE.with(|rule| std::mem::swap(&mut *rule.borrow_mut(), slot));
 }
 
 /// Reset timezone rule to default (called from Context::new).

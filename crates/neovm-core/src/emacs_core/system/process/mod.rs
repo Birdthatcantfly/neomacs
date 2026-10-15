@@ -529,7 +529,7 @@ pub(crate) use helpers::*;
 
 mod types;
 pub use types::*;
-pub(crate) use types::{restore_world_state, take_world_state};
+pub(crate) use types::{swap_world_state, world_state_placeholder};
 #[cfg(test)]
 #[path = "tests/process_test.rs"]
 mod tests;

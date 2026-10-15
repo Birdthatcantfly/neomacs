@@ -47,18 +47,15 @@ impl SymbolPropertyRevision {
 /// every Lisp thread sees one value, as in GNU. (N-mutator mode needs shared
 /// storage instead: a recorded obligation.)
 #[cold]
-pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
-    Box::new((
-        REVISION.with(Cell::get),
-        OBSERVED.with(|observed| std::mem::take(&mut *observed.borrow_mut())),
-    ))
+pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
+    Box::new((0_u64, rustc_hash::FxHashSet::<SymId>::default()))
 }
 
 #[cold]
-pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
-    let state = *state
-        .downcast::<(u64, rustc_hash::FxHashSet<SymId>)>()
+pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
+    let slot = slot
+        .downcast_mut::<(u64, rustc_hash::FxHashSet<SymId>)>()
         .expect("carried World state");
-    REVISION.with(|revision| revision.set(state.0));
-    OBSERVED.with(|observed| *observed.borrow_mut() = state.1);
+    REVISION.with(|revision| slot.0 = revision.replace(slot.0));
+    OBSERVED.with(|observed| std::mem::swap(&mut *observed.borrow_mut(), &mut slot.1));
 }

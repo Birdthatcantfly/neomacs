@@ -25,8 +25,8 @@ mod chrome;
 pub use chrome::WindowChromePresence;
 mod display;
 pub(crate) use display::{
-    restore_world_state as restore_display_world_state,
-    take_world_state as take_display_world_state,
+    swap_world_state as swap_display_world_state,
+    world_state_placeholder as display_world_state_placeholder,
 };
 mod display_table_input;
 pub(crate) use display::WindowScrollUpdate;
