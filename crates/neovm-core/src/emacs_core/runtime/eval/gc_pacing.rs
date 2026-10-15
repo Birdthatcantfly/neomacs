@@ -51,6 +51,10 @@ impl Context {
         );
     }
 
+    /// Every root this Context holds, in named groups. Inlined into each of
+    /// its two callers (the collector's seeding and a Green thread's
+    /// parking), so each specializes the walk for its own visitor.
+    #[inline(always)]
     pub(super) fn trace_roots(
         &self,
         group: &mut dyn FnMut(&'static str),
