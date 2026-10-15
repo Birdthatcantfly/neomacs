@@ -1592,6 +1592,10 @@ mod soak_tests;
 mod mutator_tests;
 
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+#[path = "bg/tests/hof_credit_test.rs"]
+mod hof_credit_tests;
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
 #[path = "bg/tests/inline_size_test.rs"]
 mod inline_size_tests;
 
