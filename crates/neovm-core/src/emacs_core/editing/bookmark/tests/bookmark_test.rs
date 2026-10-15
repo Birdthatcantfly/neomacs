@@ -631,7 +631,7 @@ fn bookmark_save_load_preserves_raw_unibyte_file_path() {
         "bookmark file was not written to the raw-byte path {os_path:?}"
     );
 
-    eval.bookmarks = BookmarkManager::new();
+    *eval.bookmarks = BookmarkManager::new();
     builtin_bookmark_load(&mut eval, vec![path_val]).expect("load from raw path");
     assert!(eval.bookmarks.get(&bm_str("raw-bm")).is_some());
 
@@ -660,7 +660,7 @@ fn test_builtin_bookmark_save_load() {
     assert!(result.unwrap().is_nil());
 
     // Clear and load
-    eval.bookmarks = BookmarkManager::new();
+    *eval.bookmarks = BookmarkManager::new();
     let result = builtin_bookmark_load(&mut eval, vec![Value::string(save_file.to_string())]);
     assert!(result.is_ok());
     let load_message = result.unwrap();

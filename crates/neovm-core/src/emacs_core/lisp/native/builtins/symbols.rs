@@ -3251,7 +3251,7 @@ pub(crate) fn builtin_redirect_debugging_output(
 ) -> EvalResult {
     expect_args_range("redirect-debugging-output", &args, 1, 2)?;
     if args[0].is_nil() {
-        eval.debugging_output_file = None;
+        *eval.debugging_output_file_mut() = None;
         return Ok(Value::NIL);
     }
     let expanded =
@@ -3271,7 +3271,7 @@ pub(crate) fn builtin_redirect_debugging_output(
                 vec![Value::string(err.to_string())],
             )
         })?;
-    eval.debugging_output_file = Some(file);
+    *eval.debugging_output_file_mut() = Some(file);
     Ok(Value::NIL)
 }
 

@@ -2114,7 +2114,7 @@ pub(crate) fn sync_runtime_face_table_from_frame_lisp_faces(
         Some(palette) => FaceColorResolver::TtyPalette(palette),
         None => FaceColorResolver::Standard,
     };
-    eval.face_table =
+    *eval.face_table =
         runtime_face_table_from_frame_lisp_faces_resolved(eval, frame_id, false, resolver);
     // The palette travels with the table: everything downstream that realizes
     // one more face -- an anonymous attribute plist from a text property, an
@@ -3043,7 +3043,7 @@ pub(crate) fn builtin_internal_make_lisp_face(
         vector
     };
     eval.face_table.ensure_face(&face_name);
-    eval.face_change_count += 1;
+    *eval.face_change_count += 1;
     Ok(result)
 }
 
@@ -3115,7 +3115,7 @@ pub(crate) fn builtin_internal_copy_lisp_face(
 
     let result = args[1];
 
-    eval.face_change_count += 1;
+    *eval.face_change_count += 1;
 
     Ok(result)
 }
@@ -3376,7 +3376,7 @@ pub(crate) fn builtin_internal_set_lisp_face_attribute(
         }
     }
 
-    eval.face_change_count += 1;
+    *eval.face_change_count += 1;
 
     Ok(result)
 }
@@ -3772,7 +3772,7 @@ pub(crate) fn builtin_internal_merge_in_global_face(
         sync_face_overrides_from_lisp_face_vector(&face_name, local_vector, false);
     }
 
-    eval.face_change_count += 1;
+    *eval.face_change_count += 1;
     Ok(Value::NIL)
 }
 

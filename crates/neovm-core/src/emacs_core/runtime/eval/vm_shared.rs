@@ -76,7 +76,7 @@ impl Context {
     }
 
     pub(crate) fn interactive_minibuffer_read_count(&self) -> u64 {
-        self.interactive_minibuffer_read_count
+        *self.interactive_minibuffer_read_count
     }
 
     // --- Post-command point adjustment (GNU `keyboard.c`) -------------------
@@ -322,7 +322,7 @@ impl Context {
     }
 
     pub(crate) fn note_interactive_minibuffer_read(&mut self) {
-        self.interactive_minibuffer_read_count =
+        *self.interactive_minibuffer_read_count =
             self.interactive_minibuffer_read_count.saturating_add(1);
     }
 

@@ -25474,16 +25474,16 @@ fn alloc_probe_bytecode_hash_isolation() {
 #[test]
 fn display_affecting_var_set_bumps_display_var_change_count() {
     let mut eval = Context::new();
-    let before = eval.display_var_change_count;
+    let before = *eval.display_var_change_count;
     eval.mark_redisplay_dirty_if_display_var(intern("truncate-lines"));
-    let after = eval.display_var_change_count;
+    let after = *eval.display_var_change_count;
     assert!(
         after > before,
         "a display-affecting var must bump display_var_change_count ({before} -> {after})"
     );
     eval.mark_redisplay_dirty_if_display_var(intern("neomacs--definitely-not-a-display-var"));
     assert_eq!(
-        eval.display_var_change_count, after,
+        *eval.display_var_change_count, after,
         "an ordinary variable must not bump the display-var counter"
     );
 }

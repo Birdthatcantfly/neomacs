@@ -215,8 +215,8 @@ pub(super) fn restore_buffer(
         );
         effect = MinibufferWindowRestoreEffect::BufferRestored(saved.minibuffer_window_id);
     }
-    eval.minibuffer_selected_window = saved.previous_minibuffer_selected_window;
-    eval.active_minibuffer_window = saved.previous_active_minibuffer_window;
+    *eval.minibuffer_selected_window = saved.previous_minibuffer_selected_window;
+    *eval.active_minibuffer_window = saved.previous_active_minibuffer_window;
     effect
 }
 
@@ -252,8 +252,8 @@ pub(super) fn teardown(
     } else {
         // A transfer skips the remaining read-unwind selection statements.
         // The independent final buffer action and configurations still run.
-        eval.minibuffer_selected_window = saved.previous_minibuffer_selected_window;
-        eval.active_minibuffer_window = saved.previous_active_minibuffer_window;
+        *eval.minibuffer_selected_window = saved.previous_minibuffer_selected_window;
+        *eval.active_minibuffer_window = saved.previous_active_minibuffer_window;
     }
     let window_restore = MinibufferWindowRestoreEffect::NoBufferRestored;
     MinibufferTeardownOutcome {

@@ -995,7 +995,7 @@ impl RedisplayTransaction<'_> {
             self.eval.echo_area_resize_exact_pending = false;
             self.eval.gnu_redisplay_hooks.windows = PendingScope::None;
             self.eval.gnu_redisplay_hooks.mode_lines = PendingScope::None;
-            self.eval.last_redisplay_signature = Some(self.eval.redisplay_signature());
+            *self.eval.last_redisplay_signature = Some(self.eval.redisplay_signature());
         }
         Ok(Value::NIL)
     }

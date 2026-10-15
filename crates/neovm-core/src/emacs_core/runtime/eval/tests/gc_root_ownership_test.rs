@@ -125,7 +125,7 @@ fn gc_preserves_redisplay_message_snapshot_interval_plists() {
     let plists = propertized_echo_message(&mut ctx);
     let signature = ctx.redisplay_signature();
     ctx.set_current_message(None);
-    ctx.last_redisplay_signature = Some(signature);
+    *ctx.last_redisplay_signature = Some(signature);
     for _ in 0..3 {
         ctx.gc_collect_exact();
         for &plist in &plists {

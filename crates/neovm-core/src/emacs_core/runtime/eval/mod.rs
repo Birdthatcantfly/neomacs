@@ -59,7 +59,7 @@ use crate::window::{
 
 pub(crate) mod world;
 pub use world::{ContextShutdownError, ObarrayWriteAccess, OutstandingWorldViews};
-pub(crate) use world::{ObarrayView, OwnedRootRegistryView, WorldView};
+pub(crate) use world::{ObarrayView, OwnedRootRegistryView, WorldSlot, WorldView};
 
 mod callback;
 mod lexical_symbols;
@@ -3046,7 +3046,7 @@ pub struct Context {
     /// hostname from an explicit Lisp replacement.  This is transient process
     /// state and is deliberately reconstructed rather than serialized in a
     /// portable dump.
-    pub(crate) cached_system_name: Value,
+    pub(crate) cached_system_name: WorldSlot<Value>,
     /// The window edge the pointer is holding, if any.
     ///
     /// Updated as `read_char` consumes each pointer press and release, so it is
@@ -3065,7 +3065,7 @@ pub struct Context {
     /// retaining every parked value as a GC root.
     suspended_thread_bindings: Vec<ThreadDynamicBindingState>,
     /// GNU-compatible CPU and managed-allocation profiler state.
-    pub(crate) profiler: super::profiler::ProfilerState,
+    pub(crate) profiler: WorldSlot<super::profiler::ProfilerState>,
     /// Lexical environment: flat cons alist mirroring GNU Emacs's
     /// `Vinternal_interpreter_environment`.
     pub(crate) lexenv: Value,
@@ -3147,18 +3147,18 @@ pub struct Context {
     /// Buffer manager — owns all live buffers and tracks current buffer.
     pub buffers: BufferManager,
     /// GNU xwidget runtime state: internal model/view lists and id counter.
-    pub(crate) xwidgets: super::xwidget::XwidgetState,
+    pub(crate) xwidgets: WorldSlot<super::xwidget::XwidgetState>,
     /// GNU `last_overlay_modification_hooks`: hook-list/overlay pairs recorded
     /// by the before-change overlay scan and replayed by the after-change scan.
-    pub(crate) last_overlay_modification_hooks: Vec<OverlayModificationHook>,
+    pub(crate) last_overlay_modification_hooks: WorldSlot<Vec<OverlayModificationHook>>,
     /// GNU `interval_insert_behind_hooks`: text-property hook list recorded
     /// by `verify_interval_modification` before an insertion and replayed by
     /// `report_interval_modification` after the inserted text exists.
-    pub(crate) interval_insert_behind_hooks: Value,
+    pub(crate) interval_insert_behind_hooks: WorldSlot<Value>,
     /// GNU `interval_insert_in_front_hooks`: text-property hook list recorded
     /// by `verify_interval_modification` before an insertion and replayed by
     /// `report_interval_modification` after the inserted text exists.
-    pub(crate) interval_insert_in_front_hooks: Value,
+    pub(crate) interval_insert_in_front_hooks: WorldSlot<Value>,
     /// Match data from the last successful search/match operation.
     pub(crate) match_data: Option<MatchData>,
     /// Deferred after-change records, mirroring GNU Emacs's
@@ -3169,7 +3169,7 @@ pub struct Context {
     /// `after-change-functions` immediately. Each entry is the GNU triple
     /// `(charpos - BEG, Z - (charpos - lendel + lenins), lenins - lendel)`
     /// in 1-based character coordinates.
-    pub(crate) combine_after_change_list: Vec<(i64, i64, i64)>,
+    pub(crate) combine_after_change_list: WorldSlot<Vec<(i64, i64, i64)>>,
     /// Buffer that owns the deferred after-change records, mirroring GNU
     /// Emacs's `combine_after_change_buffer` (insdel.c). When the change
     /// buffer differs, the pending list is flushed before recording the new
@@ -3178,9 +3178,9 @@ pub struct Context {
     /// fragment (echo-area printer output), so the next complete message
     /// first terminates that line.
     pub(crate) message_log_need_newline: bool,
-    pub(crate) combine_after_change_buffer: Option<crate::buffer::BufferId>,
+    pub(crate) combine_after_change_buffer: WorldSlot<Option<crate::buffer::BufferId>>,
     /// Process manager — owns all tracked processes.
-    pub(crate) processes: ProcessManager,
+    pub(crate) processes: WorldSlot<ProcessManager>,
     /// Network manager — owns network connections, filters, and sentinels.
     /// Variable watcher list — callbacks on variable changes.
     pub(crate) watchers: WorldView<VariableWatcherList>,
@@ -3219,32 +3219,32 @@ pub struct Context {
     /// GNU stores this separately from the dynamically bindable Lisp variable
     /// `global-map`; preserving that distinction is observable through
     /// `current-global-map`, active key lookup, and legacy `global-set-key`.
-    selected_global_map: super::keymap::SelectedGlobalMap,
+    selected_global_map: WorldSlot<super::keymap::SelectedGlobalMap>,
     /// Register manager — quick storage and retrieval of text, positions, etc.
-    pub(crate) registers: RegisterManager,
+    pub(crate) registers: WorldSlot<RegisterManager>,
     /// Bookmark manager — persistent named positions.
-    pub(crate) bookmarks: BookmarkManager,
+    pub(crate) bookmarks: WorldSlot<BookmarkManager>,
     /// Abbreviation manager — text abbreviation expansion.
-    pub(crate) abbrevs: AbbrevManager,
+    pub(crate) abbrevs: WorldSlot<AbbrevManager>,
     /// Autoload manager — deferred function loading.
     pub(crate) autoloads: WorldView<AutoloadManager>,
     /// Custom variable manager — defcustom/defgroup system.
     pub(crate) custom: CustomManager,
     /// Rectangle state — stores the last killed rectangle for yank-rectangle.
-    pub(crate) rectangle: RectangleState,
+    pub(crate) rectangle: WorldSlot<RectangleState>,
     /// Interactive command registry — tracks interactive commands.
-    pub(crate) interactive: InteractiveRegistry,
+    pub(crate) interactive: WorldSlot<InteractiveRegistry>,
     /// Tree-sitter runtime manager — loaded grammars, parser state, node handles,
     /// and compiled queries backing `treesit-*` builtins.
     pub(crate) treesit: WorldView<super::treesit::TreeSitterManager>,
     /// Minibuffer runtime state — active minibuffer stack, prompt metadata, and history.
-    pub(crate) minibuffers: MinibufferManager,
+    pub(crate) minibuffers: WorldSlot<MinibufferManager>,
     /// Count of completed minibuffer reads observed by the evaluator.
-    pub(crate) interactive_minibuffer_read_count: u64,
+    pub(crate) interactive_minibuffer_read_count: WorldSlot<u64>,
     /// Current echo-area message text, mirroring GNU `current-message`.
-    pub(crate) current_message: Option<crate::heap_types::LispString>,
+    pub(crate) current_message: WorldSlot<Option<crate::heap_types::LispString>>,
     /// GNU `echo_buffer[2]`, held by identity rather than by name.
-    pub(crate) echo_area_buffers: EchoAreaBuffers,
+    pub(crate) echo_area_buffers: WorldSlot<EchoAreaBuffers>,
     /// Pending request to resize the echo-area mini-window *exactly* to its
     /// content on the next redisplay, mirroring GNU `resize_echo_area_exactly`
     /// (src/xdisp.c:13228-13245). GNU's `command_loop_1` (src/keyboard.c:1344)
@@ -3265,34 +3265,34 @@ pub struct Context {
     /// appending to the previous message.
     pub(crate) message_buf_print: bool,
     /// Window that was selected when the active minibuffer session began.
-    pub(crate) minibuffer_selected_window: Option<crate::window::WindowId>,
+    pub(crate) minibuffer_selected_window: WorldSlot<Option<crate::window::WindowId>>,
     /// Currently active minibuffer window, if any.
-    pub(crate) active_minibuffer_window: Option<crate::window::WindowId>,
+    pub(crate) active_minibuffer_window: WorldSlot<Option<crate::window::WindowId>>,
     /// Pending orderly shutdown requested by GNU C-owned primitives such as
     /// `kill-emacs`.
     pub(crate) shutdown_request: Option<ShutdownRequest>,
     /// First shutdown entry owns the hooks; the request is published after them.
     pub(crate) shutdown_in_progress: bool,
-    pub(crate) daemon: Option<DaemonState>,
+    pub(crate) daemon: WorldSlot<Option<DaemonState>>,
     /// Batch-compatible input-mode interrupt flag for `current-input-mode`.
     pub(crate) input_mode_interrupt: bool,
     /// Lisp-visible `quit_char` used by `current-input-mode` and low-level
     /// keyboard quit detection.
-    pub(crate) quit_char: i64,
+    pub(crate) quit_char: WorldSlot<i64>,
     /// True while the command loop is blocked waiting for external input.
     pub(crate) waiting_for_user_input: bool,
     /// Frame manager — owns all frames and windows.
     pub(crate) frames: WorldView<FrameManager>,
     /// Mode registry — major/minor modes.
-    pub(crate) modes: ModeRegistry,
+    pub(crate) modes: WorldSlot<ModeRegistry>,
     /// Thread manager — cooperative threading primitives.
-    pub(crate) threads: ThreadManager,
+    pub(crate) threads: WorldSlot<ThreadManager>,
     /// Keyboard macro metadata — ring/counter state layered above the
     /// keyboard-owned live recording/playback runtime.
-    pub(crate) kmacro: KmacroManager,
+    pub(crate) kmacro: WorldSlot<KmacroManager>,
     /// Command loop state — event queue, prefix args, kbd macros, quit flag.
     /// Used by the interactive command loop (recursive-edit → command_loop).
-    pub(crate) command_loop: crate::keyboard::CommandLoop,
+    pub(crate) command_loop: WorldSlot<crate::keyboard::CommandLoop>,
     /// Input event receiver from the display/render thread.
     /// `None` in batch mode (tests, non-interactive evaluation).
     /// When `Some`, `read_char()` drains this queue but normally blocks on the
@@ -3347,7 +3347,8 @@ pub struct Context {
     /// composition_gstring_put_cache/lookup_cache, src/composite.c): keyed
     /// by the gstring header's font family + pixel size + characters, valued
     /// by the shaped gstring with its ID slot assigned.
-    pub gstring_shape_cache: HashMap<crate::emacs_core::font::GstringShapeCacheKey, Value>,
+    pub(crate) gstring_shape_cache:
+        WorldSlot<HashMap<crate::emacs_core::font::GstringShapeCacheKey, Value>>,
     /// Optional GUI observer of a complete marker-backed scroll transition.
     #[allow(clippy::type_complexity)]
     pub scroll_preview_fn: Option<
@@ -3411,14 +3412,14 @@ pub struct Context {
     /// `Vcode_conversion_reused_workbuf` and `reused_workbuf_in_use`.
     pub(crate) code_conversion_workspace: crate::code_conversion_workspace::CodeConversionWorkspace,
     /// Face table — global registry of named face definitions.
-    pub(crate) face_table: FaceTable,
+    pub(crate) face_table: WorldSlot<FaceTable>,
     /// Incremented when any face attribute changes; layout engine uses
     /// this to invalidate its resolved face cache.
-    pub face_change_count: u64,
+    pub(crate) face_change_count: WorldSlot<u64>,
     /// Source identity for the display-facing `face_table` derived from a
     /// frame's authoritative Lisp face specifications.  Equal identity means
     /// redisplay can reuse the table without scanning every face again.
-    materialized_face_table_source: Option<(crate::window::FrameId, u64)>,
+    materialized_face_table_source: WorldSlot<Option<(crate::window::FrameId, u64)>>,
     /// Incremented when any display-affecting buffer-local/global variable is
     /// set (truncate-lines, bidi-*, ctl-arrow, buffer-display-table,
     /// buffer-invisibility-spec, fill-column-indicator, overlay-arrow,
@@ -3426,7 +3427,7 @@ pub struct Context {
     /// overlay tick, so the incremental fast paths key on this counter to force
     /// a full rebuild (adversarial-review fix). Rare event → a global counter
     /// (over-invalidating all windows) is acceptable and simpler than per-var keys.
-    pub display_var_change_count: u64,
+    pub(crate) display_var_change_count: WorldSlot<u64>,
     pub input_progress: neomacs_display_protocol::input_progress::InputProgress,
     /// Explicit redisplay invalidation generation, used for state that GNU
     /// marks with update_mode_lines/window redisplay flags.
@@ -3434,22 +3435,22 @@ pub struct Context {
     /// This counter also moves for presentation-only work (chrome, menu,
     /// mode-line), so it must NOT be the reason a window relayouts its body
     /// text; retained bodies key on [`BodyRedisplayRevision`] instead.
-    redisplay_generation: u64,
+    redisplay_generation: WorldSlot<u64>,
     /// Body-only redisplay revisions for `(force-window-update)`; see
     /// [`BodyRedisplayRevision`]. Kept per window and per buffer so a targeted
     /// force does not rebuild unrelated windows.
-    body_redisplay_all: u64,
-    body_redisplay_by_window: FxHashMap<WindowId, u64>,
-    body_redisplay_by_buffer: FxHashMap<BufferId, u64>,
+    body_redisplay_all: WorldSlot<u64>,
+    body_redisplay_by_window: WorldSlot<FxHashMap<WindowId, u64>>,
+    body_redisplay_by_buffer: WorldSlot<FxHashMap<BufferId, u64>>,
     /// GNU `update_menu_bar` invalidation boundary.  This is narrower than
     /// `redisplay_generation`; see [`MenuBarRebuildGeneration`].
-    menu_bar_rebuild_generation: u64,
+    menu_bar_rebuild_generation: WorldSlot<u64>,
     /// Which windows' chrome (mode/header/tab line) must be re-generated on
     /// the next redisplay. See [`ChromeDirty`].
-    chrome_dirty: crate::emacs_core::chrome_dirty::ChromeDirty,
+    chrome_dirty: WorldSlot<crate::emacs_core::chrome_dirty::ChromeDirty>,
     /// Pending GNU display ownership and private transaction state. Each
     /// exclusively borrowed Context owns it; never a process/TLS Lisp cache.
-    pub(crate) gnu_redisplay_hooks: redisplay_hooks::RedisplayHookOwnership,
+    pub(crate) gnu_redisplay_hooks: WorldSlot<redisplay_hooks::RedisplayHookOwnership>,
     /// Process-unique id for THIS evaluator instance. Lets thread-local
     /// caches outside neovm-core (e.g. the layout engine's menu-bar item
     /// cache) refuse entries from a previous Context: tests create many
@@ -3472,7 +3473,7 @@ pub struct Context {
     /// Last visible state submitted to redisplay.  Mirrors GNU's fast
     /// `needs_no_redisplay` path by skipping layout when none of the visible
     /// inputs changed.
-    last_redisplay_signature: Option<RedisplaySignature>,
+    last_redisplay_signature: WorldSlot<Option<RedisplaySignature>>,
     /// GNU `lisp_eval_depth`: one shared counter for interpreted cons-form
     /// evaluation, Lisp-visible `funcall`, and bytecode `Bcall`.
     pub(crate) depth: usize,
@@ -3569,7 +3570,7 @@ pub struct Context {
     /// condition runtime.
     next_resume_id: u64,
     /// GNU `pending_funcalls` equivalent for internal no-Lisp teardown paths.
-    pub(crate) pending_safe_funcalls: Vec<PendingSafeFuncall>,
+    pub(crate) pending_safe_funcalls: WorldSlot<Vec<PendingSafeFuncall>>,
     /// Cached truth of `internal--compiler-function-overrides`.
     ///
     /// GNU's hot evaluator path reads the function cell directly. Neomacs only
@@ -3636,7 +3637,7 @@ pub struct Context {
     pub(crate) tier_i: tier_i::TierI,
     /// User-defined fringe bitmaps registered via `define-fringe-bitmap`.
     /// GC-safe: holds no raw `Value`s (bits are `Vec<u16>`, faces are names).
-    pub(crate) fringe_bitmaps: super::builtins::fringe_bitmap::FringeBitmapRegistry,
+    pub(crate) fringe_bitmaps: WorldSlot<super::builtins::fringe_bitmap::FringeBitmapRegistry>,
     // Semantic registries belong to this heap; TLS only selects an active view.
     pub(crate) ccl_registry: super::ccl::CclRegistryHandle,
     pub(crate) charset_registry: super::charset::CharsetRegistryHandle,
@@ -4509,7 +4510,8 @@ impl Context {
     }
 
     pub(crate) fn select_global_map(&mut self, keymap: Value) {
-        self.selected_global_map.select(keymap, self.symbol_mode());
+        let mode = self.symbol_mode();
+        self.selected_global_map.select(keymap, mode);
     }
 
     #[inline]
@@ -4580,7 +4582,7 @@ impl Context {
     pub(crate) fn current_input_mode_tuple(&self) -> (bool, bool, bool, i64) {
         // Batch oracle compatibility: flow-control and meta are fixed to
         // nil/t respectively; quit-char remains mutable like GNU Emacs.
-        (self.input_mode_interrupt, false, true, self.quit_char)
+        (self.input_mode_interrupt, false, true, *self.quit_char)
     }
 
     pub(crate) fn set_input_mode_interrupt(&mut self, interrupt: bool) {
@@ -5213,6 +5215,18 @@ impl Context {
         &mut self.frames
     }
 
+    /// GNU's `face_change_count`: bumped on every face change.
+    #[inline]
+    pub fn face_change_count(&self) -> u64 {
+        *self.face_change_count
+    }
+
+    /// Bumped when a display-affecting variable changes.
+    #[inline]
+    pub fn display_var_change_count(&self) -> u64 {
+        *self.display_var_change_count
+    }
+
     pub fn current_message_text(&self) -> Option<String> {
         self.current_message
             .as_ref()
@@ -5253,7 +5267,7 @@ impl Context {
     }
 
     pub fn active_minibuffer_window_id(&self) -> Option<WindowId> {
-        if let Some(wid) = self.active_minibuffer_window {
+        if let Some(wid) = *self.active_minibuffer_window {
             return Some(wid);
         }
         let state = self.minibuffers.current()?;
@@ -5292,7 +5306,7 @@ impl Context {
         if selected_frame.minibuffer_window != Some(selected_frame.selected_window) {
             return None;
         }
-        let caller = self.minibuffer_selected_window?;
+        let caller = (*self.minibuffer_selected_window)?;
         super::window_cmds::WindowDomain::Live.frame_of(&self.frames, caller)?;
         Some(caller)
     }
@@ -5367,7 +5381,7 @@ impl Context {
             minibuffer_window_id,
         )
         .apply(&mut self.minibuffer_selected_window);
-        self.active_minibuffer_window = Some(minibuffer_window_id);
+        *self.active_minibuffer_window = Some(minibuffer_window_id);
         Ok(Some(minibuffer_window_id))
     }
 
@@ -5394,14 +5408,14 @@ impl Context {
         // only after installing its own message.
         self.cancel_key_echo_state();
         self.message_buf_print = false;
-        if self.current_message != message {
+        if (*self.current_message) != message {
             // GNU keeps no copy: `current_message` (src/xdisp.c:13420) reads the
             // echo buffer back with `make_buffer_string (BEG, Z, true)`
             // (`current_message_1`, src/xdisp.c:13437-13446), so what Lisp sees
             // is the text as the buffer holds it -- multibyte whenever the
             // buffer is. Store what was written, not what was handed in.
             let stored = self.mirror_message_to_echo_area_buffer(message.as_ref());
-            self.current_message = stored.or(message);
+            *self.current_message = stored.or(message);
             self.invalidate_redisplay();
         }
     }
@@ -5530,11 +5544,11 @@ impl Context {
     ) {
         match self.current_message.as_mut() {
             Some(message) => *message = message.concat(text),
-            None => self.current_message = Some(text.clone()),
+            None => *self.current_message = Some(text.clone()),
         }
         let current = self.current_message.clone();
         if let Some(stored) = self.mirror_message_to_echo_area_buffer(current.as_ref()) {
-            self.current_message = Some(stored);
+            *self.current_message = Some(stored);
         }
         self.invalidate_redisplay();
     }
@@ -5544,7 +5558,7 @@ impl Context {
             self.ensure_echo_area_buffers();
         }
         if !self.message_buf_print {
-            self.current_message = None;
+            *self.current_message = None;
             self.message_buf_print = true;
         }
         self.append_current_message_runtime_text(text);
@@ -5562,7 +5576,7 @@ impl Context {
             self.ensure_echo_area_buffers();
         }
         if !self.message_buf_print {
-            self.current_message = None;
+            *self.current_message = None;
             self.message_buf_print = true;
         }
         self.append_current_message_lisp_string(text);
@@ -5795,12 +5809,12 @@ impl Context {
     /// Refresh the render-facing face table from this frame's Lisp face
     /// vectors before redisplay.
     pub fn sync_runtime_faces_for_frame(&mut self, frame_id: crate::window::FrameId) -> bool {
-        let source = (frame_id, self.face_change_count);
-        if self.materialized_face_table_source == Some(source) {
+        let source = (frame_id, *self.face_change_count);
+        if (*self.materialized_face_table_source) == Some(source) {
             return false;
         }
         super::xfaces::sync_runtime_face_table_from_frame_lisp_faces(self, frame_id);
-        self.materialized_face_table_source = Some(source);
+        *self.materialized_face_table_source = Some(source);
         true
     }
 
@@ -5818,7 +5832,7 @@ impl Context {
         let _ = super::xfaces::ensure_lisp_face_id_property(self, face_name);
         let changed = self.face_table.set_attribute(face_name, attr, value);
         if changed {
-            self.face_change_count += 1;
+            *self.face_change_count += 1;
         }
         changed
     }
@@ -7716,6 +7730,7 @@ mod pdump_reconstruct;
 mod macroexpand;
 
 mod admission;
+mod global_state;
 mod green;
 pub(crate) use admission::ThreadingMode;
 pub(crate) use green::{SelectTurn, green_make_thread, green_world};

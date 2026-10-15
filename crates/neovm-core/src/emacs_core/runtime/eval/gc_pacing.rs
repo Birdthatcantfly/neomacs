@@ -243,7 +243,7 @@ impl Context {
         visit(self.inhibit_quit);
         visit(self.throw_on_input);
         if self.cached_system_name.is_heap_object() {
-            visit(self.cached_system_name);
+            visit(*self.cached_system_name);
         }
         if let Some(filter_fn) = self.interpreted_closure_filter_fn {
             visit(filter_fn);
@@ -266,10 +266,10 @@ impl Context {
             visit(hook.overlay);
         }
         if !self.interval_insert_behind_hooks.is_nil() {
-            visit(self.interval_insert_behind_hooks);
+            visit(*self.interval_insert_behind_hooks);
         }
         if !self.interval_insert_in_front_hooks.is_nil() {
-            visit(self.interval_insert_in_front_hooks);
+            visit(*self.interval_insert_in_front_hooks);
         }
         if !self.current_local_map.is_nil() {
             visit(self.current_local_map);
@@ -393,7 +393,7 @@ impl Context {
         group("kmacro");
         self.kmacro.trace_roots_with(visit);
         group("command_loop");
-        crate::gc_trace::GcTrace::trace_roots_with(&self.command_loop, visit);
+        crate::gc_trace::GcTrace::trace_roots_with(&*self.command_loop, visit);
         group("modes");
         self.modes.trace_roots_with(visit);
         group("frames");

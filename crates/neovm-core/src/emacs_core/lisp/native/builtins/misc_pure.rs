@@ -187,7 +187,7 @@ fn message_dolog(
         // buffer, so text placed in `*Messages*' by other means never gets one
         // (verified on GNU 31.0.90: "keep" + `(message "hello")' logs
         // "keephello\n").
-        let needs_newline = ctx.message_log_need_newline;
+        let needs_newline = ctx.message_log_need_newline();
         if needs_newline {
             let _ = ctx.buffers.goto_buffer_emacs_byte_pos(buf_id, old_full_end);
             let _ = ctx.buffers.insert_into_buffer(buf_id, "\n");
@@ -266,7 +266,7 @@ fn message_dolog(
     if let Some(old) = old_buf {
         ctx.restore_current_buffer_if_live(old);
     }
-    ctx.message_log_need_newline = termination == MessageLogTermination::Fragment;
+    ctx.set_message_log_need_newline(termination == MessageLogTermination::Fragment);
 }
 
 impl super::eval::Context {

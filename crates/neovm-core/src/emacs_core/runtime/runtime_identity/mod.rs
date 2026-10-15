@@ -436,7 +436,7 @@ fn install_system_name(eval: &mut Context, name: String) {
         .unwrap_or_else(|| Value::string(name));
     eval.set_variable("system-name", value);
     eval.obarray_mut().make_special("system-name");
-    eval.cached_system_name = value;
+    *eval.cached_system_name = value;
 }
 
 fn refresh_system_name_from(eval: &mut Context, name: String) {

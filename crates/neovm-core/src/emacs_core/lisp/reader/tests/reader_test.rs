@@ -2108,9 +2108,9 @@ fn activate_minibuffer_window_switches_displayed_buffer_and_restores_state() {
         Some(active_buffer)
     );
     assert_eq!(ev.buffer_manager().current_buffer_id(), Some(active_buffer));
-    assert_eq!(ev.active_minibuffer_window, Some(minibuffer_window));
+    assert_eq!(*ev.active_minibuffer_window, Some(minibuffer_window));
     assert_eq!(
-        ev.minibuffer_selected_window,
+        *ev.minibuffer_selected_window,
         Some(previous_selected_window)
     );
 
@@ -2129,8 +2129,8 @@ fn activate_minibuffer_window_switches_displayed_buffer_and_restores_state() {
             .and_then(|window| window.buffer_id()),
         Some(previous_minibuffer_buffer)
     );
-    assert_eq!(ev.active_minibuffer_window, None);
-    assert_eq!(ev.minibuffer_selected_window, None);
+    assert_eq!(*ev.active_minibuffer_window, None);
+    assert_eq!(*ev.minibuffer_selected_window, None);
     assert_ne!(
         ev.menu_bar_rebuild_generation(),
         generation_while_active,
@@ -2165,7 +2165,7 @@ fn nested_minibuffer_keeps_the_outer_calling_window_active() {
     .expect("activate nested minibuffer");
 
     assert_eq!(
-        ev.minibuffer_selected_window,
+        *ev.minibuffer_selected_window,
         Some(calling_window),
         "GNU preserves minibuf_selected_window when a recursive minibuffer reuses the already-selected minibuffer window"
     );

@@ -714,7 +714,7 @@ pub(crate) fn builtin_external_debugging_output(
         Some(name) => crate::encoding::encode_lisp_string(&internal, name, eol_conversion),
         None => internal.as_bytes().to_vec(),
     };
-    if let Some(file) = eval.debugging_output_file.as_mut() {
+    if let Some(file) = eval.debugging_output_file_mut().as_mut() {
         use std::io::Write;
         file.write_all(&bytes)
             .and_then(|_| file.flush())

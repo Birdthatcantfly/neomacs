@@ -26,7 +26,7 @@ impl Context {
     /// Mark this evaluator as a daemon before running normal-top-level.
     /// The name is host-owned; Lisp cannot change daemonp by setting variables.
     pub fn configure_daemon(&mut self, name: Option<String>, notify: Option<DaemonNotifier>) {
-        self.daemon = Some(DaemonState {
+        *self.daemon = Some(DaemonState {
             name,
             initialized: false,
             notify,
@@ -1435,12 +1435,12 @@ impl Context {
     /// (bumped by `force-mode-line-update`, display-variable writes, media
     /// changes). Caches of redisplay-derived data key on it.
     pub fn redisplay_generation(&self) -> u64 {
-        self.redisplay_generation
+        *self.redisplay_generation
     }
 
     /// Generation of GNU `update_menu_bar` rebuild requests.
     pub fn menu_bar_rebuild_generation(&self) -> MenuBarRebuildGeneration {
-        MenuBarRebuildGeneration(self.menu_bar_rebuild_generation)
+        MenuBarRebuildGeneration(*self.menu_bar_rebuild_generation)
     }
 
     /// See the `context_instance_id` field.
@@ -1496,8 +1496,8 @@ impl Context {
 
     pub(crate) fn invalidate_redisplay(&mut self) {
         tracing::debug!(target: "neomacs::redisplay_sig", "invalidate_redisplay");
-        self.redisplay_generation = self.redisplay_generation.wrapping_add(1);
-        self.last_redisplay_signature = None;
+        *self.redisplay_generation = self.redisplay_generation.wrapping_add(1);
+        *self.last_redisplay_signature = None;
     }
 
     /// Record an explicit body redisplay request (GNU `Fforce_window_update`,
@@ -1515,7 +1515,7 @@ impl Context {
     pub fn force_body_redisplay(&mut self, target: ForcedBodyRedisplay) {
         match target {
             ForcedBodyRedisplay::AllWindows => {
-                self.body_redisplay_all = self.body_redisplay_all.wrapping_add(1);
+                *self.body_redisplay_all = self.body_redisplay_all.wrapping_add(1);
             }
             ForcedBodyRedisplay::Window(window) => {
                 let counter = self.body_redisplay_by_window.entry(window).or_insert(0);
@@ -1542,7 +1542,7 @@ impl Context {
         buffer: BufferId,
     ) -> BodyRedisplayRevision {
         BodyRedisplayRevision::new(
-            self.body_redisplay_all,
+            *self.body_redisplay_all,
             self.body_redisplay_by_window
                 .get(&window)
                 .copied()
@@ -1557,7 +1557,7 @@ impl Context {
     /// Cross GNU `update_menu_bar`'s rebuild boundary and schedule redisplay.
     pub(crate) fn request_menu_bar_rebuild(&mut self, reason: MenuBarRebuildReason) {
         tracing::debug!(?reason, "request menu-bar rebuild");
-        self.menu_bar_rebuild_generation = self.menu_bar_rebuild_generation.wrapping_add(1);
+        *self.menu_bar_rebuild_generation = self.menu_bar_rebuild_generation.wrapping_add(1);
         self.invalidate_redisplay();
     }
 
@@ -1662,7 +1662,7 @@ impl Context {
             // A display-affecting variable changed: the incremental fast paths
             // key on this counter so they re-lay instead of reusing rows shaped
             // under the old setting (the four buffer/face ticks do not move here).
-            self.display_var_change_count = self.display_var_change_count.wrapping_add(1);
+            *self.display_var_change_count = self.display_var_change_count.wrapping_add(1);
         }
     }
 
@@ -1811,7 +1811,7 @@ impl Context {
             self.echo_area_resize_exact_pending = false;
             let _ = super::super::builtins::run_redisplay_window_change_hooks(self);
         }
-        self.last_redisplay_signature = Some(self.redisplay_signature());
+        *self.last_redisplay_signature = Some(self.redisplay_signature());
         Ok(())
     }
 
@@ -1985,10 +1985,10 @@ impl Context {
             current_message: self.current_message.clone(),
             active_minibuffer_window: self.active_minibuffer_window.map(|id| id.0),
             minibuffer_selected_window: self.minibuffer_selected_window.map(|id| id.0),
-            face_change_count: self.face_change_count,
+            face_change_count: (*self.face_change_count),
             obarray_function_epoch: self.obarray.function_epoch(),
             symbol_property_revision: crate::emacs_core::symbol::SymbolPropertyRevision::current(),
-            redisplay_generation: self.redisplay_generation,
+            redisplay_generation: (*self.redisplay_generation),
             frame,
         }
     }
@@ -3132,15 +3132,15 @@ impl Context {
     }
 
     pub(crate) fn quit_char(&self) -> i64 {
-        self.quit_char
+        *self.quit_char
     }
 
     pub(crate) fn set_quit_char(&mut self, quit: i64) {
-        self.quit_char = quit & 0o377;
+        *self.quit_char = quit & 0o377;
     }
 
     pub(crate) fn event_is_quit_char(&self, event: &Value) -> bool {
-        event.as_fixnum() == Some(self.quit_char)
+        event.as_fixnum() == Some(*self.quit_char)
     }
 
     pub(crate) fn request_quit_from_keyboard_input(&mut self) {

@@ -168,7 +168,7 @@ fn set_lisp_face_attribute_bumps_face_change_count() {
     // incremental redisplay's retained key compares `face_change_count` and
     // drops matrices when set-face-attribute / theme load mutates appearance
     // in place (spec §4.2 escalation — the hash cannot backstop face drift).
-    let before = eval.face_change_count;
+    let before = *eval.face_change_count;
     builtin_internal_set_lisp_face_attribute(
         &mut eval,
         vec![
@@ -178,7 +178,7 @@ fn set_lisp_face_attribute_bumps_face_change_count() {
         ],
     )
     .unwrap();
-    let after = eval.face_change_count;
+    let after = *eval.face_change_count;
     assert!(
         after > before,
         "set-face-attribute must bump face_change_count (before={before} after={after})"
@@ -195,7 +195,7 @@ fn frame_face_attribute_setter_defers_runtime_realization_until_redisplay() {
     let face_name = "__neovm_deferred_face_realization";
 
     builtin_internal_make_lisp_face(&mut eval, vec![Value::symbol(face_name), frame]).unwrap();
-    let before = eval.face_change_count;
+    let before = *eval.face_change_count;
 
     builtin_internal_set_lisp_face_attribute(
         &mut eval,
@@ -216,7 +216,7 @@ fn frame_face_attribute_setter_defers_runtime_realization_until_redisplay() {
         "the GNU-shaped frame-local Lisp face vector is authoritative",
     );
     assert!(
-        eval.face_change_count > before,
+        (*eval.face_change_count) > before,
         "the setter must dirty redisplay"
     );
     assert_eq!(

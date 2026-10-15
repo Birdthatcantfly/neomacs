@@ -144,34 +144,34 @@ impl Context {
         ev.load_read_cursors.clear();
         ev.last_uncaught_signal_backtrace = None;
         ev.buffers.reset_for_minimal_runtime();
-        ev.xwidgets = super::super::xwidget::XwidgetState::new();
+        *ev.xwidgets = super::super::xwidget::XwidgetState::new();
         ev.last_overlay_modification_hooks.clear();
-        ev.interval_insert_behind_hooks = Value::NIL;
-        ev.interval_insert_in_front_hooks = Value::NIL;
+        *ev.interval_insert_behind_hooks = Value::NIL;
+        *ev.interval_insert_in_front_hooks = Value::NIL;
         ev.match_data = None;
-        ev.processes = ProcessManager::new();
+        *ev.processes = ProcessManager::new();
         *ev.watchers = VariableWatcherList::new();
         ev.current_local_map = Value::NIL;
-        ev.selected_global_map = super::super::keymap::SelectedGlobalMap::default();
-        ev.registers = RegisterManager::new();
-        ev.bookmarks = BookmarkManager::new();
-        ev.abbrevs = AbbrevManager::new();
+        *ev.selected_global_map = super::super::keymap::SelectedGlobalMap::default();
+        *ev.registers = RegisterManager::new();
+        *ev.bookmarks = BookmarkManager::new();
+        *ev.abbrevs = AbbrevManager::new();
         *ev.autoloads = AutoloadManager::new();
         ev.custom = CustomManager::new();
-        ev.rectangle = RectangleState::new();
-        ev.interactive = InteractiveRegistry::new();
+        *ev.rectangle = RectangleState::new();
+        *ev.interactive = InteractiveRegistry::new();
         ev.input_mode_interrupt = false;
         *ev.frames = lisp_frame_manager();
-        ev.modes = ModeRegistry::new();
-        ev.threads = ThreadManager::new();
-        ev.kmacro = KmacroManager::new();
-        ev.command_loop = crate::keyboard::CommandLoop::default();
+        *ev.modes = ModeRegistry::new();
+        *ev.threads = ThreadManager::new();
+        *ev.kmacro = KmacroManager::new();
+        *ev.command_loop = crate::keyboard::CommandLoop::default();
         ev.input_rx = None;
         ev.eval_task_rx = None;
         ev.redisplay_fn = None;
         ev.mode_line_display_flow = None;
         ev.redisplay_prepare_fn = None;
-        ev.gnu_redisplay_hooks = redisplay_hooks::RedisplayHookOwnership::initial();
+        *ev.gnu_redisplay_hooks = redisplay_hooks::RedisplayHookOwnership::initial();
         ev.display_idle_maintenance_fn = None;
         ev.scroll_preview_fn = None;
         ev.frame_snapshot_fn = None;
@@ -179,16 +179,16 @@ impl Context {
         ev.scroll_goal = None;
         ev.display_host = None;
         *ev.coding_systems = CodingSystemManager::new();
-        ev.face_table = FaceTable::new();
-        ev.face_change_count = 0;
-        ev.display_var_change_count = 0;
-        ev.redisplay_generation = 0;
-        ev.body_redisplay_all = 0;
+        *ev.face_table = FaceTable::new();
+        *ev.face_change_count = 0;
+        *ev.display_var_change_count = 0;
+        *ev.redisplay_generation = 0;
+        *ev.body_redisplay_all = 0;
         ev.body_redisplay_by_window.clear();
         ev.body_redisplay_by_buffer.clear();
-        ev.menu_bar_rebuild_generation = 0;
+        *ev.menu_bar_rebuild_generation = 0;
         ev.media_generation = 0;
-        ev.last_redisplay_signature = None;
+        *ev.last_redisplay_signature = None;
         ev.depth = 0;
         ev.max_depth = 1600;
         ev.gc_pending = false;
@@ -2098,12 +2098,12 @@ impl Context {
             tagged_heap: world.tagged_heap,
             pdump_image: None,
             after_pdump_load_hook_pending: false,
-            cached_system_name: Value::NIL,
+            cached_system_name: WorldSlot::new(Value::NIL),
             obarray: world.obarray,
             window_edge_drag: crate::emacs_core::window_edge_drag::WindowEdgeDrag::default(),
             specpdl: Vec::new(),
             suspended_thread_bindings: Vec::new(),
-            profiler: super::super::profiler::ProfilerState::default(),
+            profiler: WorldSlot::new(super::super::profiler::ProfilerState::default()),
             lexenv: Value::NIL,
             internal_interpreter_environment_symbol: seed
                 .core_eval_symbols
@@ -2135,50 +2135,50 @@ impl Context {
             load_read_cursors: Vec::new(),
             last_uncaught_signal_backtrace: None,
             buffers: world.buffers,
-            xwidgets: super::super::xwidget::XwidgetState::new(),
-            last_overlay_modification_hooks: Vec::new(),
-            interval_insert_behind_hooks: Value::NIL,
-            interval_insert_in_front_hooks: Value::NIL,
+            xwidgets: WorldSlot::new(super::super::xwidget::XwidgetState::new()),
+            last_overlay_modification_hooks: WorldSlot::new(Vec::new()),
+            interval_insert_behind_hooks: WorldSlot::new(Value::NIL),
+            interval_insert_in_front_hooks: WorldSlot::new(Value::NIL),
             match_data: None,
-            combine_after_change_list: Vec::new(),
-            combine_after_change_buffer: None,
+            combine_after_change_list: WorldSlot::new(Vec::new()),
+            combine_after_change_buffer: WorldSlot::new(None),
             message_log_need_newline: false,
-            processes: ProcessManager::new(),
+            processes: WorldSlot::new(ProcessManager::new()),
             watchers: world.watchers,
             active_variable_watchers: world.active_variable_watchers,
             standard_syntax_table: seed.standard_syntax_table,
             syntax_code_objects: seed.syntax_code_objects,
             standard_category_table: seed.standard_category_table,
             current_local_map: Value::NIL,
-            selected_global_map: super::super::keymap::SelectedGlobalMap::default(),
-            registers: RegisterManager::new(),
-            bookmarks: BookmarkManager::new(),
-            abbrevs: AbbrevManager::new(),
+            selected_global_map: WorldSlot::new(super::super::keymap::SelectedGlobalMap::default()),
+            registers: WorldSlot::new(RegisterManager::new()),
+            bookmarks: WorldSlot::new(BookmarkManager::new()),
+            abbrevs: WorldSlot::new(AbbrevManager::new()),
             autoloads: world.autoloads,
             custom: seed.custom,
-            rectangle: RectangleState::new(),
-            interactive: InteractiveRegistry::new(),
+            rectangle: WorldSlot::new(RectangleState::new()),
+            interactive: WorldSlot::new(InteractiveRegistry::new()),
             treesit: world.treesit,
-            minibuffers: MinibufferManager::new(),
-            interactive_minibuffer_read_count: 0,
-            current_message: None,
-            echo_area_buffers: EchoAreaBuffers::default(),
+            minibuffers: WorldSlot::new(MinibufferManager::new()),
+            interactive_minibuffer_read_count: WorldSlot::new(0),
+            current_message: WorldSlot::new(None),
+            echo_area_buffers: WorldSlot::new(EchoAreaBuffers::default()),
             echo_area_resize_exact_pending: false,
             debugging_output_file: None,
             message_buf_print: false,
-            minibuffer_selected_window: None,
-            active_minibuffer_window: None,
+            minibuffer_selected_window: WorldSlot::new(None),
+            active_minibuffer_window: WorldSlot::new(None),
             shutdown_request: None,
             shutdown_in_progress: false,
-            daemon: None,
+            daemon: WorldSlot::new(None),
             input_mode_interrupt: true,
-            quit_char: 7,
+            quit_char: WorldSlot::new(7),
             waiting_for_user_input: false,
             frames: world.frames,
-            modes: ModeRegistry::new(),
-            threads: ThreadManager::new(),
-            kmacro: KmacroManager::new(),
-            command_loop: seed.command_loop,
+            modes: WorldSlot::new(ModeRegistry::new()),
+            threads: WorldSlot::new(ThreadManager::new()),
+            kmacro: WorldSlot::new(KmacroManager::new()),
+            command_loop: WorldSlot::new(seed.command_loop),
             input_rx: None,
             eval_task_rx: None,
             quit_requested: QuitRequest::new(),
@@ -2186,7 +2186,7 @@ impl Context {
             mode_line_display_flow: None,
             redisplay_prepare_fn: None,
             font_shape_fn: None,
-            gstring_shape_cache: HashMap::new(),
+            gstring_shape_cache: WorldSlot::new(HashMap::new()),
             display_idle_maintenance_fn: None,
             scroll_preview_fn: None,
             frame_snapshot_fn: None,
@@ -2199,21 +2199,21 @@ impl Context {
             coding_systems: world.coding_systems,
             code_conversion_workspace:
                 crate::code_conversion_workspace::CodeConversionWorkspace::default(),
-            face_table: FaceTable::new(),
-            face_change_count: 0,
-            materialized_face_table_source: None,
-            display_var_change_count: 0,
+            face_table: WorldSlot::new(FaceTable::new()),
+            face_change_count: WorldSlot::new(0),
+            materialized_face_table_source: WorldSlot::new(None),
+            display_var_change_count: WorldSlot::new(0),
             input_progress: Default::default(),
-            redisplay_generation: 0,
-            body_redisplay_all: 0,
-            body_redisplay_by_window: FxHashMap::default(),
-            body_redisplay_by_buffer: FxHashMap::default(),
-            menu_bar_rebuild_generation: 0,
-            chrome_dirty: Default::default(),
-            gnu_redisplay_hooks: redisplay_hooks::RedisplayHookOwnership::initial(),
+            redisplay_generation: WorldSlot::new(0),
+            body_redisplay_all: WorldSlot::new(0),
+            body_redisplay_by_window: WorldSlot::new(FxHashMap::default()),
+            body_redisplay_by_buffer: WorldSlot::new(FxHashMap::default()),
+            menu_bar_rebuild_generation: WorldSlot::new(0),
+            chrome_dirty: WorldSlot::new(Default::default()),
+            gnu_redisplay_hooks: WorldSlot::new(redisplay_hooks::RedisplayHookOwnership::initial()),
             context_instance_id: next_context_instance_id(),
             media_generation: 0,
-            last_redisplay_signature: None,
+            last_redisplay_signature: WorldSlot::new(None),
             depth: 0,
             eval_counter: 0,
             max_depth: 1600,
@@ -2239,7 +2239,7 @@ impl Context {
             bc_frames: Vec::new(),
             condition_stack: Vec::new(),
             next_resume_id: 1,
-            pending_safe_funcalls: Vec::new(),
+            pending_safe_funcalls: WorldSlot::new(Vec::new()),
             compiler_function_overrides_symbol: seed
                 .core_eval_symbols
                 .compiler_function_overrides_symbol,
@@ -2267,7 +2267,9 @@ impl Context {
             interpreted_closure_filter_fn: None,
             cconv_memo: cconv_memo::CconvMemo::from_env(),
             tier_i: tier_i::TierI::from_env(),
-            fringe_bitmaps: super::super::builtins::fringe_bitmap::FringeBitmapRegistry::new(),
+            fringe_bitmaps: WorldSlot::new(
+                super::super::builtins::fringe_bitmap::FringeBitmapRegistry::new(),
+            ),
             ccl_registry: seed.registries.ccl,
             charset_registry: seed.registries.charset,
             font_registry: seed.registries.font,

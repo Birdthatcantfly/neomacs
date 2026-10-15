@@ -1698,8 +1698,8 @@ pub(crate) fn prepare_interval_modification_for_change(
     byte_end: EmacsBytePos,
     before_hooks: impl FnOnce(&super::eval::Context),
 ) -> Result<(), Flow> {
-    eval.interval_insert_behind_hooks = Value::NIL;
-    eval.interval_insert_in_front_hooks = Value::NIL;
+    *eval.interval_insert_behind_hooks = Value::NIL;
+    *eval.interval_insert_in_front_hooks = Value::NIL;
 
     if byte_start == byte_end {
         record_interval_insert_hooks(eval, buf_id, byte_start);
@@ -1784,7 +1784,7 @@ fn record_interval_insert_hooks(
         if let Some(hooks) = buf.text_props_get_property_at_emacs_byte_pos(prev_byte, behind_sym)
             && !hooks.is_nil()
         {
-            eval.interval_insert_behind_hooks = hooks;
+            *eval.interval_insert_behind_hooks = hooks;
         }
     }
 
@@ -1792,7 +1792,7 @@ fn record_interval_insert_hooks(
         && let Some(hooks) = buf.text_props_get_property_at_emacs_byte_pos(byte_pos, front_sym)
         && !hooks.is_nil()
     {
-        eval.interval_insert_in_front_hooks = hooks;
+        *eval.interval_insert_in_front_hooks = hooks;
     }
 }
 
@@ -1803,8 +1803,8 @@ pub(crate) fn report_interval_modification(
     lisp_start: i64,
     lisp_end: i64,
 ) -> Result<(), Flow> {
-    let behind = eval.interval_insert_behind_hooks;
-    let front = eval.interval_insert_in_front_hooks;
+    let behind = *eval.interval_insert_behind_hooks;
+    let front = *eval.interval_insert_in_front_hooks;
     if !behind.is_nil() {
         call_text_property_hook_lists(eval, vec![behind], lisp_start, lisp_end)?;
     }

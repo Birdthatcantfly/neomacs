@@ -626,7 +626,7 @@ fn prepare_buffer_change(
         return Ok(start);
     };
     if before_change_hooks_quiet(ctx, current_id) {
-        ctx.last_overlay_modification_hooks = Vec::new();
+        *ctx.last_overlay_modification_hooks = Vec::new();
     } else if start_policy == ChangeStartPolicy::Preserved {
         start = run_preserving_change_start(ctx, start_policy, start, |ctx| {
             run_before_change_hooks(ctx, current_id, range)
@@ -685,7 +685,7 @@ fn run_before_change_hooks(
         }
         run_named_hook_reset_on_error(ctx, before_change_functions_symbol(), &hook_args)?;
 
-        ctx.last_overlay_modification_hooks = collect_overlay_change_hooks(
+        *ctx.last_overlay_modification_hooks = collect_overlay_change_hooks(
             ctx,
             byte_range.start().get(),
             byte_range.end().get(),
@@ -882,7 +882,7 @@ fn signal_after_change_with_kind(
         // flushes it via `Fcombine_after_change_execute` before recording
         // the new change.
         let needs_flush = !ctx.combine_after_change_list.is_empty()
-            && ctx.combine_after_change_buffer != Some(current_id);
+            && (*ctx.combine_after_change_buffer) != Some(current_id);
         if needs_flush {
             execute_combined_after_change(ctx)?;
         }
@@ -901,7 +901,7 @@ fn signal_after_change_with_kind(
             let change = lenins - lendel;
             ctx.combine_after_change_list
                 .push((beg_field, end_field, change));
-            ctx.combine_after_change_buffer = Some(current_id);
+            *ctx.combine_after_change_buffer = Some(current_id);
         }
         return Ok(());
     }
@@ -948,8 +948,8 @@ fn signal_after_change_with_kind(
         Value::fixnum(lisp_end),
         Value::fixnum(lisp_old_len),
     ];
-    let saved_interval_insert_behind_hooks = ctx.interval_insert_behind_hooks;
-    let saved_interval_insert_in_front_hooks = ctx.interval_insert_in_front_hooks;
+    let saved_interval_insert_behind_hooks = *ctx.interval_insert_behind_hooks;
+    let saved_interval_insert_in_front_hooks = *ctx.interval_insert_in_front_hooks;
 
     let specpdl_count = ctx.specpdl.len();
     // The saved hook lists live only in the Rust locals above while
@@ -963,8 +963,8 @@ fn signal_after_change_with_kind(
     let result = (|| -> Result<(), Flow> {
         run_named_hook_reset_on_error(ctx, after_change_functions_symbol(), &hook_args)?;
 
-        ctx.interval_insert_behind_hooks = saved_interval_insert_behind_hooks;
-        ctx.interval_insert_in_front_hooks = saved_interval_insert_in_front_hooks;
+        *ctx.interval_insert_behind_hooks = saved_interval_insert_behind_hooks;
+        *ctx.interval_insert_in_front_hooks = saved_interval_insert_in_front_hooks;
 
         // --- Run overlay hooks ---
         // insert-in-front-hooks: overlays whose start == beg
@@ -1231,14 +1231,14 @@ pub(crate) fn execute_combined_after_change(
         return Ok(());
     }
 
-    let Some(target_id) = ctx.combine_after_change_buffer else {
+    let Some(target_id) = *ctx.combine_after_change_buffer else {
         ctx.combine_after_change_list.clear();
         return Ok(());
     };
 
     if ctx.buffers.get(target_id).is_none() {
         ctx.combine_after_change_list.clear();
-        ctx.combine_after_change_buffer = None;
+        *ctx.combine_after_change_buffer = None;
         return Ok(());
     }
 
@@ -1253,7 +1253,7 @@ pub(crate) fn execute_combined_after_change(
             Some(b) => b,
             None => {
                 ctx.combine_after_change_list.clear();
-                ctx.combine_after_change_buffer = None;
+                *ctx.combine_after_change_buffer = None;
                 if let Some(prev) = saved_buffer {
                     let _ = ctx.set_current_buffer_unrecorded(prev);
                 }
@@ -1280,7 +1280,7 @@ pub(crate) fn execute_combined_after_change(
     };
 
     ctx.combine_after_change_list.clear();
-    ctx.combine_after_change_buffer = None;
+    *ctx.combine_after_change_buffer = None;
 
     let _ = list_len;
 

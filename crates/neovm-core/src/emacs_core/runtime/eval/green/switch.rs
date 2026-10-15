@@ -325,7 +325,7 @@ impl Context {
     /// at the resume.
     fn exchange_world_threads(&mut self, baton: &Baton) {
         if let Some(runtime) = baton.green_runtime().as_ref() {
-            std::mem::swap(&mut self.threads, &mut runtime.threads.borrow_mut());
+            std::mem::swap(&mut *self.threads, &mut runtime.threads.borrow_mut());
         }
     }
 

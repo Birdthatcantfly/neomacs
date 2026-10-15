@@ -354,8 +354,8 @@ impl RetainedWindowKey {
             props_modified_tick,
             overlay_modified_tick,
             overlay_digest,
-            face_change_count: evaluator.face_change_count,
-            display_var_change_count: evaluator.display_var_change_count,
+            face_change_count: evaluator.face_change_count(),
+            display_var_change_count: evaluator.display_var_change_count(),
         }
     }
 

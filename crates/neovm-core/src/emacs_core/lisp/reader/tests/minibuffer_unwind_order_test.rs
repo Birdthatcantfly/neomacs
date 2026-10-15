@@ -216,7 +216,7 @@ fn exercise_reader(restore_windows: bool, throw_inactive: bool, record_active: b
         selected
     );
     assert_eq!(eval.minibuffers.depth(), 0);
-    assert_eq!(eval.active_minibuffer_window, None);
+    assert_eq!(*eval.active_minibuffer_window, None);
     let leaf = eval
         .frames
         .get(frame)

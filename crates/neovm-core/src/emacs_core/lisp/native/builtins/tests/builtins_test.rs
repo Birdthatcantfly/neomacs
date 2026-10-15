@@ -4720,7 +4720,7 @@ fn byte_position_and_clear_bitmap_semantics() {
     }
 
     let mut face_cache_ctx = crate::emacs_core::eval::Context::new();
-    let face_change_before = face_cache_ctx.face_change_count;
+    let face_change_before = *face_cache_ctx.face_change_count;
     assert_eq!(
         builtin_clear_face_cache(&mut face_cache_ctx, vec![]).unwrap(),
         Value::NIL
@@ -4733,7 +4733,7 @@ fn byte_position_and_clear_bitmap_semantics() {
     // discarding every realized face is the whole point: without it a
     // `tty-color-define` that moves a colour never reaches the screen.
     assert!(
-        face_cache_ctx.face_change_count > face_change_before,
+        (*face_cache_ctx.face_change_count) > face_change_before,
         "clear-face-cache must invalidate the realized faces"
     );
     let clear_face_arity =

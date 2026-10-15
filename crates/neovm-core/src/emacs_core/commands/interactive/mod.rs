@@ -2258,7 +2258,7 @@ fn interactive_inactive_minibuffer_target_p(
         eval.frames
             .get(frame_id)
             .is_some_and(|frame| frame.minibuffer_window == Some(window_id))
-    }) && eval.active_minibuffer_window != Some(window_id)
+    }) && (*eval.active_minibuffer_window) != Some(window_id)
 }
 
 fn interactive_select_window_from_prefix_context(

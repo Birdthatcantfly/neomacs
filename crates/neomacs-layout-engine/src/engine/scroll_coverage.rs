@@ -1138,8 +1138,8 @@ impl LayoutEngine {
             || buffer.overlay_modified_tick() != key.overlay_modified_tick
             || buffer.point_max_char_pos().get() as i64 != key.buffer_size
             || buffer.point_min_char_pos().get() as i64 != key.buffer_begv
-            || evaluator.face_change_count != key.face_change_count
-            || evaluator.display_var_change_count != key.display_var_change_count
+            || evaluator.face_change_count() != key.face_change_count
+            || evaluator.display_var_change_count() != key.display_var_change_count
             || evaluator.media_generation() != key.media_generation
             || evaluator
                 .frame_manager()
