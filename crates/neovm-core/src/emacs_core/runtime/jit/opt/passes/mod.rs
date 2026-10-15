@@ -16,3 +16,5 @@ pub(crate) mod static_fix;
 #[cfg(test)]
 #[path = "tests/bools_reference_test.rs"]
 mod bools_reference_tests;
+
+pub(crate) mod switch_epochs;

@@ -2216,3 +2216,25 @@ thread_local! {
 pub(crate) fn force_opt_osr_entry_for_test(on: Option<bool>) {
     OPT_OSR_ENTRY_TEST_OVERRIDE.with(|value| value.set(on));
 }
+
+/// Opt switch constant rematerialization and IR epoch-guard scheduling.
+/// Default off. Immutable process configuration, with no Lisp runtime state.
+pub(crate) fn jit_switch_hoist_on() -> bool {
+    #[cfg(test)]
+    if let Some(on) = SWITCH_HOIST_TEST_OVERRIDE.with(std::cell::Cell::get) {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NEOVM_JIT_SWITCH_HOIST").as_deref() == Ok("on"))
+}
+
+#[cfg(test)]
+thread_local! {
+    // Scalar compiler configuration only; never Lisp state.
+    static SWITCH_HOIST_TEST_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn force_switch_hoist_for_test(on: Option<bool>) {
+    SWITCH_HOIST_TEST_OVERRIDE.with(|v| v.set(on));
+}

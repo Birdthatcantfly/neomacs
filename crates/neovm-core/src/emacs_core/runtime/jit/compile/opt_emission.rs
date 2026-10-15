@@ -36,6 +36,9 @@ mod sqrt_emission;
 #[path = "opt_store_facts.rs"]
 mod store_facts;
 
+#[path = "opt_switch_emission.rs"]
+mod switch_emission;
+
 /// Global variables carry only values crossing IR blocks; local float payloads
 /// remain unboxed until an actual edge or observable operation needs them.
 /// Threading: compiler-owned variables and immutable representation metadata.
@@ -1070,6 +1073,7 @@ pub(super) fn emit(mut ctx: EmitContext<'_, '_>) -> Result<(), CompileError> {
         .iter()
         .map(|bits| Value::from_bits(bits.0 as usize))
         .collect();
+    let switches = switch_emission::Plans::build(&ctx, &constants)?;
     for (index, data) in ctx.func.blocks.iter().enumerate() {
         for &param in &data.params {
             if ctx.values.logical[param.index()] {
@@ -1151,6 +1155,18 @@ pub(super) fn emit(mut ctx: EmitContext<'_, '_>) -> Result<(), CompileError> {
                             (word, SlotRep::raw_if(ctx.variable_raw[slot]))
                         },
                     )
+                }
+                ir::Opcode::Const(_) if switches.elide(id) => None,
+                ir::Opcode::Const(index) if switches.rematerialize(*index) => {
+                    // The rooted leaf owns this immutable static slot. The
+                    // word is used only by cold lookup/recovery paths, so CLIF
+                    // sinks the immediate there instead of loading the slot.
+                    Some((
+                        ctx.fb
+                            .ins()
+                            .iconst(types::I64, constants[*index as usize].bits() as i64),
+                        SlotRep::Tagged,
+                    ))
                 }
                 ir::Opcode::Const(index)
                     if (jit_opt_passes().reps
@@ -1419,6 +1435,8 @@ pub(super) fn emit(mut ctx: EmitContext<'_, '_>) -> Result<(), CompileError> {
                         None => (ctx.fb.create_block(), &[][..]),
                     };
                     let bools: Vec<_> = reps.iter().map(|rep| *rep == SlotRep::Bool).collect();
+                    let checks = switches.guards.after_poll(id);
+                    let serviced = (!checks.is_empty()).then(|| ctx.fb.create_block());
                     emit_backedge_jump_with_representations(
                         ctx.fb,
                         ctx.rt
@@ -1433,7 +1451,24 @@ pub(super) fn emit(mut ctx: EmitContext<'_, '_>) -> Result<(), CompileError> {
                         &[],
                         &mut pending,
                         None, // v2 entry protocols retain baseline lowering.
+                        serviced,
                     );
+                    if let Some(serviced) = serviced {
+                        ctx.fb.switch_to_block(serviced);
+                        ctx.fb.seal_block(serviced);
+                        ctx.fb.set_cold_block(serviced);
+                        let exact = precise_snapshot(&mut ctx, &mut local, frame)?;
+                        let resume = ctx.func.frames[frame.index()].clone();
+                        switch_emission::emit_checks(
+                            &mut ctx,
+                            &switches,
+                            checks,
+                            &exact,
+                            &resume,
+                            &mut deopts,
+                        )?;
+                        ctx.fb.ins().jump(target, args);
+                    }
                     if direct.is_some() {
                         terminated = true;
                     } else {
@@ -1455,6 +1490,7 @@ pub(super) fn emit(mut ctx: EmitContext<'_, '_>) -> Result<(), CompileError> {
         ctx.point = RecipePoint::Term(block);
         if !terminated {
             publish_cross(&mut ctx, &mut local, block);
+            switch_emission::emit_entries(&mut ctx, &mut local, block, &switches, &mut deopts)?;
             emit_term(
                 &mut ctx,
                 &mut local,
@@ -1462,6 +1498,7 @@ pub(super) fn emit(mut ctx: EmitContext<'_, '_>) -> Result<(), CompileError> {
                 &mut deopts,
                 &mut pending,
                 &constants,
+                &switches,
             )?;
         }
         for site in &deopts {
@@ -1523,6 +1560,7 @@ fn emit_term(
     deopts: &mut Vec<PendingDeopt>,
     pending: &mut Vec<PendingDispatch>,
     constants: &[Value],
+    switches: &switch_emission::Plans,
 ) -> Result<(), CompileError> {
     match &ctx.func.blocks[block.index()].term {
         ir::Term::Return(value) => {
@@ -1592,7 +1630,11 @@ fn emit_term(
             default,
         } => {
             let dispatch = tagged(ctx, local, *value);
-            let table_word = tagged(ctx, local, *table);
+            let deferred_table = switches.deferred_table(block);
+            let table_word = match deferred_table {
+                Some(word) => switch_dispatch::DispatchTable::StaticConstant(word),
+                None => switch_dispatch::DispatchTable::Materialized(tagged(ctx, local, *table)),
+            };
             let rt = ctx
                 .rt
                 .ok_or(CompileError::UnsupportedOp("opt-emit:switch-runtime"))?;
@@ -1623,7 +1665,17 @@ fn emit_term(
             if let Some(frame) =
                 site.and_then(|pc| ctx.func.source_states[pc].as_ref().map(|state| state.frame))
             {
-                let exact = snapshot(ctx, local, frame)?;
+                let exact = if deferred_table.is_some() {
+                    let state = &ctx.func.frames[frame.index()];
+                    if state.parent.is_some() || state.handlers != 0 || state.stack.len() < 2 {
+                        return Err(CompileError::UnsupportedOp("opt-switch:deferred-frame"));
+                    }
+                    let (stack, reps) =
+                        read_stack(ctx, local, &state.stack[..state.stack.len() - 2]);
+                    (stack, reps, None)
+                } else {
+                    snapshot(ctx, local, frame)?
+                };
                 if exact.2.is_some() {
                     return Err(CompileError::UnsupportedOp(
                         "opt-sink:switch-exceptional-frame",
@@ -1631,7 +1683,7 @@ fn emit_term(
                 }
                 stack = exact.0;
                 reps = exact.1;
-                if stack.len() >= 2 {
+                if deferred_table.is_none() && stack.len() >= 2 {
                     stack.truncate(stack.len() - 2);
                     reps.truncate(stack.len());
                 }
@@ -1641,40 +1693,15 @@ fn emit_term(
                 signal_target_for_site(ctx.fb, ctx.signal_exit, &[], pending, &stack, &reps);
             // Inline plans require the exact constant table their source
             // metadata names. Dispatch and landing edges still come from IR.
-            let inline = if !ctx.aot && jit_inline_switch_on() {
-                site.and_then(|pc| {
-                    let ir::ValueDef::Inst(table_inst) =
-                        ctx.func.values[ctx.func.resolve(*table)?.index()].def
-                    else {
-                        return None;
-                    };
-                    let ir::Opcode::Const(index) = ctx.func.insts[table_inst.index()].op else {
-                        return None;
-                    };
-                    let Some(Op::Constant(source_index)) =
-                        pc.checked_sub(1).and_then(|i| ctx.ops.get(i))
-                    else {
-                        return None;
-                    };
-                    if index != *source_index as u32
-                        || constants.get(index as usize) != ctx.constants.get(index as usize)
-                    {
-                        return None;
-                    }
-                    switch_dispatch::inline_switch_for_site(
-                        ctx.ops,
-                        constants,
-                        ctx.dynamic_prefix,
-                        &ctx.cfg.leaders,
-                        pc,
-                        &targets,
-                    )
-                })
+            let fallback;
+            let inline = if switches.enabled() {
+                switches.inline(block)
             } else {
-                None
+                fallback = switch_emission::inline_for_block(ctx, block, constants);
+                fallback.as_ref()
             };
             let mut landings = SwitchLandings { blocks };
-            switch_dispatch::emit_switch_dispatch(
+            switch_dispatch::emit_switch_dispatch_with_epoch(
                 ctx.fb,
                 rt,
                 dispatch,
@@ -1683,7 +1710,12 @@ fn emit_term(
                 miss,
                 stale,
                 &mut landings,
-                inline.as_ref(),
+                inline,
+                if switches.guards.is_hoisted(block) {
+                    switch_dispatch::EpochCheck::LoopEntry
+                } else {
+                    switch_dispatch::EpochCheck::AtDispatch
+                },
             );
             for (landing, target, args) in work {
                 ctx.fb.switch_to_block(landing);

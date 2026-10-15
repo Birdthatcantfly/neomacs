@@ -3257,8 +3257,9 @@ fn emit_backedge_jump_with_representations(
     handlers: &[HandlerStatic],
     pending: &mut Vec<PendingDispatch>,
     physical: Option<inline_physical::PollAdmission<'_>>,
+    serviced: Option<Block>,
 ) {
-    if bool_slots.is_none() {
+    if bool_slots.is_none() && serviced.is_none() {
         emit_backedge_jump_with_args(
             fb,
             rt,
@@ -3338,6 +3339,14 @@ fn emit_backedge_jump_with_representations(
     let tagged_reps = vec![SlotRep::Tagged; vals.len()];
     let se = signal_target_for_site(fb, signal_exit, handlers, pending, vals, &tagged_reps);
     let ok = lowering::icmp_imm_p(fb, IntCC::Equal, status, STATUS_OK);
+    // Opt IR guards live only on the successful serviced successor. The
+    // common unserviced edge above still jumps straight to the loop.
+    let serviced_target = serviced.unwrap_or(target_block);
+    let serviced_args = if serviced.is_some() {
+        &[][..]
+    } else {
+        target_args
+    };
     if let Some(cache) = &rt.inline_entry_cache {
         let refreshed = fb.create_block();
         fb.ins().brif(ok, refreshed, &[], se, &[]);
@@ -3354,9 +3363,9 @@ fn emit_backedge_jump_with_representations(
                 admission.pending,
             );
         }
-        fb.ins().jump(target_block, target_args);
+        fb.ins().jump(serviced_target, serviced_args);
     } else {
-        fb.ins().brif(ok, target_block, target_args, se, &[]);
+        fb.ins().brif(ok, serviced_target, serviced_args, se, &[]);
     }
     cold.end(fb, Some(cold_exits::ColdExit::Poll));
 }

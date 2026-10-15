@@ -952,3 +952,7 @@ fn opt_reps_native_static_fixnum_untag_uses_immediate_payload() {
 #[cfg(test)]
 #[path = "opt_licm_positive_test.rs"]
 mod licm_positive_tests;
+
+#[cfg(test)]
+#[path = "opt_switch_hoist_test.rs"]
+mod switch_hoist_tests;

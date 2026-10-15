@@ -700,7 +700,10 @@ pub struct CompiledLeaf {
     /// R1a: per-leaf heap-constant relocation vector. Generated code loads each
     /// heap-object constant from `reloc_data[idx]` through a baked base pointer
     /// instead of baking the tagged heap pointer as an immediate — so the code
-    /// holds NO heap pointer (GC-traceable here, AOT-portable). Fixnums + non-heap
+    /// normally holds no heap pointer (GC-traceable here, AOT-portable). A JIT
+    /// inline switch may rematerialize its nonmoving static table in cold code;
+    /// this vector still roots it, as it roots the directly addressed epoch.
+    /// AOT always retains slot loads. Fixnums + non-heap
     /// immediates (nil/t) stay baked. Traced as a GC root while the leaf is cached.
     pub(crate) reloc_data: Box<[Value]>,
     /// R1c-sidecar: per-(thread,leaf) base-pointer block the AOT code reads to

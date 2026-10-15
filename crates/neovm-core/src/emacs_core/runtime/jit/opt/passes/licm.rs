@@ -57,13 +57,13 @@ fn run_with_fast(func: &mut Func, fast: bool) -> Result<LicmStats, VerifyError> 
 
 /// One closed single-entry natural loop and existing unconditional preheader.
 /// Threading: compiler IDs only, not a runtime loop-state object.
-struct NaturalLoop {
-    header: Block,
-    preheader: Block,
-    members: HashSet<Block>,
+pub(super) struct NaturalLoop {
+    pub(super) header: Block,
+    pub(super) preheader: Block,
+    pub(super) members: HashSet<Block>,
 }
 
-fn natural_loops(func: &Func, dom: &Dominance) -> Option<Vec<NaturalLoop>> {
+pub(super) fn natural_loops(func: &Func, dom: &Dominance) -> Option<Vec<NaturalLoop>> {
     let mut latches: HashMap<Block, Vec<Block>> = HashMap::new();
     for &block in dom.reverse_postorder() {
         for edge in func.blocks[block.index()].term.edges() {
