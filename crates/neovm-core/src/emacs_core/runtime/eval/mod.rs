@@ -3025,362 +3025,57 @@ pub(crate) struct DaemonState {
 ///
 /// Host hooks, Rc leases and active TLS registry views remain on that thread.
 /// Parallel Lisp creates a Context on each mutator over the shared World.
+/// `repr(C)` with the fields in the order rustc chose for main at
+/// e5fd507ac9 (round 3w, plan-3w.md section 3): every Context offset,
+/// including each one the JIT reads, is fixed by this declaration order, not
+/// by rustc's layout heuristics, so a field's change of type (a
+/// `WorldSlot`) moves no other field. `context_layout_test` pins the offsets.
+#[repr(C)]
 pub struct Context {
-    /// Arithmetic policy ownership, reconstructed rather than dumped.
-    pub(crate) integer_width_context: super::builtins::IntegerWidthContext,
-    pub(crate) owned_roots: OwnedRootRegistryView,
-    /// Tagged pointer heap — sole GC and allocator.
-    pub(crate) tagged_heap: WorldView<crate::tagged::gc::TaggedHeap>,
-    /// Mmap-backed pdump image that owns any mapped heap payloads borrowed by
-    /// this evaluator's Lisp objects.
-    /// The loaded pdump mapping, LEAKED to 'static at install: process-global
-    /// structures (the symbol interner's dump-name aliases — see
-    /// `intern_dump_lisp_string` — and the mapped tagged-heap objects) hold
-    /// pointers into it, so the mapping must outlive every Context. One
-    /// bounded leak per load; production loads once per process.
-    pub(crate) pdump_image: Option<&'static super::pdump::mmap_image::LoadedMmapImage>,
-    /// One-shot runtime flag set by file pdump loads.  GNU keeps this as
-    /// pdumper runtime state, not as a public obarray symbol.
-    pub(crate) after_pdump_load_hook_pending: bool,
-    /// Runtime-owned `system-name` object used to distinguish GNU's cached
-    /// hostname from an explicit Lisp replacement.  This is transient process
-    /// state and is deliberately reconstructed rather than serialized in a
-    /// portable dump.
-    pub(crate) cached_system_name: WorldSlot<Value>,
-    /// The window edge the pointer is holding, if any.
-    ///
-    /// Updated as `read_char` consumes each pointer press and release, so it is
-    /// ordered against the redisplays those events cause: every presentation
-    /// composed between a grab and its release is stamped as the drag's, and
-    /// none after it is.
-    pub(crate) window_edge_drag: crate::emacs_core::window_edge_drag::WindowEdgeDrag,
-    /// The obarray — unified symbol table with value cells, function cells, plists.
-    pub(crate) obarray: ObarrayView,
-    /// Specpdl — special binding stack that writes directly to the obarray.
-    /// Matches GNU Emacs's specpdl design.
-    pub(crate) specpdl: Vec<SpecBinding>,
-    /// Binding stacks parked while a nested simulated thread runs. GNU owns a
-    /// separate specpdl per thread; keeping suspended stacks out of the active
-    /// `specpdl` gives the single-threaded runtime the same isolation while
-    /// retaining every parked value as a GC root.
-    suspended_thread_bindings: Vec<ThreadDynamicBindingState>,
-    /// GNU-compatible CPU and managed-allocation profiler state.
-    pub(crate) profiler: WorldSlot<super::profiler::ProfilerState>,
-    /// Lexical environment: flat cons alist mirroring GNU Emacs's
-    /// `Vinternal_interpreter_environment`.
-    pub(crate) lexenv: Value,
-    /// GNU `eval.c` keeps `Vinternal_interpreter_environment` on a hidden
-    /// symbol object by `Funintern`ing the public name from the obarray.
-    /// NeoVM keeps the actual evaluator-owned symbol identity here so the
-    /// public `internal-interpreter-environment` symbol can stay visible
-    /// while remaining unbound and non-special.
-    #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
-    pub(crate) internal_interpreter_environment_symbol: SymId,
-    /// GNU `eval.c` hot-path DEFVARs exposed via direct globals like
-    /// `Vquit_flag`, `Vinhibit_quit`, and `Vthrow_on_input`.
-    ///
-    /// NeoVM still stores their values in the obarray's symbol cells so Lisp
-    /// sees ordinary variables, but evaluator boundaries keep their symbol
-    /// identities cached here to avoid repeated name interning/lookups.
-    quit_flag_symbol: SymId,
-    inhibit_quit_symbol: SymId,
-    throw_on_input_symbol: SymId,
-    kill_emacs_symbol: SymId,
-    quit_flag: Value,
-    inhibit_quit: Value,
-    /// `throw-on-input`'s value, cached beside the two flags it is polled
-    /// with.  GNU's `QUIT` reads C globals; reading this one out of the
-    /// obarray instead put a symbol lookup on every safe point, because the
-    /// poll's guard is true in any session that owns an input channel -- 8 M
-    /// lookups in a 20-keystroke rust-lsp run.
-    throw_on_input: Value,
-    /// The attention word (`attention.rs`): one bit per input a safe point
-    /// or a speculated call site must look at.  Derived from `quit_flag`,
-    /// `throw_on_input`, `compiler_function_overrides_active` and the
-    /// force-slow-spec harness and callback census, and written ONLY by
-    /// `refresh_attention` and the constructors; compiled code reads it at
-    /// `CONTEXT_ATTENTION_OFFSET`.
-    attention: u32,
-    /// Nonzero while `unbind_to` is running unwind cleanup forms.
-    ///
-    /// GNU `unbind_to` clears `Vquit_flag` and then runs cleanup forms without
-    /// polling the input layer again; input processing sets `Vquit_flag` before
-    /// the evaluator observes it.  Neomacs has an evaluator-side
-    /// `throw-on-input` poll to bridge host input, so suppress that extra poll
-    /// during cleanup to preserve GNU's unwind semantics.
-    unwind_cleanup_depth: usize,
-    noninteractive_symbol: SymId,
-    noninteractive: bool,
-    symbols_with_pos_enabled_symbol: SymId,
-    /// When true, `symbolp`/`eq`/hash operations transparently unwrap
-    /// symbol-with-pos objects. Bound to `t` by the byte-compiler.
-    pub(crate) symbols_with_pos_enabled: bool,
-    print_symbols_bare_symbol: SymId,
-    /// `runtime_binding_has_projection`'s membership as a bitset over symbol
-    /// ids (see `runtime_projection_mask_for`).
-    runtime_projection_mask: Box<[u64]>,
-    /// When true, the printer outputs bare symbol names for symbol-with-pos.
-    pub(crate) print_symbols_bare: bool,
-    /// Features list (for require/provide).
-    pub(crate) features: WorldView<Vec<SymId>>,
-    /// Features currently being resolved through `require`.
-    pub(crate) require_stack: Vec<SymId>,
-    /// Files currently being loaded (mirrors `Vloads_in_progress` in lread.c).
-    pub(crate) loads_in_progress: Vec<crate::heap_types::LispString>,
-    /// Uninterned, identity-only Lisp token for the active load stream.
-    pub(crate) load_read_stream_token: LoadReadStreamToken,
-    /// Stack of active load-read cursors (nested loads).  Each entry pairs the
-    /// heap `LispString` being read with a byte offset that BOTH the
-    /// readevalloop AND `(read STREAM=standard-input)` advance — mirroring GNU's
-    /// `readcharfun`/`instream` shared cursor (lread.c `readevalloop`).  A file
-    /// that calls `(read)` mid-load thus consumes the *next* top-level form and
-    /// the loop resumes after it.  Transient process state: never serialized.
-    /// The `source` Values are kept alive by a `push_specpdl_root` at push time,
-    /// not by this Vec (which GC does not trace).
-    pub(crate) load_read_cursors: Vec<LoadReadCursor>,
-    /// Compact render of the live Lisp backtrace captured when the most recent
-    /// *uncaught* signal was dispatched (specpdl still intact), for the command
-    /// loop's error log.  Only populated when debug-level tracing is active, so
-    /// it costs nothing in production.  Taken (cleared) when logged.  See
-    /// `dispatch_signal` and `command_loop_2`.
-    pub(crate) last_uncaught_signal_backtrace: Option<String>,
-    /// Buffer manager — owns all live buffers and tracks current buffer.
-    pub buffers: BufferManager,
-    /// GNU xwidget runtime state: internal model/view lists and id counter.
-    pub(crate) xwidgets: WorldSlot<super::xwidget::XwidgetState>,
-    /// GNU `last_overlay_modification_hooks`: hook-list/overlay pairs recorded
-    /// by the before-change overlay scan and replayed by the after-change scan.
-    pub(crate) last_overlay_modification_hooks: WorldSlot<Vec<OverlayModificationHook>>,
-    /// GNU `interval_insert_behind_hooks`: text-property hook list recorded
-    /// by `verify_interval_modification` before an insertion and replayed by
-    /// `report_interval_modification` after the inserted text exists.
-    pub(crate) interval_insert_behind_hooks: WorldSlot<Value>,
-    /// GNU `interval_insert_in_front_hooks`: text-property hook list recorded
-    /// by `verify_interval_modification` before an insertion and replayed by
-    /// `report_interval_modification` after the inserted text exists.
-    pub(crate) interval_insert_in_front_hooks: WorldSlot<Value>,
-    /// Match data from the last successful search/match operation.
-    pub(crate) match_data: Option<MatchData>,
-    /// Deferred after-change records, mirroring GNU Emacs's
-    /// `combine_after_change_list` (insdel.c). When
-    /// `combine-after-change-calls` is non-nil and no incompatible
-    /// before-change-functions or overlays are installed,
-    /// `signal_after_change` records the change here instead of running
-    /// `after-change-functions` immediately. Each entry is the GNU triple
-    /// `(charpos - BEG, Z - (charpos - lendel + lenins), lenins - lendel)`
-    /// in 1-based character coordinates.
-    pub(crate) combine_after_change_list: WorldSlot<Vec<(i64, i64, i64)>>,
-    /// Buffer that owns the deferred after-change records, mirroring GNU
-    /// Emacs's `combine_after_change_buffer` (insdel.c). When the change
-    /// buffer differs, the pending list is flushed before recording the new
-    /// change.
-    /// GNU `message_log_need_newline`: the last `*Messages*' log was a
-    /// fragment (echo-area printer output), so the next complete message
-    /// first terminates that line.
-    pub(crate) message_log_need_newline: bool,
     pub(crate) combine_after_change_buffer: WorldSlot<Option<crate::buffer::BufferId>>,
-    /// Process manager — owns all tracked processes.
-    pub(crate) processes: WorldSlot<ProcessManager>,
-    /// Network manager — owns network connections, filters, and sentinels.
-    /// Variable watcher list — callbacks on variable changes.
-    pub(crate) watchers: WorldView<VariableWatcherList>,
-    /// Symbols whose variable watchers are currently running.
-    ///
-    /// GNU `notify_variable_watchers` temporarily sets the symbol's trapped
-    /// write state to `SYMBOL_UNTRAPPED_WRITE` to suppress recursive watcher
-    /// notification while a watcher callback mutates the same symbol.
-    pub(crate) active_variable_watchers: WorldView<HashSet<SymId>>,
-    /// Canonical Lisp object returned by `standard-syntax-table`.
-    ///
-    /// GNU Emacs stores this in `Vstandard_syntax_table`; NeoVM keeps the
-    /// authoritative identity here and mirrors it into thread-local state for
-    /// no-evaluator syntax builtins.
-    pub(crate) standard_syntax_table: Value,
-    /// GNU's `Vsyntax_code_object`: canonical `(CODE)` conses for the 16 bare
-    /// syntax classes. Standard syntax tables and `string-to-syntax` share
-    /// these objects, so `eq` identity is observable.
-    pub(crate) syntax_code_objects: Value,
-    /// Last `syntax-ppss` parser state for the current evaluator.
-    ///
-    /// GNU implements `syntax-ppss` in Lisp as an incremental cache over
-    /// `parse-partial-sexp`.  Fields 2 and 6 of the returned state are
-    /// intentionally cache-dependent, so keeping the last state is part of
-    /// matching the observable behavior of repeated `syntax-ppss` calls.
-    /// Canonical Lisp object returned by `standard-category-table`.
-    ///
-    /// Like `standard_syntax_table`, this is mirrored into thread-local state
-    /// because the category-table helpers currently expose some no-evaluator
-    /// entry points.
-    pub(crate) standard_category_table: Value,
-    /// Current buffer-local keymap (set by `use-local-map`).
-    pub(crate) current_local_map: Value,
     /// Global keymap selected by `use-global-map`.
     ///
     /// GNU stores this separately from the dynamically bindable Lisp variable
     /// `global-map`; preserving that distinction is observable through
     /// `current-global-map`, active key lookup, and legacy `global-set-key`.
     selected_global_map: WorldSlot<super::keymap::SelectedGlobalMap>,
-    /// Register manager — quick storage and retrieval of text, positions, etc.
-    pub(crate) registers: WorldSlot<RegisterManager>,
-    /// Bookmark manager — persistent named positions.
-    pub(crate) bookmarks: WorldSlot<BookmarkManager>,
-    /// Abbreviation manager — text abbreviation expansion.
-    pub(crate) abbrevs: WorldSlot<AbbrevManager>,
-    /// Autoload manager — deferred function loading.
-    pub(crate) autoloads: WorldView<AutoloadManager>,
-    /// Custom variable manager — defcustom/defgroup system.
-    pub(crate) custom: CustomManager,
-    /// Rectangle state — stores the last killed rectangle for yank-rectangle.
-    pub(crate) rectangle: WorldSlot<RectangleState>,
-    /// Interactive command registry — tracks interactive commands.
-    pub(crate) interactive: WorldSlot<InteractiveRegistry>,
-    /// Tree-sitter runtime manager — loaded grammars, parser state, node handles,
-    /// and compiled queries backing `treesit-*` builtins.
-    pub(crate) treesit: WorldView<super::treesit::TreeSitterManager>,
-    /// Minibuffer runtime state — active minibuffer stack, prompt metadata, and history.
-    pub(crate) minibuffers: WorldSlot<MinibufferManager>,
-    /// Count of completed minibuffer reads observed by the evaluator.
-    pub(crate) interactive_minibuffer_read_count: WorldSlot<u64>,
     /// Current echo-area message text, mirroring GNU `current-message`.
     pub(crate) current_message: WorldSlot<Option<crate::heap_types::LispString>>,
     /// GNU `echo_buffer[2]`, held by identity rather than by name.
     pub(crate) echo_area_buffers: WorldSlot<EchoAreaBuffers>,
-    /// Pending request to resize the echo-area mini-window *exactly* to its
-    /// content on the next redisplay, mirroring GNU `resize_echo_area_exactly`
-    /// (src/xdisp.c:13228-13245). GNU's `command_loop_1` (src/keyboard.c:1344)
-    /// runs `resize_echo_area_exactly` after every command when a message is
-    /// displayed, passing `exact_p = (minibuf_level == 0)`. We set this flag at
-    /// the same post-command point and consume it in the redisplay layout pass
-    /// so a `grow-only` echo window shrinks back to fit a shorter (even
-    /// non-empty) message once the command finishes with no active minibuffer.
-    pub(crate) echo_area_resize_exact_pending: bool,
-    /// Redirected debugging output stream. Mirrors GNU print.c's
-    /// `redirect-debugging-output` redirection target for writes through
-    /// `external-debugging-output`.
-    pub(crate) debugging_output_file: Option<std::fs::File>,
-    /// True after print output has selected the current echo area buffer.
-    ///
-    /// Mirrors GNU xdisp.c `message_buf_print`: `message`/clear reset it, and
-    /// the next print-to-echo starts with a fresh echo buffer instead of
-    /// appending to the previous message.
-    pub(crate) message_buf_print: bool,
     /// Window that was selected when the active minibuffer session began.
     pub(crate) minibuffer_selected_window: WorldSlot<Option<crate::window::WindowId>>,
     /// Currently active minibuffer window, if any.
     pub(crate) active_minibuffer_window: WorldSlot<Option<crate::window::WindowId>>,
-    /// Pending orderly shutdown requested by GNU C-owned primitives such as
-    /// `kill-emacs`.
-    pub(crate) shutdown_request: Option<ShutdownRequest>,
-    /// First shutdown entry owns the hooks; the request is published after them.
-    pub(crate) shutdown_in_progress: bool,
-    pub(crate) daemon: WorldSlot<Option<DaemonState>>,
-    /// Batch-compatible input-mode interrupt flag for `current-input-mode`.
-    pub(crate) input_mode_interrupt: bool,
-    /// Lisp-visible `quit_char` used by `current-input-mode` and low-level
-    /// keyboard quit detection.
-    pub(crate) quit_char: WorldSlot<i64>,
-    /// True while the command loop is blocked waiting for external input.
-    pub(crate) waiting_for_user_input: bool,
-    /// Frame manager — owns all frames and windows.
-    pub(crate) frames: WorldView<FrameManager>,
-    /// Mode registry — major/minor modes.
-    pub(crate) modes: WorldSlot<ModeRegistry>,
     /// Thread manager — cooperative threading primitives.
     pub(crate) threads: WorldSlot<ThreadManager>,
-    /// Keyboard macro metadata — ring/counter state layered above the
-    /// keyboard-owned live recording/playback runtime.
-    pub(crate) kmacro: WorldSlot<KmacroManager>,
     /// Command loop state — event queue, prefix args, kbd macros, quit flag.
     /// Used by the interactive command loop (recursive-edit → command_loop).
     pub(crate) command_loop: WorldSlot<crate::keyboard::CommandLoop>,
-    /// Input event receiver from the display/render thread.
-    /// `None` in batch mode (tests, non-interactive evaluation).
-    /// When `Some`, `read_char()` drains this queue but normally blocks on the
-    /// unified process/input poller. Producers must enqueue first, then call
-    /// [`Context::wait_notifier`]'s notifier so input cannot miss that wait.
-    pub input_rx: Option<crossbeam_channel::Receiver<crate::keyboard::InputEvent>>,
-    /// Tasks queued from other threads (e.g. the diagnostics server) to run on
-    /// the Lisp thread at a safe point. Drained in the `read_char` loop.
-    eval_task_rx: Option<crossbeam_channel::Receiver<EvalThreadTask>>,
-    /// Cross-thread quit signal. The input-bridge thread flips this to
-    /// `true` when it observes a `quit-char` keystroke; the evaluator
-    /// drains it from `maybe_quit` into `Vquit_flag` on its next poll.
+    /// Consecutive graphical scroll commands retain a pixel goal, not a
+    /// possibly clipped buffer column. Owned exclusively by this VM.
+    pub(crate) scroll_goal: Option<crate::emacs_core::xdisp::motion::ScrollGoal>,
+    /// Source identity for the display-facing `face_table` derived from a
+    /// frame's authoritative Lisp face specifications.  Equal identity means
+    /// redisplay can reuse the table without scanning every face again.
+    materialized_face_table_source: WorldSlot<Option<(crate::window::FrameId, u64)>>,
+    /// Pending GNU display ownership and private transaction state. Each
+    /// exclusively borrowed Context owns it; never a process/TLS Lisp cache.
+    pub(crate) gnu_redisplay_hooks: WorldSlot<redisplay_hooks::RedisplayHookOwnership>,
+    /// Cached Lisp-visible GC tuning variables used on every safe point.
     ///
-    /// GNU handles this case with `sys_longjmp` from the signal or
-    /// keystroke handler straight into `read_char`'s `setjmp` target
-    /// (`keyboard.c:12738`, `keyboard.c:3812`). Rust can't do that
-    /// across owned borrows, so we use an atomic flag and rely on
-    /// `maybe_quit` polling from `eval_sub` / `Ffuncall` / the bytecode
-    /// VM to pick it up.
-    pub quit_requested: QuitRequest,
-    /// Redisplay callback — called before blocking for input in `read_char()`.
-    ///
-    /// In GNU Emacs, `read_char()` calls `redisplay()` directly (keyboard.c
-    /// calls xdisp.c, both in the same binary). In our crate structure,
-    /// `neomacs-layout-engine` depends on `neovm-core`, so neovm-core cannot
-    /// call the layout engine directly (circular dependency). Instead,
-    /// `neomacs-bin` sets this callback to run the layout engine and send
-    /// the resulting `FrameGlyphBuffer` to the render thread.
-    ///
-    /// `None` in batch mode (no display).
-    #[allow(clippy::type_complexity)]
-    // frontend callback seam avoids a core/layout dependency cycle
-    pub redisplay_fn: Option<Box<dyn FnMut(&mut Self)>>,
-    /// First non-local mode-line exit deferred across the frontend's void
-    /// redisplay callback. Each Context belongs to one mutator at a time;
-    /// independent mutators own independent slots. Flow owns its payload's
-    /// GC pins until redisplay restores its state and returns the exit.
-    pub(crate) mode_line_display_flow: Option<Flow>,
-    /// Renderer-inert mini/echo geometry preparation before window-change
-    /// hooks. Exclusively invoked by the guarded redisplay transaction.
-    #[allow(clippy::type_complexity)]
-    pub redisplay_prepare_fn:
-        Option<Box<dyn FnMut(&mut Self, RedisplayMiniGeometryRequest) -> EvalResult>>,
-    /// Frontend-installed font-shaping driver (GNU `font->driver->shape`).
-    /// The gstring contract lives in src/font.c's `Ffont_shape_gstring`; the
-    /// shaping engine lives in the display layer, so the frontend installs
-    /// this typed seam. `None` means the driver cannot shape (the subr
-    /// answers nil — no composition).
-    #[allow(clippy::type_complexity)]
-    pub font_shape_fn: Option<crate::emacs_core::font::FontShapeFn>,
-    /// Shaped-gstring cache (GNU `gstring_hash_table`,
-    /// composition_gstring_put_cache/lookup_cache, src/composite.c): keyed
-    /// by the gstring header's font family + pixel size + characters, valued
-    /// by the shaped gstring with its ID slot assigned.
-    pub(crate) gstring_shape_cache:
-        WorldSlot<HashMap<crate::emacs_core::font::GstringShapeCacheKey, Value>>,
-    /// Optional GUI observer of a complete marker-backed scroll transition.
-    #[allow(clippy::type_complexity)]
-    pub scroll_preview_fn: Option<
-        Box<
-            dyn FnMut(
-                &Self,
-                crate::window::FrameId,
-                crate::window::WindowId,
-                Vec<neomacs_display_protocol::input_progress::InputReceipt>,
-            ),
-        >,
-    >,
-    /// One bounded, read-only display maintenance step during idle input waits
-    /// or a GUI command boundary when input remains queued. The delay requests
-    /// another idle wakeup; the boolean requests publication after releasing
-    /// the engine borrow. Installing this also enables periodic GUI service.
-    #[allow(clippy::type_complexity)]
-    pub display_idle_maintenance_fn:
-        Option<Box<dyn FnMut(&Self) -> (Option<std::time::Duration>, bool)>>,
-    /// Frontend-installed frame snapshot hook (`neomacs--frame-snapshot`).
-    /// Same seam pattern as `redisplay_fn`: neovm-core cannot reach the
-    /// layout engine, so the frontend lays out the requested frames on
-    /// demand and returns the serialized snapshot. Take/call/reinstall.
-    #[allow(clippy::type_complexity)]
-    pub frame_snapshot_fn: Option<
-        Box<
-            dyn FnMut(
-                &mut Self,
-                &crate::emacs_core::xdisp::SnapshotRequest,
-            ) -> Result<String, String>,
-        >,
-    >,
+    /// GNU updates its low-level GC tuning state when the watched variables
+    /// change, then keeps `maybe_gc` itself cheap.  Mirror that split here:
+    /// refresh the cache on the mutation sites, and let safe points combine
+    /// the cached values with current heap usage.
+    gc_runtime_settings_cache: GcRuntimeSettingsCache,
+    /// Bootstrapped standard interpreted-closure filter function object.
+    /// Rooted so the dumped startup state's runtime closure hook remains live.
+    interpreted_closure_filter_fn: Option<Value>,
+    pub(crate) in_flight_registry: super::error::InFlightRegistryHandle,
+    pub(crate) cached_standard_case_table: Option<Value>,
+    /// Buffer manager — owns all live buffers and tracks current buffer.
+    pub buffers: BufferManager,
     /// Frontend-installed synchronous window layout query.
     ///
     /// `window-end` with UPDATE non-nil, and every geometry query in the `posn`
@@ -3391,121 +3086,76 @@ pub struct Context {
     /// while invoking it is tracked explicitly: recursive/exclusively-borrowed
     /// queries report `LayoutBusy` instead of silently returning stale state.
     pub(crate) window_layout_query_adapter: WindowLayoutQueryAdapter,
-    /// Consecutive graphical scroll commands retain a pixel goal, not a
-    /// possibly clipped buffer column. Owned exclusively by this VM.
-    pub(crate) scroll_goal: Option<crate::emacs_core::xdisp::motion::ScrollGoal>,
-    /// Host-display bridge for GUI frame realization.
-    pub display_host: Option<Box<dyn DisplayHost>>,
-    /// Frontend-owned opener for additional text terminals requested by
-    /// `make-terminal-frame`. The VM owns identities; platform code owns the
-    /// device, raw-mode, input, renderer, and lifecycle resources.
-    pub(crate) tty_frame_host_factory: Option<Box<dyn TtyFrameHostFactory>>,
-    /// Desired visual configuration.  Lisp updates this snapshot atomically;
-    /// attaching or rebuilding a display replays it as authoritative state.
-    pub(crate) visual_config: neomacs_display_protocol::VisualConfig,
     /// Native anchor for the next Lisp-driven menu-bar popup.
     pub(crate) pending_menu_bar_popup_anchor: Option<super::MenuBarPopupAnchor>,
-    /// Coding system manager — encoding/decoding registry.
-    pub(crate) coding_systems: WorldView<CodingSystemManager>,
     /// Reusable scratch-buffer lifecycle shared by code-conversion entry
     /// points. This is transient runtime state, like GNU's
     /// `Vcode_conversion_reused_workbuf` and `reused_workbuf_in_use`.
     pub(crate) code_conversion_workspace: crate::code_conversion_workspace::CodeConversionWorkspace,
-    /// Face table — global registry of named face definitions.
-    pub(crate) face_table: WorldSlot<FaceTable>,
-    /// Incremented when any face attribute changes; layout engine uses
-    /// this to invalidate its resolved face cache.
-    pub(crate) face_change_count: WorldSlot<u64>,
-    /// Source identity for the display-facing `face_table` derived from a
-    /// frame's authoritative Lisp face specifications.  Equal identity means
-    /// redisplay can reuse the table without scanning every face again.
-    materialized_face_table_source: WorldSlot<Option<(crate::window::FrameId, u64)>>,
-    /// Incremented when any display-affecting buffer-local/global variable is
-    /// set (truncate-lines, bidi-*, ctl-arrow, buffer-display-table,
-    /// buffer-invisibility-spec, fill-column-indicator, overlay-arrow,
-    /// display-line-numbers, …). These change layout with NO buffer-text/face/
-    /// overlay tick, so the incremental fast paths key on this counter to force
-    /// a full rebuild (adversarial-review fix). Rare event → a global counter
-    /// (over-invalidating all windows) is acceptable and simpler than per-var keys.
-    pub(crate) display_var_change_count: WorldSlot<u64>,
-    pub input_progress: neomacs_display_protocol::input_progress::InputProgress,
-    /// Explicit redisplay invalidation generation, used for state that GNU
-    /// marks with update_mode_lines/window redisplay flags.
-    ///
-    /// This counter also moves for presentation-only work (chrome, menu,
-    /// mode-line), so it must NOT be the reason a window relayouts its body
-    /// text; retained bodies key on [`BodyRedisplayRevision`] instead.
-    redisplay_generation: WorldSlot<u64>,
-    /// Body-only redisplay revisions for `(force-window-update)`; see
-    /// [`BodyRedisplayRevision`]. Kept per window and per buffer so a targeted
-    /// force does not rebuild unrelated windows.
-    body_redisplay_all: WorldSlot<u64>,
-    body_redisplay_by_window: WorldSlot<FxHashMap<WindowId, u64>>,
-    body_redisplay_by_buffer: WorldSlot<FxHashMap<BufferId, u64>>,
-    /// GNU `update_menu_bar` invalidation boundary.  This is narrower than
-    /// `redisplay_generation`; see [`MenuBarRebuildGeneration`].
-    menu_bar_rebuild_generation: WorldSlot<u64>,
-    /// Which windows' chrome (mode/header/tab line) must be re-generated on
-    /// the next redisplay. See [`ChromeDirty`].
-    chrome_dirty: WorldSlot<crate::emacs_core::chrome_dirty::ChromeDirty>,
-    /// Pending GNU display ownership and private transaction state. Each
-    /// exclusively borrowed Context owns it; never a process/TLS Lisp cache.
-    pub(crate) gnu_redisplay_hooks: WorldSlot<redisplay_hooks::RedisplayHookOwnership>,
-    /// Process-unique id for THIS evaluator instance. Lets thread-local
-    /// caches outside neovm-core (e.g. the layout engine's menu-bar item
-    /// cache) refuse entries from a previous Context: tests create many
-    /// evaluators per thread, and generation counters restart at 0 while
-    /// heap addresses recycle, so without this a cache key could collide
-    /// across instances.
-    context_instance_id: u64,
-    /// Bumped when asynchronously decoded media (images) reaches a terminal
-    /// state, so a completed decode escalates past the retained-matrix reuse
-    /// key as well as the redisplay signature.
-    ///
-    /// Redisplay has two independent gates: `redisplay_generation` decides
-    /// whether to redisplay at all, while `RetainedWindowKey` decides whether a
-    /// window may reuse its retained matrix. An image finishing its decode
-    /// changed neither the buffer ticks nor the geometry in that key, so
-    /// redisplay ran and then reused the matrix that had captured the image's
-    /// 1x1 `Pending` placeholder — every async-decoded buffer image stayed one
-    /// pixel for the lifetime of the buffer.
-    media_generation: u64,
     /// Last visible state submitted to redisplay.  Mirrors GNU's fast
     /// `needs_no_redisplay` path by skipping layout when none of the visible
     /// inputs changed.
     last_redisplay_signature: WorldSlot<Option<RedisplaySignature>>,
-    /// GNU `lisp_eval_depth`: one shared counter for interpreted cons-form
-    /// evaluation, Lisp-visible `funcall`, and bytecode `Bcall`.
-    pub(crate) depth: usize,
-    #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
-    eval_counter: u64,
-    /// Maximum recursion depth.
-    pub(crate) max_depth: usize,
-    /// Set when allocation crosses the GC threshold; cleared by `gc_collect`.
-    pub(crate) gc_pending: bool,
-    /// Total number of GC collections performed.
-    pub(crate) gc_count: u64,
-    /// Last thread that activated this Context, for cold cache invalidation.
-    last_activation_thread: Option<std::thread::ThreadId>,
-    /// Nested depth of explicit GC inhibition scopes.
-    pub(crate) gc_inhibit_depth: usize,
-    /// True while the mutator-side collection driver
-    /// (`gc_collect_from_current_roots_impl`) is on the stack. Set and cleared
-    /// INLINE, deliberately not via a Drop guard: a panic that unwinds out of
-    /// the driver must LEAVE the flag set, so module-boundary panic containment
-    /// can detect "this panic escaped GC machinery — heap invariants unknown"
-    /// and re-raise instead of containing. A guard that cleared it on unwind
-    /// would erase exactly the evidence the detector exists to preserve.
-    pub(crate) gc_driver_active: bool,
-    /// Stress-test mode: force GC at every safe point regardless of threshold.
-    pub(crate) gc_stress: bool,
-    /// Cached Lisp-visible GC tuning variables used on every safe point.
-    ///
-    /// GNU updates its low-level GC tuning state when the watched variables
-    /// change, then keeps `maybe_gc` itself cheap.  Mirror that split here:
-    /// refresh the cache on the mutation sites, and let safe points combine
-    /// the cached values with current heap usage.
-    gc_runtime_settings_cache: GcRuntimeSettingsCache,
+    /// Match data from the last successful search/match operation.
+    pub(crate) match_data: Option<MatchData>,
+    /// Input event receiver from the display/render thread.
+    /// `None` in batch mode (tests, non-interactive evaluation).
+    /// When `Some`, `read_char()` drains this queue but normally blocks on the
+    /// unified process/input poller. Producers must enqueue first, then call
+    /// [`Context::wait_notifier`]'s notifier so input cannot miss that wait.
+    pub input_rx: Option<crossbeam_channel::Receiver<crate::keyboard::InputEvent>>,
+    /// Tasks queued from other threads (e.g. the diagnostics server) to run on
+    /// the Lisp thread at a safe point. Drained in the `read_char` loop.
+    eval_task_rx: Option<crossbeam_channel::Receiver<EvalThreadTask>>,
+    /// Specpdl — special binding stack that writes directly to the obarray.
+    /// Matches GNU Emacs's specpdl design.
+    pub(crate) specpdl: Vec<SpecBinding>,
+    /// Binding stacks parked while a nested simulated thread runs. GNU owns a
+    /// separate specpdl per thread; keeping suspended stacks out of the active
+    /// `specpdl` gives the single-threaded runtime the same isolation while
+    /// retaining every parked value as a GC root.
+    suspended_thread_bindings: Vec<ThreadDynamicBindingState>,
+    /// Features currently being resolved through `require`.
+    pub(crate) require_stack: Vec<SymId>,
+    /// Files currently being loaded (mirrors `Vloads_in_progress` in lread.c).
+    pub(crate) loads_in_progress: Vec<crate::heap_types::LispString>,
+    /// Stack of active load-read cursors (nested loads).  Each entry pairs the
+    /// heap `LispString` being read with a byte offset that BOTH the
+    /// readevalloop AND `(read STREAM=standard-input)` advance — mirroring GNU's
+    /// `readcharfun`/`instream` shared cursor (lread.c `readevalloop`).  A file
+    /// that calls `(read)` mid-load thus consumes the *next* top-level form and
+    /// the loop resumes after it.  Transient process state: never serialized.
+    /// The `source` Values are kept alive by a `push_specpdl_root` at push time,
+    /// not by this Vec (which GC does not trace).
+    pub(crate) load_read_cursors: Vec<LoadReadCursor>,
+    /// GNU `last_overlay_modification_hooks`: hook-list/overlay pairs recorded
+    /// by the before-change overlay scan and replayed by the after-change scan.
+    pub(crate) last_overlay_modification_hooks: WorldSlot<Vec<OverlayModificationHook>>,
+    /// Deferred after-change records, mirroring GNU Emacs's
+    /// `combine_after_change_list` (insdel.c). When
+    /// `combine-after-change-calls` is non-nil and no incompatible
+    /// before-change-functions or overlays are installed,
+    /// `signal_after_change` records the change here instead of running
+    /// `after-change-functions` immediately. Each entry is the GNU triple
+    /// `(charpos - BEG, Z - (charpos - lendel + lenins), lenins - lendel)`
+    /// in 1-based character coordinates.
+    pub(crate) combine_after_change_list: WorldSlot<Vec<(i64, i64, i64)>>,
+    /// Bookmark manager — persistent named positions.
+    pub(crate) bookmarks: WorldSlot<BookmarkManager>,
+    /// Rectangle state — stores the last killed rectangle for yank-rectangle.
+    pub(crate) rectangle: WorldSlot<RectangleState>,
+    /// Interactive command registry — tracks interactive commands.
+    pub(crate) interactive: WorldSlot<InteractiveRegistry>,
+    /// Minibuffer runtime state — active minibuffer stack, prompt metadata, and history.
+    pub(crate) minibuffers: WorldSlot<MinibufferManager>,
+    /// Mode registry — major/minor modes.
+    pub(crate) modes: WorldSlot<ModeRegistry>,
+    /// Keyboard macro metadata — ring/counter state layered above the
+    /// keyboard-owned live recording/playback runtime.
+    pub(crate) kmacro: WorldSlot<KmacroManager>,
+    /// Desired visual configuration.  Lisp updates this snapshot atomically;
+    /// attaching or rebuilding a display replays it as authoritative state.
+    pub(crate) visual_config: neomacs_display_protocol::VisualConfig,
     /// Active VM-local root frames. Mirrors GNU's model more closely than a
     /// single save/truncate side vector by keeping VM dynamic roots in explicit
     /// nested frames.
@@ -3540,6 +3190,328 @@ pub struct Context {
     /// only ever overwritten with tagged stores), so tracing `0..top` is
     /// always sound and no per-frame fill is needed.
     pub(crate) jit_root_stack: Vec<Value>,
+    /// Frame metadata for each active bytecode invocation.
+    /// Each entry records where the frame's stack region starts in bc_buf
+    /// and the function object (so GC can trace its constants).
+    pub(crate) bc_frames: Vec<BcFrame>,
+    /// Shared condition runtime mirror for active catch/condition handlers.
+    pub(crate) condition_stack: Vec<ConditionFrame>,
+    /// GNU `pending_funcalls` equivalent for internal no-Lisp teardown paths.
+    pub(crate) pending_safe_funcalls: WorldSlot<Vec<PendingSafeFuncall>>,
+    /// Thread-private backing stores for the interpreter's per-entry stacks
+    /// (see `vm::InterpreterStackPool`). Live frames leave this empty cache
+    /// before execution; parked roots are published separately, never here.
+    pub(crate) interpreter_stacks: crate::emacs_core::bytecode::vm::InterpreterStackPool,
+    /// specpdl depths of the dynamic bindings generated code has made in
+    /// the current native frames (`neovm_jit_varbind` pushes, `Op::Unbind`
+    /// pops N, a frame exit truncates to its base).  A Context field, not a
+    /// thread-local: every shim already holds the Context, and the
+    /// thread-local's lookup plus RefCell borrow ran on every bind, unbind
+    /// and native entry.
+    pub(crate) jit_bind_stack: Vec<usize>,
+    /// `cconv-make-interpreted-closure` statistics and effect counters
+    /// (`NEOVM_CCONV_MEMO`, P4.1 Stage 0).
+    pub(crate) cconv_memo: cconv_memo::CconvMemo,
+    /// Tier-I fallback B: compiled hot interpreted closures (`NEOVM_TIER_I`,
+    /// P4.2 Part A).
+    pub(crate) tier_i: tier_i::TierI,
+    /// Compact render of the live Lisp backtrace captured when the most recent
+    /// *uncaught* signal was dispatched (specpdl still intact), for the command
+    /// loop's error log.  Only populated when debug-level tracing is active, so
+    /// it costs nothing in production.  Taken (cleared) when logged.  See
+    /// `dispatch_signal` and `command_loop_2`.
+    pub(crate) last_uncaught_signal_backtrace: Option<String>,
+    pub(crate) daemon: WorldSlot<Option<DaemonState>>,
+    /// Process manager — owns all tracked processes.
+    pub(crate) processes: WorldSlot<ProcessManager>,
+    /// Abbreviation manager — text abbreviation expansion.
+    pub(crate) abbrevs: WorldSlot<AbbrevManager>,
+    /// GNU-compatible CPU and managed-allocation profiler state.
+    pub(crate) profiler: WorldSlot<super::profiler::ProfilerState>,
+    /// Pending orderly shutdown requested by GNU C-owned primitives such as
+    /// `kill-emacs`.
+    pub(crate) shutdown_request: Option<ShutdownRequest>,
+    /// The window edge the pointer is holding, if any.
+    ///
+    /// Updated as `read_char` consumes each pointer press and release, so it is
+    /// ordered against the redisplays those events cause: every presentation
+    /// composed between a grab and its release is stamped as the drag's, and
+    /// none after it is.
+    pub(crate) window_edge_drag: crate::emacs_core::window_edge_drag::WindowEdgeDrag,
+    /// Arithmetic policy ownership, reconstructed rather than dumped.
+    pub(crate) integer_width_context: super::builtins::IntegerWidthContext,
+    pub(crate) owned_roots: OwnedRootRegistryView,
+    /// Tagged pointer heap — sole GC and allocator.
+    pub(crate) tagged_heap: WorldView<crate::tagged::gc::TaggedHeap>,
+    /// The obarray — unified symbol table with value cells, function cells, plists.
+    pub(crate) obarray: ObarrayView,
+    /// `runtime_binding_has_projection`'s membership as a bitset over symbol
+    /// ids (see `runtime_projection_mask_for`).
+    runtime_projection_mask: Box<[u64]>,
+    /// Features list (for require/provide).
+    pub(crate) features: WorldView<Vec<SymId>>,
+    /// GNU xwidget runtime state: internal model/view lists and id counter.
+    pub(crate) xwidgets: WorldSlot<super::xwidget::XwidgetState>,
+    /// Network manager — owns network connections, filters, and sentinels.
+    /// Variable watcher list — callbacks on variable changes.
+    pub(crate) watchers: WorldView<VariableWatcherList>,
+    /// Symbols whose variable watchers are currently running.
+    ///
+    /// GNU `notify_variable_watchers` temporarily sets the symbol's trapped
+    /// write state to `SYMBOL_UNTRAPPED_WRITE` to suppress recursive watcher
+    /// notification while a watcher callback mutates the same symbol.
+    pub(crate) active_variable_watchers: WorldView<HashSet<SymId>>,
+    /// Register manager — quick storage and retrieval of text, positions, etc.
+    pub(crate) registers: WorldSlot<RegisterManager>,
+    /// Autoload manager — deferred function loading.
+    pub(crate) autoloads: WorldView<AutoloadManager>,
+    /// Tree-sitter runtime manager — loaded grammars, parser state, node handles,
+    /// and compiled queries backing `treesit-*` builtins.
+    pub(crate) treesit: WorldView<super::treesit::TreeSitterManager>,
+    /// Frame manager — owns all frames and windows.
+    pub(crate) frames: WorldView<FrameManager>,
+    /// Cross-thread quit signal. The input-bridge thread flips this to
+    /// `true` when it observes a `quit-char` keystroke; the evaluator
+    /// drains it from `maybe_quit` into `Vquit_flag` on its next poll.
+    ///
+    /// GNU handles this case with `sys_longjmp` from the signal or
+    /// keystroke handler straight into `read_char`'s `setjmp` target
+    /// (`keyboard.c:12738`, `keyboard.c:3812`). Rust can't do that
+    /// across owned borrows, so we use an atomic flag and rely on
+    /// `maybe_quit` polling from `eval_sub` / `Ffuncall` / the bytecode
+    /// VM to pick it up.
+    pub quit_requested: QuitRequest,
+    /// Shaped-gstring cache (GNU `gstring_hash_table`,
+    /// composition_gstring_put_cache/lookup_cache, src/composite.c): keyed
+    /// by the gstring header's font family + pixel size + characters, valued
+    /// by the shaped gstring with its ID slot assigned.
+    pub(crate) gstring_shape_cache:
+        WorldSlot<HashMap<crate::emacs_core::font::GstringShapeCacheKey, Value>>,
+    /// Coding system manager — encoding/decoding registry.
+    pub(crate) coding_systems: WorldView<CodingSystemManager>,
+    /// Face table — global registry of named face definitions.
+    pub(crate) face_table: WorldSlot<FaceTable>,
+    pub input_progress: neomacs_display_protocol::input_progress::InputProgress,
+    body_redisplay_by_window: WorldSlot<FxHashMap<WindowId, u64>>,
+    body_redisplay_by_buffer: WorldSlot<FxHashMap<BufferId, u64>>,
+    /// Which windows' chrome (mode/header/tab line) must be re-generated on
+    /// the next redisplay. See [`ChromeDirty`].
+    chrome_dirty: WorldSlot<crate::emacs_core::chrome_dirty::ChromeDirty>,
+    /// See `SymbolByteCodeCallCache`: what each symbol's function cell resolves
+    /// to for a bytecode stack call, epoch-tagged.
+    pub(crate) symbol_bytecode_call_cache: crate::emacs_core::bytecode::vm::SymbolByteCodeCallCache,
+    /// Hot cache for named callable resolution in `funcall`/`apply`.
+    /// Keyed by symbol id; entries are validated against the obarray's
+    /// `function_epoch` so that any `defalias` / `fset` / autoload
+    /// installation immediately invalidates stale lookups.
+    named_call_cache: FxHashMap<SymId, NamedCallCacheEntry>,
+    macro_perf_stats: WorldView<MacroPerfStats>,
+    /// User-defined fringe bitmaps registered via `define-fringe-bitmap`.
+    /// GC-safe: holds no raw `Value`s (bits are `Vec<u16>`, faces are names).
+    pub(crate) fringe_bitmaps: WorldSlot<super::builtins::fringe_bitmap::FringeBitmapRegistry>,
+    // Semantic registries belong to this heap; TLS only selects an active view.
+    pub(crate) ccl_registry: super::ccl::CclRegistryHandle,
+    pub(crate) charset_registry: super::charset::CharsetRegistryHandle,
+    pub(crate) font_registry: super::xfaces::FontRegistryHandle,
+    pub(crate) terminal_registry: super::terminal::pure::TerminalRegistryHandle,
+    pub(crate) hash_table_test_registry: super::builtins::HashTableTestRegistryHandle,
+    pub(crate) file_notify_registry: super::builtins::FileNotifyRegistryHandle,
+    pub(crate) window_configuration_registry: super::builtins::WindowConfigurationRegistryHandle,
+    pub(crate) dynamic_module_registry: super::dynamic_module::DynamicModuleRegistryHandle,
+    /// Mmap-backed pdump image that owns any mapped heap payloads borrowed by
+    /// this evaluator's Lisp objects.
+    /// The loaded pdump mapping, LEAKED to 'static at install: process-global
+    /// structures (the symbol interner's dump-name aliases — see
+    /// `intern_dump_lisp_string` — and the mapped tagged-heap objects) hold
+    /// pointers into it, so the mapping must outlive every Context. One
+    /// bounded leak per load; production loads once per process.
+    pub(crate) pdump_image: Option<&'static super::pdump::mmap_image::LoadedMmapImage>,
+    /// Runtime-owned `system-name` object used to distinguish GNU's cached
+    /// hostname from an explicit Lisp replacement.  This is transient process
+    /// state and is deliberately reconstructed rather than serialized in a
+    /// portable dump.
+    pub(crate) cached_system_name: WorldSlot<Value>,
+    /// Lexical environment: flat cons alist mirroring GNU Emacs's
+    /// `Vinternal_interpreter_environment`.
+    pub(crate) lexenv: Value,
+    quit_flag: Value,
+    inhibit_quit: Value,
+    /// `throw-on-input`'s value, cached beside the two flags it is polled
+    /// with.  GNU's `QUIT` reads C globals; reading this one out of the
+    /// obarray instead put a symbol lookup on every safe point, because the
+    /// poll's guard is true in any session that owns an input channel -- 8 M
+    /// lookups in a 20-keystroke rust-lsp run.
+    throw_on_input: Value,
+    /// Nonzero while `unbind_to` is running unwind cleanup forms.
+    ///
+    /// GNU `unbind_to` clears `Vquit_flag` and then runs cleanup forms without
+    /// polling the input layer again; input processing sets `Vquit_flag` before
+    /// the evaluator observes it.  Neomacs has an evaluator-side
+    /// `throw-on-input` poll to bridge host input, so suppress that extra poll
+    /// during cleanup to preserve GNU's unwind semantics.
+    unwind_cleanup_depth: usize,
+    /// GNU `interval_insert_behind_hooks`: text-property hook list recorded
+    /// by `verify_interval_modification` before an insertion and replayed by
+    /// `report_interval_modification` after the inserted text exists.
+    pub(crate) interval_insert_behind_hooks: WorldSlot<Value>,
+    /// GNU `interval_insert_in_front_hooks`: text-property hook list recorded
+    /// by `verify_interval_modification` before an insertion and replayed by
+    /// `report_interval_modification` after the inserted text exists.
+    pub(crate) interval_insert_in_front_hooks: WorldSlot<Value>,
+    /// Canonical Lisp object returned by `standard-syntax-table`.
+    ///
+    /// GNU Emacs stores this in `Vstandard_syntax_table`; NeoVM keeps the
+    /// authoritative identity here and mirrors it into thread-local state for
+    /// no-evaluator syntax builtins.
+    pub(crate) standard_syntax_table: Value,
+    /// GNU's `Vsyntax_code_object`: canonical `(CODE)` conses for the 16 bare
+    /// syntax classes. Standard syntax tables and `string-to-syntax` share
+    /// these objects, so `eq` identity is observable.
+    pub(crate) syntax_code_objects: Value,
+    /// Last `syntax-ppss` parser state for the current evaluator.
+    ///
+    /// GNU implements `syntax-ppss` in Lisp as an incremental cache over
+    /// `parse-partial-sexp`.  Fields 2 and 6 of the returned state are
+    /// intentionally cache-dependent, so keeping the last state is part of
+    /// matching the observable behavior of repeated `syntax-ppss` calls.
+    /// Canonical Lisp object returned by `standard-category-table`.
+    ///
+    /// Like `standard_syntax_table`, this is mirrored into thread-local state
+    /// because the category-table helpers currently expose some no-evaluator
+    /// entry points.
+    pub(crate) standard_category_table: Value,
+    /// Current buffer-local keymap (set by `use-local-map`).
+    pub(crate) current_local_map: Value,
+    /// Count of completed minibuffer reads observed by the evaluator.
+    pub(crate) interactive_minibuffer_read_count: WorldSlot<u64>,
+    /// Lisp-visible `quit_char` used by `current-input-mode` and low-level
+    /// keyboard quit detection.
+    pub(crate) quit_char: WorldSlot<i64>,
+    /// Redisplay callback — called before blocking for input in `read_char()`.
+    ///
+    /// In GNU Emacs, `read_char()` calls `redisplay()` directly (keyboard.c
+    /// calls xdisp.c, both in the same binary). In our crate structure,
+    /// `neomacs-layout-engine` depends on `neovm-core`, so neovm-core cannot
+    /// call the layout engine directly (circular dependency). Instead,
+    /// `neomacs-bin` sets this callback to run the layout engine and send
+    /// the resulting `FrameGlyphBuffer` to the render thread.
+    ///
+    /// `None` in batch mode (no display).
+    #[allow(clippy::type_complexity)]
+    // frontend callback seam avoids a core/layout dependency cycle
+    pub redisplay_fn: Option<Box<dyn FnMut(&mut Self)>>,
+    /// First non-local mode-line exit deferred across the frontend's void
+    /// redisplay callback. Each Context belongs to one mutator at a time;
+    /// independent mutators own independent slots. Flow owns its payload's
+    /// GC pins until redisplay restores its state and returns the exit.
+    pub(crate) mode_line_display_flow: Option<Flow>,
+    /// Renderer-inert mini/echo geometry preparation before window-change
+    /// hooks. Exclusively invoked by the guarded redisplay transaction.
+    #[allow(clippy::type_complexity)]
+    pub redisplay_prepare_fn:
+        Option<Box<dyn FnMut(&mut Self, RedisplayMiniGeometryRequest) -> EvalResult>>,
+    /// Frontend-installed font-shaping driver (GNU `font->driver->shape`).
+    /// The gstring contract lives in src/font.c's `Ffont_shape_gstring`; the
+    /// shaping engine lives in the display layer, so the frontend installs
+    /// this typed seam. `None` means the driver cannot shape (the subr
+    /// answers nil — no composition).
+    #[allow(clippy::type_complexity)]
+    pub font_shape_fn: Option<crate::emacs_core::font::FontShapeFn>,
+    /// Optional GUI observer of a complete marker-backed scroll transition.
+    #[allow(clippy::type_complexity)]
+    pub scroll_preview_fn: Option<
+        Box<
+            dyn FnMut(
+                &Self,
+                crate::window::FrameId,
+                crate::window::WindowId,
+                Vec<neomacs_display_protocol::input_progress::InputReceipt>,
+            ),
+        >,
+    >,
+    /// One bounded, read-only display maintenance step during idle input waits
+    /// or a GUI command boundary when input remains queued. The delay requests
+    /// another idle wakeup; the boolean requests publication after releasing
+    /// the engine borrow. Installing this also enables periodic GUI service.
+    #[allow(clippy::type_complexity)]
+    pub display_idle_maintenance_fn:
+        Option<Box<dyn FnMut(&Self) -> (Option<std::time::Duration>, bool)>>,
+    /// Frontend-installed frame snapshot hook (`neomacs--frame-snapshot`).
+    /// Same seam pattern as `redisplay_fn`: neovm-core cannot reach the
+    /// layout engine, so the frontend lays out the requested frames on
+    /// demand and returns the serialized snapshot. Take/call/reinstall.
+    #[allow(clippy::type_complexity)]
+    pub frame_snapshot_fn: Option<
+        Box<
+            dyn FnMut(
+                &mut Self,
+                &crate::emacs_core::xdisp::SnapshotRequest,
+            ) -> Result<String, String>,
+        >,
+    >,
+    /// Host-display bridge for GUI frame realization.
+    pub display_host: Option<Box<dyn DisplayHost>>,
+    /// Frontend-owned opener for additional text terminals requested by
+    /// `make-terminal-frame`. The VM owns identities; platform code owns the
+    /// device, raw-mode, input, renderer, and lifecycle resources.
+    pub(crate) tty_frame_host_factory: Option<Box<dyn TtyFrameHostFactory>>,
+    /// Incremented when any face attribute changes; layout engine uses
+    /// this to invalidate its resolved face cache.
+    pub(crate) face_change_count: WorldSlot<u64>,
+    /// Incremented when any display-affecting buffer-local/global variable is
+    /// set (truncate-lines, bidi-*, ctl-arrow, buffer-display-table,
+    /// buffer-invisibility-spec, fill-column-indicator, overlay-arrow,
+    /// display-line-numbers, …). These change layout with NO buffer-text/face/
+    /// overlay tick, so the incremental fast paths key on this counter to force
+    /// a full rebuild (adversarial-review fix). Rare event → a global counter
+    /// (over-invalidating all windows) is acceptable and simpler than per-var keys.
+    pub(crate) display_var_change_count: WorldSlot<u64>,
+    /// Explicit redisplay invalidation generation, used for state that GNU
+    /// marks with update_mode_lines/window redisplay flags.
+    ///
+    /// This counter also moves for presentation-only work (chrome, menu,
+    /// mode-line), so it must NOT be the reason a window relayouts its body
+    /// text; retained bodies key on [`BodyRedisplayRevision`] instead.
+    redisplay_generation: WorldSlot<u64>,
+    /// Body-only redisplay revisions for `(force-window-update)`; see
+    /// [`BodyRedisplayRevision`]. Kept per window and per buffer so a targeted
+    /// force does not rebuild unrelated windows.
+    body_redisplay_all: WorldSlot<u64>,
+    /// GNU `update_menu_bar` invalidation boundary.  This is narrower than
+    /// `redisplay_generation`; see [`MenuBarRebuildGeneration`].
+    menu_bar_rebuild_generation: WorldSlot<u64>,
+    /// Process-unique id for THIS evaluator instance. Lets thread-local
+    /// caches outside neovm-core (e.g. the layout engine's menu-bar item
+    /// cache) refuse entries from a previous Context: tests create many
+    /// evaluators per thread, and generation counters restart at 0 while
+    /// heap addresses recycle, so without this a cache key could collide
+    /// across instances.
+    context_instance_id: u64,
+    /// Bumped when asynchronously decoded media (images) reaches a terminal
+    /// state, so a completed decode escalates past the retained-matrix reuse
+    /// key as well as the redisplay signature.
+    ///
+    /// Redisplay has two independent gates: `redisplay_generation` decides
+    /// whether to redisplay at all, while `RetainedWindowKey` decides whether a
+    /// window may reuse its retained matrix. An image finishing its decode
+    /// changed neither the buffer ticks nor the geometry in that key, so
+    /// redisplay ran and then reused the matrix that had captured the image's
+    /// 1x1 `Pending` placeholder — every async-decoded buffer image stayed one
+    /// pixel for the lifetime of the buffer.
+    media_generation: u64,
+    /// GNU `lisp_eval_depth`: one shared counter for interpreted cons-form
+    /// evaluation, Lisp-visible `funcall`, and bytecode `Bcall`.
+    pub(crate) depth: usize,
+    #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
+    eval_counter: u64,
+    /// Maximum recursion depth.
+    pub(crate) max_depth: usize,
+    /// Total number of GC collections performed.
+    pub(crate) gc_count: u64,
+    /// Last thread that activated this Context, for cold cache invalidation.
+    last_activation_thread: Option<std::thread::ThreadId>,
+    /// Nested depth of explicit GC inhibition scopes.
+    pub(crate) gc_inhibit_depth: usize,
     /// Mirror of `jit_root_stack.as_mut_ptr()`, republished on growth; read by
     /// generated code via a compile-time field offset.
     pub(crate) jit_root_stack_ptr: *mut Value,
@@ -3560,39 +3532,9 @@ pub struct Context {
     /// Where that guard's cold side parks a leaf's entry parameters after
     /// the vmctx across its measuring call.
     pub(crate) jit_stack_scratch: [usize; native_stack::JIT_STACK_SCRATCH_WORDS],
-    /// Frame metadata for each active bytecode invocation.
-    /// Each entry records where the frame's stack region starts in bc_buf
-    /// and the function object (so GC can trace its constants).
-    pub(crate) bc_frames: Vec<BcFrame>,
-    /// Shared condition runtime mirror for active catch/condition handlers.
-    pub(crate) condition_stack: Vec<ConditionFrame>,
     /// Stable identity source for VM resume targets stored in the shared
     /// condition runtime.
     next_resume_id: u64,
-    /// GNU `pending_funcalls` equivalent for internal no-Lisp teardown paths.
-    pub(crate) pending_safe_funcalls: WorldSlot<Vec<PendingSafeFuncall>>,
-    /// Cached truth of `internal--compiler-function-overrides`.
-    ///
-    /// GNU's hot evaluator path reads the function cell directly. Neomacs only
-    /// needs the override alist during compiler/macro machinery, so keep the
-    /// nil/common case as a cached flag for genuine calls and refresh it through the same runtime
-    /// binding paths that already maintain `quit-flag` and `noninteractive`.
-    compiler_function_overrides_symbol: SymId,
-    compiler_function_overrides_active: bool,
-    /// See `SymbolByteCodeCallCache`: what each symbol's function cell resolves
-    /// to for a bytecode stack call, epoch-tagged.
-    pub(crate) symbol_bytecode_call_cache: crate::emacs_core::bytecode::vm::SymbolByteCodeCallCache,
-    /// Thread-private backing stores for the interpreter's per-entry stacks
-    /// (see `vm::InterpreterStackPool`). Live frames leave this empty cache
-    /// before execution; parked roots are published separately, never here.
-    pub(crate) interpreter_stacks: crate::emacs_core::bytecode::vm::InterpreterStackPool,
-    /// specpdl depths of the dynamic bindings generated code has made in
-    /// the current native frames (`neovm_jit_varbind` pushes, `Op::Unbind`
-    /// pops N, a frame exit truncates to its base).  A Context field, not a
-    /// thread-local: every shim already holds the Context, and the
-    /// thread-local's lookup plus RefCell borrow ran on every bind, unbind
-    /// and native entry.
-    pub(crate) jit_bind_stack: Vec<usize>,
     /// This owner's slab of dynamic bindings of projected variables (Phase 0
     /// step 2), or none. It occupies the former reserved opcode-epoch word,
     /// with the same size, alignment and niche, so no Context offset moves.
@@ -3602,11 +3544,6 @@ pub struct Context {
     /// with compiler overrides inactive (`Vm::call_apply_native`). Genuine
     /// calls must recheck after advice, redefinition or an overrides toggle.
     pub(crate) apply_fast_path_epoch: std::cell::Cell<u64>,
-    /// Hot cache for named callable resolution in `funcall`/`apply`.
-    /// Keyed by symbol id; entries are validated against the obarray's
-    /// `function_epoch` so that any `defalias` / `fset` / autoload
-    /// installation immediately invalidates stale lookups.
-    named_call_cache: FxHashMap<SymId, NamedCallCacheEntry>,
     /// Hot cache for what an interpreted form's head symbol resolves to,
     /// validated against the obarray's `function_epoch`.
     form_head_cache: FormHeadCache,
@@ -3623,32 +3560,109 @@ pub struct Context {
     /// Diagnostic counters for eager/runtime macro expansion.
     pub(crate) macro_expand_calls: u64,
     pub(crate) macro_expand_total_us: u64,
+    /// GNU `eval.c` keeps `Vinternal_interpreter_environment` on a hidden
+    /// symbol object by `Funintern`ing the public name from the obarray.
+    /// NeoVM keeps the actual evaluator-owned symbol identity here so the
+    /// public `internal-interpreter-environment` symbol can stay visible
+    /// while remaining unbound and non-special.
+    #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
+    pub(crate) internal_interpreter_environment_symbol: SymId,
+    /// GNU `eval.c` hot-path DEFVARs exposed via direct globals like
+    /// `Vquit_flag`, `Vinhibit_quit`, and `Vthrow_on_input`.
+    ///
+    /// NeoVM still stores their values in the obarray's symbol cells so Lisp
+    /// sees ordinary variables, but evaluator boundaries keep their symbol
+    /// identities cached here to avoid repeated name interning/lookups.
+    quit_flag_symbol: SymId,
+    inhibit_quit_symbol: SymId,
+    throw_on_input_symbol: SymId,
+    kill_emacs_symbol: SymId,
+    /// The attention word (`attention.rs`): one bit per input a safe point
+    /// or a speculated call site must look at.  Derived from `quit_flag`,
+    /// `throw_on_input`, `compiler_function_overrides_active` and the
+    /// force-slow-spec harness and callback census, and written ONLY by
+    /// `refresh_attention` and the constructors; compiled code reads it at
+    /// `CONTEXT_ATTENTION_OFFSET`.
+    attention: u32,
+    noninteractive_symbol: SymId,
+    symbols_with_pos_enabled_symbol: SymId,
+    print_symbols_bare_symbol: SymId,
+    /// Uninterned, identity-only Lisp token for the active load stream.
+    pub(crate) load_read_stream_token: LoadReadStreamToken,
+    /// Redirected debugging output stream. Mirrors GNU print.c's
+    /// `redirect-debugging-output` redirection target for writes through
+    /// `external-debugging-output`.
+    /// Reserve for the World's value (plan-3w.md section 3).
+    #[allow(dead_code)]
+    _reserved_debugging_output_file: Option<std::fs::File>,
+    /// Cached truth of `internal--compiler-function-overrides`.
+    ///
+    /// GNU's hot evaluator path reads the function cell directly. Neomacs only
+    /// needs the override alist during compiler/macro machinery, so keep the
+    /// nil/common case as a cached flag for genuine calls and refresh it through the same runtime
+    /// binding paths that already maintain `quit-flag` and `noninteractive`.
+    compiler_function_overrides_symbol: SymId,
+    /// One-shot runtime flag set by file pdump loads.  GNU keeps this as
+    /// pdumper runtime state, not as a public obarray symbol.
+    pub(crate) after_pdump_load_hook_pending: bool,
+    noninteractive: bool,
+    /// When true, `symbolp`/`eq`/hash operations transparently unwrap
+    /// symbol-with-pos objects. Bound to `t` by the byte-compiler.
+    pub(crate) symbols_with_pos_enabled: bool,
+    /// When true, the printer outputs bare symbol names for symbol-with-pos.
+    pub(crate) print_symbols_bare: bool,
+    /// Buffer that owns the deferred after-change records, mirroring GNU
+    /// Emacs's `combine_after_change_buffer` (insdel.c). When the change
+    /// buffer differs, the pending list is flushed before recording the new
+    /// change.
+    /// GNU `message_log_need_newline`: the last `*Messages*' log was a
+    /// fragment (echo-area printer output), so the next complete message
+    /// first terminates that line.
+    /// Reserve for the World's value (plan-3w.md section 3).
+    #[allow(dead_code)]
+    _reserved_message_log_need_newline: bool,
+    /// Pending request to resize the echo-area mini-window *exactly* to its
+    /// content on the next redisplay, mirroring GNU `resize_echo_area_exactly`
+    /// (src/xdisp.c:13228-13245). GNU's `command_loop_1` (src/keyboard.c:1344)
+    /// runs `resize_echo_area_exactly` after every command when a message is
+    /// displayed, passing `exact_p = (minibuf_level == 0)`. We set this flag at
+    /// the same post-command point and consume it in the redisplay layout pass
+    /// so a `grow-only` echo window shrinks back to fit a shorter (even
+    /// non-empty) message once the command finishes with no active minibuffer.
+    pub(crate) echo_area_resize_exact_pending: bool,
+    /// True after print output has selected the current echo area buffer.
+    ///
+    /// Mirrors GNU xdisp.c `message_buf_print`: `message`/clear reset it, and
+    /// the next print-to-echo starts with a fresh echo buffer instead of
+    /// appending to the previous message.
+    /// Reserve for the World's value (plan-3w.md section 3).
+    #[allow(dead_code)]
+    _reserved_message_buf_print: bool,
+    /// First shutdown entry owns the hooks; the request is published after them.
+    pub(crate) shutdown_in_progress: bool,
+    /// Batch-compatible input-mode interrupt flag for `current-input-mode`.
+    /// Reserve for the World's value (plan-3w.md section 3).
+    #[allow(dead_code)]
+    _reserved_input_mode_interrupt: bool,
+    /// True while the command loop is blocked waiting for external input.
+    pub(crate) waiting_for_user_input: bool,
+    /// Set when allocation crosses the GC threshold; cleared by `gc_collect`.
+    pub(crate) gc_pending: bool,
+    /// True while the mutator-side collection driver
+    /// (`gc_collect_from_current_roots_impl`) is on the stack. Set and cleared
+    /// INLINE, deliberately not via a Drop guard: a panic that unwinds out of
+    /// the driver must LEAVE the flag set, so module-boundary panic containment
+    /// can detect "this panic escaped GC machinery — heap invariants unknown"
+    /// and re-raise instead of containing. A guard that cleared it on unwind
+    /// would erase exactly the evidence the detector exists to preserve.
+    pub(crate) gc_driver_active: bool,
+    /// Stress-test mode: force GC at every safe point regardless of threshold.
+    pub(crate) gc_stress: bool,
+    compiler_function_overrides_active: bool,
     /// When true, collect detailed timing counters for macro/eager-load paths.
     macro_perf_enabled: bool,
-    macro_perf_stats: WorldView<MacroPerfStats>,
-    /// Bootstrapped standard interpreted-closure filter function object.
-    /// Rooted so the dumped startup state's runtime closure hook remains live.
-    interpreted_closure_filter_fn: Option<Value>,
-    /// `cconv-make-interpreted-closure` statistics and effect counters
-    /// (`NEOVM_CCONV_MEMO`, P4.1 Stage 0).
-    pub(crate) cconv_memo: cconv_memo::CconvMemo,
-    /// Tier-I fallback B: compiled hot interpreted closures (`NEOVM_TIER_I`,
-    /// P4.2 Part A).
-    pub(crate) tier_i: tier_i::TierI,
-    /// User-defined fringe bitmaps registered via `define-fringe-bitmap`.
-    /// GC-safe: holds no raw `Value`s (bits are `Vec<u16>`, faces are names).
-    pub(crate) fringe_bitmaps: WorldSlot<super::builtins::fringe_bitmap::FringeBitmapRegistry>,
-    // Semantic registries belong to this heap; TLS only selects an active view.
-    pub(crate) ccl_registry: super::ccl::CclRegistryHandle,
-    pub(crate) charset_registry: super::charset::CharsetRegistryHandle,
-    pub(crate) font_registry: super::xfaces::FontRegistryHandle,
-    pub(crate) terminal_registry: super::terminal::pure::TerminalRegistryHandle,
-    pub(crate) hash_table_test_registry: super::builtins::HashTableTestRegistryHandle,
-    pub(crate) file_notify_registry: super::builtins::FileNotifyRegistryHandle,
-    pub(crate) window_configuration_registry: super::builtins::WindowConfigurationRegistryHandle,
-    pub(crate) dynamic_module_registry: super::dynamic_module::DynamicModuleRegistryHandle,
-    pub(crate) in_flight_registry: super::error::InFlightRegistryHandle,
-    pub(crate) cached_standard_case_table: Option<Value>,
+    /// Custom variable manager — defcustom/defgroup system.
+    pub(crate) custom: CustomManager,
 }
 
 // A mutex does not make the host hooks, Rc leases or TLS views transferable.
@@ -4582,11 +4596,11 @@ impl Context {
     pub(crate) fn current_input_mode_tuple(&self) -> (bool, bool, bool, i64) {
         // Batch oracle compatibility: flow-control and meta are fixed to
         // nil/t respectively; quit-char remains mutable like GNU Emacs.
-        (self.input_mode_interrupt, false, true, *self.quit_char)
+        (self.input_mode_interrupt(), false, true, *self.quit_char)
     }
 
     pub(crate) fn set_input_mode_interrupt(&mut self, interrupt: bool) {
-        self.input_mode_interrupt = interrupt;
+        self.set_input_mode_interrupt_flag(interrupt);
     }
 
     #[inline]
@@ -5215,18 +5229,6 @@ impl Context {
         &mut self.frames
     }
 
-    /// GNU's `face_change_count`: bumped on every face change.
-    #[inline]
-    pub fn face_change_count(&self) -> u64 {
-        *self.face_change_count
-    }
-
-    /// Bumped when a display-affecting variable changes.
-    #[inline]
-    pub fn display_var_change_count(&self) -> u64 {
-        *self.display_var_change_count
-    }
-
     pub fn current_message_text(&self) -> Option<String> {
         self.current_message
             .as_ref()
@@ -5407,7 +5409,7 @@ impl Context {
         // keyboard reader. Keyboard echo publication restores its typed state
         // only after installing its own message.
         self.cancel_key_echo_state();
-        self.message_buf_print = false;
+        self.set_message_buf_print(false);
         if (*self.current_message) != message {
             // GNU keeps no copy: `current_message` (src/xdisp.c:13420) reads the
             // echo buffer back with `make_buffer_string (BEG, Z, true)`
@@ -5557,9 +5559,9 @@ impl Context {
         if !self.noninteractive() {
             self.ensure_echo_area_buffers();
         }
-        if !self.message_buf_print {
+        if !self.message_buf_print() {
             *self.current_message = None;
-            self.message_buf_print = true;
+            self.set_message_buf_print(true);
         }
         self.append_current_message_runtime_text(text);
     }
@@ -5575,15 +5577,15 @@ impl Context {
         if !self.noninteractive() {
             self.ensure_echo_area_buffers();
         }
-        if !self.message_buf_print {
+        if !self.message_buf_print() {
             *self.current_message = None;
-            self.message_buf_print = true;
+            self.set_message_buf_print(true);
         }
         self.append_current_message_lisp_string(text);
     }
 
     pub(crate) fn discard_current_message_without_clear_hook(&mut self) {
-        self.message_buf_print = false;
+        self.set_message_buf_print(false);
         if self.current_message.take().is_some() {
             let _ = self.mirror_message_to_echo_area_buffer(None);
             self.invalidate_redisplay();
@@ -5594,7 +5596,7 @@ impl Context {
         &mut self,
         run_echo_area_clear_hook: bool,
     ) -> EchoMessageClearResult {
-        self.message_buf_print = false;
+        self.set_message_buf_print(false);
         if self
             .visible_variable_value_or_nil("inhibit-message")
             .is_truthy()

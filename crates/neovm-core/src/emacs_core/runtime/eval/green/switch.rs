@@ -69,6 +69,17 @@ const WORLD_ROOT_GROUPS: &[&str] = &[
     "buffers",
     "frames",
     "coding_systems",
+    // GNU-global state the World owns since round 3w.
+    "profiler",
+    "proc_timer",
+    "registers",
+    "interactive",
+    "xwidgets",
+    "face_table",
+    "threads",
+    "kmacro",
+    "command_loop",
+    "modes",
 ];
 
 /// Why a thread may not give the Baton up here.
@@ -166,7 +177,6 @@ impl Context {
         self.threads.set_thread_current_buffer(key.id(), current);
         self.restore_deferred_error(&baton, key);
         let parked = self.park_owner();
-        self.exchange_world_threads(&baton);
         let roots = self.collect_parked_roots();
         self.publish_parked_roots(&baton, key, roots);
         let outcome = control.transfer(key, wait, baton, &receiver);
@@ -175,7 +185,6 @@ impl Context {
             Err(Handoff::NoRunnable(baton)) => (baton, true),
         };
         self.retire_parked_roots(&baton, key);
-        self.exchange_world_threads(&baton);
         self.threads.enter_thread(key.id());
         let (exit, case_table) = baton
             .green_runtime()
@@ -320,15 +329,6 @@ impl Context {
         }
     }
 
-    /// Move the World's `ThreadManager` between this Context and the
-    /// runtime's slot (`GreenRuntime::threads`): to the slot at a park, back
-    /// at the resume.
-    fn exchange_world_threads(&mut self, baton: &Baton) {
-        if let Some(runtime) = baton.green_runtime().as_ref() {
-            std::mem::swap(&mut *self.threads, &mut runtime.threads.borrow_mut());
-        }
-    }
-
     /// KEY's error held since its start is pending again
     /// (`GreenRuntime::deferred_errors`).
     fn restore_deferred_error(&mut self, baton: &Baton, key: ThreadKey) {
@@ -416,17 +416,17 @@ fn run_worker(key: ThreadKey, receiver: mpsc::Receiver<Baton>, control: Arc<Cont
         return;
     };
     baton.enter();
+    let mut owner = Context::new_green_owner(&baton);
     if control.lifecycle() == Lifecycle::Closing {
         // Main ended before this thread ever ran.
+        owner.threads.mark_thread_exited(key.id());
         if let Some(runtime) = baton.green_runtime().as_ref() {
-            runtime.threads.borrow_mut().mark_thread_exited(key.id());
             runtime.pending_starts.borrow_mut().remove(&key);
         }
+        owner.retire_green_owner();
         control.finish(key, baton);
         return;
     }
-    let mut owner = Context::new_green_owner(&baton);
-    owner.exchange_world_threads(&baton);
     // Enter the thread before its buffer: a buffer switch records itself as
     // the current thread's buffer.
     owner.threads.enter_thread(key.id());
@@ -472,7 +472,6 @@ fn run_worker(key: ThreadKey, receiver: mpsc::Receiver<Baton>, control: Arc<Cont
         .take()
         .expect("a finishing thread holds the Baton");
     owner.restore_deferred_error(&baton, key);
-    owner.exchange_world_threads(&baton);
     if let Some(request) = exit
         && control.lifecycle() == Lifecycle::Running
         && let Some(runtime) = baton.green_runtime().as_ref()

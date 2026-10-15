@@ -34,11 +34,6 @@ use crate::tagged::gc::{CollectorQuiescenceError, FacadeMarkExclusionError};
 pub(crate) struct GreenRuntime {
     pub(super) bootstrap: GreenBootstrap,
     pub(super) control: std::sync::Arc<scheduler::Control>,
-    /// The World's threads, mutexes and condition variables (GNU keeps them
-    /// global). They travel with the Baton: the holder's `Context::threads`
-    /// is the World's manager, as in a Sim World, and this slot keeps it
-    /// from a park to the next resume (it holds a placeholder otherwise).
-    pub(super) threads: std::cell::RefCell<crate::emacs_core::threads::ThreadManager>,
     /// Each parked thread's private roots (plan-3d §4).
     pub(super) parked:
         std::cell::RefCell<rustc_hash::FxHashMap<ThreadKey, Vec<crate::emacs_core::value::Value>>>,
@@ -99,13 +94,7 @@ impl GreenRuntime {
     #[cold]
     #[inline(never)]
     pub(super) fn trace_roots(&self, visit: &mut dyn FnMut(crate::emacs_core::value::Value)) {
-        use crate::gc_trace::GcTrace;
         self.bootstrap.trace_roots(visit);
-        let mut roots = Vec::new();
-        self.threads.borrow().trace_roots(&mut roots);
-        for value in roots {
-            visit(value);
-        }
         for values in self.parked.borrow().values() {
             for value in values {
                 visit(*value);
@@ -188,7 +177,6 @@ impl Context {
         self.install_green_runtime(Box::new(GreenRuntime {
             bootstrap,
             control: Default::default(),
-            threads: Default::default(),
             parked: Default::default(),
             pending_starts: Default::default(),
             exit: Default::default(),

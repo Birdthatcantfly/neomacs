@@ -150,7 +150,6 @@ impl GreenBootstrap {
                 runtime_projection_mask: self.core_eval_symbols.runtime_projection_mask.clone(),
             },
             custom: CustomManager::new(),
-            command_loop: crate::keyboard::CommandLoop::new(),
             standard_syntax_table: self.standard_syntax_table,
             syntax_code_objects: self.syntax_code_objects,
             standard_category_table: self.standard_category_table,

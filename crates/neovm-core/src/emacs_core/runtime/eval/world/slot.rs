@@ -1,31 +1,59 @@
 //! A Context field whose state GNU keeps global (round 3w, plan-3w.md).
 //!
-//! Every such field is reached through its [`WorldSlot`], the one access
-//! path for that state. Step 1 holds the value inline, so the slot has the
-//! value's layout and every access compiles as before; step 2 moves the
-//! value into the World and leaves the slot as a pointer to it, padded to
-//! the value's size so no other Context field moves.
+//! The value lives in the World ([`super::super::global_state::GlobalState`]);
+//! every owner's Context reaches it through its [`WorldSlot`], the one access
+//! path for that state. The slot is the size and alignment of the value it
+//! replaces, so no other Context field moves (plan-3w.md section 3, option
+//! A): it holds the cell's address in its first word and reserves the rest.
 //!
 //! No `AsRef`/`AsMut`: they would shadow the value's own `as_ref`/`as_mut`
 //! (`Option::as_ref`) at every call site.
 
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ops::{Deref, DerefMut};
+use std::ptr::NonNull;
 
 /// A Context field of GNU-global state; see the module documentation.
-#[repr(transparent)]
-#[derive(Default)]
-pub(crate) struct WorldSlot<T>(T);
+#[repr(C)]
+pub(crate) union WorldSlot<T> {
+    cell: NonNull<T>,
+    /// Keeps the slot the size and alignment of `T` (plan-3w.md section 3).
+    _reserve: ManuallyDrop<MaybeUninit<T>>,
+}
 
 impl<T> WorldSlot<T> {
+    /// A slot is in place of a value at least a pointer wide and as aligned.
+    const FITS: () = assert!(
+        std::mem::size_of::<T>() >= std::mem::size_of::<NonNull<T>>()
+            && std::mem::align_of::<T>() == std::mem::align_of::<NonNull<T>>()
+    );
+
+    /// The slot over CELL.
+    ///
+    /// # Safety
+    /// CELL is a value in the World the slot's Context holds a lease on, so
+    /// it outlives the slot. Its accesses follow the World's view rules: one
+    /// owner touches World state at a time (the sole owner, or the Green
+    /// Baton holder; design-r3 section 12).
     #[inline(always)]
-    pub(crate) const fn new(value: T) -> Self {
-        Self(value)
+    pub(crate) unsafe fn over(cell: NonNull<T>) -> Self {
+        let () = Self::FITS;
+        Self { cell }
+    }
+
+    /// The World cell this slot reaches.
+    #[inline(always)]
+    pub(crate) fn cell(&self) -> NonNull<T> {
+        // SAFETY: only `over` constructs a slot, which writes `cell`.
+        unsafe { self.cell }
     }
 }
 
-impl<T: std::fmt::Debug> std::fmt::Debug for WorldSlot<T> {
+impl<T> std::fmt::Debug for WorldSlot<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
+        f.debug_struct("WorldSlot")
+            .field("cell", &self.cell())
+            .finish()
     }
 }
 
@@ -33,14 +61,18 @@ impl<T> Deref for WorldSlot<T> {
     type Target = T;
     #[inline(always)]
     fn deref(&self) -> &T {
-        &self.0
+        // SAFETY: `over`'s contract: a live World cell, touched by one owner
+        // at a time; this shared borrow excludes a mutable one through the
+        // same slot.
+        unsafe { self.cell().as_ref() }
     }
 }
 
 impl<T> DerefMut for WorldSlot<T> {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut T {
-        &mut self.0
+        // SAFETY: as `deref`, with this slot borrowed exclusively.
+        unsafe { self.cell().as_mut() }
     }
 }
 
@@ -52,7 +84,7 @@ where
     type IntoIter = <&'a T as IntoIterator>::IntoIter;
     #[inline(always)]
     fn into_iter(self) -> Self::IntoIter {
-        (&self.0).into_iter()
+        (&**self).into_iter()
     }
 }
 
@@ -64,6 +96,6 @@ where
     type IntoIter = <&'a mut T as IntoIterator>::IntoIter;
     #[inline(always)]
     fn into_iter(self) -> Self::IntoIter {
-        (&mut self.0).into_iter()
+        (&mut **self).into_iter()
     }
 }

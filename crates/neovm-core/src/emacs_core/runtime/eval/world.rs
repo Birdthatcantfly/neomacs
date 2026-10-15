@@ -46,6 +46,8 @@ struct World {
     coding_systems: Box<UnsafeCell<CodingSystemManager>>,
     macro_perf_stats: Box<UnsafeCell<MacroPerfStats>>,
     buffers: Box<UnsafeCell<BufferStorage>>,
+    /// GNU-global state every owner shares (round 3w).
+    global: Box<UnsafeCell<super::global_state::GlobalState>>,
     /// Every owner's slab of dynamic bindings (Phase 0 step 2), for
     /// allocation and the collector's root phase.
     owner_slabs: std::cell::RefCell<super::owner_bindings::OwnerSlabRegistry>,
@@ -1021,6 +1023,7 @@ pub(super) struct WorldStorageBuilder {
     pub(super) coding_systems: CodingSystemManager,
     pub(super) macro_perf_stats: MacroPerfStats,
     pub(super) buffers: OwnedBufferStorageParts,
+    pub(super) global: super::global_state::GlobalState,
 }
 
 static_assertions::assert_not_impl_any!(WorldStorageBuilder: Send, Sync, Clone);
@@ -1045,6 +1048,7 @@ pub(super) struct ReadyWorld {
     pub(super) coding_systems: WorldView<CodingSystemManager>,
     pub(super) macro_perf_stats: WorldView<MacroPerfStats>,
     pub(super) buffers: BufferManager,
+    pub(super) global: super::global_state::GlobalSlots,
 }
 
 static_assertions::assert_not_impl_any!(ReadyWorld: Send, Sync, Clone);
@@ -1084,6 +1088,7 @@ impl WorldStorageBuilder {
             coding_systems: Box::new(UnsafeCell::new(self.coding_systems)),
             macro_perf_stats: Box::new(UnsafeCell::new(self.macro_perf_stats)),
             buffers,
+            global: Box::new(UnsafeCell::new(self.global)),
             owner_slabs: Default::default(),
             thread_projections: Default::default(),
             threading: Cell::new(super::admission::ThreadingMode::from_env()),
@@ -1167,6 +1172,9 @@ impl WorldStorageBuilder {
                 ptr: cell_ptr(&lease.0.macro_perf_stats),
                 lease: lease.duplicate_for_view(),
             },
+            // SAFETY: the World's stable cell, kept alive by this owner's
+            // leases; World state is touched by one owner at a time.
+            global: unsafe { super::global_state::GlobalSlots::over(cell_ptr(&lease.0.global)) },
             // SAFETY: World owns the exact stable cell and this is its sole
             // selection/view; the supplied lease is for that same World.
             buffers: unsafe {

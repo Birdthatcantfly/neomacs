@@ -1,24 +1,281 @@
-//! Accessors for GNU-global Context state too small to hold a
-//! [`super::WorldSlot`] in place (round 3w, plan-3w.md section 8): step 2
-//! moves these values into a World group, behind these same accessors.
+//! GNU-global state, owned by the World (round 3w, plan-3w.md).
+//!
+//! GNU keeps all of this in C globals (or KBOARD/terminal fields, not per
+//! thread either), so every owner of a World must see the same values. The
+//! World holds one [`GlobalState`]; each owner's Context reaches a field
+//! through its [`WorldSlot`] (the one access path), and the four values too
+//! small to hold a slot in place through the accessors below.
 
-use super::Context;
+use super::*;
+use std::ptr::NonNull;
+
+macro_rules! global_state {
+    ($($(#[$doc:meta])* $field:ident: $ty:ty,)*) => {
+        /// The World's GNU-global state (plan-3w.md section 1.2; each
+        /// field's GNU anchor is on it).
+        pub(crate) struct GlobalState {
+            $($(#[$doc])* pub(crate) $field: $ty,)*
+            /// xdisp.c `message_log_need_newline`.
+            pub(crate) message_log_need_newline: bool,
+            /// xdisp.c `message_buf_print`.
+            pub(crate) message_buf_print: bool,
+            /// keyboard.c `interrupt_input`.
+            pub(crate) input_mode_interrupt: bool,
+            /// print.c `external_debugging_output`'s stream.
+            pub(crate) debugging_output_file: Option<std::fs::File>,
+        }
+
+        /// One owner's slots over a World's [`GlobalState`].
+        pub(crate) struct GlobalSlots {
+            $(pub(crate) $field: WorldSlot<$ty>,)*
+        }
+
+        impl GlobalSlots {
+            /// Slots over every field of the state at CELL.
+            ///
+            /// # Safety
+            /// CELL is the World's stable `GlobalState` allocation; see
+            /// [`WorldSlot::over`].
+            pub(super) unsafe fn over(cell: NonNull<GlobalState>) -> Self {
+                let cell = cell.as_ptr();
+                // SAFETY: each field pointer is derived from the whole
+                // allocation (`addr_of_mut!` through CELL), never from a
+                // reference, so it keeps the allocation's provenance.
+                unsafe {
+                    Self {
+                        $($field: WorldSlot::over(NonNull::new_unchecked(
+                            std::ptr::addr_of_mut!((*cell).$field),
+                        )),)*
+                    }
+                }
+            }
+        }
+    };
+}
+
+global_state! {
+    /// `Vsystem_name` (sysdep.c).
+    cached_system_name: Value,
+    /// profiler.c `cpu_log` / `memory_log`.
+    profiler: super::super::profiler::ProfilerState,
+    /// xwidget.c `internal_xwidget_list`.
+    xwidgets: super::super::xwidget::XwidgetState,
+    /// buffer.c `last_overlay_modification_hooks`.
+    last_overlay_modification_hooks: Vec<OverlayModificationHook>,
+    /// textprop.c `interval_insert_behind_hooks`.
+    interval_insert_behind_hooks: Value,
+    /// textprop.c `interval_insert_in_front_hooks`.
+    interval_insert_in_front_hooks: Value,
+    /// insdel.c `combine_after_change_list`.
+    combine_after_change_list: Vec<(i64, i64, i64)>,
+    /// insdel.c `combine_after_change_buffer`.
+    combine_after_change_buffer: Option<crate::buffer::BufferId>,
+    /// process.c `Vprocess_alist`, `chan_process[]`.
+    processes: ProcessManager,
+    /// keymap.c `current_global_map`.
+    selected_global_map: super::super::keymap::SelectedGlobalMap,
+    /// `register-alist` (a global variable).
+    registers: RegisterManager,
+    /// bookmark.el globals.
+    bookmarks: BookmarkManager,
+    /// abbrev.c `Vabbrev_table_name_list` and its global tables.
+    abbrevs: AbbrevManager,
+    /// `killed-rectangle` (a global variable).
+    rectangle: RectangleState,
+    /// callint.c: a function's `interactive` form, global.
+    interactive: InteractiveRegistry,
+    /// minibuf.c `minibuf_level`, `Vminibuffer_list`.
+    minibuffers: MinibufferManager,
+    /// minibuf.c reads (global with `minibuf_level`).
+    interactive_minibuffer_read_count: u64,
+    /// xdisp.c echo area message.
+    current_message: Option<crate::heap_types::LispString>,
+    /// xdisp.c `echo_area_buffer[]`.
+    echo_area_buffers: EchoAreaBuffers,
+    /// minibuf.c `minibuf_selected_window`.
+    minibuffer_selected_window: Option<crate::window::WindowId>,
+    /// minibuf.c `minibuf_window` in use.
+    active_minibuffer_window: Option<crate::window::WindowId>,
+    /// emacs.c daemon state (process-global).
+    daemon: Option<DaemonState>,
+    /// keyboard.c `quit_char`.
+    quit_char: i64,
+    /// The major/minor mode registry (`minor-mode-alist`, global).
+    modes: ModeRegistry,
+    /// thread.c `all_threads`.
+    threads: ThreadManager,
+    /// KBOARD `kbd_macro_*` (per terminal, one terminal in Phase 0).
+    kmacro: KmacroManager,
+    /// keyboard.c `command_loop_level`, KBOARD input state.
+    command_loop: crate::keyboard::CommandLoop,
+    /// xfaces.c `face_alist` / frame face caches.
+    face_table: FaceTable,
+    /// xfaces.c `face_change_count`.
+    face_change_count: u64,
+    /// The face table's materialized source (xfaces.c frame caches).
+    materialized_face_table_source: Option<(crate::window::FrameId, u64)>,
+    /// xdisp.c display-variable change tracking.
+    display_var_change_count: u64,
+    /// xdisp.c redisplay generation.
+    redisplay_generation: u64,
+    /// xdisp.c `windows_or_buffers_changed`-style body revision.
+    body_redisplay_all: u64,
+    /// xdisp.c per-window redisplay revisions.
+    body_redisplay_by_window: FxHashMap<WindowId, u64>,
+    /// xdisp.c per-buffer redisplay revisions.
+    body_redisplay_by_buffer: FxHashMap<BufferId, u64>,
+    /// xmenu.c menu-bar rebuild generation.
+    menu_bar_rebuild_generation: u64,
+    /// xdisp.c chrome (mode/header/tab line) dirtiness.
+    chrome_dirty: crate::emacs_core::chrome_dirty::ChromeDirty,
+    /// xdisp.c `pre-redisplay-function` / hook ownership.
+    gnu_redisplay_hooks: redisplay_hooks::RedisplayHookOwnership,
+    /// xdisp.c last redisplay's inputs.
+    last_redisplay_signature: Option<RedisplaySignature>,
+    /// xdisp.c `safe_call` queue.
+    pending_safe_funcalls: Vec<PendingSafeFuncall>,
+    /// fringe.c `fringe_bitmaps[]`.
+    fringe_bitmaps: super::super::builtins::fringe_bitmap::FringeBitmapRegistry,
+    /// composite.c `gstring_hash_table`.
+    gstring_shape_cache: HashMap<crate::emacs_core::font::GstringShapeCacheKey, Value>,
+}
+
+impl GlobalState {
+    /// A new World's state, COMMAND_LOOP being its first owner's.
+    pub(super) fn fresh(command_loop: crate::keyboard::CommandLoop) -> Self {
+        Self {
+            cached_system_name: Value::NIL,
+            profiler: super::super::profiler::ProfilerState::default(),
+            xwidgets: super::super::xwidget::XwidgetState::new(),
+            last_overlay_modification_hooks: Vec::new(),
+            interval_insert_behind_hooks: Value::NIL,
+            interval_insert_in_front_hooks: Value::NIL,
+            combine_after_change_list: Vec::new(),
+            combine_after_change_buffer: None,
+            processes: ProcessManager::new(),
+            selected_global_map: super::super::keymap::SelectedGlobalMap::default(),
+            registers: RegisterManager::new(),
+            bookmarks: BookmarkManager::new(),
+            abbrevs: AbbrevManager::new(),
+            rectangle: RectangleState::new(),
+            interactive: InteractiveRegistry::new(),
+            minibuffers: MinibufferManager::new(),
+            interactive_minibuffer_read_count: 0,
+            current_message: None,
+            echo_area_buffers: EchoAreaBuffers::default(),
+            minibuffer_selected_window: None,
+            active_minibuffer_window: None,
+            daemon: None,
+            quit_char: 7,
+            modes: ModeRegistry::new(),
+            threads: ThreadManager::new(),
+            kmacro: KmacroManager::new(),
+            command_loop,
+            face_table: FaceTable::new(),
+            face_change_count: 0,
+            materialized_face_table_source: None,
+            display_var_change_count: 0,
+            redisplay_generation: 0,
+            body_redisplay_all: 0,
+            body_redisplay_by_window: FxHashMap::default(),
+            body_redisplay_by_buffer: FxHashMap::default(),
+            menu_bar_rebuild_generation: 0,
+            chrome_dirty: Default::default(),
+            gnu_redisplay_hooks: redisplay_hooks::RedisplayHookOwnership::initial(),
+            last_redisplay_signature: None,
+            pending_safe_funcalls: Vec::new(),
+            fringe_bitmaps: super::super::builtins::fringe_bitmap::FringeBitmapRegistry::new(),
+            gstring_shape_cache: HashMap::new(),
+            message_log_need_newline: false,
+            message_buf_print: false,
+            input_mode_interrupt: true,
+            debugging_output_file: None,
+        }
+    }
+}
 
 impl Context {
+    /// The World's GNU-global state, reached from this owner's `quit_char`
+    /// slot (the four values below have no slot of their own).
+    #[inline]
+    fn global_state(&self) -> &GlobalState {
+        let field = self.quit_char.cell().as_ptr();
+        // SAFETY: every slot points at a field of the World's one
+        // `GlobalState` with the allocation's provenance (`GlobalSlots::over`),
+        // so stepping back by the field's offset names that allocation; the
+        // World outlives this Context.
+        unsafe {
+            &*field
+                .cast::<u8>()
+                .sub(std::mem::offset_of!(GlobalState, quit_char))
+                .cast::<GlobalState>()
+        }
+    }
+
+    #[inline]
+    fn global_state_mut(&mut self) -> &mut GlobalState {
+        let field = self.quit_char.cell().as_ptr();
+        // SAFETY: as `global_state`, with this owner borrowed exclusively.
+        unsafe {
+            &mut *field
+                .cast::<u8>()
+                .sub(std::mem::offset_of!(GlobalState, quit_char))
+                .cast::<GlobalState>()
+        }
+    }
+
+    /// GNU's `face_change_count`: bumped on every face change.
+    #[inline]
+    pub fn face_change_count(&self) -> u64 {
+        *self.face_change_count
+    }
+
+    /// Bumped when a display-affecting variable changes.
+    #[inline]
+    pub fn display_var_change_count(&self) -> u64 {
+        *self.display_var_change_count
+    }
+
     /// xdisp.c `message_log_need_newline`.
     #[inline]
     pub(crate) fn message_log_need_newline(&self) -> bool {
-        self.message_log_need_newline
+        self.global_state().message_log_need_newline
     }
 
     #[inline]
     pub(crate) fn set_message_log_need_newline(&mut self, value: bool) {
-        self.message_log_need_newline = value;
+        self.global_state_mut().message_log_need_newline = value;
+    }
+
+    /// xdisp.c `message_buf_print`.
+    #[inline]
+    pub(crate) fn message_buf_print(&self) -> bool {
+        self.global_state().message_buf_print
+    }
+
+    #[inline]
+    pub(crate) fn set_message_buf_print(&mut self, value: bool) {
+        self.global_state_mut().message_buf_print = value;
+    }
+
+    /// keyboard.c `interrupt_input`.
+    #[inline]
+    pub(crate) fn input_mode_interrupt(&self) -> bool {
+        self.global_state().input_mode_interrupt
+    }
+
+    #[inline]
+    pub(crate) fn set_input_mode_interrupt_flag(&mut self, value: bool) {
+        self.global_state_mut().input_mode_interrupt = value;
     }
 
     /// print.c `external_debugging_output`'s stream.
     #[inline]
     pub(crate) fn debugging_output_file_mut(&mut self) -> &mut Option<std::fs::File> {
-        &mut self.debugging_output_file
+        &mut self.global_state_mut().debugging_output_file
     }
 }
+
+#[cfg(test)]
+#[path = "tests/context_layout_test.rs"]
+mod context_layout_tests;
