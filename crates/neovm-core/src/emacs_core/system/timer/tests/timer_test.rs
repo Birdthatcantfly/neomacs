@@ -14,6 +14,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[path = "numeric_boundaries.rs"]
 mod numeric_boundaries;
 
+#[cfg(test)]
+#[path = "timed_waits.rs"]
+mod timed_wait_tests;
+
 fn eval_first_form_after_marker(eval: &mut Context, source: &str, marker: &str) {
     let start = source
         .find(marker)
