@@ -855,3 +855,96 @@ fn d1_a_thread_uses_a_sqlite_handle_opened_by_another() {
         "((42))"
     );
 }
+
+fn select_slices() -> usize {
+    super::switch::SELECT_SLICES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A Sim World's waits are today's: no Green runtime, no slice.
+#[test]
+fn a_sim_worlds_waits_never_slice() {
+    crate::test_utils::init_test_tracing();
+    let mut ev = Context::new_with_threading(ThreadingMode::Sim);
+    let before = select_slices();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn (sleep-for 0.05) (accept-process-output nil 0.05) 'done)"
+        ),
+        "done"
+    );
+    assert!(started.elapsed() >= std::time::Duration::from_millis(100));
+    assert_eq!(select_slices(), before);
+}
+
+/// With no other thread wanting the Baton, a Green wait blocks itself:
+/// a peer that only sleeps never makes it poll in slices.
+#[test]
+fn a_green_wait_slices_only_while_a_peer_is_ready() {
+    let mut ev = green();
+    eval(&mut ev, "(thread-join (make-thread (lambda () nil)))");
+    let before = select_slices();
+    assert_eq!(eval(&mut ev, "(progn (sleep-for 0.05) 'alone)"), "alone");
+    assert_eq!(select_slices(), before, "a wait alone sliced");
+    let started = std::time::Instant::now();
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(let ((th (make-thread (lambda () (sleep-for 0.2) 'peer))))
+               (sleep-for 0.3)
+               (thread-join th))"
+        ),
+        "peer"
+    );
+    let elapsed = started.elapsed();
+    // One slice to let the new thread start, one when its wait ends:
+    // never one per 10 ms of the 0.3 s both spend waiting.
+    let slices = select_slices() - before;
+    assert!(slices <= 4, "{slices} slices while both threads slept");
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "the two waits took {elapsed:?}"
+    );
+}
+
+/// The child of `a_worker_panic_aborts_the_process_and_never_hangs_main`.
+#[test]
+#[ignore = "run as a child process by a_worker_panic_aborts_the_process_and_never_hangs_main"]
+fn worker_panic_child() {
+    let mut ev = green();
+    super::switch::PANIC_NEXT_WORKER.store(true, std::sync::atomic::Ordering::Relaxed);
+    eval(&mut ev, "(thread-join (make-thread (lambda () 'never)))");
+    // Unreachable: the worker's panic aborts the process.
+    std::process::exit(0);
+}
+
+#[test]
+fn a_worker_panic_aborts_the_process_and_never_hangs_main() {
+    use std::os::unix::process::ExitStatusExt;
+    let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "emacs_core::eval::green::switch_tests::worker_panic_child",
+            "--ignored",
+            "--test-threads",
+            "1",
+        ])
+        .env_remove("RUST_LOG")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn the child");
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait for the child") {
+            break status;
+        }
+        if started.elapsed() > std::time::Duration::from_secs(60) {
+            let _ = child.kill();
+            panic!("a worker panic left main hanging");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(status.signal(), Some(libc::SIGABRT), "{status:?}");
+}

@@ -1480,9 +1480,10 @@ impl super::eval::Context {
         wait_time: Duration,
     ) -> Result<WaitBlockActivity, Flow> {
         // GNU `thread_select`: other Lisp threads run during the wait.
-        if self.green_select_switch(wait_time)? {
-            return Ok(WaitBlockActivity::poll());
-        }
+        let wait_time = match self.green_select_switch(wait_time)? {
+            crate::emacs_core::eval::SelectTurn::Switched => return Ok(WaitBlockActivity::poll()),
+            crate::emacs_core::eval::SelectTurn::Block(wait_time) => wait_time,
+        };
         match self.wait_block(request, wait_time) {
             WaitBlock::Poll => Ok(WaitBlockActivity::poll()),
             WaitBlock::Poller(interest) => {

@@ -7,14 +7,29 @@
 
 use super::super::world::Baton;
 use super::super::{Context, Flow, Value};
-use super::scheduler::{Control, Handoff, Lifecycle, ThreadKey, Wait};
+use super::scheduler::{Control, Handoff, Lifecycle, Peers, ThreadKey, Wait};
 use crate::emacs_core::error::signal;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 /// The longest a thread waiting in `thread_select` leaves its own input
-/// unwatched while other threads run.
+/// unwatched while other threads run. Only a peer ready to run makes a wait
+/// slice; round 3f replaces the slice with a select that releases the
+/// Baton and is woken by readiness or a scheduler event, as GNU's.
 const SELECT_QUANTUM: Duration = Duration::from_millis(10);
+
+/// How a `thread_select` wait went ([`Context::green_select_switch`]).
+pub(crate) enum SelectTurn {
+    /// This thread gave the Baton up for a slice of the wait.
+    Switched,
+    /// This thread blocks itself for this long.
+    Block(Duration),
+}
+
+/// Waits that gave the Baton up for a slice (tests read it).
+#[cfg(test)]
+pub(crate) static SELECT_SLICES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// A Lisp thread's place in its Green runtime, kept in its owner slab.
 pub(crate) struct GreenSeat {
@@ -236,24 +251,49 @@ impl Context {
         }
     }
 
-    /// GNU `thread_select`: a wait of WAIT_TIME for input or a deadline lets
-    /// the other Lisp threads run. Returns true when this thread gave the
-    /// Baton up instead of blocking, for at most [`SELECT_QUANTUM`] of the
-    /// wait (it waits for its own input only while it runs); false when it
-    /// should block itself: no other thread could run meanwhile, or
-    /// switching is refused here.
-    pub(crate) fn green_select_switch(&mut self, wait_time: Duration) -> Result<bool, Flow> {
-        let Some(seat) = self.green_seat() else {
-            return Ok(false);
-        };
+    /// GNU `thread_select`: how a wait of WAIT_TIME for input or a
+    /// deadline shares the Baton.
+    /// - With another thread ready to run, this one gives the Baton up for
+    ///   at most [`SELECT_QUANTUM`] of the wait (it watches its own input
+    ///   only while it runs): [`SelectTurn::Switched`].
+    /// - Otherwise it blocks itself, watching its input and timers, for the
+    ///   wait or until the earliest deadline another thread sleeps to,
+    ///   whichever comes first: [`SelectTurn::Block`]. A sleeping peer
+    ///   never makes it poll.
+    /// - Outside a Green runtime, for a zero wait, or where switching is
+    ///   refused: `Block(WAIT_TIME)`, today's wait unchanged.
+    pub(crate) fn green_select_switch(&mut self, wait_time: Duration) -> Result<SelectTurn, Flow> {
+        if self.green_seat().is_none() {
+            return Ok(SelectTurn::Block(wait_time));
+        }
+        self.green_select_turn(wait_time)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn green_select_turn(&mut self, wait_time: Duration) -> Result<SelectTurn, Flow> {
+        let seat = self.green_seat().expect("seated");
         let key = seat.key;
         let control = Arc::clone(&seat.control);
-        if wait_time.is_zero() || switch_refusal(self).is_some() || !control.others_could_run(key) {
-            return Ok(false);
+        if wait_time.is_zero() || switch_refusal(self).is_some() {
+            return Ok(SelectTurn::Block(wait_time));
         }
-        let deadline = Instant::now() + wait_time.min(SELECT_QUANTUM);
-        self.green_wait(Wait::Until(deadline))?;
-        Ok(true)
+        let now = Instant::now();
+        match control.peers(key, now) {
+            Peers::Ready => {
+                #[cfg(test)]
+                SELECT_SLICES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.green_wait(Wait::Select {
+                    slice_end: now + wait_time.min(SELECT_QUANTUM),
+                    wait_end: now + wait_time,
+                })?;
+                Ok(SelectTurn::Switched)
+            }
+            Peers::Sleeping(deadline) => Ok(SelectTurn::Block(
+                wait_time.min(deadline.saturating_duration_since(now)),
+            )),
+            Peers::Blocked => Ok(SelectTurn::Block(wait_time)),
+        }
     }
 
     /// Main is ending (its Context drops): every other thread ends without
@@ -404,6 +444,10 @@ fn run_worker(key: ThreadKey, receiver: mpsc::Receiver<Baton>, control: Arc<Cont
         runtime.pending_starts.borrow_mut().remove(&key)
     });
     owner.take_green_seat(key, Arc::clone(&control), receiver, baton);
+    #[cfg(test)]
+    if PANIC_NEXT_WORKER.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        panic!("test hook: a Green worker panics");
+    }
     let outcome = match function {
         Some(function) => {
             owner.push_vm_root_frame();
@@ -448,7 +492,17 @@ struct AbortOnPanic;
 impl Drop for AbortOnPanic {
     fn drop(&mut self) {
         if std::thread::panicking() {
+            let thread = std::thread::current();
+            tracing::error!(
+                thread = thread.name().unwrap_or("?"),
+                "a Green Lisp thread panicked; its Baton would be lost, so the process aborts"
+            );
             std::process::abort();
         }
     }
 }
+
+/// Test hook: the next worker panics as it starts its function.
+#[cfg(test)]
+pub(crate) static PANIC_NEXT_WORKER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);

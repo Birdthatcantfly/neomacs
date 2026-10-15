@@ -49,10 +49,26 @@ pub(crate) enum Wait {
     Mutex(u64),
     /// A condition variable's notification (`condition-wait`).
     Condition(u64),
-    /// A deadline (`sleep-for`): runnable again once it passes.
-    Until(Instant),
+    /// A `thread_select` wait that gave the Baton up for a slice: runnable
+    /// again at `slice_end`, to watch its own input; its wait itself ends
+    /// at `wait_end`, which is all a waiting peer blocks for.
+    Select {
+        slice_end: Instant,
+        wait_end: Instant,
+    },
     /// It ended.
     Exited,
+}
+
+/// What the other threads are doing, seen by a thread about to wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Peers {
+    /// One can run now.
+    Ready,
+    /// None can run before this deadline, the earliest one sleeps to.
+    Sleeping(Instant),
+    /// None can run until a running thread wakes it.
+    Blocked,
 }
 
 /// Whether the runtime still runs threads, or is shutting down because its
@@ -134,7 +150,29 @@ impl Control {
         self.state()
             .waits
             .iter()
-            .any(|(key, wait)| *key != me && matches!(wait, Wait::Runnable | Wait::Until(_)))
+            .any(|(key, wait)| *key != me && matches!(wait, Wait::Runnable | Wait::Select { .. }))
+    }
+
+    /// What the threads other than ME are doing at NOW.
+    pub(crate) fn peers(&self, me: ThreadKey, now: Instant) -> Peers {
+        let state = self.state();
+        let mut earliest: Option<Instant> = None;
+        for (key, wait) in &state.waits {
+            if *key == me {
+                continue;
+            }
+            match *wait {
+                Wait::Runnable => return Peers::Ready,
+                Wait::Select { wait_end, .. } if wait_end <= now => return Peers::Ready,
+                Wait::Select {
+                    wait_end: deadline, ..
+                } => {
+                    earliest = Some(earliest.map_or(deadline, |e| e.min(deadline)));
+                }
+                _ => {}
+            }
+        }
+        earliest.map_or(Peers::Blocked, Peers::Sleeping)
     }
 
     /// Make KEY the next thread to run, whatever it waits for.
@@ -216,7 +254,7 @@ impl Control {
         let expired: Vec<ThreadKey> = state
             .waits
             .iter()
-            .filter(|(_, wait)| matches!(wait, Wait::Until(deadline) if *deadline <= now))
+            .filter(|(_, wait)| matches!(wait, Wait::Select { slice_end, .. } if *slice_end <= now))
             .map(|(key, _)| *key)
             .collect();
         for key in expired {
@@ -237,7 +275,7 @@ impl Control {
             .waits
             .iter()
             .filter_map(|(key, wait)| match wait {
-                Wait::Until(deadline) => Some((*key, *deadline)),
+                Wait::Select { slice_end, .. } => Some((*key, *slice_end)),
                 _ => None,
             })
             .min_by_key(|(_, deadline)| *deadline)
@@ -358,6 +396,15 @@ impl Control {
         for key in blocked {
             Self::wake_locked(&mut state, key);
         }
+    }
+
+    /// Take KEY's join handle, once KEY has ended.
+    pub(crate) fn take_join_handle(&self, key: ThreadKey) -> Option<std::thread::JoinHandle<()>> {
+        let mut state = self.state();
+        if !matches!(state.waits.get(&key), Some(Wait::Exited)) {
+            return None;
+        }
+        state.joins.remove(&key)
     }
 
     /// Take every worker's join handle (shutdown).

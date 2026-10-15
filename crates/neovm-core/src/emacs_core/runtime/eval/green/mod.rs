@@ -22,7 +22,7 @@ pub(crate) use bootstrap::GreenBootstrap;
 #[cfg(debug_assertions)]
 pub(crate) use bootstrap::debug_assert_native_tables_open;
 pub(crate) use scheduler::{ThreadKey, Wait};
-pub(crate) use switch::GreenSeat;
+pub(crate) use switch::{GreenSeat, SelectTurn};
 
 use super::admission::AdmissionError;
 use super::{Context, ThreadingMode};

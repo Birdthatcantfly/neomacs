@@ -54,6 +54,10 @@ impl Context {
             })?;
         }
         self.threads.join_thread(id);
+        // Reap its OS thread: it handed the Baton on as its last act.
+        if let Some(os_thread) = control.take_join_handle(key) {
+            let _ = os_thread.join();
+        }
         if let Some(flow) = pending {
             return Err(flow);
         }
