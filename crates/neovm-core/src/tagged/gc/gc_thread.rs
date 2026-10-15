@@ -354,41 +354,130 @@ const _: () = {
     assert!(size_of::<WorkerMarkLogs>() == 80);
 };
 
-pub(super) static GC_THREAD: std::sync::OnceLock<
-    std::sync::Mutex<std::sync::mpsc::Sender<GcRequest>>,
-> = std::sync::OnceLock::new();
+/// The name of every collector thread. Thread names need not be unique: a
+/// process with one heap looks as it did with the single process collector,
+/// and measurement tools keep matching it. The heap identity lives in the
+/// registry and in the `neovm::gc` trace events.
+pub(crate) const COLLECTOR_THREAD_NAME: &str = "neovm-gc";
 
-/// Lazily spawn the process-global GC thread and return its request channel.
-/// The thread lives for the process; it loops draining requests.
-pub(super) fn gc_thread() -> std::sync::MutexGuard<'static, std::sync::mpsc::Sender<GcRequest>> {
-    GC_THREAD
-        .get_or_init(|| {
-            let (tx, rx) = std::sync::mpsc::channel::<GcRequest>();
-            std::thread::Builder::new()
-                .name("neovm-gc".to_string())
-                .spawn(move || {
-                    while let Ok(req) = rx.recv() {
-                        match req {
-                            GcRequest::MarkAll(HeapPtr(p), done) => {
-                                // Exclusive access: the mutator is blocked on
-                                // `done` until we signal.
-                                unsafe { (*p).mark_all() };
-                                let _ = done.send(());
-                            }
-                            GcRequest::ConcurrentMark(job) => {
-                                run_concurrent_mark(job);
-                            }
-                            GcRequest::ConcurrentMarkEnabled(job) => {
-                                run_concurrent_mark_enabled(*job);
-                            }
-                        }
-                    }
-                })
-                .expect("spawn neovm-gc thread");
-            std::sync::Mutex::new(tx)
-        })
+/// One heap's collector: the request channel of its thread and the thread
+/// itself. Each collector serves one heap in FIFO order, so a concurrent job
+/// another heap leaves running cannot hold up this heap's requests (two
+/// Worlds on one OS thread used to deadlock on the single process
+/// collector).
+struct Collector {
+    requests: std::sync::mpsc::Sender<GcRequest>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl Collector {
+    /// Spawn `heap`'s collector. Like the process collector it replaces, it
+    /// is spawned by the heap's first GC request, so it inherits that
+    /// mutator's CPU affinity mask and default thread settings.
+    fn spawn(heap: HeapIdentity) -> Self {
+        let (requests, rx) = std::sync::mpsc::channel::<GcRequest>();
+        let thread = std::thread::Builder::new()
+            .name(COLLECTOR_THREAD_NAME.to_owned())
+            .spawn(move || serve_gc_requests(rx))
+            .expect("spawn neovm-gc thread");
+        tracing::debug!(target: "neovm::gc", heap = heap.get(), "collector spawned");
+        Self { requests, thread }
+    }
+}
+
+/// The collector's loop: drain requests until the heap retires (its sender
+/// is dropped).
+fn serve_gc_requests(rx: std::sync::mpsc::Receiver<GcRequest>) {
+    while let Ok(req) = rx.recv() {
+        match req {
+            GcRequest::MarkAll(HeapPtr(p), done) => {
+                // Exclusive access: the mutator is blocked on
+                // `done` until we signal.
+                unsafe { (*p).mark_all() };
+                let _ = done.send(());
+            }
+            GcRequest::ConcurrentMark(job) => {
+                run_concurrent_mark(job);
+            }
+            GcRequest::ConcurrentMarkEnabled(job) => {
+                run_concurrent_mark_enabled(*job);
+            }
+        }
+    }
+}
+
+/// The live collectors, keyed by the heap each serves. Cold: touched once per
+/// GC request and at heap teardown, never by allocation. A side table rather
+/// than a `TaggedHeap` field, so the allocation fast paths keep their field
+/// displacements.
+static COLLECTORS: std::sync::Mutex<FxHashMap<HeapIdentity, Collector>> =
+    std::sync::Mutex::new(FxHashMap::with_hasher(rustc_hash::FxBuildHasher));
+
+/// Lock the registry. An entry is inserted only after its thread spawned, so
+/// a panic under the lock leaves the map consistent and a poisoned lock is
+/// still usable (heap teardown must not panic).
+fn collectors() -> std::sync::MutexGuard<'static, FxHashMap<HeapIdentity, Collector>> {
+    COLLECTORS
         .lock()
-        .expect("gc thread channel poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Hand `request` to `heap`'s collector, spawning the collector on the heap's
+/// first request.
+pub(super) fn send_to_collector(heap: HeapIdentity, request: GcRequest) {
+    collectors()
+        .entry(heap)
+        .or_insert_with(|| Collector::spawn(heap))
+        .requests
+        .send(request)
+        .unwrap_or_else(|_| panic!("the neovm-gc thread of heap {} is gone", heap.get()));
+}
+
+/// Remove `heap`'s collector at heap teardown and close its request channel:
+/// the thread exits once its current job returns. `None` when the heap never
+/// sent a GC request.
+pub(super) fn retire_collector(heap: HeapIdentity) -> Option<RetiredCollector> {
+    let Collector { requests, thread } = collectors().remove(&heap)?;
+    drop(requests);
+    Some(RetiredCollector { heap, thread })
+}
+
+/// Whether `heap` has a live collector.
+#[cfg(test)]
+pub(crate) fn collector_is_registered(heap: HeapIdentity) -> bool {
+    collectors().contains_key(&heap)
+}
+
+/// A collector whose heap retired: `join` it, or `detach` it when the heap
+/// abandoned a running concurrent job.
+#[must_use = "join or detach the retired collector"]
+pub(super) struct RetiredCollector {
+    heap: HeapIdentity,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl RetiredCollector {
+    /// Wait for the thread to exit. With no job in flight it is parked in
+    /// `recv`, which fails at once now that the channel is closed. A panic
+    /// on the collector already failed its heap's request; teardown only
+    /// logs it.
+    pub(super) fn join(self) {
+        if self.thread.join().is_err() {
+            tracing::error!(target: "neovm::gc", heap = self.heap.get(), "collector panicked");
+        } else {
+            tracing::debug!(target: "neovm::gc", heap = self.heap.get(), "collector joined");
+        }
+    }
+
+    /// Let the thread finish on its own, for a heap that abandoned a running
+    /// concurrent job (Drop never waits for a marker). The job exits once it
+    /// sees `stop`; then `recv` fails on the closed channel and the thread
+    /// ends. What the job may still read is retained by the abandoning heap
+    /// (`TaggedHeap::drop`).
+    pub(super) fn detach(self) {
+        tracing::debug!(target: "neovm::gc", heap = self.heap.get(), "collector detached");
+        drop(self.thread);
+    }
 }
 
 /// Atomically set an OWNED cons cell's mark bit using only its pointer. The mark

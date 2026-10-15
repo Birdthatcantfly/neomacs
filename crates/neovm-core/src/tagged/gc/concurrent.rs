@@ -511,7 +511,7 @@ impl TaggedHeap {
         } else {
             GcRequest::ConcurrentMark(job)
         };
-        gc_thread().send(request).expect("neovm-gc thread is gone");
+        send_to_collector(self.heap_identity(), request);
         self.handshake.last_start_jobasm_us = jobasm_t0.elapsed().as_micros() as u64;
         // Pacer: open this cycle's mark window (closed by `incremental_finish`).
         self.pace_mark_start = Some(std::time::Instant::now());

@@ -692,7 +692,7 @@ fn concurrent_worker_channel_dispatch_preserves_legacy_and_enabled_symbol_polici
                 };
                 // Exercise the actual shared channel match, not a direct loop
                 // call or a model of its enabled/legacy election.
-                gc_thread().send(request).expect("GC worker channel closed");
+                send_to_collector(heap.heap_identity(), request);
                 let result = harness
                     .result
                     // Keep the heap alive until the actual exit handoff. A

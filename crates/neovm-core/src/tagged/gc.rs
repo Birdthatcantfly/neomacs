@@ -2582,8 +2582,36 @@ impl Drop for TaggedHeap {
         // allocations and returns without waiting for either kind of reader.
         if self.concurrent_mark_running || self.facade_mark_is_excluded() {
             self.abandon_concurrent_mark();
+            // The collector may still be running the abandoned job: detach
+            // it rather than wait.
+            //
+            // SAFETY (ordering): the detached thread cannot touch this heap's
+            // freed memory.
+            // - The job never dereferences the heap (`ConcurrentMarkJob`; the
+            //   mapped-veclike snapshot keeps a heap pointer for identity
+            //   comparison only). It reads its own snapshots and queues, and
+            //   through them the blocks, pages, vector backings and hash
+            //   storage that `abandon_concurrent_mark` just retained
+            //   (forgot) for it. Leased obarray chunks outlive their owner
+            //   the same way.
+            // - `stop` was stored (Release) above, so the job exits at its
+            //   next check. Its final `exited` send fails harmlessly once
+            //   `gc_exited` drops with this heap.
+            // - Retiring closes the request channel, so after the job `recv`
+            //   fails and the thread ends. No other request can be queued:
+            //   `MarkAll` is synchronous (its sender is blocked until done,
+            //   so none is pending while the owner runs Drop), and only one
+            //   concurrent job runs per heap.
+            if let Some(collector) = retire_collector(self.identity) {
+                collector.detach();
+            }
             crate::tagged::gc::clear_tagged_heap_if_installed(self);
             return;
+        }
+        // No job is in flight, so the heap's collector is idle in `recv`:
+        // joining it returns at once, and no collector outlives its heap.
+        if let Some(collector) = retire_collector(self.identity) {
+            collector.join();
         }
         // No marker is active, so Tier-H's snapshot and retired originals are
         // freed with the claims state when the census carrier drops below;
