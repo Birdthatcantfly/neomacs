@@ -59,7 +59,10 @@ fn credit_caller(eval: &Context, callbacks: usize) {
     };
     let runtime = caller.jit_runtime();
     // A caller already through a compile keeps its verdict; re-tiering it is
-    // a separate decision.
+    // a separate decision. The per-source answer is cached, a negative one
+    // too: it is computed only from inside the caller's own mapping, after
+    // that callback ran at least `CALLBACKS_PER_HEAT` times, so the site's
+    // callback is no longer cold, and its numeric feedback only narrows.
     if runtime.compiled_id().is_some()
         || !runtime.hof_caller(|| super::compile::hof_caller_selectable(caller))
     {

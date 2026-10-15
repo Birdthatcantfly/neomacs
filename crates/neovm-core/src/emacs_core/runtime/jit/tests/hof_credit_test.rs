@@ -118,3 +118,37 @@ fn hof_inline_off_gives_no_credit() {
     compile::force_hof_inline_for_test(None);
     assert_eq!(heat, 1);
 }
+
+#[test]
+fn a_mapping_in_an_interpreted_calls_argument_credits_no_caller() {
+    let _inline = InlineOn::enter();
+    let mut ctx = crate::test_utils::runtime_startup_context();
+    byte_compiled(
+        &mut ctx,
+        "hof-credit-arg",
+        "(mapcar (lambda (x) (car x)) l)",
+    );
+    // The argument's mapping runs while the call's frame still evaluates
+    // its arguments, before the callback below ever ran: no credit, and no
+    // verdict cached for the caller.
+    ctx.eval_str("(hof-credit-arg (mapcar #'list (number-sequence 1 3200)))")
+        .expect("call");
+    let heat = ctx
+        .eval_str("(symbol-function 'hof-credit-arg)")
+        .expect("function")
+        .get_bytecode_data()
+        .expect("bytecode")
+        .jit_runtime()
+        .heat();
+    assert_eq!(heat, 1 + 100, "only the body's own mapping credits");
+    ctx.eval_str("(hof-credit-arg (mapcar #'list (number-sequence 1 3200)))")
+        .expect("call");
+    let heat = ctx
+        .eval_str("(symbol-function 'hof-credit-arg)")
+        .expect("function")
+        .get_bytecode_data()
+        .expect("bytecode")
+        .jit_runtime()
+        .heat();
+    assert_eq!(heat, 2 + 200);
+}
