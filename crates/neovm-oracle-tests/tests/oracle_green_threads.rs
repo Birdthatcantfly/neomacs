@@ -558,3 +558,97 @@ fn green_byte_compiled_parked_frames_survive_other_threads_gc() {
         ]],
     );
 }
+
+// Round 3w: GNU-global state is one value for every Lisp thread.
+
+#[test]
+fn green_a_process_made_by_one_thread_is_every_threads() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(let ((proc (thread-join
+             (make-thread (lambda () (make-pipe-process :name "g3w-pipe" :noquery t))))))
+  (prog1 (list (process-name proc)
+               (eq (get-process "g3w-pipe") proc)
+               (and (memq proc (process-list)) t)
+               (format "%S" proc)
+               (process-live-p proc))
+    (delete-process proc)))
+"##,
+        expect_test::expect![[r##""OK (\"g3w-pipe\" t t \"#<process g3w-pipe>\" (open listen connect stop))""##]],
+    );
+}
+
+#[test]
+fn green_registers_abbrevs_and_kmacros_set_by_a_thread_are_mains() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(progn
+  (thread-join
+   (make-thread
+    (lambda ()
+      (set-register ?q "g3w-register")
+      (define-abbrev-table 'g3w-abbrev-table '(("g3wab" "g3w-expansion")))
+      (setq last-kbd-macro [?a ?b]))))
+  (list (get-register ?q)
+        (abbrev-expansion "g3wab" g3w-abbrev-table)
+        last-kbd-macro))
+"##,
+        expect_test::expect![[r#""OK (\"g3w-register\" \"g3w-expansion\" [97 98])""#]],
+    );
+}
+
+#[test]
+fn green_a_minor_mode_and_a_face_defined_by_a_thread_are_mains() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(progn
+  (thread-join
+   (make-thread
+    (lambda ()
+      (define-minor-mode g3w-minor-mode "A 3w test mode." :lighter " G3W")
+      (defface g3w-face '((t :weight bold)) "A 3w test face." :group 'basic-faces)
+      (g3w-minor-mode 1))))
+  (list (fboundp 'g3w-minor-mode)
+        (and (memq 'g3w-minor-mode minor-mode-list) t)
+        g3w-minor-mode
+        (facep 'g3w-face)
+        (face-attribute 'g3w-face :weight)
+        (and (memq 'g3w-face (face-list)) t)))
+"##,
+        expect_test::expect![[r#""OK (t t t [face unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified] bold t)""#]],
+    );
+}
+
+#[test]
+fn green_the_echo_area_and_the_time_zone_are_one_for_every_thread() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(progn
+  (thread-join
+   (make-thread
+    (lambda ()
+      (message "g3w-message")
+      (set-time-zone-rule "XXX-5"))))
+  (prog1 (list (current-message) (current-time-zone))
+    (set-time-zone-rule nil)))
+"##,
+        expect_test::expect![[r#""OK (nil (18000 \"XXX\"))""#]],
+    );
+}
+
+#[test]
+fn green_memory_use_counts_include_every_threads_consing() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(let ((before (car (memory-use-counts))))
+  (thread-join (make-thread (lambda () (make-list 10000 'x) nil)))
+  (>= (- (car (memory-use-counts)) before) 10000))
+"##,
+        expect_test::expect![[r#""OK t""#]],
+    );
+}

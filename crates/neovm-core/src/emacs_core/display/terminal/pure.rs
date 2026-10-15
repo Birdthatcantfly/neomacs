@@ -1688,6 +1688,42 @@ pub(crate) fn builtin_delete_terminal(
 #[path = "tests/gc_context_migration_test.rs"]
 mod gc_context_migration_tests;
 
+/// Round 3w (plan-3w.md section 7, C1): this World state lives in a
+/// thread-local while its World's Baton holder runs, and in the World while
+/// it is parked; the Green runtime moves it at each park and resume, so
+/// every Lisp thread sees one value, as in GNU. (N-mutator mode needs shared
+/// storage instead: a recorded obligation.)
+#[cold]
+pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
+    Box::new(TERMINAL_MANAGER.with(|manager| {
+        manager.get().map(|m| {
+            std::mem::replace(
+                &mut *m.borrow_mut(),
+                TerminalManager {
+                    terminals: Vec::new(),
+                },
+            )
+        })
+    }))
+}
+
+#[cold]
+pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
+    let state = *state
+        .downcast::<Option<TerminalManager>>()
+        .expect("carried World state");
+    if let Some(state) = state {
+        TERMINAL_MANAGER.with(|manager| {
+            let manager = manager.get_or_init(|| {
+                RefCell::new(TerminalManager {
+                    terminals: Vec::new(),
+                })
+            });
+            *manager.borrow_mut() = state;
+        });
+    }
+}
+
 #[cfg(test)]
 #[path = "tests/registry_reinstall_test.rs"]
 mod registry_reinstall_tests;

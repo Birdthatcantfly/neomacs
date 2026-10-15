@@ -1033,6 +1033,22 @@ thread_local! {
     static TIME_ZONE_RULE: RefCell<ZoneRule> = const { RefCell::new(ZoneRule::Local) };
 }
 
+/// Round 3w (plan-3w.md section 7, C2): the time-zone rule is one value for
+/// the World (GNU's TZ is process-wide; a process runs one World). It lives
+/// in this thread-local while the Baton holder runs and in the World while
+/// it is parked, so reads take no lock; the Green runtime moves it at each
+/// park and resume. Several Worlds in one process each keep their own rule.
+#[cold]
+pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
+    Box::new(TIME_ZONE_RULE.with(|slot| slot.replace(ZoneRule::Local)))
+}
+
+#[cold]
+pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
+    let state = *state.downcast::<ZoneRule>().expect("carried World state");
+    TIME_ZONE_RULE.with(|slot| *slot.borrow_mut() = state);
+}
+
 /// Reset timezone rule to default (called from Context::new).
 pub(crate) fn reset_timefns_thread_locals() {
     TIME_ZONE_RULE.with(|slot| *slot.borrow_mut() = ZoneRule::Local);

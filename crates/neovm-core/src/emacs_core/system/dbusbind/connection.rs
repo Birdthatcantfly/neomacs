@@ -170,3 +170,19 @@ fn string_arg(value: Value) -> Result<String, Flow> {
         )
     })
 }
+
+/// Round 3w (plan-3w.md section 7, C1): this World state lives in a
+/// thread-local while its World's Baton holder runs, and in the World while
+/// it is parked; the Green runtime moves it at each park and resume, so
+/// every Lisp thread sees one value, as in GNU. (N-mutator mode needs shared
+/// storage instead: a recorded obligation.)
+#[cold]
+pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
+    Box::new(BUSES.with(|buses| std::mem::take(&mut *buses.borrow_mut())))
+}
+
+#[cold]
+pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
+    let state = *state.downcast::<HashMap<BusKey, BusConnection>>().expect("carried World state");
+    BUSES.with(|buses| *buses.borrow_mut() = state);
+}

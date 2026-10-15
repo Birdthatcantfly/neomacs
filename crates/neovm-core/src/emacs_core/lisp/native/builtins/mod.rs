@@ -472,6 +472,10 @@ pub(crate) mod misc_eval;
 pub(crate) mod search;
 mod stubs;
 pub(crate) use byte_code::builtin_byte_code;
+pub(crate) use stubs::{
+    restore_world_state as restore_selection_world_state,
+    take_world_state as take_selection_world_state,
+};
 
 mod subrs;
 pub(crate) mod symbols;

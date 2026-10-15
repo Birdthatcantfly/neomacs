@@ -5694,6 +5694,26 @@ mod metadata_capture_tests;
 #[path = "tests/heap_mut_closure_guard_test.rs"]
 mod heap_mut_closure_guard;
 
+/// Round 3w (plan-3w.md section 7, C1): this World state lives in a
+/// thread-local while its World's Baton holder runs, and in the World while
+/// it is parked; the Green runtime moves it at each park and resume, so
+/// every Lisp thread sees one value, as in GNU. (N-mutator mode needs shared
+/// storage instead: a recorded obligation.)
+#[cold]
+pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
+    Box::new(
+        THREAD_LOCAL_ALLOCATION_COUNTS.with(|counts| counts.replace([0; MEMORY_USE_COUNT_LEN])),
+    )
+}
+
+#[cold]
+pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
+    let state = *state
+        .downcast::<[u64; MEMORY_USE_COUNT_LEN]>()
+        .expect("carried World state");
+    THREAD_LOCAL_ALLOCATION_COUNTS.with(|counts| counts.set(state));
+}
+
 #[cfg(test)]
 #[path = "tests/gc_generational_hydration_test.rs"]
 mod gc_generational_hydration;

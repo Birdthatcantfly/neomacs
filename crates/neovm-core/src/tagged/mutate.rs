@@ -637,3 +637,19 @@ pub fn with_xwidget_view_mut<R>(
 #[cfg(debug_assertions)]
 #[path = "gc/tests/heap_mut_closure_test.rs"]
 mod gc_heap_mut_closure_tests;
+
+/// Round 3w (plan-3w.md section 7, C1): this World state lives in a
+/// thread-local while its World's Baton holder runs, and in the World while
+/// it is parked; the Green runtime moves it at each park and resume, so
+/// every Lisp thread sees one value, as in GNU. (N-mutator mode needs shared
+/// storage instead: a recorded obligation.)
+#[cold]
+pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
+    Box::new(COLLECTION_REVISION.with(std::cell::Cell::get))
+}
+
+#[cold]
+pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
+    let state = *state.downcast::<u64>().expect("carried World state");
+    COLLECTION_REVISION.with(|revision| revision.set(state));
+}

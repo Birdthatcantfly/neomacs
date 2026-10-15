@@ -24,6 +24,10 @@ pub(crate) mod body;
 mod chrome;
 pub use chrome::WindowChromePresence;
 mod display;
+pub(crate) use display::{
+    restore_world_state as restore_display_world_state,
+    take_world_state as take_display_world_state,
+};
 mod display_table_input;
 pub(crate) use display::WindowScrollUpdate;
 pub use display_table_input::LayoutDisplayTableInput;

@@ -14,6 +14,7 @@
 
 mod api;
 mod bootstrap;
+mod carried;
 mod scheduler;
 mod switch;
 
@@ -40,6 +41,9 @@ pub(crate) struct GreenRuntime {
     /// A started thread's function until its OS thread runs it.
     pub(super) pending_starts:
         std::cell::RefCell<rustc_hash::FxHashMap<ThreadKey, crate::emacs_core::value::Value>>,
+    /// The World's thread-local state while its holder is parked
+    /// (`carried`, plan-3w.md section 7).
+    pub(super) carried: std::cell::RefCell<Option<carried::CarriedState>>,
     /// A `kill-emacs` run by another thread, for main to exit with.
     pub(super) exit: std::cell::Cell<Option<super::ShutdownRequest>>,
     /// The standard case table, one for every thread as in GNU:
@@ -180,6 +184,7 @@ impl Context {
             parked: Default::default(),
             pending_starts: Default::default(),
             exit: Default::default(),
+            carried: Default::default(),
             standard_case_table: std::cell::Cell::new(self.cached_standard_case_table),
             deferred_errors: Default::default(),
         }));

@@ -839,6 +839,30 @@ pub fn capture_normalized<S, T>(
 #[path = "collection_reads/tests/collection_reads_test.rs"]
 mod tests;
 
+/// Round 3w (plan-3w.md section 7, C1): this World state lives in a
+/// thread-local while its World's Baton holder runs, and in the World while
+/// it is parked; the Green runtime moves it at each park and resume, so
+/// every Lisp thread sees one value, as in GNU. The recent-read cache is
+/// cleared instead: it only ever answers again. (N-mutator mode needs shared
+/// storage instead: a recorded obligation.)
+#[cold]
+pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
+    Box::new((
+        ACTIVE.with(Cell::get),
+        STATE.with(|state| std::mem::take(&mut *state.borrow_mut())),
+    ))
+}
+
+#[cold]
+pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
+    let (active, state) = *state
+        .downcast::<(bool, State)>()
+        .expect("carried World state");
+    ACTIVE.with(|cell| cell.set(active));
+    STATE.with(|slot| *slot.borrow_mut() = state);
+    reset_recent_reads_for_heap_installation();
+}
+
 #[cfg(test)]
 #[path = "tests/write_fusion_test.rs"]
 mod write_fusion_tests;

@@ -777,10 +777,9 @@ fn main_ending_also_ends_threads_created_by_threads() {
     );
 }
 
-// Known Green 3d gaps (design-r3.md section 11, class D1): state GNU keeps
-// global lives in a per-OS-thread static here, so a Lisp thread sees it
-// fresh. Round 3w moves these into the World. Each pin states GNU 31.1's
-// answer (sandboxed GNU run, 2026-10-14).
+// The 3d D1 gaps, closed by round 3w: state GNU keeps global is one value
+// for every Lisp thread. Each expectation is GNU 31.1's answer (sandboxed
+// GNU run, 2026-10-14).
 
 /// The composition is a text property of the string, which every thread
 /// reads; the registry behind it being per OS thread (D1) does not show.
@@ -802,7 +801,6 @@ fn a_thread_sees_a_composition_made_by_another() {
 }
 
 #[test]
-#[ignore = "3w: TIME_ZONE_RULE is per OS thread (design-r3.md section 11, D1)"]
 fn d1_a_thread_sees_the_time_zone_rule_set_by_another() {
     let mut ev = green();
     assert_eq!(
@@ -818,7 +816,6 @@ fn d1_a_thread_sees_the_time_zone_rule_set_by_another() {
 }
 
 #[test]
-#[ignore = "3w: PROCESS_NAME_REGISTRY and the ProcessManager are per owner (design-r3.md section 11, D1)"]
 fn d1_a_thread_sees_a_process_made_by_another() {
     let mut ev = green();
     assert_eq!(
@@ -837,7 +834,6 @@ fn d1_a_thread_sees_a_process_made_by_another() {
 }
 
 #[test]
-#[ignore = "3w: sqlite DB_HANDLES are per OS thread (design-r3.md section 11, D1)"]
 fn d1_a_thread_uses_a_sqlite_handle_opened_by_another() {
     let mut ev = green();
     // GNU 31.1 here was built without sqlite; any GNU with sqlite answers

@@ -9928,3 +9928,21 @@ impl super::super::eval::Context {
         Ok(outcome)
     }
 }
+
+/// Round 3w (plan-3w.md section 7, C1): this World state lives in a
+/// thread-local while its World's Baton holder runs, and in the World while
+/// it is parked. The Green runtime takes it at a park and restores it at the
+/// next resume, so every Lisp thread sees one value, as in GNU. (N-mutator
+/// mode needs shared storage instead: a recorded obligation.)
+#[cold]
+pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
+    Box::new(PROCESS_NAME_REGISTRY.with(|names| std::mem::take(&mut *names.borrow_mut())))
+}
+
+#[cold]
+pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
+    let state = *state
+        .downcast::<rustc_hash::FxHashMap<ProcessId, String>>()
+        .expect("the process names' carried state");
+    PROCESS_NAME_REGISTRY.with(|names| *names.borrow_mut() = state);
+}

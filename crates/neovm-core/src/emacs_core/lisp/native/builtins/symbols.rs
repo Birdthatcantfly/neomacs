@@ -6946,6 +6946,22 @@ pub(crate) fn builtin_make_interpreted_closure(args: Vec<Value>) -> EvalResult {
     make_interpreted_closure_from_parts(&args[0], &args[1], &args[2], args.get(3), args.get(4))
 }
 
+/// Round 3w (plan-3w.md section 7, C1): this World state lives in a
+/// thread-local while its World's Baton holder runs, and in the World while
+/// it is parked; the Green runtime moves it at each park and resume, so
+/// every Lisp thread sees one value, as in GNU. (N-mutator mode needs shared
+/// storage instead: a recorded obligation.)
+#[cold]
+pub(crate) fn take_world_state() -> Box<dyn std::any::Any> {
+    Box::new(LOSSAGE_SIZE.with(|slot| *slot.borrow()))
+}
+
+#[cold]
+pub(crate) fn restore_world_state(state: Box<dyn std::any::Any>) {
+    let state = *state.downcast::<i64>().expect("carried World state");
+    LOSSAGE_SIZE.with(|slot| *slot.borrow_mut() = state);
+}
+
 #[cfg(test)]
 #[path = "tests/positioned_menu_item_identity_test.rs"]
 mod positioned_menu_item_identity_tests;
