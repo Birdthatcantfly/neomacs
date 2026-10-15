@@ -40,7 +40,7 @@ fn verified_heap() -> TaggedHeap {
 }
 
 fn minor(heap: &mut TaggedHeap, roots: &[TaggedValue]) {
-    heap.begin_minor_collection();
+    heap.begin_minor_collection().unwrap();
     for &root in roots {
         heap.seed_root(root);
     }
@@ -222,7 +222,7 @@ fn verify_mode_rejects_an_old_cons_edge_with_a_clean_card() {
     heap.card_table()
         .expect("GEN1 built the table")
         .clear(card_addr(owner));
-    heap.begin_minor_collection();
+    heap.begin_minor_collection().unwrap();
     heap.seed_root(owner);
     // A second root keeps the child marked, so the missed-child check passes
     // and the card check alone must reject the edge the next minor would miss.

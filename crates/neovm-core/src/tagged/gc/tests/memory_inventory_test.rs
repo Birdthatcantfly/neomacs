@@ -15,7 +15,7 @@ fn header(value: TaggedValue) -> &'static mut GcHeader {
 }
 
 fn minor(heap: &mut TaggedHeap, roots: &[TaggedValue]) {
-    heap.begin_minor_collection();
+    heap.begin_minor_collection().unwrap();
     for &root in roots {
         heap.seed_root(root);
     }
@@ -65,7 +65,7 @@ fn memory_inventory_reports_old_dead_only_before_major_promotion() {
     let dead_vector = heap.alloc_vector(vec![TaggedValue::NIL; 17]);
     minor(&mut heap, &[live_cons, dead_cons, live_vector, dead_vector]);
 
-    heap.begin_minor_collection();
+    heap.begin_minor_collection().unwrap();
     heap.seed_root(live_cons);
     heap.seed_root(live_vector);
     heap.incremental_drain_all();

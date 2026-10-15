@@ -40,7 +40,7 @@ fn verified_heap() -> TaggedHeap {
 }
 
 fn minor(heap: &mut TaggedHeap, roots: &[TaggedValue]) {
-    heap.begin_minor_collection();
+    heap.begin_minor_collection().unwrap();
     for &root in roots {
         heap.seed_root(root);
     }
@@ -76,7 +76,7 @@ fn missed_barrier_is_detected_before_sweep(class: OwnerClass) {
     }
     let child = heap.alloc_string(LispString::from_utf8("missed-barrier-young-child"));
     let child_ptr = child.as_string_ptr().unwrap().cast();
-    heap.begin_minor_collection();
+    heap.begin_minor_collection().unwrap();
     heap.seed_root(owner);
     assert!(!heap.is_value_marked(child));
     // Inject after begin: the current-child backstop at cycle start must not

@@ -2,6 +2,7 @@
 //! Context completion counts and hooks publish once after the entire sweep.
 
 use super::*;
+use strum::IntoEnumIterator;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CompletionCounts {
@@ -377,4 +378,84 @@ fn generational_done_poll_terminates_immediately_and_folds_resident_satb_partial
     assert!(context.tagged_heap.value_is_marked_for_test(orphan));
     context.tagged_heap.finish_incremental_sweep_now();
     assert!(context.tagged_heap.owns_heap_value_for_test(orphan));
+}
+
+#[derive(Clone, Copy, Debug, strum::EnumIter)]
+enum ResidualMajorEntry {
+    DroppedCapture,
+    JoinedWorker,
+}
+
+#[test]
+fn scheduler_finishes_residual_major_and_skips_minor() {
+    for entry in ResidualMajorEntry::iter() {
+        let mut context = context(usize::MAX, usize::MAX);
+        context.with_gc_inhibited(|context| {
+            context
+                .eval_str("(setq u34p-retained (cons (vector 239) 241))")
+                .expect("root a young graph in the real obarray");
+        });
+        let root = context
+            .obarray()
+            .symbol_value_copied("u34p-retained")
+            .unwrap();
+        let child = root.cons_car();
+        assert!(!context.tagged_heap.value_is_old_for_test(root));
+        assert!(context.tagged_heap.should_run_minor(false, false));
+        let before = counts(&context);
+        let heap_collections = context.tagged_heap.gc_collections();
+        let heap_ptr: *mut crate::tagged::gc::TaggedHeap = &mut *context.tagged_heap;
+        // SAFETY: this Context owns the installed heap and every runtime root.
+        // Its mutator is stopped through admission, root capture and optional
+        // worker publication. Root enumeration only seeds collector work and
+        // cannot run Lisp callbacks or allocation safepoints.
+        unsafe {
+            let mut capture = (*heap_ptr).permit_concurrent_mark().unwrap().begin();
+            let captured_heap = capture.heap_mut() as *mut crate::tagged::gc::TaggedHeap;
+            context.seed_registered_mutator_roots_world_stopped(captured_heap);
+            match entry {
+                ResidualMajorEntry::DroppedCapture => drop(capture),
+                ResidualMajorEntry::JoinedWorker => {
+                    capture.launch().unwrap();
+                    (*heap_ptr).finish_concurrent_mark().unwrap();
+                }
+            }
+        }
+        assert!(context.tagged_heap.mark_in_progress(), "{entry:?}");
+        assert!(!context.tagged_heap.concurrent_mark_running(), "{entry:?}");
+        assert!(!context.tagged_heap.sweep_in_progress(), "{entry:?}");
+        assert_eq!(
+            counts(&context),
+            before,
+            "starting or joining is not completion"
+        );
+        assert_eq!(context.tagged_heap.gc_collections(), heap_collections);
+
+        // A fresh due cycle would select a minor with these pacing limits.
+        // This invocation instead finishes the pending major and accounts it
+        // exactly once; that completed major already includes young garbage.
+        context.gc_collect_from_current_roots_impl(false);
+        assert_one_completion(&context, before);
+        assert_eq!(context.tagged_heap.gc_collections(), heap_collections + 1);
+        assert!(!context.tagged_heap.mark_in_progress(), "{entry:?}");
+        assert!(!context.tagged_heap.concurrent_mark_running(), "{entry:?}");
+        assert!(!context.tagged_heap.sweep_in_progress(), "{entry:?}");
+        assert_eq!(
+            context.obarray().symbol_value_copied("u34p-retained"),
+            Some(root)
+        );
+        assert!(context.tagged_heap.owns_heap_value_for_test(root));
+        assert!(context.tagged_heap.owns_heap_value_for_test(child));
+        assert!(context.tagged_heap.value_is_old_for_test(root));
+        assert!(context.tagged_heap.value_is_old_for_test(child));
+        assert_eq!(root.cons_car(), child);
+        assert_eq!(
+            root.cons_cdr(),
+            crate::tagged::value::TaggedValue::fixnum(241)
+        );
+        assert_eq!(
+            child.as_vector_data().unwrap()[0],
+            crate::tagged::value::TaggedValue::fixnum(239)
+        );
+    }
 }

@@ -150,7 +150,7 @@ fn gc_generational_hydration_old_owner_keeps_key_through_minors_and_majors() {
     assert!(heap.is_remembered_for_test(owner));
     assert_eq!(heap.remembered_log_len_for_test(), 1);
 
-    heap.begin_minor_collection();
+    heap.begin_minor_collection().unwrap();
     heap.seed_root(owner);
     heap.complete_minor_collection();
     heap.finish_incremental_sweep_now();

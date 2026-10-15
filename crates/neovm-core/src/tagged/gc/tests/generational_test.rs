@@ -108,7 +108,7 @@ fn generational_cons_card_lifecycle() {
     assert!(crate::tagged::mutate::set_cons_cdr(owner, child));
     assert!(heap.owner_card_is_dirty_for_test(owner));
     assert!(heap.current_mutator_gc().remset.is_empty());
-    heap.begin_minor_collection();
+    heap.begin_minor_collection().unwrap();
     assert!(heap.generational.r_seed.is_empty());
     heap.seed_root(owner);
     heap.complete_minor_collection();
@@ -141,7 +141,7 @@ fn generational_mapped_and_permanent_logs_are_per_cycle() {
     heap.current_mutator_gc_mut()
         .remembered_cache
         .fill(permanent.bits());
-    heap.begin_minor_collection();
+    heap.begin_minor_collection().unwrap();
     assert!(
         heap.current_mutator_gc()
             .remembered_cache
@@ -204,7 +204,7 @@ fn generational_header_claim_is_unique_across_threads() {
 }
 
 fn minor(heap: &mut TaggedHeap, roots: &[TaggedValue]) {
-    heap.begin_minor_collection();
+    heap.begin_minor_collection().unwrap();
     for &root in roots {
         heap.seed_root(root);
     }
@@ -281,7 +281,7 @@ fn minor_eager_box_promotion_precedes_sweep_window_stores() {
     let roots = ScratchRoots::new();
     let owner = heap.alloc_hash_table(LispHashTable::new(HashTableTest::Eq));
     roots.keep(owner);
-    heap.begin_minor_collection();
+    heap.begin_minor_collection().unwrap();
     heap.seed_root(owner);
     heap.complete_minor_collection();
     assert!(heap.sweep_in_progress());
@@ -699,7 +699,7 @@ fn generational_partition_verifier_checks_old_box_children() {
             child,
         );
     }
-    heap.begin_minor_collection();
+    heap.begin_minor_collection().unwrap();
     heap.seed_root(owner);
     heap.incremental_drain_all();
     heap.verify_dump_partition();
@@ -718,7 +718,7 @@ fn generational_partition_verifier_checks_unmarked_old_cons_children() {
     // Deliberately bypass the barrier. The old cons will stay unmarked in the
     // next minor, so an ordinary mark-only owner walk cannot find this edge.
     unsafe { (*(owner.xcons_ptr() as *mut ConsCell)).set_car(child) };
-    heap.begin_minor_collection();
+    heap.begin_minor_collection().unwrap();
     heap.seed_root(owner);
     heap.incremental_drain_all();
     heap.verify_dump_partition();

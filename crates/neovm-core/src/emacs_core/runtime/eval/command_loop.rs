@@ -2231,6 +2231,21 @@ impl Context {
                     return; // sweep deferred; cycle not done yet
                 }
                 return; // GC thread still marking; mutator continues
+            } else if (*heap_ptr).mark_in_progress() {
+                // A joined worker or dropped unpublished capture can leave a
+                // major's residual mark. Minor admission requires quiescence;
+                // finish that cycle with the complete current root set first.
+                match (*heap_ptr).drain_to_quiescent(|heap| {
+                    self.seed_registered_mutator_roots_world_stopped(heap);
+                }) {
+                    Ok(quiescent) => drop(quiescent),
+                    Err(error) => {
+                        // Preserve the unfinished cycle on failed recovery.
+                        tracing::warn!(target: "neovm::gc", %error, "residual major recovery pending");
+                        return;
+                    }
+                }
+                cycle_completed = true;
             } else if self.gc_stress && (*heap_ptr).generational_enabled() {
                 // A fresh automatic stress cycle is synchronous. Choose its
                 // generation before advancing the next-cycle stride; an
@@ -2240,7 +2255,9 @@ impl Context {
                     .should_run_minor(self.gc_runtime_settings_cache.memory_full.is_full(), true);
                 (*heap_ptr).note_generation_stress_cycle_started();
                 if minor {
-                    (*heap_ptr).begin_minor_collection();
+                    (*heap_ptr).begin_minor_collection().expect(
+                        "scheduler drained the preceding mark and sweep before minor admission",
+                    );
                     self.seed_registered_mutator_roots_world_stopped(heap_ptr);
                     (*heap_ptr).complete_minor_collection();
                     (*heap_ptr).finish_incremental_sweep_now();
@@ -2256,7 +2273,9 @@ impl Context {
                 // Minor marking stops every registered mutator and visits
                 // their roots. Promotion completes before mutating resumes;
                 // the existing sweep continuation records cycle completion.
-                (*heap_ptr).begin_minor_collection();
+                (*heap_ptr).begin_minor_collection().expect(
+                    "scheduler drained the preceding mark and sweep before minor admission",
+                );
                 self.seed_registered_mutator_roots_world_stopped(heap_ptr);
                 (*heap_ptr).complete_minor_collection();
                 return;

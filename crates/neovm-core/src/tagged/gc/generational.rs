@@ -218,14 +218,37 @@ impl TaggedHeap {
     }
 }
 
+/// Minor admission belongs to the serialized, stopped heap owner. Residual
+/// major marking must finish before a new cycle may reset any collector state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum MinorCollectionAdmissionError {
+    #[error("the heap has unfinished collector work")]
+    CollectorBusy,
+    #[error("minor collection requires the generational collector")]
+    GenerationalDisabled,
+}
+
+static_assertions::assert_impl_all!(MinorCollectionAdmissionError: Send, Sync, std::fmt::Debug);
+
 impl TaggedHeap {
     /// Future global stop-all-mutators handshake belongs before this entry:
     /// join the collector, park every mutator and wait for all barrier appends.
+    /// Minors and an active major mark are mutually exclusive, including the
+    /// residual major after a worker joins or an unpublished capture drops.
     #[cold]
     #[inline(never)]
-    pub(crate) fn begin_minor_collection(&mut self) {
-        assert!(self.generational.enabled);
-        assert!(!self.concurrent_mark_running);
+    pub(crate) fn begin_minor_collection(&mut self) -> Result<(), MinorCollectionAdmissionError> {
+        // Admission precedes EVERY mutation, even for a GEN0 heap. Joining a
+        // worker alone does not finish its major's residual mark or sweep.
+        facade_mark::CollectorQuiescence::check(self)
+            .map_err(|_| MinorCollectionAdmissionError::CollectorBusy)?;
+        if !self.generational.enabled {
+            return Err(MinorCollectionAdmissionError::GenerationalDisabled);
+        }
+        debug_assert!(
+            !self.concurrent_mark_running,
+            "minor stop-all excludes concurrent marking"
+        );
         self.generational.cycle = GenerationCycle::Minor;
         self.generational.promo.clear();
         self.incremental_mark_us = 0;
@@ -233,6 +256,7 @@ impl TaggedHeap {
         self.pace_mark_start_bytes = self.bytes_since_gc();
         self.begin_collection_with(false);
         self.mark_in_progress = true;
+        Ok(())
     }
 
     /// Marking and all fixpoints execute on the stopped mutator, then eager
@@ -645,3 +669,7 @@ impl TaggedHeap {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "tests/minor_admission_test.rs"]
+mod minor_admission_tests;

@@ -972,7 +972,7 @@ fn tier_h_old_table_remembers_young_child_for_next_minor() {
     let child = heap.alloc_record(vec![TaggedValue::fixnum(1401)]);
     insert(owner, TaggedValue::fixnum(2), child);
     assert!(heap.current_mutator_gc().remset.contains(&owner));
-    heap.begin_minor_collection();
+    heap.begin_minor_collection().unwrap();
     heap.seed_root(owner);
     heap.complete_minor_collection();
     heap.finish_incremental_sweep_now();

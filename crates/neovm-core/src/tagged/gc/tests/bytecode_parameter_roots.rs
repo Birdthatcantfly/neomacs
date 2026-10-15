@@ -36,7 +36,7 @@ fn collect(heap: &mut TaggedHeap, owner: TaggedValue, collection: Collection) {
     match collection {
         Collection::Major => heap.collect_exact(std::iter::once(owner)),
         Collection::Minor => {
-            heap.begin_minor_collection();
+            heap.begin_minor_collection().unwrap();
             heap.seed_root(owner);
             heap.complete_minor_collection();
             heap.finish_incremental_sweep_now();
