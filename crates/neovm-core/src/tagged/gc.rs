@@ -2949,3 +2949,8 @@ mod cons_young_minor_work_tests;
 #[cfg(test)]
 #[path = "gc/tests/cons_young_shared_test.rs"]
 mod cons_young_shared_tests;
+
+/// Exact GEN1 sweep deltas, late births, conditional release and verifier fault.
+#[cfg(test)]
+#[path = "gc/tests/cons_sweep_accounting_test.rs"]
+mod cons_sweep_accounting_tests;

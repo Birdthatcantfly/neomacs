@@ -721,6 +721,17 @@ impl AllocatorState {
     /// Consume the newly freed inventory and reset only completed sweep work,
     /// preserving every next-minor young flag and registry entry.
     pub(super) fn take_completed_sweep_freed(&mut self) -> usize {
+        let freed = self.take_completed_sweep_freed_inner();
+        #[cfg(test)]
+        if test_fault_is(ConsAllocatorFault::CorruptCompletedSweepFreed) {
+            return freed
+                .checked_add(1)
+                .expect("test freed-count mutation overflow");
+        }
+        freed
+    }
+
+    fn take_completed_sweep_freed_inner(&mut self) -> usize {
         let state = self;
         state.sweep_work.clear();
         state.sweep_unvisited_old = 0;
@@ -731,7 +742,6 @@ impl AllocatorState {
         std::mem::take(&mut self.empty_candidates)
     }
 
-    #[cfg(test)]
     pub(super) fn free_count_for(&self, base: ConsBlockBase) -> Option<usize> {
         let state = self;
         state.blocks.get(&base).map(|&slot| state.block(slot).count)
@@ -1141,7 +1151,6 @@ impl ConsAllocator {
         self.with_state_mut(|state, _mode| state.take_empty_candidates())
     }
 
-    #[cfg(test)]
     pub(super) fn free_count_for(&self, base: ConsBlockBase) -> Option<usize> {
         self.with_state(|state, _mode| state.free_count_for(base))
     }
@@ -1333,7 +1342,6 @@ impl SharedConsAllocator<'_> {
         self.with_state_mut(|state, _mode| state.take_empty_candidates())
     }
 
-    #[cfg(test)]
     pub(super) fn free_count_for(&self, base: ConsBlockBase) -> Option<usize> {
         self.with_state(|state, _mode| state.free_count_for(base))
     }
@@ -1732,6 +1740,7 @@ pub(super) enum ConsAllocatorFault {
     SkipCarveRecording,
     KeepFlagAfterPromotion,
     CorruptAvailable,
+    CorruptCompletedSweepFreed,
     ClearNextFlagAtSweepCompletion,
 }
 

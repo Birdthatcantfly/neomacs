@@ -459,18 +459,24 @@ impl TaggedHeap {
         }
     }
 
-    /// Finalize the deferred sweep: recompute the cons live count from the mark
-    /// bitmaps (cheap popcount; counts allocate-black new conses, excludes
-    /// reclaimed ones), fix the allocation accounting, and emit the cycle trace.
+    /// Finalize the deferred sweep: GEN1 consumes publication-time freed-cell
+    /// deltas; GEN0 retains its bitmap recount. Both account for allocate-black
+    /// births, fix allocation counters, and emit the completed cycle trace.
     pub(super) fn finish_incremental_sweep(&mut self) {
         // I1 (`sweep_in_progress` clears below) and I2 (the recount).
         self.close_alloc_regions();
+        if self.generational.enabled {
+            #[cfg(test)]
+            {
+                // SAFETY: finish has closed all regions in this stopped extent.
+                // Keep this mutation before recount consumes CURRENT work.
+                unsafe { self.cons_allocator.stopped_world() }.apply_late_clear_mutation_for_test();
+            }
+        }
         let recount: usize = if self.generational.enabled {
-            self.cons_blocks
-                .iter()
-                .map(ConsBlock::count_live_generational)
-                .sum()
+            self.cons_recount_from_sweep()
         } else {
+            // GEN0 keeps its existing full-heap recount and release path.
             self.cons_blocks.iter().map(ConsBlock::count_marked).sum()
         };
         // allocated_count carries the tracked cons live count; replace it with
@@ -488,18 +494,12 @@ impl TaggedHeap {
         }
         self.cons_live_count = recount;
 
-        if self.generational.enabled {
-            #[cfg(test)]
-            {
-                // SAFETY: finish has closed all regions in this stopped extent.
-                unsafe { self.cons_allocator.stopped_world() }.apply_late_clear_mutation_for_test();
-            }
-            // C3 retains the legacy full recount above; C4 consumes this exact
-            // freed delta instead. Neither operation clears young flags/logs.
-            let _ = self.cons_allocator.take_completed_sweep_freed();
-            let _ = self.cons_allocator.take_empty_candidates();
-        }
-        let _released_cons_blocks = self.release_empty_cons_blocks();
+        let _released_cons_blocks = if self.generational.enabled {
+            let candidates = self.cons_allocator.take_empty_candidates();
+            self.release_empty_cons_candidates(candidates)
+        } else {
+            self.release_empty_cons_blocks()
+        };
         let _released_object_pages = self.release_empty_object_pages();
 
         if self.generational.major_in_progress {
@@ -1168,7 +1168,6 @@ impl TaggedHeap {
     fn sweep_minor_cons(&mut self) -> usize {
         self.close_alloc_regions();
         let old_live = self.cons_live_count;
-        let mut new_live = self.cons_allocator.sweep_unvisited_old_cells();
         for work_index in 0..self.cons_allocator.sweep_len() {
             let base = self.cons_allocator.sweep_base_at(work_index);
             let index = self.cons_block_index_by_base[&base.addr()];
@@ -1185,17 +1184,16 @@ impl TaggedHeap {
                     self.cons_allocator.publish_generational(block, head, live);
                 }
             }
-            new_live += live;
         }
+        let new_live = self.cons_recount_from_sweep();
         self.cons_live_count = new_live;
         self.current_mutator_gc_mut().allocated_count = self
             .current_mutator_gc()
             .allocated_count
             .saturating_sub(old_live)
             .saturating_add(new_live);
-        let _ = self.cons_allocator.take_completed_sweep_freed();
-        let _ = self.cons_allocator.take_empty_candidates();
-        let _ = self.release_empty_cons_blocks();
+        let candidates = self.cons_allocator.take_empty_candidates();
+        let _ = self.release_empty_cons_candidates(candidates);
         let mapped_live: usize = self
             .mapped_cons_ranges
             .iter()
@@ -1354,6 +1352,120 @@ impl TaggedHeap {
         new_live
             .saturating_add(mapped_live)
             .saturating_mul(size_of::<ConsCell>())
+    }
+
+    /// Complete GEN1 inventory from sweep deltas after every region closes.
+    /// Shared by eager minor and deferred minor/major finish. The serialized
+    /// heap owner runs this only after every cons sweep item was published.
+    fn cons_recount_from_sweep(&mut self) -> usize {
+        debug_assert!(!self.alloc_regions_open());
+        // Publication charged only cells newly freed by this collection,
+        // excluding cells already free when its work was withheld. The
+        // current tracked count includes every sweep-window handout and
+        // the close above has refunded all unused region tails.
+        let freed = self.cons_allocator.take_completed_sweep_freed();
+        let count = self
+            .cons_live_count
+            .checked_sub(freed)
+            .expect("cons sweep freed more cells than the tracked inventory");
+        if self.generational.verify {
+            // Deliberately slow and verify-only: the ordinary GEN1 path
+            // must not regain an O(all cons blocks) final-slice census.
+            let census: usize = self
+                .cons_blocks
+                .iter()
+                .map(ConsBlock::count_live_generational)
+                .sum();
+            assert_eq!(
+                count, census,
+                "GC verify: cons recount from sweep differs from bitmap census"
+            );
+            let old: usize = self.cons_blocks.iter().map(ConsBlock::count_old).sum();
+            assert_eq!(
+                self.generational.old_cons_count, old,
+                "GC verify: incremental old cons count differs from bitmap census"
+            );
+        }
+        count
+    }
+
+    /// GEN1 release decision visits only blocks observed empty by this sweep.
+    /// An earlier empty block may have supplied new cells after publication;
+    /// compare its CURRENT private list with its high-water mark after closing
+    /// all regions. No actual release means no whole-cons-heap scan.
+    ///
+    /// Actual releases retain the memo's conditional O(all blocks) vector/index/
+    /// card rebuild. All work cursors must be consumed before compaction.
+    fn release_empty_cons_candidates(&mut self, candidates: Vec<ConsBlockBase>) -> usize {
+        debug_assert!(
+            !self.alloc_regions_open(),
+            "releasing blocks under a region"
+        );
+        let mut empty = FxHashSet::default();
+        for base in candidates {
+            let index = *self
+                .cons_block_index_by_base
+                .get(&base.addr())
+                .expect("completed sweep candidate is still heap-owned");
+            let used = self.cons_blocks[index].next_index as usize;
+            let free = self
+                .cons_allocator
+                .free_count_for(base)
+                .expect("completed sweep candidate is still registered");
+            assert!(
+                free <= used,
+                "cons free count exceeds its initialized capacity"
+            );
+            if free == used {
+                empty.insert(base);
+            }
+        }
+        if empty.is_empty() {
+            return 0;
+        }
+        self.mark_cons_block_cache = None;
+        // Unlink allocator metadata and any NEXT-minor log before storage can
+        // be recycled. All identities below are stable block bases.
+        // SAFETY: the existing collector caller retains stopped ownership;
+        // no callbacks, allocation safepoints or mutator resumes occur here.
+        unsafe { scan_contract::SingleMutatorWorld::from_heap(self) }
+            .with_stopped_heap(|heap, proof| {
+                let mut logs = super::young_registry::StoppedYoungLogs::new(
+                    &mut heap._satb_layout_reserve,
+                    proof,
+                )
+                .expect("candidate release requires every young-only loan returned");
+                let mut stopped = unsafe { heap.cons_allocator.stopped_world() };
+                for &base in &empty {
+                    stopped
+                        .unregister(base, &mut logs)
+                        .expect("released candidate uses this heap canonical registry");
+                    if let Some(census) = heap.census.as_deref_mut() {
+                        census.forget_cons_block(base.addr());
+                    }
+                    if let Some(map) = heap.chunk_map.as_deref() {
+                        map.set(base.addr(), ChunkEntry::NONE);
+                    }
+                }
+            })
+            .expect("candidate release requires every young-only loan returned");
+        let old_len = self.cons_blocks.len();
+        self.cons_blocks
+            .retain(|block| !empty.contains(&ConsBlockBase::of(block)));
+        self.cons_block_index_by_base.clear();
+        for (index, block) in self.cons_blocks.iter().enumerate() {
+            let previous = self
+                .cons_block_index_by_base
+                .insert(block.base_addr(), index);
+            debug_assert!(previous.is_none(), "cons block base registered twice");
+            if let Some(map) = self.chunk_map.as_deref() {
+                map.set(block.base_addr(), ChunkEntry::new(ChunkClass::Cons, index));
+            }
+        }
+        self.rebuild_card_slot_blocks();
+        let released = old_len - self.cons_blocks.len();
+        debug_assert_eq!(released, empty.len());
+        released
     }
 
     /// Drop ordinary cons blocks with no survivors and rebuild their
