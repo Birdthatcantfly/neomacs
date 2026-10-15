@@ -303,9 +303,11 @@ fn canonical_subr_object(sym_id: SymId) -> TaggedValue {
 /// Mint the canonical subr object of every symbol in IDS on this thread now,
 /// so a snapshot of the table is complete (a Green Lisp thread installs it;
 /// minting lazily on two threads would give one primitive two objects).
+/// Through `subr_from_sym_id`, so `canonical_subr_object` keeps its one
+/// caller and stays inlined there.
 pub(crate) fn mint_static_subr_objects(ids: impl IntoIterator<Item = SymId>) {
     for id in ids {
-        let _ = canonical_subr_object(id);
+        let _ = TaggedValue::subr_from_sym_id(id);
     }
 }
 

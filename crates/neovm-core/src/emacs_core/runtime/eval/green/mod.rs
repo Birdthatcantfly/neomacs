@@ -94,7 +94,10 @@ impl GreenRuntime {
         }
     }
 
-    /// Visit every value the runtime holds.
+    /// Visit every value the runtime holds. Out of line: the World's trace
+    /// reaches it only in a Green World.
+    #[cold]
+    #[inline(never)]
     pub(super) fn trace_roots(&self, visit: &mut dyn FnMut(crate::emacs_core::value::Value)) {
         use crate::gc_trace::GcTrace;
         self.bootstrap.trace_roots(visit);

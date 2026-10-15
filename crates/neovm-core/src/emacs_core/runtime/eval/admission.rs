@@ -246,14 +246,22 @@ impl Context {
         Ok(())
     }
 
+    /// The standard case table's variable, made now if it was not yet: its
+    /// cell must exist before admission, as a cell born after it is born
+    /// projected, and admission leaves it unprojected (it is storage for
+    /// what GNU keeps in C globals).
+    #[cold]
+    #[inline(never)]
+    fn standard_case_table_cell(&mut self) -> SymId {
+        let _ = crate::emacs_core::casetab::builtin_standard_case_table(self, Vec::new());
+        crate::emacs_core::casetab::standard_case_table_object_symbol_id()
+    }
+
     /// Decide what admission does: the bindings it rewrites, what each
     /// channel publishes and keeps, and the cells it projects.
     fn plan_admission(&mut self) -> AdmissionPlan {
         let undo_list = super::buffer_undo_list_symbol();
-        // Made now if it was not yet: its cell must exist before admission,
-        // as a fresh cell after it is born projected.
-        let _ = crate::emacs_core::casetab::builtin_standard_case_table(self, Vec::new());
-        let case_table = crate::emacs_core::casetab::standard_case_table_object_symbol_id();
+        let case_table = self.standard_case_table_cell();
         let mut bindings = Vec::new();
         let mut chains: Vec<PlannedChain> = Vec::new();
         let mut chain_of: FxHashMap<(SymId, Channel), usize> = FxHashMap::default();
