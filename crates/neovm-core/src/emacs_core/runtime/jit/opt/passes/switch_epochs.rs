@@ -9,7 +9,8 @@
 //!
 //! A closed natural loop with one unconditional preheader can reuse its entry
 //! witness until a safepoint. Calls and MAY_REENTER/MAY_GC operations block
-//! admission; Poll is the sole exception. EVERY Poll in the region schedules
+//! admission; unknown writes also clobber the witness, even without Lisp
+//! reentry. Poll is the sole safepoint exception. EVERY Poll in the region schedules
 //! the same guards on its serviced successor. Its unserviced successor needs
 //! no check. Entry failure resumes the header with the preheader's initial
 //! stack; poll failure resumes the Poll's own post-edge frame, after service.
@@ -23,7 +24,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::{cfg::Dominance, licm};
-use crate::emacs_core::jit::opt::{ir::*, verify::VerifyError};
+use crate::emacs_core::jit::opt::{ir::*, mem::AliasClass, verify::VerifyError};
 
 /// A guard for one switch, with an exact interpreter continuation. Threading:
 /// compilation-owned SSA IDs only, no captured Lisp pointers or runtime state.
@@ -73,7 +74,9 @@ impl<'a> SwitchEpochGuards<'a> {
                 || natural.members.iter().any(|b| {
                     func.blocks[b.index()].insts.iter().any(|id| {
                         let inst = &func.insts[id.index()];
-                        inst.op != Opcode::Poll && inst.op.is_safepoint(inst.eff)
+                        inst.op != Opcode::Poll
+                            && (inst.op.is_safepoint(inst.eff)
+                                || AliasClass::Unknown.clobbered_by(inst.eff))
                     })
                 })
             {

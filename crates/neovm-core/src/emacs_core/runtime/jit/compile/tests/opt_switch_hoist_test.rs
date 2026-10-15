@@ -146,7 +146,12 @@ fn opt_switch_hoist_schedules_entry_and_every_poll_but_declines_reentry() {
         .find(|b| matches!(b.term, ir::Term::Switch { .. }))
         .unwrap()
         .insts[0];
-    for effects in [Effects::MAY_REENTER, Effects::MAY_GC] {
+    for effects in [
+        Effects::MAY_REENTER,
+        Effects::MAY_GC,
+        Effects::WRITE_HEAP,
+        Effects::WRITE_BINDINGS,
+    ] {
         ir.insts[id.index()].eff = effects;
         let schedule = SwitchEpochGuards::build(&ir, &sites).unwrap();
         assert!(sites.iter().all(|&site| !schedule.is_hoisted(site)));
