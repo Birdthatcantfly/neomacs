@@ -89,20 +89,13 @@ impl Arm {
         if admit {
             ev.admit_threads().expect("eager admission");
         }
-        let mut arm = Self {
+        Self {
             ev,
             frames: Vec::new(),
-        };
-        arm.hand_off();
-        arm
+        }
     }
 
     fn apply(&mut self, op: Op) {
-        self.apply_op(op);
-        self.hand_off();
-    }
-
-    fn apply_op(&mut self, op: Op) {
         let ev = &mut self.ev;
         // Direct calls below run on whichever Context last installed its
         // thread state; this arm's must be the installed one.
@@ -158,18 +151,7 @@ impl Arm {
     }
 
     fn observe(&mut self) -> String {
-        let seen = eval(&mut self.ev, "(trnd-obs)");
-        self.hand_off();
-        seen
-    }
-
-    /// Finish this World's concurrent mark before the other arm runs: both
-    /// Worlds share the process's one collector thread, which a mark left
-    /// running would keep from the other World's collection.
-    fn hand_off(&mut self) {
-        self.ev
-            .finish_concurrent_mark()
-            .expect("finish the concurrent mark");
+        eval(&mut self.ev, "(trnd-obs)")
     }
 
     /// Canonical storage: what an owner with no bindings would see.
@@ -198,7 +180,6 @@ impl Arm {
                 ));
             }
         }
-        self.hand_off();
         seen
     }
 }
@@ -278,10 +259,8 @@ fn a_late_admission_matches_an_owner_admitted_from_the_start() {
         }
         eager.ev.setup_thread_locals();
         eager.ev.unbind_to(0);
-        eager.hand_off();
         late.ev.setup_thread_locals();
         late.ev.unbind_to(0);
-        late.hand_off();
         assert_eq!(
             late.observe(),
             eager.observe(),
@@ -494,15 +473,12 @@ fn a_backtrace_eval_in_progress_rewinds_after_admission() {
     assert_eq!(eval(&mut ev, "tab-r"), "1");
 }
 
-/// Two Worlds on one OS thread share the process's one collector thread
-/// (`tagged/gc/gc_thread.rs` `GC_THREAD`): a concurrent mark World A leaves
-/// running occupies it until A's mutator stops the job, so World B's
-/// synchronous collection (`mark_all_on_gc_thread`) waits forever. See
-/// tmp/tls-r3/two-world-collector-hazard.md. One World -- production, and
-/// the Green runtime -- cannot reach it. Passes once the collector serves
-/// another heap's request while a concurrent job is idle.
+/// Two Worlds on one OS thread used to share the process's one collector
+/// thread: a concurrent mark World A left running occupied it until A's
+/// mutator stopped the job, so World B's synchronous collection
+/// (`mark_all_on_gc_thread`) waited forever. Each heap now has its own
+/// collector (`tagged/gc/gc_thread.rs` `COLLECTORS`).
 #[test]
-#[ignore = "two Worlds share the process collector thread: a concurrent mark left running by one World deadlocks the other's sync collection (peer task, P2)"]
 fn a_second_worlds_sync_collection_completes_while_the_first_marks() {
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -510,7 +486,8 @@ fn a_second_worlds_sync_collection_completes_while_the_first_marks() {
         let mut second = Context::new();
         first.setup_thread_locals();
         let mut started = false;
-        for _ in 0..64 {
+        // A generational heap runs up to 64 minors before a concurrent major.
+        for _ in 0..4096 {
             eval(
                 &mut first,
                 "(let ((i 0)) (while (< i 2000) (make-list 8 i) (setq i (1+ i))))",

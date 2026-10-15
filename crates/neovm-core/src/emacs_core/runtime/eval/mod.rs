@@ -7810,6 +7810,10 @@ mod admission_header_tests;
 #[path = "tests/gc_context_shutdown.rs"]
 mod gc_context_shutdown_tests;
 
+#[cfg(test)]
+#[path = "tests/gc_thread_per_heap_test.rs"]
+mod gc_thread_per_heap_tests;
+
 // task3-jitcrash-diag: diagnostic repros for the pre-existing JIT
 // heap-corruption crash (no fix here).
 #[cfg(test)]
