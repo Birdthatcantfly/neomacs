@@ -58,8 +58,6 @@ struct World {
     thread_projections: std::cell::RefCell<crate::emacs_core::forward::ThreadProjectionTable>,
     /// How this World runs Lisp threads, fixed at construction.
     threading: Cell<super::admission::ThreadingMode>,
-    /// Whether thread admission has run: sticky, never reset.
-    admitted: Cell<bool>,
     /// The Green runtime (round 3d), once started.
     green: std::cell::RefCell<Option<Box<super::green::GreenRuntime>>>,
     /// The OS thread holding the World's Baton, in a Green World
@@ -1092,7 +1090,6 @@ impl WorldStorageBuilder {
             owner_slabs: Default::default(),
             thread_projections: Default::default(),
             threading: Cell::new(super::admission::ThreadingMode::from_env()),
-            admitted: Cell::new(false),
             green: Default::default(),
             baton_holder: Cell::new(None),
         }));
@@ -1239,12 +1236,7 @@ impl Context {
     /// Whether thread admission has run in this World.
     #[inline]
     pub(crate) fn threads_admitted(&self) -> bool {
-        self.obarray.lease.0.admitted.get()
-    }
-
-    /// Record that admission has committed: sticky.
-    pub(super) fn mark_threads_admitted(&mut self) {
-        self.obarray.lease.0.admitted.set(true);
+        self.tagged_heap.threads_admitted()
     }
 
     /// Make room for admission to project OWNED variables onto descriptors

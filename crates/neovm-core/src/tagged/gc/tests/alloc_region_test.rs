@@ -30,10 +30,11 @@ fn cons(heap: &mut TaggedHeap, n: i64) -> TaggedValue {
 
 fn free_list(heap: &TaggedHeap) -> Vec<usize> {
     let mut out = Vec::new();
-    let mut cell = heap.cons_free_list;
-    while !cell.is_null() {
-        out.push(cell as usize);
-        cell = unsafe { (*cell).free_next() };
+    for mut cell in heap.cons_allocator.free_heads() {
+        while !cell.is_null() {
+            out.push(cell as usize);
+            cell = unsafe { (*cell).free_next() };
+        }
     }
     out
 }
@@ -127,7 +128,10 @@ fn a_free_list_region_is_one_adjacent_run() {
     let (cur, lim) = heap.cons_region_for_test();
     assert_eq!(cur, cell_addr(cells[11]));
     assert_eq!(lim, cell_addr(cells[20]), "the run stops at the gap at 20");
-    assert_eq!(heap.cons_free_list as usize, cell_addr(cells[21]));
+    assert_eq!(
+        heap.cons_allocator.free_heads()[0] as usize,
+        cell_addr(cells[21])
+    );
     // Use the run up; the next region is the next run.
     for i in 11..20 {
         assert_eq!(cell_addr(cons(&mut heap, i)), cell_addr(cells[i as usize]));

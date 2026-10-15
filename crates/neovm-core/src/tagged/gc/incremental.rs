@@ -132,11 +132,14 @@ impl TaggedHeap {
 
         // Begin the deferred sweep. Detach the young non-cons list (new non-cons
         // allocations link onto a fresh `all_objects` and are not swept this
-        // cycle) and reset the cons free list (rebuilt as blocks are swept).
+        // cycle) and withhold cons lists (published only after each block is swept).
         self.begin_old_sweep_world_stopped();
         self.sweep_noncons_pending = self.all_objects;
         self.all_objects = std::ptr::null_mut();
-        self.cons_free_list = std::ptr::null_mut();
+        // SAFETY: the collector owns this stopped extent, with regions closed
+        // and the concurrent marker joined before any free list is withheld.
+        unsafe { self.cons_allocator.stopped_world() }
+            .withhold(self.cons_blocks.iter().map(ConsBlockBase::of));
         self.sweep_cons_cursor = 0;
         self.sweep_cons_end = self.cons_blocks.len();
         self.sweep_cons_live_cells = 0;
@@ -222,7 +225,8 @@ impl TaggedHeap {
     /// at their use sites on purpose — clearing poison would assert a
     /// coherence nothing can verify and erase the only evidence.
     pub(crate) fn gc_locks_poisoned(&self) -> bool {
-        self.satb_handoff.is_poisoned()
+        self.cons_allocator.is_poisoned()
+            || self.satb_handoff.is_poisoned()
             || self.gc_wake.0.is_poisoned()
             || self
                 .concurrent_hash_snapshot()
@@ -260,11 +264,17 @@ impl TaggedHeap {
         let mut swept_blocks = 0usize;
         while swept_blocks < budget && self.sweep_cons_cursor < self.sweep_cons_end {
             let idx = self.sweep_cons_cursor;
-            let free_list: *mut *mut ConsCell = &mut self.cons_free_list;
+            let mut head = std::ptr::null_mut();
             let live = if self.generational.enabled {
-                self.cons_blocks[idx].sweep_generational(unsafe { &mut *free_list })
+                self.cons_blocks[idx].sweep_generational(&mut head)
             } else {
-                self.cons_blocks[idx].sweep(unsafe { &mut *free_list })
+                self.cons_blocks[idx].sweep(&mut head)
+            };
+            // SAFETY: this block's sweep just rebuilt its exact dead-cell list;
+            // its storage stays heap-owned and publication follows rebuilding.
+            unsafe {
+                self.cons_allocator
+                    .publish(&self.cons_blocks[idx], head, live)
             };
             self.sweep_cons_live_cells += live;
             self.sweep_cons_cursor += 1;
@@ -1121,13 +1131,14 @@ impl TaggedHeap {
         let old_live = self.cons_live_count;
         let mut new_live = 0;
         let mut released = 0usize;
-        self.cons_free_list = std::ptr::null_mut();
+        // SAFETY: the collector owns this stopped extent, with regions closed
+        // and the concurrent marker joined before any free list is withheld.
+        unsafe { self.cons_allocator.stopped_world() }
+            .withhold(self.cons_blocks.iter().map(ConsBlockBase::of));
 
-        // GNU's `sweep_conses` (`alloc.c`) decides each block's fate INSIDE
-        // this one pass: it remembers the free-list head, threads the block's
-        // dead cells onto it, and if the block turns out to have no survivors
-        // it restores the head -- un-threading exactly those cells -- and
-        // frees the block.
+        // Like GNU's `sweep_conses`, decide each block's fate in this pass.
+        // Its private free list is published only for a retained block; an
+        // empty block's metadata is removed before its storage is released.
         //
         // Sweeping every block here and then sweeping them ALL a second time
         // in `release_empty_cons_blocks` to drop the empty ones cost 30.8% of
@@ -1136,23 +1147,22 @@ impl TaggedHeap {
         // collected zero times; it is on the critical path as soon as they do.
         let Self {
             cons_blocks,
-            cons_free_list,
+            cons_allocator,
             census,
             chunk_map,
             ..
         } = self;
         cons_blocks.retain_mut(|block| {
-            let saved = *cons_free_list;
+            let mut head = std::ptr::null_mut();
             let live = if GENERATIONAL {
-                block.sweep_generational(cons_free_list)
+                block.sweep_generational(&mut head)
             } else {
-                block.sweep(cons_free_list)
+                block.sweep(&mut head)
             };
             if live == 0 {
-                // Back this block's cells out of the free list: its storage is
-                // about to be deallocated, and a freed cell must not stay
-                // reachable from the allocator.
-                *cons_free_list = saved;
+                // Unregister before storage is released: no available list
+                // may name cells in a dropped block.
+                cons_allocator.unregister(ConsBlockBase::of(block));
                 released += 1;
                 if let Some(census) = census.as_deref_mut() {
                     census.forget_cons_block(block.base_addr());
@@ -1162,6 +1172,9 @@ impl TaggedHeap {
                 }
                 false
             } else {
+                // SAFETY: regions are closed and this stopped sweep just
+                // rebuilt exactly the dead cells of a retained owned block.
+                unsafe { cons_allocator.publish(block, head, live) };
                 new_live += live;
                 true
             }
@@ -1206,10 +1219,9 @@ impl TaggedHeap {
             .saturating_mul(size_of::<ConsCell>())
     }
 
-    /// Drop ordinary cons blocks with no survivors and rebuild the intrusive
-    /// free list plus base-address registry. The free list contains pointers
-    /// into dead cells, so it must be discarded before empty block storage is
-    /// deallocated and reconstructed from the retained blocks afterward.
+    /// Drop ordinary cons blocks with no survivors and rebuild their
+    /// base-address registry. Unregister each dropped block's private list
+    /// before releasing its storage; retained lists remain intact.
     /// Call only after a complete eager or deferred sweep, when mark bits are
     /// the authoritative live-cell set and no sweep cursor remains active.
     pub(super) fn release_empty_cons_blocks(&mut self) -> usize {
@@ -1226,7 +1238,11 @@ impl TaggedHeap {
             return 0;
         }
 
-        self.cons_free_list = std::ptr::null_mut();
+        for block in &self.cons_blocks {
+            if self.cons_block_live_count(block) == 0 {
+                self.cons_allocator.unregister(ConsBlockBase::of(block));
+            }
+        }
         self.mark_cons_block_cache = None;
         if self.census.is_some() || self.chunk_map.is_some() {
             let released: Vec<usize> = self
@@ -1254,7 +1270,6 @@ impl TaggedHeap {
 
         self.cons_block_index_by_base =
             FxHashMap::with_capacity_and_hasher(self.cons_blocks.len(), Default::default());
-        let mut rebuilt_live = 0usize;
         for (block_index, block) in self.cons_blocks.iter_mut().enumerate() {
             let previous = self
                 .cons_block_index_by_base
@@ -1266,13 +1281,7 @@ impl TaggedHeap {
                     ChunkEntry::new(ChunkClass::Cons, block_index),
                 );
             }
-            rebuilt_live += if gen_enabled {
-                block.sweep_generational(&mut self.cons_free_list)
-            } else {
-                block.sweep(&mut self.cons_free_list)
-            };
         }
-        debug_assert_eq!(rebuilt_live, self.cons_live_count);
         self.rebuild_card_slot_blocks();
 
         old_len - self.cons_blocks.len()
@@ -2118,7 +2127,12 @@ impl TaggedHeap {
             {
                 return false;
             }
-            let mut free = self.cons_free_list;
+            let mut free = self
+                .cons_allocator
+                .free_heads()
+                .into_iter()
+                .find(|head| ConsBlock::block_base_for_ptr(*head) == base)
+                .unwrap_or(std::ptr::null_mut());
             while !free.is_null() {
                 if std::ptr::eq(free, ptr) {
                     return false;

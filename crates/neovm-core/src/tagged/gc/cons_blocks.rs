@@ -256,7 +256,7 @@ impl ConsBlock {
             && self.trailer().is_old(Self::index_of_ptr(ptr))
     }
 
-    /// Sweep: thread reclaimed cells into the global intrusive free list and
+    /// Sweep: thread reclaimed cells into this block's intrusive free list and
     /// return the number of live cells in this block.
     pub(super) fn sweep(&mut self, free_list: &mut *mut ConsCell) -> usize {
         clear_cons_observed_dead(

@@ -147,6 +147,17 @@ impl<'owner> CollectorClosedPhase<'owner> {
             _exclusion: exclusion,
         })
     }
+
+    /// Commit admission only while the sole owner is stopped and marking is
+    /// excluded. The allocator and the World observe the same sticky state.
+    fn commit(&mut self, plan: &AdmissionPlan, fresh: Option<NonNull<OwnerSlab>>) {
+        self.context.commit_admission(plan, fresh);
+        // SAFETY: this phase owns the sole stopped Context, retains marker
+        // exclusion, and permits no Lisp/callback or allocation-region access
+        // across the transition. The heap closes its regions before the flip.
+        unsafe { self.context.tagged_heap.admit_threads_world_stopped() };
+        self.context.enter_world_projection_scope();
+    }
 }
 
 impl Drop for CollectorClosedPhase<'_> {
@@ -247,10 +258,10 @@ impl Context {
         // The heap the collector closes is this owner's, installed on this
         // thread.
         self.setup_thread_locals();
-        let phase = CollectorClosedPhase::enter(self)?;
+        let mut phase = CollectorClosedPhase::enter(self)?;
         let plan = phase.context.plan_admission();
         let fresh = phase.context.reserve_admission(&plan, reservation)?;
-        phase.context.commit_admission(&plan, fresh);
+        phase.commit(&plan, fresh);
         Ok(())
     }
 
@@ -522,8 +533,6 @@ impl Context {
         self.obarray
             .invalidate_all_function_bindings(FunctionEpochBump::ThreadAdmission);
         self.republish_owner_mirrors();
-        self.mark_threads_admitted();
-        self.enter_world_projection_scope();
     }
 }
 
@@ -651,3 +660,7 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/admission_scenarios_test.rs"]
 mod scenario_tests;
+
+#[cfg(test)]
+#[path = "tests/admission_allocator_test.rs"]
+mod allocator_tests;

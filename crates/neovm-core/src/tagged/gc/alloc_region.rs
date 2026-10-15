@@ -168,24 +168,18 @@ impl TaggedHeap {
     /// source order: the free list's head and the address-adjacent cells
     /// after it, else the newest block's bump tail, else a fresh block.
     fn reserve_cons_run(&mut self, want: usize) -> (*mut ConsCell, usize, ConsRegionSource) {
-        let head = self.cons_free_list;
-        if !head.is_null() {
-            // The sweep threads each block's dead cells high to low onto the
-            // head, so the list ascends within a block; a run stops at the
-            // first gap. It cannot cross into another block: the mark bitmap
-            // follows a block's last cell.
-            let mut n = 1;
-            // SAFETY: free-list nodes are reclaimed cells of owned blocks.
-            let mut next = unsafe { (*head).free_next() };
-            while n < want && next as usize == head as usize + n * size_of::<ConsCell>() {
-                n += 1;
-                next = unsafe { (*next).free_next() };
-            }
-            self.cons_free_list = next;
+        // SAFETY: this heap retains every registered block and owns all
+        // allocation regions. Sole access or the admitted-mode mutex reserves
+        // an exclusive run for us.
+        if let Some((head, n)) = unsafe { self.cons_allocator.reserve_run(want) } {
             self.region_stats.cons_from_free_list += 1;
             return (head, n, ConsRegionSource::FreeListRun);
         }
-        if let Some(block) = self.cons_blocks.len().checked_sub(1) {
+        if let Some(block) = self.cons_blocks.len().checked_sub(1)
+            && self
+                .cons_allocator
+                .is_ready(ConsBlockBase::of(&self.cons_blocks[block]))
+        {
             let (first, n) = self.cons_blocks[block].reserve_tail(want);
             if n > 0 {
                 self.region_stats.cons_from_block_tail += 1;
@@ -209,6 +203,7 @@ impl TaggedHeap {
         let (first, n) = block.reserve_tail(want);
         debug_assert!(first == 0 && n >= 1, "a fresh block has room");
         let cell = block.cells_ptr();
+        self.cons_allocator.register(&block);
         self.cons_blocks.push(block);
         let block_index = self.cons_blocks.len() - 1;
         self.cons_block_index_by_base
@@ -393,8 +388,9 @@ impl TaggedHeap {
     /// cells `[cur, lim)` go back where they came from: a block tail still
     /// ending at `lim` rewinds its bump cursor (after the un-mark, keeping
     /// "bits at or above `next_index` are never set"); anything else is
-    /// pushed back on the free list high to low, so the list stays ascending
-    /// and every cell's car is `DEAD` again.
+    /// linked back to that block's free list, in ascending order within the
+    /// returned range, with every cell's car `DEAD` again. Other mutators may
+    /// return separate runs in any order; reservation simply stops at a gap.
     #[inline(never)]
     fn close_cons_region(&mut self) {
         let source = self.region_book.cons;
@@ -437,17 +433,11 @@ impl TaggedHeap {
             owner.rewind_tail(start);
             return;
         }
-        debug_assert!(
-            source == ConsRegionSource::FreeListRun,
-            "a block-tail region whose block moved or grew while it was open"
-        );
-        for i in (0..unused).rev() {
-            // SAFETY: the cell is an unhanded cell of the region's owned
-            // block; nothing else can reach it.
-            let cell = unsafe { first.add(i) };
-            unsafe { (*cell).set_free_next(self.cons_free_list) };
-            self.cons_free_list = cell;
-        }
+        // Another mutator may have extended a bump tail before its owner
+        // closed it. Such a range returns to this block's list too.
+        // SAFETY: these are our unhanded, unmarked cells in a live block;
+        // region close precedes sweep, and the mutex serializes list writes.
+        unsafe { self.cons_allocator.return_unused(first, unused) };
     }
 
     /// Trace and reset the refill statistics (once per finished collection).

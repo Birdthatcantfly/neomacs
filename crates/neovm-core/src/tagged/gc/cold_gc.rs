@@ -283,7 +283,7 @@ const _: () = {
     assert!(offset_of!(TaggedHeap, all_objects) == 3768);
     assert!(offset_of!(TaggedHeap, gc_threshold) == 3784);
     assert!(offset_of!(TaggedHeap, live_bytes) == 3792);
-    assert!(offset_of!(TaggedHeap, cons_free_list) == 3840);
+    assert!(offset_of!(TaggedHeap, cons_allocator) == 3840);
     assert!(offset_of!(TaggedHeap, cons_live_count) == 3848);
     assert!(offset_of!(TaggedHeap, census) == 4504);
     assert!(offset_of!(TaggedHeap, mark_parity) == 4520);

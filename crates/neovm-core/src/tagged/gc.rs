@@ -511,9 +511,11 @@ pub struct TaggedHeap {
     /// evaluator drains these after collection through `DisplayHost`.
     pending_video_destroys: Vec<neomacs_display_protocol::VideoId>,
 
-    /// Reclaimed cons cells threaded through the dead cells themselves,
-    /// matching GNU alloc.c's `cons_free_list`.
-    cons_free_list: *mut ConsCell,
+    /// One intrusive free list per block. Before sticky thread admission,
+    /// metadata is mutator-exclusive; afterward one mutex serializes every
+    /// head/count and available-block access. Refill is cold.
+    /// Boxed to preserve the inline heap's JIT-visible layout.
+    cons_allocator: ConsAllocatorOwner,
     /// SIZE-CLASS OBJECT ARENAS (non-cons allocator modernization stage 3 +
     /// task 03/3a): every heap float/string/vector/bytecode lives in a
     /// 64KB-aligned `ObjectPage`
@@ -1020,7 +1022,7 @@ impl TaggedHeap {
             doomed_finalizer_functions: Vec::new(),
             pending_surface_destroys: Vec::new(),
             pending_video_destroys: Vec::new(),
-            cons_free_list: std::ptr::null_mut(),
+            cons_allocator: ConsAllocatorOwner::default(),
             float_arena: ObjectArena::new(chunk_map.clone()),
             string_arena: ObjectArena::new(chunk_map.clone()),
             canonical_empty_strings: CanonicalEmptyStrings::default(),
@@ -2302,17 +2304,14 @@ impl TaggedHeap {
             .iter()
             .map(|block| block.next_index as usize)
             .sum();
-        let mut free = self.cons_free_list;
         let mut free_count = 0usize;
-        while !free.is_null() && free_count < bumped_cons_slots {
-            let base = ConsBlock::block_base_for_ptr(free);
-            if let Some(&block_index) = self.cons_block_index_by_base.get(&base) {
-                free_cells_by_block[block_index] += 1;
+        for (base, count) in self.cons_allocator.free_counts() {
+            if let Some(&block_index) = self.cons_block_index_by_base.get(&base.addr()) {
+                free_cells_by_block[block_index] = count;
             }
-            free_count += 1;
-            free = unsafe { (*free).free_next() };
+            free_count += count;
         }
-        debug_assert!(free.is_null(), "cons free list exceeds bumped cell count");
+        debug_assert!(free_count <= bumped_cons_slots);
 
         let mut cons = ConsLayoutStats {
             pages: self.cons_blocks.len(),
@@ -2809,6 +2808,8 @@ pub(crate) use collection_observed::{
 use collection_observed::{
     clear_cons_observed_block, clear_cons_observed_dead, has_noncons_collection_observations,
 };
+mod cons_allocator;
+use cons_allocator::{ConsAllocatorOwner, ConsBlockBase};
 mod cons_blocks;
 /// The cons-block trailer's shape, for `jit_layout::heap`.
 #[cfg_attr(not(feature = "jit"), allow(unused_imports))]
