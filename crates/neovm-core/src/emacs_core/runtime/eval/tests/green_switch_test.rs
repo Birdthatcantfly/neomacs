@@ -428,13 +428,13 @@ fn a_thread_buffer_disposition_of_silently_or_t() {
             &mut ev,
             "(progn
                (setq tgq-log nil)
-               (let* ((s (get-buffer-create \"tgq-s\"))
+               (let* ((s (setq tgq-s (get-buffer-create \"tgq-s\")))
                       (k (get-buffer-create \"tgq-k\"))
                       (quiet (save-current-buffer
                                (set-buffer s)
                                (make-thread (lambda ()
                                               (thread-yield)
-                                              (setq tgq-log (cons (list 'quiet (buffer-live-p (current-buffer)))
+                                              (setq tgq-log (cons (list 'quiet (eq (current-buffer) tgq-s) (buffer-live-p (current-buffer)))
                                                                 tgq-log)))
                                             nil 'silently)))
                       (keeper (save-current-buffer
@@ -449,7 +449,29 @@ fn a_thread_buffer_disposition_of_silently_or_t() {
                  (thread-join keeper)
                  (nreverse tgq-log)))"
         ),
-        "((t nil t) (quiet t) (keeper \"tgq-k\"))"
+        "((t nil t) (quiet nil t) (keeper \"tgq-k\"))"
+    );
+}
+
+#[test]
+fn a_thread_starting_leaves_the_previous_threads_buffer_alone() {
+    let mut ev = green();
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn
+               (setq tgr-a (get-buffer-create \"tgr-a\") tgr-b (get-buffer-create \"tgr-b\"))
+               (let* ((first (save-current-buffer
+                               (set-buffer tgr-a)
+                               (make-thread (lambda () (thread-yield) (buffer-name)) nil t)))
+                      (second (save-current-buffer
+                                (set-buffer tgr-b)
+                                (make-thread (lambda () (thread-yield) (buffer-name))))))
+                 (thread-yield)
+                 (list (kill-buffer tgr-a) (buffer-live-p tgr-a)
+                       (thread-join first) (thread-join second))))"
+        ),
+        "(nil t \"tgr-a\" \"tgr-b\")"
     );
 }
 

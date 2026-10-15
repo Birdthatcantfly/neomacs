@@ -375,10 +375,12 @@ fn run_worker(key: ThreadKey, receiver: mpsc::Receiver<Baton>, control: Arc<Cont
     }
     let mut owner = Context::new_green_owner(&baton);
     owner.exchange_world_threads(&baton);
+    // Enter the thread before its buffer: a buffer switch records itself as
+    // the current thread's buffer.
+    owner.threads.enter_thread(key.id());
     if let Some(buffer) = owner.threads.thread_current_buffer(key.id()) {
         owner.restore_current_buffer_if_live(buffer);
     }
-    owner.threads.enter_thread(key.id());
     owner.threads.start_thread(key.id());
     // GNU raises an error signalled into a thread that has not run yet at
     // its first switch, once it has handlers.
