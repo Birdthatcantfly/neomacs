@@ -860,13 +860,15 @@ fn select_slices() -> usize {
     super::switch::SELECT_SLICES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// A Sim World's waits are today's: no Green runtime, no slice.
+/// A Sim World's waits are today's: no Green runtime, no slice. Only the
+/// slice count is asserted: how long a timed wait lasts is the wait loop's
+/// own contract (it may end one coarse-clock tick early today, a GNU
+/// divergence fixed and pinned separately), not this test's.
 #[test]
 fn a_sim_worlds_waits_never_slice() {
     crate::test_utils::init_test_tracing();
     let mut ev = Context::new_with_threading(ThreadingMode::Sim);
     let before = select_slices();
-    let started = std::time::Instant::now();
     assert_eq!(
         eval(
             &mut ev,
@@ -874,7 +876,6 @@ fn a_sim_worlds_waits_never_slice() {
         ),
         "done"
     );
-    assert!(started.elapsed() >= std::time::Duration::from_millis(100));
     assert_eq!(select_slices(), before);
 }
 
