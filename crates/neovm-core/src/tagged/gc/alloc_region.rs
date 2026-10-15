@@ -141,6 +141,28 @@ impl TaggedHeap {
         let want = self.region_budget(size_of::<ConsCell>(), CONS_REGION_MAX_CELLS);
         let (first, n, source) = self.reserve_cons_run(want);
         debug_assert!(n >= 1 && n <= want);
+        if self.generational.enabled {
+            // All three region sources have installed their base registry
+            // entry before this point. Record the carve before initializing
+            // or publishing a cell, once per cold refill rather than per cons.
+            let base = ConsBlock::block_base_for_ptr(first);
+            let block_index = self.cons_block_index_by_base[&base];
+            let recorded = match self._satb_layout_reserve.current_young_log_mut() {
+                Ok(log) => self
+                    .cons_allocator
+                    .note_carve(ConsBlockBase::of(&self.cons_blocks[block_index]), log),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = recorded {
+                // No cell was initialized, marked, charged or handed out.
+                // SAFETY: reserve_cons_run gave us this entire exclusive,
+                // unmarked/young range in a still-owned registered block.
+                // Returning it to the private free list also handles a fresh
+                // or bump-tail grant without leaving untracked used cells.
+                unsafe { self.cons_allocator.return_unused(first, n) };
+                panic!("canonical young recording refused an unhanded cons grant: {error:?}");
+            }
+        }
         let color = if self.allocates_black() {
             let base = ConsBlock::block_base_for_ptr(first);
             ConsBlock::mark_run_at(base, ConsBlock::index_of_ptr(first), n, true);

@@ -246,9 +246,36 @@ impl TaggedHeap {
             return Err(MinorCollectionAdmissionError::GenerationalDisabled);
         }
         debug_assert!(
-            !self.concurrent_mark_running,
-            "minor stop-all excludes concurrent marking"
+            !self.concurrent_mark_running
+                && !self.mark_in_progress
+                && !self.generational.major_in_progress,
+            "minor stop-all excludes concurrent and unfinished major marking"
         );
+        self.close_alloc_regions();
+        // SAFETY: the existing collector caller retains stopped ownership;
+        // no callbacks, allocation safepoints or mutator resumes occur here.
+        unsafe { scan_contract::SingleMutatorWorld::from_heap(self) }
+            .with_stopped_heap(|heap, proof| {
+                // SAFETY: admission proved collector quiescence before any
+                // mutation. Every mutator is stopped and its regions are closed;
+                // minor marking/promotion stays in this same stopped extent.
+                let mut logs = super::young_registry::StoppedYoungLogs::new(
+                    &mut heap._satb_layout_reserve,
+                    proof,
+                )
+                .expect("minor admission returned every young-only loan");
+                let mut stopped = unsafe { heap.cons_allocator.stopped_world() };
+                if heap.generational.verify {
+                    stopped
+                        .verify_young_at_begin(&heap.cons_blocks, &mut logs)
+                        .expect("minor verifier uses this heap canonical registry");
+                }
+                // Frozen tracking only in stage 2: existing full scans remain.
+                let _ = stopped
+                    .capture_minor(&mut logs)
+                    .expect("minor capture uses this heap canonical registry");
+            })
+            .expect("minor admission returned every young-only loan");
         self.generational.cycle = GenerationCycle::Minor;
         self.generational.promo.clear();
         self.incremental_mark_us = 0;
@@ -297,6 +324,11 @@ impl TaggedHeap {
         if !self.generational.enabled {
             return;
         }
+        // Refuse before moving promotion buffers or changing any old bits.
+        // SAFETY: the caller retains the existing stopped-owner contract.
+        unsafe { scan_contract::SingleMutatorWorld::from_heap(self) }
+            .ensure_young_logs_stopped()
+            .expect("promotion requires every young-only loan returned");
         if self.is_minor_collection() && self.generational.verify {
             // Every mutator is stopped and the weak/finalizer fixpoints are
             // complete. Check before promotion could hide a missing mark and
@@ -342,6 +374,30 @@ impl TaggedHeap {
             old_count += block.count_old();
         }
         self.generational.old_cons_count = old_count;
+        // SAFETY: the existing collector caller retains stopped ownership;
+        // no callbacks, allocation safepoints or mutator resumes occur here.
+        unsafe { scan_contract::SingleMutatorWorld::from_heap(self) }
+            .with_stopped_heap(|heap, proof| {
+                // SAFETY: every mutator remains stopped after all cons survivors
+                // have been promoted, regions are closed, and the marker joined.
+                // Clear flags HERE, before sweep can resume mutators; subsequent
+                // carves belong to the next minor even while this sweep continues.
+                let mut logs = super::young_registry::StoppedYoungLogs::new(
+                    &mut heap._satb_layout_reserve,
+                    proof,
+                )
+                .expect("promotion requires every young-only loan returned");
+                let mut stopped = unsafe { heap.cons_allocator.stopped_world() };
+                stopped
+                    .finish_promotion(&mut logs)
+                    .expect("promotion uses this heap canonical registry");
+                if heap.generational.verify {
+                    stopped
+                        .verify_after_promotion(&heap.cons_blocks, &mut logs)
+                        .expect("promotion verifier uses this heap canonical registry");
+                }
+            })
+            .expect("promotion requires every young-only loan returned");
         if self.generational.verify {
             self.verify_age_mirror_world_stopped();
         }

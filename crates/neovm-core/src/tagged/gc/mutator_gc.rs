@@ -181,6 +181,18 @@ impl TaggedHeap {
 
 use super::satb::{SatbBuffer, SatbHandoff, SatbPoisoned, SatbRetired};
 use super::scan_contract::{SatbDrainError, StoppedMutatorsProof};
+use super::young_registry::{
+    YoungBlockLog, YoungLogLoan, YoungLogReturnError, YoungLogSlot, YoungRegistrationId,
+    YoungRegistrationLocation, YoungRegistryControl, YoungRegistryError,
+};
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum MutatorRetireError {
+    #[error(transparent)]
+    Young(#[from] YoungRegistryError),
+    #[error(transparent)]
+    Satb(#[from] SatbPoisoned),
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum SatbMutatorLifecycle {
@@ -199,26 +211,38 @@ pub(super) struct SatbMutatorState {
     pub(super) satb_snapshotted_owners: FxHashSet<usize>,
     pub(super) satb_string_preimage_addrs: FxHashSet<usize>,
     lifecycle: SatbMutatorLifecycle,
+    /// Same cold registration and retire path as SATB; never a ThreadId map.
+    young: YoungLogSlot,
 }
 
 static_assertions::assert_not_impl_any!(SatbMutatorState: Send, Sync, Clone, Copy);
 static_assertions::assert_impl_all!(SatbMutatorState: std::fmt::Debug);
 
 impl SatbMutatorState {
-    pub(super) fn new() -> Self {
+    fn new(young: YoungLogSlot) -> Self {
         Self {
             satb: SatbBuffer::new(),
             satb_snapshotted_owners: FxHashSet::default(),
             satb_string_preimage_addrs: FxHashSet::default(),
             lifecycle: SatbMutatorLifecycle::Active,
+            young,
         }
     }
 
     #[must_use = "retirement must succeed before removing the registration"]
-    pub(super) fn retire(&mut self, handoff: &SatbHandoff) -> Result<SatbRetired, SatbPoisoned> {
+    pub(super) fn retire(
+        &mut self,
+        handoff: &SatbHandoff,
+    ) -> Result<SatbRetired, MutatorRetireError> {
+        // Reject before taking/publishing SATB or changing lifecycle. A worker
+        // must return its young payload before its canonical owner can retire.
+        self.young.resident()?;
         let retired = std::mem::take(&mut self.satb).retire(handoff);
         self.lifecycle = SatbMutatorLifecycle::Retired;
-        retired
+        // Preserve SATB's existing poison/lifecycle semantics after preflight.
+        // The retained retired entry still owns its young log and dirty-owner
+        // dedup sets until the stopped-world consumer has drained them.
+        retired.map_err(MutatorRetireError::from)
     }
 
     /// Residual words are an error, never a reason to clear the log at begin.
@@ -246,6 +270,9 @@ struct RegisteredMutatorGc {
 /// a real future registry must own each hot/cold pair as one registration.
 struct MutatorSatbRegistry {
     current: SatbMutatorState,
+    /// Canonical ID issuance, owner permutation index, and O(1) loan preflight.
+    /// Payloads reside only in the hot/cold registrations above and below.
+    young_control: YoungRegistryControl,
     /// Owner-resident SATB words folded by the last successful termination.
     /// Keep diagnostics in this cold allocation so heap/JIT offsets do not move.
     last_termination_partial_words: usize,
@@ -277,28 +304,179 @@ const _: () = {
 };
 
 impl MutatorSatbSlot {
-    pub(super) fn new() -> Self {
+    #[inline]
+    pub(super) fn young_heap_identity(&self) -> super::HeapIdentity {
+        self.0.young_control.heap_identity()
+    }
+
+    /// This all-owner counter belongs to the canonical confined registry.
+    /// Check it before any shutdown work and in the nonblocking Drop path.
+    #[inline]
+    pub(super) fn has_outstanding_young_loans(&self) -> bool {
+        self.0.young_control.has_outstanding_loans()
+    }
+
+    pub(super) fn new(identity: HeapIdentity) -> Self {
+        let (young_control, young) = YoungRegistryControl::new(identity);
         Self(Box::new(MutatorSatbRegistry {
-            current: SatbMutatorState::new(),
+            current: SatbMutatorState::new(young),
+            young_control,
             last_termination_partial_words: 0,
             #[cfg(test)]
             registered: Vec::new(),
         }))
     }
 
-    /// Include this Box and the cfg(test) registry descriptor allocation in
-    /// memory_inventory, in addition to logs/hash payloads counted per owner.
+    /// Include this Box, the cfg(test) descriptor/location index allocations,
+    /// and resident young-log Vec payloads. SATB buffers/hash payloads remain
+    /// accounted separately per owner, without double counting. A worker loan
+    /// owns its Vec outside the registry until return; stopped preflight rejects
+    /// outstanding loans, so a stopped inventory contains every young payload.
     #[cfg(feature = "gc-memory-telemetry")]
     pub(super) fn allocation_bytes(&self) -> usize {
-        let bytes = std::mem::size_of::<MutatorSatbRegistry>();
+        let bytes = std::mem::size_of::<MutatorSatbRegistry>()
+            + self.0.young_control.allocation_bytes()
+            + self.0.current.young.resident_allocation_bytes();
         #[cfg(not(test))]
         {
             bytes
         }
         #[cfg(test)]
         {
-            bytes + self.0.registered.capacity() * std::mem::size_of::<RegisteredMutatorGc>()
+            bytes
+                + self.0.registered.capacity() * std::mem::size_of::<RegisteredMutatorGc>()
+                + self
+                    .0
+                    .registered
+                    .iter()
+                    .map(|entry| entry.satb.young.resident_allocation_bytes())
+                    .sum::<usize>()
         }
+    }
+
+    /// Owner-side access to the current canonical payload. Its unique Rust
+    /// borrow excludes a simultaneous young-only worker loan for this owner.
+    /// Root refill integration splits this field from ConsAllocatorOwner.
+    #[inline]
+    pub(super) fn current_young_log_mut(
+        &mut self,
+    ) -> Result<&mut YoungBlockLog, YoungRegistryError> {
+        if self.0.current.lifecycle == SatbMutatorLifecycle::Retired {
+            return Err(YoungRegistryError::Retired);
+        }
+        self.0.current.young.resident_mut()
+    }
+
+    #[inline]
+    pub(super) fn current_young_id(&self) -> YoungRegistrationId {
+        self.0.current.young.id()
+    }
+
+    /// Resolves logical IDs through the canonical registry's physical-location
+    /// index, including nested test-owner swaps and panic restoration.
+    fn young_parts(
+        &mut self,
+        id: YoungRegistrationId,
+    ) -> Result<(&mut YoungRegistryControl, &mut SatbMutatorState), YoungRegistryError> {
+        let registry = &mut *self.0;
+        let location = registry.young_control.location(id)?;
+        let owner = match location {
+            YoungRegistrationLocation::Current => &mut registry.current,
+            #[cfg(test)]
+            YoungRegistrationLocation::Registered(index) => {
+                &mut registry
+                    .registered
+                    .get_mut(index.index())
+                    .ok_or(YoungRegistryError::UnknownRegistration)?
+                    .satb
+            }
+        };
+        if owner.young.id() != id {
+            return Err(YoungRegistryError::UnknownRegistration);
+        }
+        Ok((&mut registry.young_control, owner))
+    }
+
+    pub(super) fn take_young_loan(
+        &mut self,
+        id: YoungRegistrationId,
+        _: &StoppedMutatorsProof,
+    ) -> Result<YoungLogLoan, YoungRegistryError> {
+        let (control, owner) = self.young_parts(id)?;
+        if owner.lifecycle == SatbMutatorLifecycle::Retired {
+            return Err(YoungRegistryError::Retired);
+        }
+        control.take_loan(&mut owner.young)
+    }
+
+    #[cfg(test)]
+    pub(super) fn retire_young_registration(
+        &mut self,
+        id: YoungRegistrationId,
+        handoff: &SatbHandoff,
+        _: &StoppedMutatorsProof,
+    ) -> Result<SatbRetired, MutatorRetireError> {
+        let (_, owner) = self.young_parts(id)?;
+        owner.retire(handoff)
+    }
+
+    pub(super) fn return_young_loan(
+        &mut self,
+        loan: YoungLogLoan,
+        _: &StoppedMutatorsProof,
+    ) -> Result<(), YoungLogReturnError> {
+        match self.young_parts(loan.id()) {
+            Ok((control, owner)) => control.return_loan(&mut owner.young, loan),
+            Err(reason) => Err(YoungLogReturnError::new(reason, loan)),
+        }
+    }
+
+    /// O(1), independent of the number of retained retired registrations.
+    pub(super) fn ensure_young_logs_stopped(
+        &self,
+        _: &StoppedMutatorsProof,
+    ) -> Result<(), YoungRegistryError> {
+        self.0.young_control.ensure_stopped()
+    }
+
+    pub(super) fn young_log_world_stopped(
+        &mut self,
+        id: YoungRegistrationId,
+        _: &StoppedMutatorsProof,
+    ) -> Result<&mut YoungBlockLog, YoungRegistryError> {
+        let (_, owner) = self.young_parts(id)?;
+        // Retired owners remain resolvable for capture and empty-block unlink.
+        owner.young.resident_mut()
+    }
+
+    pub(super) fn young_logs_world_stopped(
+        &self,
+        _: &StoppedMutatorsProof,
+    ) -> impl Iterator<Item = &YoungBlockLog> {
+        let current = std::iter::once(&self.0.current);
+        #[cfg(not(test))]
+        let owners = current;
+        #[cfg(test)]
+        let owners = current.chain(self.0.registered.iter().map(|entry| &entry.satb));
+        owners.map(|owner| {
+            owner
+                .young
+                .resident()
+                .expect("stopped young guard preflight requires all payloads resident")
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn registered_young_id(
+        &self,
+        id: TestMutatorGcId,
+        _: &StoppedMutatorsProof,
+    ) -> Result<YoungRegistrationId, YoungRegistryError> {
+        self.0
+            .registered
+            .get(id.index())
+            .map(|entry| entry.satb.young.id())
+            .ok_or(YoungRegistryError::UnknownRegistration)
     }
 
     /// Terminal abandonment only. Heap storage has already been retained;
@@ -438,11 +616,18 @@ impl TaggedHeap {
         &mut self,
         _: &StoppedMutatorsProof,
     ) -> TestMutatorGcId {
-        let records = &mut self._satb_layout_reserve.0.registered;
-        let id = TestMutatorGcId::for_index(records.len());
-        records.push(RegisteredMutatorGc {
+        let registry = &mut *self._satb_layout_reserve.0;
+        let id = TestMutatorGcId::for_index(registry.registered.len());
+        // Reserve before issuing the canonical ID: allocation failure must not
+        // leave a registry location pointing to an entry that was never pushed.
+        registry.registered.reserve(1);
+        let young = registry
+            .young_control
+            .register()
+            .expect("test mutator registration ID space exhausted");
+        registry.registered.push(RegisteredMutatorGc {
             gc: MutatorGcState::new(),
-            satb: SatbMutatorState::new(),
+            satb: SatbMutatorState::new(young),
         });
         id
     }
@@ -541,6 +726,9 @@ impl Drop for TestMutatorSwitch<'_> {
         let registry = &mut *self.heap._satb_layout_reserve.0;
         if let Some(entry) = registry.registered.get_mut(self.id.index()) {
             std::mem::swap(&mut self.heap.mutator_gc, &mut entry.gc);
+            registry
+                .young_control
+                .swap_locations(registry.current.young.id(), entry.satb.young.id());
             std::mem::swap(&mut registry.current, &mut entry.satb);
         }
         Self::refresh_tls(self.heap);
@@ -569,6 +757,9 @@ impl TaggedHeap {
             return Err(TestMutatorSwitchError::Retired);
         }
         std::mem::swap(&mut self.mutator_gc, &mut entry.gc);
+        registry
+            .young_control
+            .swap_locations(registry.current.young.id(), entry.satb.young.id());
         std::mem::swap(&mut registry.current, &mut entry.satb);
         let guard = TestMutatorSwitch { heap: self, id };
         // Guard exists before any TLS call that could unwind. This also clears

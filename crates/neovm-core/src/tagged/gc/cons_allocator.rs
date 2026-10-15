@@ -12,8 +12,12 @@
 //! regions before withholding/rebuilding lists. No cloneable storage handle is
 //! created here. A caller must unregister before releasing a block.
 
+use super::young_registry::{
+    StoppedYoungLogs, YoungBlockIndex, YoungBlockLog, YoungRegistrationId, YoungRegistryError,
+};
 use super::*;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use typed_index_collections::TiVec;
 
@@ -25,9 +29,10 @@ use typed_index_collections::TiVec;
 #[repr(transparent)]
 pub(super) struct ConsAllocatorOwner(Option<Box<ConsAllocator>>);
 
-impl Default for ConsAllocatorOwner {
-    fn default() -> Self {
-        Self(Some(Box::default()))
+impl ConsAllocatorOwner {
+    /// Reuse the existing heap identity; this never issues another domain.
+    pub(super) fn new(identity: HeapIdentity) -> Self {
+        Self(Some(Box::new(ConsAllocator::new(identity))))
     }
 }
 
@@ -64,6 +69,23 @@ impl ConsAllocatorOwner {
             .as_deref_mut()
             .expect("allocator owner is initialized")
             .unregister(base)
+    }
+
+    /// Record a region grant before its mutator can initialize any cell.
+    /// The sole owner uses a unique plain borrow; admitted mutators hold the
+    /// allocator mutex and deduplicate with a relaxed atomic swap. Only the
+    /// false-to-true transition appends to the supplied canonical owner log.
+    /// A wrong-heap log is rejected before any flag or log mutation.
+    #[inline]
+    pub(super) fn note_carve(
+        &mut self,
+        base: ConsBlockBase,
+        log: &mut YoungBlockLog,
+    ) -> Result<(), YoungRegistryError> {
+        self.0
+            .as_deref_mut()
+            .expect("allocator owner is initialized")
+            .note_carve(base, log)
     }
 
     /// # Safety
@@ -145,10 +167,18 @@ enum BlockAvailability {
 #[derive(Debug)]
 struct BlockFreeState {
     base: ConsBlockBase,
+    young: AtomicBool,
+    young_log_slot: Option<YoungLogSlot>,
     head: usize,
     count: usize,
     available_slot: Option<usize>,
     availability: BlockAvailability,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct YoungLogSlot {
+    registration: YoungRegistrationId,
+    index: YoungBlockIndex,
 }
 
 /// Private metadata identity, never exposed by the allocator facade or retained
@@ -177,28 +207,54 @@ static_assertions::assert_eq_size!(BlockSlot, usize);
 static_assertions::assert_eq_size!(Option<BlockSlot>, usize);
 static_assertions::assert_impl_all!(BlockSlot: Send, Sync, Copy, std::fmt::Debug);
 
-#[derive(Default)]
 struct AllocatorState {
+    /// Existing heap domain, shared with the canonical cold SATB registry.
+    /// It is not a second admission bit or an independently issued identity.
+    identity: HeapIdentity,
     blocks: FxHashMap<ConsBlockBase, BlockSlot>,
     slots: TiVec<BlockSlot, Option<BlockFreeState>>,
     vacant_slots: Vec<BlockSlot>,
     blocks_with_free: Vec<BlockSlot>,
+    /// Work index ONLY. Canonical cold registrations own the actual log Vecs.
+    pending_mutators: Vec<YoungRegistrationId>,
+    mark_work: Vec<ConsBlockBase>,
 }
 
 impl std::fmt::Debug for AllocatorState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // TiVec's Debug implementation enumerates typed keys and requires an
-        // inbound usize conversion. Keep slot construction private instead.
         f.debug_struct("AllocatorState")
+            .field("identity", &self.identity)
             .field("blocks", &self.blocks)
             .field("slots", &self.slots.raw)
             .field("vacant_slots", &self.vacant_slots)
             .field("blocks_with_free", &self.blocks_with_free)
+            .field("pending_mutators", &self.pending_mutators)
+            .field("mark_work", &self.mark_work)
             .finish()
     }
 }
 
 impl AllocatorState {
+    fn new(identity: HeapIdentity) -> Self {
+        Self {
+            identity,
+            blocks: FxHashMap::default(),
+            slots: TiVec::new(),
+            vacant_slots: Vec::new(),
+            blocks_with_free: Vec::new(),
+            pending_mutators: Vec::new(),
+            mark_work: Vec::new(),
+        }
+    }
+
+    fn ensure_young_registry(&self, logs: &StoppedYoungLogs<'_>) -> Result<(), YoungRegistryError> {
+        if logs.heap_identity() == self.identity {
+            Ok(())
+        } else {
+            Err(YoungRegistryError::WrongHeap)
+        }
+    }
+
     #[inline]
     fn block(&self, slot: BlockSlot) -> &BlockFreeState {
         self.slots
@@ -217,6 +273,116 @@ impl AllocatorState {
 
     fn slot(&self, base: ConsBlockBase) -> BlockSlot {
         *self.blocks.get(&base).expect("registered cons block")
+    }
+
+    fn block_for_base(&self, base: ConsBlockBase) -> &BlockFreeState {
+        self.block(self.slot(base))
+    }
+
+    fn block_for_base_mut(&mut self, base: ConsBlockBase) -> &mut BlockFreeState {
+        let slot = self.slot(base);
+        self.block_mut(slot)
+    }
+
+    fn verify_slots(&self) {
+        let mut visited: TiVec<BlockSlot, bool> = vec![false; self.slots.len()].into();
+        for &slot in &self.vacant_slots {
+            assert!(!visited[slot], "duplicate vacant slot");
+            visited[slot] = true;
+            assert!(self.slots[slot].is_none(), "vacant slot is live");
+        }
+        for (base, &slot) in &self.blocks {
+            assert!(!visited[slot], "slot reused by two block identities");
+            visited[slot] = true;
+            assert_eq!(self.block(slot).base, *base);
+        }
+        assert!(visited.iter().all(|&seen| seen), "untracked metadata slot");
+    }
+
+    /// Remove one canonical log entry in O(1), before the base map is removed
+    /// or any storage can be reused. The stopped resolver excludes worker loans.
+    fn unlink_young_log(
+        &mut self,
+        base: ConsBlockBase,
+        logs: &mut StoppedYoungLogs<'_>,
+    ) -> Result<(), YoungRegistryError> {
+        self.ensure_young_registry(logs)?;
+        let Some(slot) = self.blocks.get(&base).copied() else {
+            return Ok(());
+        };
+        let Some(location) = self.block(slot).young_log_slot else {
+            return Ok(());
+        };
+        let (removal, pending_removal) = {
+            let log = logs.resolve_mut(location.registration)?;
+            let removal = log.swap_remove(location.index);
+            assert_eq!(removal.removed, base, "young block backlink mismatch");
+            let pending_removal = if log.blocks().is_empty() {
+                let pending_index = log.pending_index().expect("nonempty log was pending");
+                let moved = log.remove_pending(&mut self.pending_mutators);
+                Some((pending_index, moved))
+            } else {
+                None
+            };
+            (removal, pending_removal)
+        };
+        self.block_mut(slot).young_log_slot = None;
+        if let Some(moved) = removal.moved {
+            self.block_for_base_mut(moved).young_log_slot = Some(location);
+        }
+        if let Some((index, Some(moved))) = pending_removal {
+            // The moved ID was already in this bound work index. An absent
+            // canonical owner is internal corruption after mutation: unwind
+            // through ConsStopAll so its existing poison policy fails closed.
+            logs.resolve_mut(moved)
+                .expect("pending canonical owner survives until drained")
+                .repair_pending_index(index);
+        }
+        Ok(())
+    }
+
+    /// O(young blocks + pending owners), preserving every owner Vec capacity.
+    /// Processing the LAST pending ID avoids moved-owner resolver/repair work.
+    fn take_pending_young(
+        &mut self,
+        logs: &mut StoppedYoungLogs<'_>,
+    ) -> Result<Vec<ConsBlockBase>, YoungRegistryError> {
+        self.ensure_young_registry(logs)?;
+        let mut bases = Vec::new();
+        while let Some(&registration) = self.pending_mutators.last() {
+            let first = bases.len();
+            {
+                // Domain refusal was handled before mutation. IDs are issued
+                // only by the bound canonical registry, which retains retired
+                // entries. Corruption here must poison the stopped capability,
+                // not return a partial drain as a recoverable capture error.
+                let log = logs
+                    .resolve_mut(registration)
+                    .expect("pending canonical owner survives until drained");
+                assert_eq!(
+                    log.pending_index().expect("queued log is pending").index(),
+                    self.pending_mutators.len() - 1
+                );
+                assert!(!log.blocks().is_empty(), "queued log is nonempty");
+                bases.extend(log.drain_blocks());
+                assert!(
+                    log.remove_pending(&mut self.pending_mutators).is_none(),
+                    "last pending ID cannot move another owner"
+                );
+            }
+            for &base in &bases[first..] {
+                let block = self.block_for_base_mut(base);
+                assert_eq!(
+                    block
+                        .young_log_slot
+                        .expect("recorded young block")
+                        .registration,
+                    registration
+                );
+                block.young_log_slot = None;
+            }
+        }
+        Ok(bases)
     }
 
     fn detach(&mut self, block_slot: BlockSlot) {
@@ -253,6 +419,8 @@ impl AllocatorState {
         );
         let metadata = BlockFreeState {
             base,
+            young: AtomicBool::new(false),
+            young_log_slot: None,
             head: 0,
             count: 0,
             available_slot: None,
@@ -270,18 +438,119 @@ impl AllocatorState {
         assert!(previous.is_none(), "cons block registered twice");
     }
 
+    /// GEN0/C1 unrecorded-block path. A recorded GEN1 block must instead use
+    /// ConsStopAll::unregister with the canonical stopped resolver.
     pub(super) fn unregister(&mut self, base: ConsBlockBase) {
-        let state = self;
-        let Some(slot) = state.blocks.remove(&base) else {
+        let Some(slot) = self.blocks.get(&base).copied() else {
             return;
         };
-        state.detach(slot);
-        let removed = state.slots[slot].take().expect("registered metadata slot");
+        let block = self.block(slot);
+        assert!(
+            block.young_log_slot.is_none(),
+            "recorded block needs stopped unregister"
+        );
+        assert!(
+            !block.young.load(Ordering::Relaxed),
+            "young block needs stopped unregister"
+        );
+        self.remove_block_metadata(base, slot);
+    }
+
+    /// All canonical obligations are unlinked while the base still resolves.
+    fn unregister_stopped(
+        &mut self,
+        base: ConsBlockBase,
+        logs: &mut StoppedYoungLogs<'_>,
+    ) -> Result<(), YoungRegistryError> {
+        self.ensure_young_registry(logs)?;
+        let Some(slot) = self.blocks.get(&base).copied() else {
+            return Ok(());
+        };
+        assert!(
+            self.mark_work.is_empty(),
+            "mark obligations must finish before unregister"
+        );
+        self.unlink_young_log(base, logs)?;
+        self.remove_block_metadata(base, slot);
+        Ok(())
+    }
+
+    fn remove_block_metadata(&mut self, base: ConsBlockBase, slot: BlockSlot) {
+        assert!(
+            self.mark_work.is_empty(),
+            "mark obligations must finish before unregister"
+        );
+        assert!(
+            self.block(slot).young_log_slot.is_none(),
+            "young backlink not unlinked"
+        );
+        self.detach(slot);
+        self.blocks.remove(&base);
+        let removed = self.slots[slot].take().expect("registered metadata slot");
         debug_assert_eq!(removed.base, base);
-        // No slot escapes this state: map and available-stack references have
-        // both gone before the identity becomes reusable. Storage stays owned
-        // by ConsBlock and is released only after this method returns.
-        state.vacant_slots.push(slot);
+        // No slot escapes: canonical log/backlinks, base map and available
+        // stack references are gone before this identity becomes reusable.
+        self.vacant_slots.push(slot);
+    }
+
+    /// Record a region grant before its mutator can initialize any cell.
+    /// The sole owner uses a unique plain borrow; admitted mutators hold the
+    /// allocator mutex and deduplicate with a relaxed atomic swap. Only the
+    /// false-to-true transition appends to the supplied canonical owner log.
+    /// A wrong-heap log is rejected before any flag or log mutation.
+    #[inline]
+    pub(super) fn note_carve(
+        &mut self,
+        base: ConsBlockBase,
+        mode: AllocatorAccessMode,
+        log: &mut YoungBlockLog,
+    ) -> Result<(), YoungRegistryError> {
+        // Refuse a crossed heap binding BEFORE touching flag/backlink/log state.
+        // Root supplies this existing-domain getter in the registry companion.
+        if log.id().heap_identity() != self.identity {
+            return Err(YoungRegistryError::WrongHeap);
+        }
+        #[cfg(test)]
+        if test_fault_is(ConsAllocatorFault::SkipCarveRecording) {
+            return Ok(());
+        }
+        let state = self;
+        let slot = state.slot(base);
+        let block = state.block_mut(slot);
+        assert_eq!(
+            block.availability,
+            BlockAvailability::Ready,
+            "carve from withheld block"
+        );
+        let newly_young = match mode {
+            AllocatorAccessMode::Sole => {
+                let young = block.young.get_mut();
+                let newly_young = !*young;
+                *young = true;
+                newly_young
+            }
+            AllocatorAccessMode::Admitted => !block.young.swap(true, Ordering::Relaxed),
+        };
+        if newly_young {
+            let index = log.push(base);
+            log.ensure_pending(&mut state.pending_mutators);
+            state.block_mut(slot).young_log_slot = Some(YoungLogSlot {
+                registration: log.id(),
+                index,
+            });
+        }
+        #[cfg(test)]
+        if test_fault_is(ConsAllocatorFault::CorruptAvailable) {
+            // Only metadata is perturbed; no canonical payload is shared/read.
+            let slot = state.slot(base);
+            state.blocks_with_free.push(slot);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn mark_work_snapshot(&self) -> Vec<ConsBlockBase> {
+        self.mark_work.clone()
     }
 
     /// # Safety
@@ -375,6 +644,8 @@ impl AllocatorState {
         self.slots.iter().flatten().map(|b| b.count).sum()
     }
 
+    /// Copy counts under exclusive metadata access; telemetry must not walk free
+    /// links after unlocking while another mutator reserves those cells.
     pub(super) fn free_counts(&self) -> Vec<(ConsBlockBase, usize)> {
         let state = self;
         state
@@ -452,10 +723,10 @@ pub(super) struct ConsAllocator {
     storage: AllocatorStorage,
     _confined: std::marker::PhantomData<std::cell::Cell<()>>,
 }
-impl Default for ConsAllocator {
-    fn default() -> Self {
+impl ConsAllocator {
+    pub(super) fn new(identity: HeapIdentity) -> Self {
         Self {
-            storage: AllocatorStorage::Sole(AllocatorState::default()),
+            storage: AllocatorStorage::Sole(AllocatorState::new(identity)),
             _confined: std::marker::PhantomData,
         }
     }
@@ -551,6 +822,25 @@ impl ConsAllocator {
         self.with_state_mut(|state, _mode| state.unregister(base))
     }
 
+    /// Record a region grant before its mutator can initialize any cell.
+    /// The sole owner uses a unique plain borrow; admitted mutators hold the
+    /// allocator mutex and deduplicate with a relaxed atomic swap. Only the
+    /// false-to-true transition appends to the supplied canonical owner log.
+    /// A wrong-heap log is rejected before any flag or log mutation.
+    #[inline]
+    pub(super) fn note_carve(
+        &mut self,
+        base: ConsBlockBase,
+        log: &mut YoungBlockLog,
+    ) -> Result<(), YoungRegistryError> {
+        self.with_state_mut(|state, mode| state.note_carve(base, mode, log))
+    }
+
+    #[cfg(test)]
+    pub(super) fn mark_work_snapshot(&self) -> Vec<ConsBlockBase> {
+        self.with_state(|state, _mode| state.mark_work_snapshot())
+    }
+
     /// # Safety
     /// Every free node must name live registered block storage, exclusively
     /// owned by this allocator until returned as a disjoint allocation run.
@@ -626,6 +916,8 @@ impl ConsAllocator {
         self.with_state(|state, _mode| state.free_count())
     }
 
+    /// Copy counts under exclusive metadata access; telemetry must not walk free
+    /// links after unlocking while another mutator reserves those cells.
     pub(super) fn free_counts(&self) -> Vec<(ConsBlockBase, usize)> {
         self.with_state(|state, _mode| state.free_counts())
     }
@@ -684,6 +976,24 @@ impl SharedConsAllocator<'_> {
         self.with_state_mut(|state, _mode| state.unregister(base))
     }
 
+    /// Record a region grant before its mutator can initialize any cell.
+    /// All list/flag metadata shares the allocator mutex. The relaxed atomic
+    /// swap deduplicates carves across mutators; only its false winner
+    /// appends to this worker's uniquely owned canonical young-only loan.
+    #[inline]
+    pub(super) fn note_carve(
+        &self,
+        base: ConsBlockBase,
+        log: &mut YoungBlockLog,
+    ) -> Result<(), YoungRegistryError> {
+        self.with_state_mut(|state, mode| state.note_carve(base, mode, log))
+    }
+
+    #[cfg(test)]
+    pub(super) fn mark_work_snapshot(&self) -> Vec<ConsBlockBase> {
+        self.with_state(|state, _mode| state.mark_work_snapshot())
+    }
+
     /// # Safety
     /// Every free node must name live registered block storage, exclusively
     /// owned by this allocator until returned as a disjoint allocation run.
@@ -733,6 +1043,8 @@ impl SharedConsAllocator<'_> {
         self.with_state(|state, _mode| state.free_count())
     }
 
+    /// Copy counts under exclusive metadata access; telemetry must not walk free
+    /// links after unlocking while another mutator reserves those cells.
     pub(super) fn free_counts(&self) -> Vec<(ConsBlockBase, usize)> {
         self.with_state(|state, _mode| state.free_counts())
     }
@@ -748,8 +1060,8 @@ impl SharedConsAllocator<'_> {
     }
 }
 
-/// Collector capability; neither moving it to another thread nor constructing
-/// it without the unsafe parked-world proof is possible through the safe API.
+/// Capability for stopped-world metadata changes. Safe callers cannot clear
+/// flags without constructing this guard at the unsafe stop-all boundary.
 #[derive(Debug)]
 #[must_use = "keep the stopped-world guard alive for collector metadata changes"]
 pub(super) struct ConsStopAll<'a> {
@@ -824,7 +1136,62 @@ impl ConsStopAll<'_> {
         **storage = AllocatorStorage::Admitted(Mutex::new(state));
     }
 
-    /// O(worklist length), including indexed available-stack removal.
+    /// Snapshot the current minor's mark work; flags remain SET until promotion.
+    /// The owned return lets the heap drop this lock before marking blocks.
+    pub(super) fn capture_minor(
+        &mut self,
+        logs: &mut StoppedYoungLogs<'_>,
+    ) -> Result<Vec<ConsBlockBase>, YoungRegistryError> {
+        self.state.ensure_young_registry(logs)?;
+        assert!(
+            self.state.mark_work.is_empty(),
+            "previous mark work not promoted"
+        );
+        self.state.mark_work = self.state.take_pending_young(logs)?;
+        Ok(self.state.mark_work.clone())
+    }
+
+    /// O(1) canonical unlink precedes base-map removal/address reuse. This is
+    /// the GEN1 release path, including carved-but-entirely-refunded candidates.
+    pub(super) fn unregister(
+        &mut self,
+        base: ConsBlockBase,
+        logs: &mut StoppedYoungLogs<'_>,
+    ) -> Result<(), YoungRegistryError> {
+        self.state.unregister_stopped(base, logs)
+    }
+
+    /// This is the ONLY young-flag clear site. Called immediately after all
+    /// promotion, still stopped. Stage 2 records flags without selecting sweep
+    /// work, so existing full-sweep withholding remains separate. Stage 3 will
+    /// move mark_work into sweep_work here and withhold its lists atomically.
+    ///
+    /// Pending logs also cover a major, whose young set includes allocations
+    /// performed while its worker marked. Flags clear at major TERMINATION,
+    /// never at sweep completion, preserving later sweep-window carves.
+    pub(super) fn finish_promotion(
+        &mut self,
+        logs: &mut StoppedYoungLogs<'_>,
+    ) -> Result<(), YoungRegistryError> {
+        self.state.ensure_young_registry(logs)?;
+        // Preserve stage2: flags are tracked/cleared but do not select mark or
+        // sweep work. Full-sweep withholding remains its existing separate call.
+        let pending = self.state.take_pending_young(logs)?;
+        let mut promoted = std::mem::take(&mut self.state.mark_work);
+        promoted.extend(pending);
+        for base in promoted {
+            let block = self.state.block_for_base_mut(base);
+            debug_assert!(block.young.load(Ordering::Relaxed));
+            #[cfg(test)]
+            if test_fault_is(ConsAllocatorFault::KeepFlagAfterPromotion) {
+                continue;
+            }
+            block.young.store(false, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Existing full sweep entry uses this in stage 2; O(worklist length).
     pub(super) fn withhold(&mut self, bases: impl IntoIterator<Item = ConsBlockBase>) {
         for base in bases {
             let slot = self.state.slot(base);
@@ -834,6 +1201,175 @@ impl ConsStopAll<'_> {
             block.count = 0;
             block.availability = BlockAvailability::WithheldForSweep;
         }
+    }
+
+    fn verify_registry(&self, logs: &StoppedYoungLogs<'_>) -> Result<(), YoungRegistryError> {
+        self.state.ensure_young_registry(logs)?;
+        self.state.verify_slots();
+        let mut listed = std::collections::HashSet::new();
+        let mut pending = std::collections::HashSet::new();
+        for registration in &self.state.pending_mutators {
+            assert_eq!(registration.heap_identity(), self.state.identity);
+            assert!(
+                pending.insert(*registration),
+                "duplicate pending canonical owner"
+            );
+        }
+        // Deliberate verify-only enumeration of the SAME SATB cold registry,
+        // including retired owners; ordinary capture visits only pending IDs.
+        for log in logs.logs_for_verify() {
+            assert_eq!(log.id().heap_identity(), self.state.identity);
+            assert_eq!(log.pending_index().is_some(), !log.blocks().is_empty());
+            if let Some(index) = log.pending_index() {
+                assert_eq!(self.state.pending_mutators[index.index()], log.id());
+                assert!(
+                    pending.remove(&log.id()),
+                    "canonical log missing pending ID"
+                );
+            }
+            for (index, base) in log.blocks().iter().enumerate() {
+                assert!(listed.insert(*base), "duplicate young log entry");
+                let block = self.state.block_for_base(*base);
+                let backlink = block
+                    .young_log_slot
+                    .expect("young block has canonical backlink");
+                assert_eq!(backlink.registration, log.id());
+                assert_eq!(backlink.index.index(), index);
+            }
+        }
+        assert!(pending.is_empty(), "pending ID has no canonical owner log");
+        for base in &self.state.mark_work {
+            assert!(listed.insert(*base), "duplicate captured young work");
+            assert!(self.state.block_for_base(*base).young_log_slot.is_none());
+        }
+        for (base, &slot) in &self.state.blocks {
+            let block = self.state.block(slot);
+            assert_eq!(
+                block.young.load(Ordering::Relaxed),
+                listed.contains(base),
+                "young flag/log mismatch at {base:?}"
+            );
+        }
+        // Check availability here as well, so CorruptAvailable is caught by
+        // the actual GEN1 verifier, not just by a cfg(test) list helper.
+        let mut available = std::collections::HashSet::new();
+        for (available_slot, &slot) in self.state.blocks_with_free.iter().enumerate() {
+            let block = self.state.block(slot);
+            assert!(available.insert(block.base), "duplicate available block");
+            assert_eq!(block.available_slot, Some(available_slot));
+            assert_eq!(block.availability, BlockAvailability::Ready);
+            assert_ne!(block.count, 0);
+        }
+        for (base, &slot) in &self.state.blocks {
+            let block = self.state.block(slot);
+            assert_eq!(
+                block.available_slot.is_some(),
+                block.availability == BlockAvailability::Ready && block.count != 0
+            );
+            assert_eq!(block.available_slot.is_some(), available.contains(base));
+        }
+        Ok(())
+    }
+
+    /// At minor BEGIN the previous sweep is finished, all regions are closed,
+    /// and every physically initialized non-old cell must be in the young set.
+    pub(super) fn verify_young_at_begin(
+        &self,
+        blocks: &[ConsBlock],
+        logs: &StoppedYoungLogs<'_>,
+    ) -> Result<(), YoungRegistryError> {
+        self.verify_registry(logs)?;
+        self.verify_stale_marks(blocks);
+        for block in blocks {
+            let metadata = self.state.block_for_base(ConsBlockBase::of(block));
+            for index in 0..block.next_index as usize {
+                // SAFETY: this guard proves stopped mutators/closed regions,
+                // and its caller retains every listed block's storage.
+                let cell = unsafe { &*block.cells_ptr().add(index) };
+                if cell.car.bits() != TaggedValue::DEAD.bits() && !block.trailer().is_old(index) {
+                    assert!(
+                        metadata.young.load(Ordering::Relaxed),
+                        "allocated young cell missing flag"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// After promotion unmarked dying young cells are still initialized until
+    /// sweep. Do not apply begin's physical-cell coverage check at this stage.
+    pub(super) fn verify_after_promotion(
+        &self,
+        blocks: &[ConsBlock],
+        logs: &StoppedYoungLogs<'_>,
+    ) -> Result<(), YoungRegistryError> {
+        self.verify_registry(logs)?;
+        self.verify_stale_marks(blocks);
+        Ok(())
+    }
+
+    fn verify_stale_marks(&self, blocks: &[ConsBlock]) {
+        for block in blocks {
+            let metadata = self.state.block_for_base(ConsBlockBase::of(block));
+            if !metadata.young.load(Ordering::Relaxed) {
+                for index in 0..block.next_index as usize {
+                    assert!(
+                        !block.trailer().is_marked(index) || block.trailer().is_old(index),
+                        "non-young block has marked non-old cell"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Mutation switches affect ONLY the current test thread. They carry no Lisp
+/// runtime state and are restored on unwind by the non-Send RAII guard.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ConsAllocatorFault {
+    SkipCarveRecording,
+    KeepFlagAfterPromotion,
+    CorruptAvailable,
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONS_ALLOCATOR_FAULT: std::cell::Cell<Option<ConsAllocatorFault>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn test_fault_is(fault: ConsAllocatorFault) -> bool {
+    CONS_ALLOCATOR_FAULT.with(|slot| slot.get() == Some(fault))
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+#[must_use = "hold fault injection for the test extent"]
+pub(super) struct ConsAllocatorFaultGuard {
+    previous: Option<ConsAllocatorFault>,
+    _owner: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+static_assertions::assert_not_impl_any!(ConsAllocatorFaultGuard: Send, Sync);
+
+#[cfg(test)]
+impl ConsAllocatorFaultGuard {
+    pub(super) fn inject(fault: ConsAllocatorFault) -> Self {
+        let previous = CONS_ALLOCATOR_FAULT.with(|slot| slot.replace(Some(fault)));
+        Self {
+            previous,
+            _owner: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ConsAllocatorFaultGuard {
+    fn drop(&mut self) {
+        CONS_ALLOCATOR_FAULT.with(|slot| slot.set(self.previous));
     }
 }
 

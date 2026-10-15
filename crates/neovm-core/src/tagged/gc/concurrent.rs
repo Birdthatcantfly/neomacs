@@ -12,6 +12,8 @@ use super::*;
 pub enum MarkFinishError {
     #[error("facade roots still retain heap {0:?}; resource shutdown is excluded")]
     FacadeRetained(HeapIdentity),
+    #[error("heap {0:?} still has outstanding young-mutator loans")]
+    MutatorsNotStopped(HeapIdentity),
     #[error("active GC marker has no completion receiver")]
     MissingCompletion,
     #[error("GC marker disconnected before its completion handoff")]
@@ -855,6 +857,12 @@ impl TaggedHeap {
     /// Lisp Value access, including through legacy TLS aliases. Its only
     /// remaining operation is automatic destruction after this returns.
     pub(crate) unsafe fn shutdown_owned_resources(&mut self) -> Result<(), MarkFinishError> {
+        // Check ALL canonical owners before finish can consume residual work
+        // or resource teardown can begin. Current-owner retirement alone does
+        // not cover a worker holding another registration's young payload.
+        if self._satb_layout_reserve.has_outstanding_young_loans() {
+            return Err(MarkFinishError::MutatorsNotStopped(self.heap_identity()));
+        }
         if self.facade_mark_is_excluded() {
             return Err(MarkFinishError::FacadeRetained(self.heap_identity()));
         }

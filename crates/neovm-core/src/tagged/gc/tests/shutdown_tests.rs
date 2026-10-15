@@ -361,3 +361,203 @@ fn snapshot_storage_lease_releases_after_final_read() {
     reader.join().unwrap();
     assert!(!storage.has_leases());
 }
+
+// UNCOMPILED scratch fixtures: append inside gc/tests/shutdown_tests.rs.
+// Reuses its existing stalled_mark/allocate_counted_native_objects helpers.
+// Never dereference any object pointer after consuming shutdown or heap Drop.
+
+#[derive(Clone, Copy, Debug)]
+enum YoungLoanRetentionOwner {
+    Current,
+    Registered,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum YoungLoanRetentionGeneration {
+    Gen0,
+    Gen1,
+}
+
+fn young_loan_retention_heap(generation: YoungLoanRetentionGeneration) -> TaggedHeap {
+    let mut heap = TaggedHeap::new();
+    heap.set_generational_enabled(matches!(generation, YoungLoanRetentionGeneration::Gen1));
+    heap
+}
+
+fn take_retention_test_loan(
+    heap: &mut TaggedHeap,
+    owner: YoungLoanRetentionOwner,
+) -> young_registry::YoungLogLoan {
+    // SAFETY: fixture owns every writer/registration with no marker, callback,
+    // Lisp execution or safepoint while the young-only payload is loaned out.
+    let mut world = unsafe { scan_contract::SingleMutatorWorld::from_heap(heap) };
+    let id = match owner {
+        YoungLoanRetentionOwner::Current => world.current_young_registration_id(),
+        YoungLoanRetentionOwner::Registered => {
+            let physical = world.register_mutator_gc_for_test();
+            world.registered_young_id_for_test(physical).unwrap()
+        }
+    };
+    world.take_young_log_loan(id).unwrap()
+}
+
+fn young_retention_live_pages() -> (usize, usize) {
+    (
+        LIVE_FLOAT_PAGES.load(Ordering::Relaxed),
+        LIVE_VECTOR_PAGES.load(Ordering::Relaxed),
+    )
+}
+
+fn allocate_young_retention_graph(heap: &mut TaggedHeap, finalizers: &AtomicUsize) {
+    let float = heap.alloc_float(641.5);
+    let vector = heap.alloc_vector(vec![float]);
+    let _root = heap.alloc_cons(vector, TaggedValue::NIL);
+    allocate_counted_native_objects(heap, finalizers);
+}
+
+#[test]
+fn shutdown_rejects_current_and_registered_young_loans_before_teardown() {
+    for generation in [
+        YoungLoanRetentionGeneration::Gen0,
+        YoungLoanRetentionGeneration::Gen1,
+    ] {
+        for owner in [
+            YoungLoanRetentionOwner::Current,
+            YoungLoanRetentionOwner::Registered,
+        ] {
+            let finalizers = AtomicUsize::new(0);
+            let mut heap = young_loan_retention_heap(generation);
+            allocate_young_retention_graph(&mut heap, &finalizers);
+            let identity = heap.heap_identity();
+            let loan = take_retention_test_loan(&mut heap, owner);
+            assert!(!heap.concurrent_mark_running());
+            assert!(!heap.facade_mark_is_excluded());
+            let pages = young_retention_live_pages();
+            let wake = Arc::clone(&heap.gc_wake);
+            // A hidden finish/wait in shutdown/Drop would deadlock this thread.
+            // No worker or job exists in this fixture.
+            let _wake_held = wake.0.lock().unwrap();
+            assert!(
+                matches!(
+                    heap.shutdown(),
+                    Err(MarkFinishError::MutatorsNotStopped(actual)) if actual == identity
+                ),
+                "{generation:?}, {owner:?}"
+            );
+            assert_eq!(finalizers.load(Ordering::Relaxed), 0);
+            assert_eq!(young_retention_live_pages(), pages);
+            // Dropping the uniquely owned payload only drops its Vec; this does
+            // not dereference any block address or grant reclamation authority.
+            drop(loan);
+            assert_eq!(young_retention_live_pages(), pages);
+        }
+    }
+}
+
+#[test]
+fn idle_drop_retains_backing_for_current_and_registered_young_loans_without_waiting() {
+    for generation in [
+        YoungLoanRetentionGeneration::Gen0,
+        YoungLoanRetentionGeneration::Gen1,
+    ] {
+        for owner in [
+            YoungLoanRetentionOwner::Current,
+            YoungLoanRetentionOwner::Registered,
+        ] {
+            let finalizers = AtomicUsize::new(0);
+            let mut heap = young_loan_retention_heap(generation);
+            allocate_young_retention_graph(&mut heap, &finalizers);
+            let loan = take_retention_test_loan(&mut heap, owner);
+            assert!(!heap.concurrent_mark_running());
+            assert!(!heap.facade_mark_is_excluded());
+            let pages = young_retention_live_pages();
+            let wake = Arc::clone(&heap.gc_wake);
+            let stop = Arc::clone(&heap.gc_stop);
+            let _wake_held = wake.0.lock().unwrap();
+            drop(heap);
+            assert!(stop.load(Ordering::Acquire));
+            assert_eq!(finalizers.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                young_retention_live_pages(),
+                pages,
+                "{generation:?}, {owner:?}"
+            );
+            drop(loan);
+            assert_eq!(young_retention_live_pages(), pages);
+        }
+    }
+}
+
+#[test]
+fn young_loan_shutdown_preflight_precedes_disconnected_marker_finish() {
+    for generation in [
+        YoungLoanRetentionGeneration::Gen0,
+        YoungLoanRetentionGeneration::Gen1,
+    ] {
+        for owner in [
+            YoungLoanRetentionOwner::Current,
+            YoungLoanRetentionOwner::Registered,
+        ] {
+            let finalizers = AtomicUsize::new(0);
+            let mut heap = young_loan_retention_heap(generation);
+            allocate_young_retention_graph(&mut heap, &finalizers);
+            let identity = heap.heap_identity();
+            let loan = take_retention_test_loan(&mut heap, owner);
+            // A disconnected synthetic marker would return Disconnected if
+            // finish were entered. Keeping no sender avoids a hanging receive.
+            let completion = stalled_mark(&mut heap);
+            drop(completion);
+            let pages = young_retention_live_pages();
+            assert!(
+                matches!(
+                    heap.shutdown(),
+                    Err(MarkFinishError::MutatorsNotStopped(actual)) if actual == identity
+                ),
+                "loan refusal must precede finish: {generation:?}, {owner:?}"
+            );
+            assert_eq!(finalizers.load(Ordering::Relaxed), 0);
+            assert_eq!(young_retention_live_pages(), pages);
+            drop(loan);
+        }
+    }
+}
+
+#[test]
+fn shutdown_after_returned_young_loan_reclaims_normally() {
+    for generation in [
+        YoungLoanRetentionGeneration::Gen0,
+        YoungLoanRetentionGeneration::Gen1,
+    ] {
+        for owner in [
+            YoungLoanRetentionOwner::Current,
+            YoungLoanRetentionOwner::Registered,
+        ] {
+            let baseline = young_retention_live_pages();
+            let finalizers = AtomicUsize::new(0);
+            let mut heap = young_loan_retention_heap(generation);
+            allocate_young_retention_graph(&mut heap, &finalizers);
+            let loan = take_retention_test_loan(&mut heap, owner);
+            let id = loan.id();
+            {
+                // SAFETY: no worker/callback exists; the fixture returns its
+                // sole owned payload before granting collection/reclamation.
+                let mut world = unsafe { scan_contract::SingleMutatorWorld::from_heap(&mut heap) };
+                world.return_young_log_loan(loan).unwrap();
+                if matches!(owner, YoungLoanRetentionOwner::Registered) {
+                    world
+                        .retire_young_registration_for_test(id)
+                        .unwrap()
+                        .acknowledge();
+                }
+                world.ensure_young_logs_stopped().unwrap();
+            }
+            heap.shutdown().unwrap();
+            assert_eq!(
+                finalizers.load(Ordering::Relaxed),
+                2,
+                "{generation:?}, {owner:?}"
+            );
+            assert_eq!(young_retention_live_pages(), baseline);
+        }
+    }
+}

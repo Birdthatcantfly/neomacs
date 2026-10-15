@@ -1145,40 +1145,66 @@ impl TaggedHeap {
         // a full collection, and the second pass also rebuilt the whole
         // base-address registry. That mattered little while batch runs
         // collected zero times; it is on the critical path as soon as they do.
-        let Self {
-            cons_blocks,
-            cons_allocator,
-            census,
-            chunk_map,
-            ..
-        } = self;
-        cons_blocks.retain_mut(|block| {
-            let mut head = std::ptr::null_mut();
-            let live = if GENERATIONAL {
-                block.sweep_generational(&mut head)
-            } else {
-                block.sweep(&mut head)
+        let mut sweep_blocks =
+            |heap: &mut Self, proof: Option<&scan_contract::StoppedMutatorsProof>| {
+                let Self {
+                    cons_blocks,
+                    cons_allocator,
+                    census,
+                    chunk_map,
+                    _satb_layout_reserve,
+                    ..
+                } = heap;
+                let mut logs = proof.map(|proof| {
+                    super::young_registry::StoppedYoungLogs::new(_satb_layout_reserve, proof)
+                        .expect("eager sweep returned every young-only loan")
+                });
+                cons_blocks.retain_mut(|block| {
+                    let mut head = std::ptr::null_mut();
+                    let live = if GENERATIONAL {
+                        block.sweep_generational(&mut head)
+                    } else {
+                        block.sweep(&mut head)
+                    };
+                    if live == 0 {
+                        // Unregister before storage is released: no available list
+                        // may name cells in a dropped block.
+                        if GENERATIONAL {
+                            // SAFETY: storage is still owned through canonical unlink.
+                            unsafe { cons_allocator.stopped_world() }
+                                .unregister(
+                                    ConsBlockBase::of(block),
+                                    logs.as_mut().expect("GEN1 stopped logs"),
+                                )
+                                .expect("released block uses this heap canonical registry");
+                        } else {
+                            cons_allocator.unregister(ConsBlockBase::of(block));
+                        }
+                        released += 1;
+                        if let Some(census) = census.as_deref_mut() {
+                            census.forget_cons_block(block.base_addr());
+                        }
+                        if let Some(map) = chunk_map.as_deref() {
+                            map.set(block.base_addr(), ChunkEntry::NONE);
+                        }
+                        false
+                    } else {
+                        // SAFETY: regions are closed and this stopped sweep just
+                        // rebuilt exactly the dead cells of a retained owned block.
+                        unsafe { cons_allocator.publish(block, head, live) };
+                        new_live += live;
+                        true
+                    }
+                });
             };
-            if live == 0 {
-                // Unregister before storage is released: no available list
-                // may name cells in a dropped block.
-                cons_allocator.unregister(ConsBlockBase::of(block));
-                released += 1;
-                if let Some(census) = census.as_deref_mut() {
-                    census.forget_cons_block(block.base_addr());
-                }
-                if let Some(map) = chunk_map.as_deref() {
-                    map.set(block.base_addr(), ChunkEntry::NONE);
-                }
-                false
-            } else {
-                // SAFETY: regions are closed and this stopped sweep just
-                // rebuilt exactly the dead cells of a retained owned block.
-                unsafe { cons_allocator.publish(block, head, live) };
-                new_live += live;
-                true
-            }
-        });
+        if GENERATIONAL {
+            // SAFETY: the eager collector retains the existing closed extent.
+            unsafe { scan_contract::SingleMutatorWorld::from_heap(self) }
+                .with_stopped_heap(|heap, proof| sweep_blocks(heap, Some(proof)))
+                .expect("eager sweep requires every young-only loan returned");
+        } else {
+            sweep_blocks(self, None);
+        }
 
         if released > 0 {
             // Dropping blocks shifts every later index, so the base-address
@@ -1238,9 +1264,31 @@ impl TaggedHeap {
             return 0;
         }
 
-        for block in &self.cons_blocks {
-            if self.cons_block_live_count(block) == 0 {
-                self.cons_allocator.unregister(ConsBlockBase::of(block));
+        if self.generational.enabled {
+            // SAFETY: the existing collector caller retains stopped ownership;
+            // no callbacks, allocation safepoints or mutator resumes occur here.
+            unsafe { scan_contract::SingleMutatorWorld::from_heap(self) }
+                .with_stopped_heap(|heap, proof| {
+                    let mut logs = super::young_registry::StoppedYoungLogs::new(
+                        &mut heap._satb_layout_reserve,
+                        proof,
+                    )
+                    .expect("release requires every young-only loan returned");
+                    let mut stopped = unsafe { heap.cons_allocator.stopped_world() };
+                    for block in &heap.cons_blocks {
+                        if block.count_live_generational() == 0 {
+                            stopped
+                                .unregister(ConsBlockBase::of(block), &mut logs)
+                                .expect("released block uses this heap canonical registry");
+                        }
+                    }
+                })
+                .expect("release requires every young-only loan returned");
+        } else {
+            for block in &self.cons_blocks {
+                if self.cons_block_live_count(block) == 0 {
+                    self.cons_allocator.unregister(ConsBlockBase::of(block));
+                }
             }
         }
         self.mark_cons_block_cache = None;

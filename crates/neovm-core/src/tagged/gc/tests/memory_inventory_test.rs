@@ -37,7 +37,8 @@ fn memory_inventory_splits_retained_ages_and_owned_payload_capacities() {
     header(permanent_vector).make_permanent();
     let (trailer, index) = heap.old_cons_trailer(old_cons).unwrap();
     trailer.set_old(index);
-    trailer.set_unlogged(index);
+    // Card marking removed the former per-cons unlogged bitmap. These
+    // immediate-valued fields need no remembered edge; set_old mirrors age.
 
     let inventory = snapshot(&heap, false);
     assert_eq!(inventory.ages.young.objects, 2);

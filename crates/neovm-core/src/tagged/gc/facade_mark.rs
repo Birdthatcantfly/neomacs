@@ -50,6 +50,11 @@ impl CollectorQuiescence {
         // ensure_satb_empty reads only: a failed admission must preserve every
         // published/owner-resident word and every owner's dedup state.
         let world = unsafe { scan_contract::SingleMutatorWorld::from_heap(heap) };
+        // Physical parking does not return a worker's canonical young loan.
+        // Refusal precedes every collector or transport mutation.
+        world
+            .ensure_young_logs_stopped()
+            .map_err(|_| CollectorQuiescenceError::CollectorBusy)?;
         match world.ensure_satb_empty() {
             Ok(()) => Ok(Self(())),
             Err(scan_contract::SatbDrainError::Poisoned(_)) => {
@@ -453,6 +458,14 @@ impl TaggedHeap {
         &mut self,
         reseed: impl FnOnce(&mut TaggedHeap),
     ) -> Result<QuiescentCollector<'_>, CollectorQuiescenceError> {
+        // Refuse before joining a marker, invoking root reseeding, draining
+        // SATB or changing any collector state. Parking does not return an
+        // owned young payload; this owner-confined all-owner counter is O(1).
+        if self._satb_layout_reserve.has_outstanding_young_loans() {
+            return Err(CollectorQuiescenceError::Marker(
+                MarkFinishError::MutatorsNotStopped(self.heap_identity()),
+            ));
+        }
         if self.gc_locks_poisoned() {
             return Err(CollectorQuiescenceError::PoisonedCollectorState);
         }

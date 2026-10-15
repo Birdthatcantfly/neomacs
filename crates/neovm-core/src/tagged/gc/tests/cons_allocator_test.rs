@@ -1,7 +1,53 @@
 //! Focused tests of the shared allocator, without making TaggedHeap Send.
+use super::super::scan_contract::SingleMutatorWorld;
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+
+// Unrecorded GEN0/C1 fixtures need no canonical registry. This test-only
+// identity is explicit; production constructors reuse TaggedHeap's identity.
+fn standalone_allocator() -> ConsAllocator {
+    ConsAllocator::new(HeapIdentity::issue())
+}
+
+fn record_canonical_carve(
+    world: &mut SingleMutatorWorld<'_>,
+    allocator: &mut ConsAllocator,
+    base: ConsBlockBase,
+) {
+    let id = world.current_young_registration_id();
+    let mut young = world.take_young_log_loan(id).unwrap();
+    allocator.note_carve(base, young.log_mut()).unwrap();
+    world.return_young_log_loan(young).unwrap();
+}
+
+fn unregister_canonical_block(
+    world: &mut SingleMutatorWorld<'_>,
+    allocator: &mut ConsAllocator,
+    base: ConsBlockBase,
+) {
+    world
+        .with_stopped_young_logs(|_, logs, _| {
+            // SAFETY: callers retain every registered block and have no worker,
+            // marker or future use of an outstanding region grant.
+            unsafe { allocator.stopped_world() }
+                .unregister(base, logs)
+                .unwrap();
+        })
+        .unwrap();
+}
+
+fn verify_canonical_registry(world: &mut SingleMutatorWorld<'_>, allocator: &mut ConsAllocator) {
+    world
+        .with_stopped_young_logs(|_, logs, _| {
+            // SAFETY: fixture owns all retained storage and excludes workers,
+            // regions and markers; verifier visits metadata/canonical logs only.
+            unsafe { allocator.stopped_world() }
+                .verify_registry(logs)
+                .unwrap();
+        })
+        .unwrap();
+}
 
 fn free_block(allocator: &mut ConsAllocator, cells: usize) -> ConsBlock {
     let mut block = ConsBlock::new();
@@ -18,7 +64,7 @@ fn free_block(allocator: &mut ConsAllocator, cells: usize) -> ConsBlock {
 
 #[test]
 fn cons_allocator_detaches_nonlast_block_and_withholds_returned_cells() {
-    let mut allocator = ConsAllocator::default();
+    let mut allocator = standalone_allocator();
     let blocks: Vec<_> = (0..3).map(|_| free_block(&mut allocator, 32)).collect();
     let first = ConsBlockBase::of(&blocks[0]);
     let last = ConsBlockBase::of(&blocks[2]);
@@ -52,7 +98,7 @@ fn cons_allocator_three_mutators_share_free_blocks_across_rebuilds() {
     const MUTATORS: usize = 3;
     const CYCLES: usize = 128;
     const CARVES: usize = 32;
-    let mut allocator = ConsAllocator::default();
+    let mut allocator = standalone_allocator();
     let mut blocks: Vec<_> = (0..3).map(|_| free_block(&mut allocator, 256)).collect();
     let bases: Vec<_> = blocks.iter().map(ConsBlock::base_addr).collect();
     let active: Vec<_> = (0..3 * 256).map(|_| AtomicBool::new(false)).collect();
@@ -176,7 +222,7 @@ fn cons_allocator_poison_prevents_collector_panic_containment() {
 
 #[test]
 fn cons_allocator_dense_slots_preserve_fragmented_run_and_return_order() {
-    let mut allocator = ConsAllocator::default();
+    let mut allocator = standalone_allocator();
     let mut blocks = [free_block(&mut allocator, 8), free_block(&mut allocator, 7)];
     let bases = blocks.each_ref().map(ConsBlockBase::of);
     // SAFETY: no workers or outstanding reservations exist in this fixture.
@@ -224,7 +270,11 @@ fn cons_allocator_dense_slots_preserve_fragmented_run_and_return_order() {
 
 #[test]
 fn cons_allocator_dense_slots_reuse_identity_after_unlink_and_withhold() {
-    let mut allocator = ConsAllocator::default();
+    let mut heap = TaggedHeap::new();
+    let mut allocator = ConsAllocator::new(heap.heap_identity());
+    // SAFETY: this fixture owns the unused coordinator heap; no worker,
+    // marker, Lisp callback or allocation safepoint reaches it.
+    let mut world = unsafe { SingleMutatorWorld::from_heap(&mut heap) };
     let blocks = [
         free_block(&mut allocator, 9),
         free_block(&mut allocator, 5),
@@ -240,6 +290,7 @@ fn cons_allocator_dense_slots_reuse_identity_after_unlink_and_withhold() {
     let mut replacement = free_block(&mut allocator, 11);
     let replacement_base = ConsBlockBase::of(&replacement);
     assert_ne!(replacement_base, bases[1]);
+    record_canonical_carve(&mut world, &mut allocator, replacement_base);
     assert_eq!(
         allocator.with_state(|state, _| state.slot(replacement_base)),
         removed_slot
@@ -260,7 +311,7 @@ fn cons_allocator_dense_slots_reuse_identity_after_unlink_and_withhold() {
     // SAFETY: all available nodes were granted; the replacement is withheld.
     assert!(unsafe { allocator.reserve_run(1) }.is_none());
     for _ in 0..64 {
-        allocator.unregister(replacement_base);
+        unregister_canonical_block(&mut world, &mut allocator, replacement_base);
         allocator.register(&replacement);
         allocator.with_state(|state, _| {
             assert_eq!(state.slot(replacement_base), removed_slot);
@@ -270,6 +321,8 @@ fn cons_allocator_dense_slots_reuse_identity_after_unlink_and_withhold() {
                 "slot storage grew with registration churn"
             );
             let entry = state.block(removed_slot);
+            assert!(!entry.young.load(Ordering::Relaxed));
+            assert_eq!(entry.young_log_slot, None);
             assert_eq!(entry.head, 0);
             assert_eq!(entry.count, 0);
             assert_eq!(entry.available_slot, None);
@@ -285,8 +338,10 @@ fn cons_allocator_dense_slots_reuse_identity_after_unlink_and_withhold() {
         let (run, count) = unsafe { allocator.reserve_run(64) }.unwrap();
         assert_eq!(ConsBlockBase::of_cell(run), replacement_base);
         assert_eq!(count, 11);
+        record_canonical_carve(&mut world, &mut allocator, replacement_base);
+        verify_canonical_registry(&mut world, &mut allocator);
     }
-    allocator.unregister(replacement_base);
+    unregister_canonical_block(&mut world, &mut allocator, replacement_base);
     allocator.unregister(bases[0]);
     allocator.unregister(bases[2]);
     allocator.verify();
@@ -294,7 +349,7 @@ fn cons_allocator_dense_slots_reuse_identity_after_unlink_and_withhold() {
 
 #[test]
 fn sole_allocator_admission_preserves_free_run_inventory() {
-    let mut allocator = ConsAllocator::default();
+    let mut allocator = standalone_allocator();
     let block = free_block(&mut allocator, 8);
     let base = ConsBlockBase::of(&block);
     assert!(!allocator.threads_admitted());
@@ -347,4 +402,326 @@ fn sole_allocator_stop_all_unwind_is_poisoned() {
     assert!(failure.is_err());
     assert!(heap.gc_locks_poisoned());
     assert!(!heap.cons_allocator.threads_admitted());
+}
+
+// Additional C2 canonical-registry regressions. This is an UNCOMPILED scratch
+// extension layered AFTER the canonical C2 fixture migration; production and
+// all previously delivered patches remain unchanged.
+fn canonical_fixture_mode(allocator: &mut ConsAllocator, mode: AllocatorAccessMode) {
+    match mode {
+        AllocatorAccessMode::Sole => {}
+        AllocatorAccessMode::Admitted => {
+            // SAFETY: fresh fixture is stopped with no worker, marker or grant.
+            unsafe { allocator.stopped_world() }.admit_threads();
+        }
+    }
+}
+
+fn record_canonical_owner_carve(
+    world: &mut SingleMutatorWorld<'_>,
+    allocator: &mut ConsAllocator,
+    registration: YoungRegistrationId,
+    base: ConsBlockBase,
+) {
+    let mut young = world.take_young_log_loan(registration).unwrap();
+    allocator.note_carve(base, young.log_mut()).unwrap();
+    world.return_young_log_loan(young).unwrap();
+}
+
+#[test]
+fn cons_allocator_canonical_wrong_heap_carve_preserves_flags_and_logs() {
+    for mode in [AllocatorAccessMode::Sole, AllocatorAccessMode::Admitted] {
+        let owner_heap = TaggedHeap::new();
+        let mut foreign_heap = TaggedHeap::new();
+        let mut allocator = ConsAllocator::new(owner_heap.heap_identity());
+        let block = free_block(&mut allocator, 8);
+        let base = ConsBlockBase::of(&block);
+        canonical_fixture_mode(&mut allocator, mode);
+        // SAFETY: real grant remains exclusive/unhanded through the refusal;
+        // this fixture retains the block and no collector or worker runs.
+        let (run, count) = unsafe { allocator.reserve_run(3) }.unwrap();
+        assert_eq!(count, 3);
+        let snapshot = |allocator: &ConsAllocator| {
+            allocator.with_state(|state, _| {
+                let block = state.block_for_base(base);
+                (
+                    state.identity,
+                    (
+                        block.young.load(Ordering::Relaxed),
+                        block.young_log_slot,
+                        block.head,
+                        block.count,
+                        block.available_slot,
+                        block.availability,
+                    ),
+                    state.pending_mutators.clone(),
+                    state.mark_work.clone(),
+                    state.blocks_with_free.clone(),
+                    state.vacant_slots.clone(),
+                )
+            })
+        };
+        let before = snapshot(&allocator);
+        // SAFETY: foreign heap is exclusively owned and unused; only its
+        // young payload is loaned locally, without Lisp/TLS aliases or marker.
+        let mut foreign = unsafe { SingleMutatorWorld::from_heap(&mut foreign_heap) };
+        let registration = foreign.current_young_registration_id();
+        let mut young = foreign.take_young_log_loan(registration).unwrap();
+        let before_log = {
+            let log = young.log_mut();
+            (log.id(), log.blocks().to_vec(), log.pending_index())
+        };
+        assert_ne!(registration.heap_identity(), owner_heap.heap_identity());
+        assert_eq!(
+            allocator.note_carve(base, young.log_mut()),
+            Err(YoungRegistryError::WrongHeap)
+        );
+        assert_eq!(snapshot(&allocator), before);
+        let after_log = {
+            let log = young.log_mut();
+            (log.id(), log.blocks().to_vec(), log.pending_index())
+        };
+        assert_eq!(after_log, before_log);
+        assert!(
+            !allocator.is_poisoned(),
+            "typed refusal is before mutation/unwind"
+        );
+        foreign.return_young_log_loan(young).unwrap();
+        foreign.ensure_young_logs_stopped().unwrap();
+        // SAFETY: refusal handed out/initialized nothing; refund the exact
+        // still-exclusive run before unrecorded cleanup.
+        unsafe { allocator.return_unused(run, count) };
+        // A wrong-domain call must not record a young block at all; the original
+        // unrecorded cleanup path remains valid and retains storage until done.
+        allocator.unregister(base);
+        allocator.verify();
+    }
+}
+
+#[test]
+fn cons_allocator_canonical_wrong_heap_empty_capture_preserves_metadata() {
+    for mode in [AllocatorAccessMode::Sole, AllocatorAccessMode::Admitted] {
+        let owner_heap = TaggedHeap::new();
+        let mut foreign_heap = TaggedHeap::new();
+        let mut allocator = ConsAllocator::new(owner_heap.heap_identity());
+        let block = free_block(&mut allocator, 8);
+        let base = ConsBlockBase::of(&block);
+        canonical_fixture_mode(&mut allocator, mode);
+        let snapshot = |allocator: &ConsAllocator| {
+            allocator.with_state(|state, _| {
+                let block = state.block_for_base(base);
+                (
+                    state.identity,
+                    (
+                        block.young.load(Ordering::Relaxed),
+                        block.young_log_slot,
+                        block.head,
+                        block.count,
+                        block.available_slot,
+                        block.availability,
+                    ),
+                    state.pending_mutators.clone(),
+                    state.mark_work.clone(),
+                    state.blocks_with_free.clone(),
+                    state.vacant_slots.clone(),
+                )
+            })
+        };
+        let before = snapshot(&allocator);
+        assert!(before.2.is_empty());
+        assert!(before.3.is_empty());
+        // SAFETY: foreign heap is unused and has no outstanding loan, marker,
+        // worker, callback or TLS alias. Its valid resolver has the WRONG domain.
+        let mut foreign = unsafe { SingleMutatorWorld::from_heap(&mut foreign_heap) };
+        let result = foreign
+            .with_stopped_young_logs(|_, logs, _| {
+                // SAFETY: external storage is retained; no workers or regions exist.
+                unsafe { allocator.stopped_world() }.capture_minor(logs)
+            })
+            .unwrap();
+        assert_eq!(result, Err(YoungRegistryError::WrongHeap));
+        assert_eq!(snapshot(&allocator), before);
+        assert!(!allocator.is_poisoned());
+        allocator.unregister(base);
+        allocator.verify();
+    }
+}
+
+#[test]
+fn cons_allocator_canonical_unlinks_swapped_owner_positions_before_base_reuse() {
+    for mode in [AllocatorAccessMode::Sole, AllocatorAccessMode::Admitted] {
+        let mut heap = TaggedHeap::new();
+        let mut allocator = ConsAllocator::new(heap.heap_identity());
+        let mut blocks: Vec<_> = (0..4).map(|_| free_block(&mut allocator, 8)).collect();
+        let bases: Vec<_> = blocks.iter().map(ConsBlockBase::of).collect();
+        canonical_fixture_mode(&mut allocator, mode);
+        // SAFETY: coordinator owns every paired registration and retained block;
+        // no Lisp allocation, marker, callback or TLS alias enters this fixture.
+        let mut world = unsafe { SingleMutatorWorld::from_heap(&mut heap) };
+        let registrations: Vec<_> = (0..3)
+            .map(|_| {
+                let physical = world.register_mutator_gc_for_test();
+                world.registered_young_id_for_test(physical).unwrap()
+            })
+            .collect();
+        let [a, b, c] = registrations.as_slice() else {
+            panic!("three owners")
+        };
+        let [a, b, c] = [*a, *b, *c];
+        // Reserve real free runs first, then record/refund them in canonical
+        // owner order A0,A1,B2,C3. These are actual grants, not synthetic nodes.
+        let grants: Vec<_> = (0..4)
+            .map(|_| {
+                // SAFETY: all four owned blocks remain registered and retained;
+                // there is no worker/collector and each grant is disjoint.
+                unsafe { allocator.reserve_run(8) }.unwrap()
+            })
+            .collect();
+        for (registration, block_index) in [(a, 0), (a, 1), (b, 2), (c, 3)] {
+            let base = bases[block_index];
+            let &(run, count) = grants
+                .iter()
+                .find(|(run, _)| ConsBlock::block_base_for_ptr(*run) == base.addr())
+                .unwrap();
+            assert_eq!(count, 8);
+            record_canonical_owner_carve(&mut world, &mut allocator, registration, base);
+            // SAFETY: this entire grant stayed unhanded/unmarked and exclusive.
+            // It is no longer used after refund; all physical storage stays owned.
+            unsafe { allocator.return_unused(run, count) };
+        }
+        world
+            .with_stopped_young_logs(|_, logs, _| {
+                // SAFETY: all loans/grants returned; no worker or marker exists.
+                let mut stopped = unsafe { allocator.stopped_world() };
+                assert_eq!(stopped.state.pending_mutators, vec![a, b, c]);
+                assert_eq!(logs.resolve_mut(a).unwrap().blocks(), &[bases[0], bases[1]]);
+                assert_eq!(
+                    logs.resolve_mut(a)
+                        .unwrap()
+                        .pending_index()
+                        .unwrap()
+                        .index(),
+                    0
+                );
+                assert_eq!(
+                    logs.resolve_mut(b)
+                        .unwrap()
+                        .pending_index()
+                        .unwrap()
+                        .index(),
+                    1
+                );
+                assert_eq!(
+                    logs.resolve_mut(c)
+                        .unwrap()
+                        .pending_index()
+                        .unwrap()
+                        .index(),
+                    2
+                );
+                stopped.verify_registry(logs).unwrap();
+
+                // Nonlast block removal moves A1 into A's index0.
+                stopped.unregister(bases[0], logs).unwrap();
+                assert_eq!(logs.resolve_mut(a).unwrap().blocks(), &[bases[1]]);
+                let moved_block = stopped
+                    .state
+                    .block_for_base(bases[1])
+                    .young_log_slot
+                    .unwrap();
+                assert_eq!(moved_block.registration, a);
+                assert_eq!(moved_block.index.index(), 0);
+                stopped.verify_registry(logs).unwrap();
+
+                // Emptying A removes nonlast pending index0 and moves C from2->0.
+                stopped.unregister(bases[1], logs).unwrap();
+                assert!(logs.resolve_mut(a).unwrap().blocks().is_empty());
+                assert_eq!(logs.resolve_mut(a).unwrap().pending_index(), None);
+                assert_eq!(stopped.state.pending_mutators, vec![c, b]);
+                assert_eq!(
+                    logs.resolve_mut(c)
+                        .unwrap()
+                        .pending_index()
+                        .unwrap()
+                        .index(),
+                    0
+                );
+                assert_eq!(
+                    logs.resolve_mut(b)
+                        .unwrap()
+                        .pending_index()
+                        .unwrap()
+                        .index(),
+                    1
+                );
+                assert!(!stopped.state.blocks.contains_key(&bases[0]));
+                assert!(!stopped.state.blocks.contains_key(&bases[1]));
+                stopped.verify_registry(logs).unwrap();
+            })
+            .unwrap();
+
+        // Re-register EXACTLY the same still-owned base A0 after canonical
+        // unlink, proving that no stale A0 log/backlink can survive address reuse.
+        allocator.register(&blocks[0]);
+        let mut head = std::ptr::null_mut();
+        let live = blocks[0].sweep(&mut head);
+        assert_eq!(live, 0);
+        // SAFETY: A0 remains owned, no grant/worker/marker exists, and this exact
+        // rebuilt list contains all eight free cells before publication.
+        unsafe { allocator.publish(&blocks[0], head, live) };
+        // SAFETY: newly published A0 is the newest ready block; run is exclusive.
+        let (run, count) = unsafe { allocator.reserve_run(8) }.unwrap();
+        assert_eq!(ConsBlock::block_base_for_ptr(run), bases[0].addr());
+        assert_eq!(count, 8);
+        record_canonical_owner_carve(&mut world, &mut allocator, a, bases[0]);
+        // SAFETY: fully unused, unmarked, exclusive grant is returned before stop.
+        unsafe { allocator.return_unused(run, count) };
+        world
+            .with_stopped_young_logs(|_, logs, _| {
+                // SAFETY: all real grants/loans are closed and storage remains owned.
+                let mut stopped = unsafe { allocator.stopped_world() };
+                assert_eq!(stopped.state.pending_mutators, vec![c, b, a]);
+                assert_eq!(logs.resolve_mut(a).unwrap().blocks(), &[bases[0]]);
+                stopped.verify_registry(logs).unwrap();
+                let work = stopped.capture_minor(logs).unwrap();
+                assert_eq!(work.len(), 3);
+                assert_eq!(
+                    work.iter()
+                        .copied()
+                        .collect::<std::collections::HashSet<_>>(),
+                    [bases[2], bases[3], bases[0]]
+                        .into_iter()
+                        .collect::<std::collections::HashSet<_>>()
+                );
+                assert!(!work.contains(&bases[1]));
+                // Every run was completely refunded: actual promotion has no live
+                // young cell. This is the real C2 flags-only post-promotion handoff.
+                for base in &work {
+                    let block = blocks
+                        .iter_mut()
+                        .find(|block| ConsBlockBase::of(block) == *base)
+                        .unwrap();
+                    assert_eq!(block.promote_marked_world_stopped(), 0);
+                }
+                stopped.finish_promotion(logs).unwrap();
+                assert!(stopped.state.mark_work.is_empty());
+                assert!(stopped.state.pending_mutators.is_empty());
+                stopped.verify_registry(logs).unwrap();
+                for base in &bases {
+                    // A1 is already absent; all remaining canonical links must be
+                    // gone BEFORE any owned ConsBlock can be dropped below.
+                    stopped.unregister(*base, logs).unwrap();
+                }
+                stopped.verify_registry(logs).unwrap();
+                assert!(stopped.state.blocks.is_empty());
+            })
+            .unwrap();
+        allocator.verify();
+        for registration in registrations {
+            world
+                .retire_young_registration_for_test(registration)
+                .unwrap()
+                .acknowledge();
+        }
+    }
 }
