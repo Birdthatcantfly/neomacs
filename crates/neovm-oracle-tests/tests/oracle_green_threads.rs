@@ -652,3 +652,19 @@ fn green_memory_use_counts_include_every_threads_consing() {
         expect_test::expect![[r#""OK t""#]],
     );
 }
+
+#[test]
+fn green_a_profiler_started_by_a_thread_runs_for_every_thread() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(progn
+  (thread-join (make-thread (lambda () (profiler-memory-start))))
+  (prog1 (list (profiler-memory-running-p)
+               (thread-join (make-thread (lambda () (profiler-memory-running-p)))))
+    (profiler-memory-stop)
+    (thread-join (make-thread (lambda () (profiler-memory-running-p))))))
+"##,
+        expect_test::expect![[r#""OK (t t)""#]],
+    );
+}

@@ -56,8 +56,6 @@ macro_rules! global_state {
 global_state! {
     /// `Vsystem_name` (sysdep.c).
     cached_system_name: Value,
-    /// profiler.c `cpu_log` / `memory_log`.
-    profiler: super::super::profiler::ProfilerState,
     /// xwidget.c `internal_xwidget_list`.
     xwidgets: super::super::xwidget::XwidgetState,
     /// buffer.c `last_overlay_modification_hooks`.
@@ -145,7 +143,6 @@ impl GlobalState {
     pub(super) fn fresh(command_loop: crate::keyboard::CommandLoop) -> Self {
         Self {
             cached_system_name: Value::NIL,
-            profiler: super::super::profiler::ProfilerState::default(),
             xwidgets: super::super::xwidget::XwidgetState::new(),
             last_overlay_modification_hooks: Vec::new(),
             interval_insert_behind_hooks: Value::NIL,

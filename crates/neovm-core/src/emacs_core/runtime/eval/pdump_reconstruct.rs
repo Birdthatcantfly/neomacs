@@ -116,7 +116,7 @@ impl Context {
             window_edge_drag: crate::emacs_core::window_edge_drag::WindowEdgeDrag::default(),
             specpdl: Vec::new(),
             suspended_thread_bindings: Vec::new(),
-            profiler: world.global.profiler,
+            profiler: super::super::profiler::ProfilerState::default(),
             lexenv,
             internal_interpreter_environment_symbol: core_eval_symbols
                 .internal_interpreter_environment_symbol,

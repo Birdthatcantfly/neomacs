@@ -260,7 +260,15 @@ impl ProfilerState {
         }
     }
 
-    fn trace_roots(&self, visit: &mut dyn FnMut(Value)) {
+    /// Continue on the OS thread that now runs the World's Lisp: CPU
+    /// samples meter that thread's CPU time from here on.
+    pub(crate) fn resume_on_this_thread(&mut self) {
+        if self.cpu_running {
+            self.cpu_last_ns = thread_cpu_time_ns();
+        }
+    }
+
+    pub(crate) fn trace_roots(&self, visit: &mut dyn FnMut(Value)) {
         if let Some(log) = &self.cpu_log {
             log.trace_roots(visit);
         }

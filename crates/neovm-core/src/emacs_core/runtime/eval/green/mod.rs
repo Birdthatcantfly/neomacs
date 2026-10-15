@@ -44,6 +44,10 @@ pub(crate) struct GreenRuntime {
     /// The World's thread-local state while its holder is parked
     /// (`carried`, plan-3w.md section 7).
     pub(super) carried: std::cell::RefCell<Option<carried::CarriedState>>,
+    /// The World's profiler (profiler.c's logs and switches) while its
+    /// holder is parked. The running owner keeps it inline, so the safe
+    /// points' `profiler_poll` test reads it at a fixed offset.
+    pub(super) profiler: std::cell::RefCell<Option<crate::emacs_core::profiler::ProfilerState>>,
     /// A `kill-emacs` run by another thread, for main to exit with.
     pub(super) exit: std::cell::Cell<Option<super::ShutdownRequest>>,
     /// The standard case table, one for every thread as in GNU:
@@ -109,6 +113,9 @@ impl GreenRuntime {
         }
         if let Some(table) = self.standard_case_table.get() {
             visit(table);
+        }
+        if let Some(profiler) = self.profiler.borrow().as_ref() {
+            profiler.trace_roots(visit);
         }
         for (symbol, data) in self.deferred_errors.borrow().values() {
             visit(*symbol);
@@ -185,6 +192,7 @@ impl Context {
             pending_starts: Default::default(),
             exit: Default::default(),
             carried: Default::default(),
+            profiler: Default::default(),
             standard_case_table: std::cell::Cell::new(self.cached_standard_case_table),
             deferred_errors: Default::default(),
         }));

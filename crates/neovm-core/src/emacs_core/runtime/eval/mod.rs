@@ -3227,7 +3227,7 @@ pub struct Context {
     /// Abbreviation manager — text abbreviation expansion.
     pub(crate) abbrevs: WorldSlot<AbbrevManager>,
     /// GNU-compatible CPU and managed-allocation profiler state.
-    pub(crate) profiler: WorldSlot<super::profiler::ProfilerState>,
+    pub(crate) profiler: super::profiler::ProfilerState,
     /// Pending orderly shutdown requested by GNU C-owned primitives such as
     /// `kill-emacs`.
     pub(crate) shutdown_request: Option<ShutdownRequest>,

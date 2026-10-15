@@ -70,7 +70,6 @@ const WORLD_ROOT_GROUPS: &[&str] = &[
     "frames",
     "coding_systems",
     // GNU-global state the World owns since round 3w.
-    "profiler",
     "proc_timer",
     "registers",
     "interactive",
@@ -177,6 +176,7 @@ impl Context {
         self.threads.set_thread_current_buffer(key.id(), current);
         self.restore_deferred_error(&baton, key);
         let parked = self.park_owner();
+        stow_profiler(self, &baton);
         stow_carried_state(&baton);
         let roots = self.collect_parked_roots();
         self.publish_parked_roots(&baton, key, roots);
@@ -187,6 +187,7 @@ impl Context {
         };
         self.retire_parked_roots(&baton, key);
         unstow_carried_state(&baton);
+        unstow_profiler(self, &baton);
         self.threads.enter_thread(key.id());
         let (exit, case_table) = baton
             .green_runtime()
@@ -420,12 +421,14 @@ fn run_worker(key: ThreadKey, receiver: mpsc::Receiver<Baton>, control: Arc<Cont
     baton.enter();
     unstow_carried_state(&baton);
     let mut owner = Context::new_green_owner(&baton);
+    unstow_profiler(&mut owner, &baton);
     if control.lifecycle() == Lifecycle::Closing {
         // Main ended before this thread ever ran.
         owner.threads.mark_thread_exited(key.id());
         if let Some(runtime) = baton.green_runtime().as_ref() {
             runtime.pending_starts.borrow_mut().remove(&key);
         }
+        stow_profiler(&mut owner, &baton);
         owner.retire_green_owner();
         stow_carried_state(&baton);
         control.finish(key, baton);
@@ -485,6 +488,7 @@ fn run_worker(key: ThreadKey, receiver: mpsc::Receiver<Baton>, control: Arc<Cont
         runtime.exit.set(Some(request));
         control.prioritize(ThreadKey::Main);
     }
+    stow_profiler(&mut owner, &baton);
     owner.retire_green_owner();
     stow_carried_state(&baton);
     control.finish(key, baton);
@@ -506,6 +510,26 @@ fn unstow_carried_state(baton: &Baton) {
         && let Some(state) = runtime.carried.borrow_mut().take()
     {
         state.restore();
+    }
+}
+
+/// The World's profiler leaves OWNER with the Baton (GNU's profiler is
+/// process-wide: one log, whichever thread runs).
+fn stow_profiler(owner: &mut Context, baton: &Baton) {
+    if let Some(runtime) = baton.green_runtime().as_ref() {
+        let mut slot = runtime.profiler.borrow_mut();
+        debug_assert!(slot.is_none(), "the World's profiler is in two places");
+        *slot = Some(std::mem::take(&mut owner.profiler));
+    }
+}
+
+/// The World's profiler arrives in OWNER with the Baton.
+fn unstow_profiler(owner: &mut Context, baton: &Baton) {
+    if let Some(runtime) = baton.green_runtime().as_ref()
+        && let Some(mut profiler) = runtime.profiler.borrow_mut().take()
+    {
+        profiler.resume_on_this_thread();
+        owner.profiler = profiler;
     }
 }
 
