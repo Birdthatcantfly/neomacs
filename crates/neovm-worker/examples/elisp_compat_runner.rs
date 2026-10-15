@@ -1,5 +1,7 @@
 use neovm_core::TaskScheduler;
+use neovm_core::emacs_core::eval::VariableView;
 use neovm_core::emacs_core::print_value;
+use neovm_core::emacs_core::symbol::CanonicalAccess;
 use neovm_core::emacs_core::symbol::Obarray;
 use neovm_core::emacs_core::value_reader::read_all;
 use neovm_host_abi::{LispValue, Signal, TaskError, TaskOptions};
@@ -100,7 +102,10 @@ fn main() {
     let workers = rt.start_dummy_workers();
 
     let parse_obarray = Obarray::new();
-    let forms = match read_all(&source, &parse_obarray) {
+    let forms = match read_all(
+        &source,
+        VariableView::canonical(CanonicalAccess::BOOTSTRAP, &parse_obarray),
+    ) {
         Ok(forms) => forms,
         Err(err) => {
             eprintln!("failed to parse forms: {}", err.message);

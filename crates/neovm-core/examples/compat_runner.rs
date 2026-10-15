@@ -1,3 +1,5 @@
+use neovm_core::emacs_core::eval::VariableView;
+use neovm_core::emacs_core::symbol::CanonicalAccess;
 use neovm_core::emacs_core::{
     Context, format_eval_result_bytes_with_eval, print::print_value, symbol::Obarray, value_reader,
 };
@@ -18,7 +20,10 @@ fn main() {
         }
     };
 
-    let forms = match value_reader::read_all(&source, &Obarray::new()) {
+    let forms = match value_reader::read_all(
+        &source,
+        VariableView::canonical(CanonicalAccess::BOOTSTRAP, &Obarray::new()),
+    ) {
         Ok(forms) => forms,
         Err(err) => {
             eprintln!("failed to parse forms: {err}");

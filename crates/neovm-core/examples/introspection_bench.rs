@@ -1,4 +1,6 @@
 use neovm_core::emacs_core::Context;
+use neovm_core::emacs_core::eval::VariableView;
+use neovm_core::emacs_core::symbol::CanonicalAccess;
 use neovm_core::emacs_core::symbol::Obarray;
 use neovm_core::emacs_core::value::Value;
 use neovm_core::emacs_core::value_reader;
@@ -77,7 +79,10 @@ fn main() {
     };
 
     let source = INTROSPECTION_FORMS.join("\n");
-    let forms = match value_reader::read_all(&source, &Obarray::new()) {
+    let forms = match value_reader::read_all(
+        &source,
+        VariableView::canonical(CanonicalAccess::BOOTSTRAP, &Obarray::new()),
+    ) {
         Ok(forms) => forms,
         Err(err) => {
             eprintln!("failed to parse benchmark forms: {err}");
