@@ -598,6 +598,11 @@ fn mapcar_activation_reads_list_cdr_after_callback_mutation() {
 
 #[test]
 fn mapcar_activation_retier_and_cache_retirement_use_the_existing_entry() {
+    // The assertions inspect the leaf the warming mapping installs in line:
+    // the deterministic split, whatever `NEOVM_JIT_BG` the suite runs under.
+    #[cfg(feature = "jit")]
+    let _bg_mode =
+        crate::emacs_core::jit::bg::TestModeScope::enter(crate::emacs_core::jit::bg::BgMode::Sync);
     let mut ctx = context();
     let roots = ctx.save_vm_roots();
     let function = bytecode(None);
