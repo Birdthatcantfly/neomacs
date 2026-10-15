@@ -230,3 +230,41 @@ fn cons_young_verifier_compares_dead_sentinel_bits_for_heap_payloads() {
     complete_minor(&mut heap, &[root]);
     assert!(heap.owns_heap_value_for_test(payload));
 }
+
+#[test]
+fn cons_young_verifier_rejects_next_minor_flag_cleared_at_sweep_completion() {
+    check_both_allocator_modes(
+        check_cons_young_verifier_rejects_next_minor_flag_cleared_at_sweep_completion,
+    );
+}
+
+fn check_cons_young_verifier_rejects_next_minor_flag_cleared_at_sweep_completion(
+    mut heap: TaggedHeap,
+) {
+    let mut roots = Vec::new();
+    for index in 0..2 * CONS_BLOCK_SIZE + 1 {
+        let value = heap.alloc_cons(TaggedValue::T, TaggedValue::NIL);
+        if index % CONS_BLOCK_SIZE == 0 {
+            roots.push(value);
+        }
+    }
+    heap.begin_minor_collection().unwrap();
+    for &root in &roots {
+        heap.seed_root(root);
+    }
+    heap.complete_minor_collection();
+    assert!(!heap.incremental_sweep_slice(1));
+    let newborn = heap.alloc_cons(TaggedValue::T, TaggedValue::NIL);
+    assert_eq!(base(newborn), base(roots[0]));
+    {
+        let _fault =
+            ConsAllocatorFaultGuard::inject(ConsAllocatorFault::ClearNextFlagAtSweepCompletion);
+        heap.finish_incremental_sweep_now();
+    }
+    let owner_index = heap.cons_block_index_by_base[&base(newborn)];
+    let owner_base = ConsBlockBase::of(&heap.cons_blocks[owner_index]);
+    assert!(heap.cons_allocator.free_count_for(owner_base).unwrap() > 0);
+    let panic = catch_unwind(AssertUnwindSafe(|| heap.begin_minor_collection()))
+        .expect_err("next minor must detect the rejected late-clear race");
+    assert!(panic_message(panic).contains("young flag/log mismatch"));
+}

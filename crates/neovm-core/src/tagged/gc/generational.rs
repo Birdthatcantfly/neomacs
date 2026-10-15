@@ -270,7 +270,7 @@ impl TaggedHeap {
                         .verify_young_at_begin(&heap.cons_blocks, &mut logs)
                         .expect("minor verifier uses this heap canonical registry");
                 }
-                // Frozen tracking only in stage 2: existing full scans remain.
+                // Freeze young logs before mark clearing; promotion hands this set to sweep.
                 let _ = stopped
                     .capture_minor(&mut logs)
                     .expect("minor capture uses this heap canonical registry");
@@ -364,32 +364,48 @@ impl TaggedHeap {
         }
         let major = self.generational.major_in_progress;
         let mut promoted = 0;
-        let mut old_count = 0;
-        for block in &self.cons_blocks {
-            promoted += if major {
-                block.promote_major_world_stopped()
-            } else {
-                block.promote_marked_world_stopped()
-            };
-            old_count += block.count_old();
-        }
-        self.generational.old_cons_count = old_count;
         // SAFETY: the existing collector caller retains stopped ownership;
         // no callbacks, allocation safepoints or mutator resumes occur here.
         unsafe { scan_contract::SingleMutatorWorld::from_heap(self) }
             .with_stopped_heap(|heap, proof| {
-                // SAFETY: every mutator remains stopped after all cons survivors
-                // have been promoted, regions are closed, and the marker joined.
-                // Clear flags HERE, before sweep can resume mutators; subsequent
-                // carves belong to the next minor even while this sweep continues.
+                let old_count;
+                // SAFETY: all mutators remain parked, regions closed, and any
+                // major worker joined through promotion and flag/work handoff.
                 let mut logs = super::young_registry::StoppedYoungLogs::new(
                     &mut heap._satb_layout_reserve,
                     proof,
                 )
                 .expect("promotion requires every young-only loan returned");
                 let mut stopped = unsafe { heap.cons_allocator.stopped_world() };
+                if major {
+                    let mut total = 0;
+                    for block in &heap.cons_blocks {
+                        promoted += block.promote_major_world_stopped();
+                        let block_old = block.count_old();
+                        stopped.record_major_old_count(ConsBlockBase::of(block), block_old);
+                        total += block_old;
+                    }
+                    old_count = total;
+                } else {
+                    // The cloned frozen bases cost O(young); unlike count_old,
+                    // this does no mark/old-bitmap work in untouched old blocks.
+                    let work = stopped.capture_work_snapshot();
+                    for base in work {
+                        let index = heap.cons_block_index_by_base[&base.addr()];
+                        let newly_old = heap.cons_blocks[index].promote_marked_world_stopped();
+                        stopped.record_minor_promoted(base, newly_old);
+                        promoted += newly_old;
+                    }
+                    old_count = heap.generational.old_cons_count + promoted;
+                }
+                heap.generational.old_cons_count = old_count;
                 stopped
-                    .finish_promotion(&mut logs)
+                    .finish_promotion(
+                        heap.generational.cycle,
+                        &heap.cons_blocks,
+                        old_count,
+                        &mut logs,
+                    )
                     .expect("promotion uses this heap canonical registry");
                 if heap.generational.verify {
                     stopped

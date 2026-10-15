@@ -96,8 +96,11 @@ fn generational_cons_card_lifecycle() {
     let roots = ScratchRoots::new();
     let owner = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
     roots.keep(owner);
-    let (trailer, index) = heap.old_cons_trailer(owner).unwrap();
-    trailer.set_old(index);
+    heap.begin_minor_collection().unwrap();
+    heap.seed_root(owner);
+    heap.complete_minor_collection();
+    heap.finish_incremental_sweep_now();
+    assert!(heap.value_is_old_for_test(owner));
     assert!(crate::tagged::mutate::set_cons_car(
         owner,
         TaggedValue::fixnum(8)

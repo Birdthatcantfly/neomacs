@@ -2939,3 +2939,13 @@ mod cons_young_refill_refund_tests;
 #[cfg(test)]
 #[path = "gc/tests/drain_young_preflight_test.rs"]
 mod drain_young_preflight_tests;
+
+/// Minor worklist bounds and untouched old-only mark words.
+#[cfg(test)]
+#[path = "gc/tests/cons_young_minor_work_test.rs"]
+mod cons_young_minor_work_tests;
+
+/// Shared GEN1 allocator stress and exit-retained young logs.
+#[cfg(test)]
+#[path = "gc/tests/cons_young_shared_test.rs"]
+mod cons_young_shared_tests;

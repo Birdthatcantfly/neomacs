@@ -136,13 +136,21 @@ impl TaggedHeap {
         self.begin_old_sweep_world_stopped();
         self.sweep_noncons_pending = self.all_objects;
         self.all_objects = std::ptr::null_mut();
-        // SAFETY: the collector owns this stopped extent, with regions closed
-        // and the concurrent marker joined before any free list is withheld.
-        unsafe { self.cons_allocator.stopped_world() }
-            .withhold(self.cons_blocks.iter().map(ConsBlockBase::of));
         self.sweep_cons_cursor = 0;
-        self.sweep_cons_end = self.cons_blocks.len();
-        self.sweep_cons_live_cells = 0;
+        if self.generational.enabled {
+            // Promotion atomically handed off and withheld this frozen work.
+            self.sweep_cons_end = self.cons_allocator.sweep_len();
+            // Both terms are post-promotion counts. Old-only unvisited blocks
+            // contribute live cells without a count_old/full sweep traversal.
+            self.sweep_cons_live_cells = self.cons_allocator.sweep_unvisited_old_cells();
+        } else {
+            // SAFETY: collector owns this stopped extent with regions closed
+            // and marker joined; GEN0 still sweeps every cons block.
+            unsafe { self.cons_allocator.stopped_world() }
+                .withhold(self.cons_blocks.iter().map(ConsBlockBase::of));
+            self.sweep_cons_end = self.cons_blocks.len();
+            self.sweep_cons_live_cells = 0;
+        }
         // Object arena pages are swept in place behind these cursors (no
         // detached list exists for them; the bitmap is re-read per slice),
         // up to the pages that exist now.
@@ -263,7 +271,12 @@ impl TaggedHeap {
         // -- cons: reclaim up to `budget` blocks (each ~64KB of cells) --
         let mut swept_blocks = 0usize;
         while swept_blocks < budget && self.sweep_cons_cursor < self.sweep_cons_end {
-            let idx = self.sweep_cons_cursor;
+            let idx = if self.generational.enabled {
+                let base = self.cons_allocator.sweep_base_at(self.sweep_cons_cursor);
+                self.cons_block_index_by_base[&base.addr()]
+            } else {
+                self.sweep_cons_cursor
+            };
             let mut head = std::ptr::null_mut();
             let live = if self.generational.enabled {
                 self.cons_blocks[idx].sweep_generational(&mut head)
@@ -273,9 +286,25 @@ impl TaggedHeap {
             // SAFETY: this block's sweep just rebuilt its exact dead-cell list;
             // its storage stays heap-owned and publication follows rebuilding.
             unsafe {
-                self.cons_allocator
-                    .publish(&self.cons_blocks[idx], head, live)
-            };
+                if self.generational.enabled {
+                    if self.generational.verify {
+                        self.cons_allocator.publish_generational_verified(
+                            &self.cons_blocks[idx],
+                            head,
+                            live,
+                        );
+                    } else {
+                        self.cons_allocator.publish_generational(
+                            &self.cons_blocks[idx],
+                            head,
+                            live,
+                        );
+                    }
+                } else {
+                    self.cons_allocator
+                        .publish(&self.cons_blocks[idx], head, live);
+                }
+            }
             self.sweep_cons_live_cells += live;
             self.sweep_cons_cursor += 1;
             swept_blocks += 1;
@@ -459,6 +488,17 @@ impl TaggedHeap {
         }
         self.cons_live_count = recount;
 
+        if self.generational.enabled {
+            #[cfg(test)]
+            {
+                // SAFETY: finish has closed all regions in this stopped extent.
+                unsafe { self.cons_allocator.stopped_world() }.apply_late_clear_mutation_for_test();
+            }
+            // C3 retains the legacy full recount above; C4 consumes this exact
+            // freed delta instead. Neither operation clears young flags/logs.
+            let _ = self.cons_allocator.take_completed_sweep_freed();
+            let _ = self.cons_allocator.take_empty_candidates();
+        }
         let _released_cons_blocks = self.release_empty_cons_blocks();
         let _released_object_pages = self.release_empty_object_pages();
 
@@ -1115,11 +1155,55 @@ impl TaggedHeap {
 
     /// Sweep unmarked cons cells back to free lists.
     pub(super) fn sweep_cons(&mut self) -> usize {
+        if self.generational.enabled && self.is_minor_collection() {
+            return self.sweep_minor_cons();
+        }
         if self.generational.enabled {
             self.sweep_cons_in_generation::<true>()
         } else {
             self.sweep_cons_in_generation::<false>()
         }
+    }
+
+    fn sweep_minor_cons(&mut self) -> usize {
+        self.close_alloc_regions();
+        let old_live = self.cons_live_count;
+        let mut new_live = self.cons_allocator.sweep_unvisited_old_cells();
+        for work_index in 0..self.cons_allocator.sweep_len() {
+            let base = self.cons_allocator.sweep_base_at(work_index);
+            let index = self.cons_block_index_by_base[&base.addr()];
+            let block = &mut self.cons_blocks[index];
+            let mut head = std::ptr::null_mut();
+            let live = block.sweep_generational(&mut head);
+            // SAFETY: stopped eager sweep owns the exact rebuilt list and
+            // retains the block until publication/release below.
+            unsafe {
+                if self.generational.verify {
+                    self.cons_allocator
+                        .publish_generational_verified(block, head, live);
+                } else {
+                    self.cons_allocator.publish_generational(block, head, live);
+                }
+            }
+            new_live += live;
+        }
+        self.cons_live_count = new_live;
+        self.current_mutator_gc_mut().allocated_count = self
+            .current_mutator_gc()
+            .allocated_count
+            .saturating_sub(old_live)
+            .saturating_add(new_live);
+        let _ = self.cons_allocator.take_completed_sweep_freed();
+        let _ = self.cons_allocator.take_empty_candidates();
+        let _ = self.release_empty_cons_blocks();
+        let mapped_live: usize = self
+            .mapped_cons_ranges
+            .iter()
+            .map(MappedConsRange::live_count)
+            .sum();
+        new_live
+            .saturating_add(mapped_live)
+            .saturating_mul(size_of::<ConsCell>())
     }
 
     // Select once for the whole sweep, rather than checking the generation
@@ -1131,10 +1215,12 @@ impl TaggedHeap {
         let old_live = self.cons_live_count;
         let mut new_live = 0;
         let mut released = 0usize;
-        // SAFETY: the collector owns this stopped extent, with regions closed
-        // and the concurrent marker joined before any free list is withheld.
-        unsafe { self.cons_allocator.stopped_world() }
-            .withhold(self.cons_blocks.iter().map(ConsBlockBase::of));
+        if !GENERATIONAL {
+            // SAFETY: GEN0's stopped full sweep owns every closed region.
+            unsafe { self.cons_allocator.stopped_world() }
+                .withhold(self.cons_blocks.iter().map(ConsBlockBase::of));
+        }
+        let verify_generational = GENERATIONAL && self.generational.verify;
 
         // Like GNU's `sweep_conses`, decide each block's fate in this pass.
         // Its private free list is published only for a retained block; an
@@ -1167,6 +1253,17 @@ impl TaggedHeap {
                         block.sweep(&mut head)
                     };
                     if live == 0 {
+                        if GENERATIONAL {
+                            // SAFETY: exact rebuilt list in retained owned storage;
+                            // no mutator runs before immediate unregister/drop.
+                            unsafe {
+                                if verify_generational {
+                                    cons_allocator.publish_generational_verified(block, head, live);
+                                } else {
+                                    cons_allocator.publish_generational(block, head, live);
+                                }
+                            }
+                        }
                         // Unregister before storage is released: no available list
                         // may name cells in a dropped block.
                         if GENERATIONAL {
@@ -1191,7 +1288,17 @@ impl TaggedHeap {
                     } else {
                         // SAFETY: regions are closed and this stopped sweep just
                         // rebuilt exactly the dead cells of a retained owned block.
-                        unsafe { cons_allocator.publish(block, head, live) };
+                        unsafe {
+                            if GENERATIONAL {
+                                if verify_generational {
+                                    cons_allocator.publish_generational_verified(block, head, live);
+                                } else {
+                                    cons_allocator.publish_generational(block, head, live);
+                                }
+                            } else {
+                                cons_allocator.publish(block, head, live);
+                            }
+                        };
                         new_live += live;
                         true
                     }
@@ -1229,6 +1336,10 @@ impl TaggedHeap {
             self.rebuild_card_slot_blocks();
         }
 
+        if GENERATIONAL {
+            let _ = self.cons_allocator.take_completed_sweep_freed();
+            let _ = self.cons_allocator.take_empty_candidates();
+        }
         self.cons_live_count = new_live;
         self.current_mutator_gc_mut().allocated_count = self
             .current_mutator_gc()

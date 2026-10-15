@@ -135,6 +135,62 @@ impl ConsAllocatorOwner {
                 .publish(block, head, live)
         }
     }
+
+    /// Consume the newly freed inventory and reset only completed sweep work,
+    /// preserving every next-minor young flag and registry entry.
+    pub(super) fn take_completed_sweep_freed(&mut self) -> usize {
+        self.0
+            .as_deref_mut()
+            .expect("allocator owner is initialized")
+            .take_completed_sweep_freed()
+    }
+
+    pub(super) fn take_empty_candidates(&mut self) -> Vec<ConsBlockBase> {
+        self.0
+            .as_deref_mut()
+            .expect("allocator owner is initialized")
+            .take_empty_candidates()
+    }
+
+    /// # Safety
+    /// Same exclusive rebuilt-list and retained-storage contract as publish.
+    /// The block must be in this generation's withheld worklist, exactly once.
+    pub(super) unsafe fn publish_generational(
+        &mut self,
+        block: &ConsBlock,
+        head: *mut ConsCell,
+        live: usize,
+    ) {
+        // SAFETY: forward the caller's documented storage/protocol contract
+        // unchanged through this private exclusive owner borrow.
+        unsafe {
+            self.0
+                .as_deref_mut()
+                .expect("allocator owner is initialized")
+                .publish_generational(block, head, live)
+        }
+    }
+
+    /// Verify exact free-node/bitmap agreement BEFORE publication makes the
+    /// list available to another mutator. Never follow links after unlocking.
+    ///
+    /// # Safety
+    /// Same contract as publish_generational, including exclusive free cells.
+    pub(super) unsafe fn publish_generational_verified(
+        &mut self,
+        block: &ConsBlock,
+        head: *mut ConsCell,
+        live: usize,
+    ) {
+        // SAFETY: forward the caller's documented storage/protocol contract
+        // unchanged through this private exclusive owner borrow.
+        unsafe {
+            self.0
+                .as_deref_mut()
+                .expect("allocator owner is initialized")
+                .publish_generational_verified(block, head, live)
+        }
+    }
 }
 
 static_assertions::assert_eq_size!(ConsAllocatorOwner, *mut ConsCell);
@@ -169,6 +225,8 @@ struct BlockFreeState {
     base: ConsBlockBase,
     young: AtomicBool,
     young_log_slot: Option<YoungLogSlot>,
+    old_count: usize,
+    free_before_sweep: Option<usize>,
     head: usize,
     count: usize,
     available_slot: Option<usize>,
@@ -218,6 +276,10 @@ struct AllocatorState {
     /// Work index ONLY. Canonical cold registrations own the actual log Vecs.
     pending_mutators: Vec<YoungRegistrationId>,
     mark_work: Vec<ConsBlockBase>,
+    sweep_work: Vec<ConsBlockBase>,
+    sweep_unvisited_old: usize,
+    sweep_freed: usize,
+    empty_candidates: Vec<ConsBlockBase>,
 }
 
 impl std::fmt::Debug for AllocatorState {
@@ -230,6 +292,10 @@ impl std::fmt::Debug for AllocatorState {
             .field("blocks_with_free", &self.blocks_with_free)
             .field("pending_mutators", &self.pending_mutators)
             .field("mark_work", &self.mark_work)
+            .field("sweep_work", &self.sweep_work)
+            .field("sweep_unvisited_old", &self.sweep_unvisited_old)
+            .field("sweep_freed", &self.sweep_freed)
+            .field("empty_candidates", &self.empty_candidates)
             .finish()
     }
 }
@@ -244,6 +310,10 @@ impl AllocatorState {
             blocks_with_free: Vec::new(),
             pending_mutators: Vec::new(),
             mark_work: Vec::new(),
+            sweep_work: Vec::new(),
+            sweep_unvisited_old: 0,
+            sweep_freed: 0,
+            empty_candidates: Vec::new(),
         }
     }
 
@@ -421,6 +491,8 @@ impl AllocatorState {
             base,
             young: AtomicBool::new(false),
             young_log_slot: None,
+            old_count: 0,
+            free_before_sweep: None,
             head: 0,
             count: 0,
             available_slot: None,
@@ -548,7 +620,6 @@ impl AllocatorState {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(super) fn mark_work_snapshot(&self) -> Vec<ConsBlockBase> {
         self.mark_work.clone()
     }
@@ -627,6 +698,144 @@ impl AllocatorState {
         entry.count = block.next_index as usize - live;
         debug_assert_eq!(head.is_null(), entry.count == 0);
         entry.availability = BlockAvailability::Ready;
+        state.attach_if_ready(slot);
+    }
+
+    pub(super) fn sweep_len(&self) -> usize {
+        self.sweep_work.len()
+    }
+
+    pub(super) fn sweep_base_at(&self, index: usize) -> ConsBlockBase {
+        self.sweep_work[index]
+    }
+
+    pub(super) fn sweep_unvisited_old_cells(&self) -> usize {
+        self.sweep_unvisited_old
+    }
+
+    #[cfg(test)]
+    pub(super) fn sweep_work_snapshot(&self) -> Vec<ConsBlockBase> {
+        self.sweep_work.clone()
+    }
+
+    /// Consume the newly freed inventory and reset only completed sweep work,
+    /// preserving every next-minor young flag and registry entry.
+    pub(super) fn take_completed_sweep_freed(&mut self) -> usize {
+        let state = self;
+        state.sweep_work.clear();
+        state.sweep_unvisited_old = 0;
+        std::mem::take(&mut state.sweep_freed)
+    }
+
+    pub(super) fn take_empty_candidates(&mut self) -> Vec<ConsBlockBase> {
+        std::mem::take(&mut self.empty_candidates)
+    }
+
+    #[cfg(test)]
+    pub(super) fn free_count_for(&self, base: ConsBlockBase) -> Option<usize> {
+        let state = self;
+        state.blocks.get(&base).map(|&slot| state.block(slot).count)
+    }
+
+    /// # Safety
+    /// Same exclusive rebuilt-list and retained-storage contract as publish.
+    /// The block must be in this generation's withheld worklist, exactly once.
+    pub(super) unsafe fn publish_generational(
+        &mut self,
+        block: &ConsBlock,
+        head: *mut ConsCell,
+        live: usize,
+    ) {
+        // SAFETY: forwarded unchanged from this method's caller.
+        unsafe { self.publish_generational_impl::<false>(block, head, live) };
+    }
+
+    /// Verify exact free-node/bitmap agreement BEFORE publication makes the
+    /// list available to another mutator. Never follow links after unlocking.
+    ///
+    /// # Safety
+    /// Same contract as publish_generational, including exclusive free cells.
+    pub(super) unsafe fn publish_generational_verified(
+        &mut self,
+        block: &ConsBlock,
+        head: *mut ConsCell,
+        live: usize,
+    ) {
+        // SAFETY: forwarded unchanged from this method's caller.
+        unsafe { self.publish_generational_impl::<true>(block, head, live) };
+    }
+
+    unsafe fn publish_generational_impl<const VERIFY: bool>(
+        &mut self,
+        block: &ConsBlock,
+        head: *mut ConsCell,
+        live: usize,
+    ) {
+        let used = block.next_index as usize;
+        let free_after = used
+            .checked_sub(live)
+            .expect("sweep live exceeds used cells");
+        debug_assert_eq!(head.is_null(), free_after == 0);
+        if VERIFY {
+            let mut seen = vec![false; used];
+            let mut cursor = head;
+            let mut count = 0;
+            while !cursor.is_null() {
+                assert_eq!(
+                    ConsBlock::block_base_for_ptr(cursor),
+                    block.base_addr(),
+                    "foreign free node"
+                );
+                assert!(
+                    ConsBlock::ptr_is_cell_aligned(cursor),
+                    "unaligned free node"
+                );
+                let index = ConsBlock::index_of_ptr(cursor);
+                assert!(index < used, "free node above high-water mark");
+                assert!(!seen[index], "duplicate free node");
+                assert!(
+                    !block.trailer().is_old(index) && !block.trailer().is_marked(index),
+                    "live cell on free list"
+                );
+                seen[index] = true;
+                count += 1;
+                // SAFETY: the node was range-checked above and caller owns
+                // the rebuilt list exclusively until final publication.
+                cursor = unsafe { (*cursor).free_next() };
+            }
+            assert_eq!(count, free_after, "free-count mismatch");
+            for (index, &listed) in seen.iter().enumerate() {
+                assert_eq!(
+                    listed,
+                    !block.trailer().is_marked(index) && !block.trailer().is_old(index),
+                    "free nodes differ from unmarked non-old bitmap cells"
+                );
+            }
+        }
+        let base = ConsBlockBase::of(block);
+        let state = self;
+        let slot = state.slot(base);
+        state.detach(slot);
+        let entry = state.block_mut(slot);
+        assert_eq!(entry.availability, BlockAvailability::WithheldForSweep);
+        debug_assert_eq!(
+            entry.old_count, live,
+            "withheld block gained unpromoted cells"
+        );
+        let free_before = entry
+            .free_before_sweep
+            .take()
+            .expect("generational block withheld exactly once");
+        let freed = free_after
+            .checked_sub(free_before)
+            .expect("free cells consumed from withheld block");
+        entry.head = head as usize;
+        entry.count = free_after;
+        entry.availability = BlockAvailability::Ready;
+        state.sweep_freed += freed;
+        if live == 0 {
+            state.empty_candidates.push(base);
+        }
         state.attach_if_ready(slot);
     }
 
@@ -836,7 +1045,6 @@ impl ConsAllocator {
         self.with_state_mut(|state, mode| state.note_carve(base, mode, log))
     }
 
-    #[cfg(test)]
     pub(super) fn mark_work_snapshot(&self) -> Vec<ConsBlockBase> {
         self.with_state(|state, _mode| state.mark_work_snapshot())
     }
@@ -903,6 +1111,72 @@ impl ConsAllocator {
             // SAFETY: this metadata loan is exclusive; the caller retains
             // the registered storage and node-ownership contract above.
             unsafe { state.publish(block, head, live) }
+        })
+    }
+
+    pub(super) fn sweep_len(&self) -> usize {
+        self.with_state(|state, _mode| state.sweep_len())
+    }
+
+    pub(super) fn sweep_base_at(&self, index: usize) -> ConsBlockBase {
+        self.with_state(|state, _mode| state.sweep_base_at(index))
+    }
+
+    pub(super) fn sweep_unvisited_old_cells(&self) -> usize {
+        self.with_state(|state, _mode| state.sweep_unvisited_old_cells())
+    }
+
+    #[cfg(test)]
+    pub(super) fn sweep_work_snapshot(&self) -> Vec<ConsBlockBase> {
+        self.with_state(|state, _mode| state.sweep_work_snapshot())
+    }
+
+    /// Consume the newly freed inventory and reset only completed sweep work,
+    /// preserving every next-minor young flag and registry entry.
+    pub(super) fn take_completed_sweep_freed(&mut self) -> usize {
+        self.with_state_mut(|state, _mode| state.take_completed_sweep_freed())
+    }
+
+    pub(super) fn take_empty_candidates(&mut self) -> Vec<ConsBlockBase> {
+        self.with_state_mut(|state, _mode| state.take_empty_candidates())
+    }
+
+    #[cfg(test)]
+    pub(super) fn free_count_for(&self, base: ConsBlockBase) -> Option<usize> {
+        self.with_state(|state, _mode| state.free_count_for(base))
+    }
+
+    /// # Safety
+    /// Same exclusive rebuilt-list and retained-storage contract as publish.
+    /// The block must be in this generation's withheld worklist, exactly once.
+    pub(super) unsafe fn publish_generational(
+        &mut self,
+        block: &ConsBlock,
+        head: *mut ConsCell,
+        live: usize,
+    ) {
+        self.with_state_mut(|state, _mode| {
+            // SAFETY: this metadata loan is exclusive; the caller retains
+            // the registered storage and node-ownership contract above.
+            unsafe { state.publish_generational(block, head, live) }
+        })
+    }
+
+    /// Verify exact free-node/bitmap agreement BEFORE publication makes the
+    /// list available to another mutator. Never follow links after unlocking.
+    ///
+    /// # Safety
+    /// Same contract as publish_generational, including exclusive free cells.
+    pub(super) unsafe fn publish_generational_verified(
+        &mut self,
+        block: &ConsBlock,
+        head: *mut ConsCell,
+        live: usize,
+    ) {
+        self.with_state_mut(|state, _mode| {
+            // SAFETY: this metadata loan is exclusive; the caller retains
+            // the registered storage and node-ownership contract above.
+            unsafe { state.publish_generational_verified(block, head, live) }
         })
     }
 
@@ -989,7 +1263,6 @@ impl SharedConsAllocator<'_> {
         self.with_state_mut(|state, mode| state.note_carve(base, mode, log))
     }
 
-    #[cfg(test)]
     pub(super) fn mark_work_snapshot(&self) -> Vec<ConsBlockBase> {
         self.with_state(|state, _mode| state.mark_work_snapshot())
     }
@@ -1030,6 +1303,72 @@ impl SharedConsAllocator<'_> {
             // SAFETY: this metadata loan is exclusive; the caller retains
             // the registered storage and node-ownership contract above.
             unsafe { state.publish(block, head, live) }
+        })
+    }
+
+    pub(super) fn sweep_len(&self) -> usize {
+        self.with_state(|state, _mode| state.sweep_len())
+    }
+
+    pub(super) fn sweep_base_at(&self, index: usize) -> ConsBlockBase {
+        self.with_state(|state, _mode| state.sweep_base_at(index))
+    }
+
+    pub(super) fn sweep_unvisited_old_cells(&self) -> usize {
+        self.with_state(|state, _mode| state.sweep_unvisited_old_cells())
+    }
+
+    #[cfg(test)]
+    pub(super) fn sweep_work_snapshot(&self) -> Vec<ConsBlockBase> {
+        self.with_state(|state, _mode| state.sweep_work_snapshot())
+    }
+
+    /// Consume the newly freed inventory and reset only completed sweep work,
+    /// preserving every next-minor young flag and registry entry.
+    pub(super) fn take_completed_sweep_freed(&self) -> usize {
+        self.with_state_mut(|state, _mode| state.take_completed_sweep_freed())
+    }
+
+    pub(super) fn take_empty_candidates(&self) -> Vec<ConsBlockBase> {
+        self.with_state_mut(|state, _mode| state.take_empty_candidates())
+    }
+
+    #[cfg(test)]
+    pub(super) fn free_count_for(&self, base: ConsBlockBase) -> Option<usize> {
+        self.with_state(|state, _mode| state.free_count_for(base))
+    }
+
+    /// # Safety
+    /// Same exclusive rebuilt-list and retained-storage contract as publish.
+    /// The block must be in this generation's withheld worklist, exactly once.
+    pub(super) unsafe fn publish_generational(
+        &self,
+        block: &ConsBlock,
+        head: *mut ConsCell,
+        live: usize,
+    ) {
+        self.with_state_mut(|state, _mode| {
+            // SAFETY: this metadata loan is exclusive; the caller retains
+            // the registered storage and node-ownership contract above.
+            unsafe { state.publish_generational(block, head, live) }
+        })
+    }
+
+    /// Verify exact free-node/bitmap agreement BEFORE publication makes the
+    /// list available to another mutator. Never follow links after unlocking.
+    ///
+    /// # Safety
+    /// Same contract as publish_generational, including exclusive free cells.
+    pub(super) unsafe fn publish_generational_verified(
+        &self,
+        block: &ConsBlock,
+        head: *mut ConsCell,
+        live: usize,
+    ) {
+        self.with_state_mut(|state, _mode| {
+            // SAFETY: this metadata loan is exclusive; the caller retains
+            // the registered storage and node-ownership contract above.
+            unsafe { state.publish_generational_verified(block, head, live) }
         })
     }
 
@@ -1136,6 +1475,10 @@ impl ConsStopAll<'_> {
         **storage = AllocatorStorage::Admitted(Mutex::new(state));
     }
 
+    pub(super) fn capture_work_snapshot(&self) -> Vec<ConsBlockBase> {
+        self.state.mark_work.clone()
+    }
+
     /// Snapshot the current minor's mark work; flags remain SET until promotion.
     /// The owned return lets the heap drop this lock before marking blocks.
     pub(super) fn capture_minor(
@@ -1161,26 +1504,35 @@ impl ConsStopAll<'_> {
         self.state.unregister_stopped(base, logs)
     }
 
-    /// This is the ONLY young-flag clear site. Called immediately after all
-    /// promotion, still stopped. Stage 2 records flags without selecting sweep
-    /// work, so existing full-sweep withholding remains separate. Stage 3 will
-    /// move mark_work into sweep_work here and withhold its lists atomically.
-    ///
-    /// Pending logs also cover a major, whose young set includes allocations
-    /// performed while its worker marked. Flags clear at major TERMINATION,
-    /// never at sweep completion, preserving later sweep-window carves.
+    /// Update a young work block's cached old count without scanning old bits.
+    pub(super) fn record_minor_promoted(&mut self, base: ConsBlockBase, promoted: usize) {
+        self.state.block_for_base_mut(base).old_count += promoted;
+    }
+
+    /// Majors replace old bits with actual liveness, including dead old cells.
+    pub(super) fn record_major_old_count(&mut self, base: ConsBlockBase, old_count: usize) {
+        self.state.block_for_base_mut(base).old_count = old_count;
+    }
+
+    /// Clear flags and detach lists in the SAME stopped-world handoff, directly
+    /// after promotion. Later carves belong solely to the next minor. Sweep and
+    /// ordinary publication never change flags.
     pub(super) fn finish_promotion(
         &mut self,
+        cycle: super::generational::GenerationCycle,
+        all_blocks: &[ConsBlock],
+        total_old: usize,
         logs: &mut StoppedYoungLogs<'_>,
     ) -> Result<(), YoungRegistryError> {
+        use super::generational::GenerationCycle;
         self.state.ensure_young_registry(logs)?;
-        // Preserve stage2: flags are tracked/cleared but do not select mark or
-        // sweep work. Full-sweep withholding remains its existing separate call.
+        // Domain/refusal preflight comes before consuming current mark work.
         let pending = self.state.take_pending_young(logs)?;
-        let mut promoted = std::mem::take(&mut self.state.mark_work);
-        promoted.extend(pending);
-        for base in promoted {
-            let block = self.state.block_for_base_mut(base);
+        let mark_work = std::mem::take(&mut self.state.mark_work);
+        // Major termination includes every concurrent-window carve, including
+        // allocations from workers whose registry entries outlive thread exit.
+        for base in mark_work.iter().chain(pending.iter()) {
+            let block = self.state.block_for_base_mut(*base);
             debug_assert!(block.young.load(Ordering::Relaxed));
             #[cfg(test)]
             if test_fault_is(ConsAllocatorFault::KeepFlagAfterPromotion) {
@@ -1188,10 +1540,39 @@ impl ConsStopAll<'_> {
             }
             block.young.store(false, Ordering::Relaxed);
         }
+        self.state.sweep_work = match cycle {
+            GenerationCycle::Minor => {
+                assert!(
+                    pending.is_empty(),
+                    "mutator carved during stopped minor marking"
+                );
+                mark_work
+            }
+            GenerationCycle::Major => all_blocks.iter().map(ConsBlockBase::of).collect(),
+        };
+        self.state.sweep_freed = 0;
+        self.state.empty_candidates.clear();
+        let mut work_old = 0;
+        // Keep bases stable until every sweep cursor drains. Detach uses the
+        // indexed available stack: O(work), never a full free-block search.
+        for index in 0..self.state.sweep_work.len() {
+            let base = self.state.sweep_work[index];
+            let slot = self.state.slot(base);
+            self.state.detach(slot);
+            let block = self.state.block_mut(slot);
+            work_old += block.old_count;
+            block.free_before_sweep = Some(block.count);
+            block.head = 0;
+            block.count = 0;
+            block.availability = BlockAvailability::WithheldForSweep;
+        }
+        self.state.sweep_unvisited_old = total_old
+            .checked_sub(work_old)
+            .expect("old work count exceeds total");
         Ok(())
     }
 
-    /// Existing full sweep entry uses this in stage 2; O(worklist length).
+    /// GEN0 full sweep withholding; GEN1 uses the promotion handoff.
     pub(super) fn withhold(&mut self, bases: impl IntoIterator<Item = ConsBlockBase>) {
         for base in bases {
             let slot = self.state.slot(base);
@@ -1200,6 +1581,20 @@ impl ConsStopAll<'_> {
             block.head = 0;
             block.count = 0;
             block.availability = BlockAvailability::WithheldForSweep;
+        }
+    }
+
+    /// Deliberately model the rejected late-clear race. Test-only mutation
+    /// still requires a real stop-all guard; production has no late-clear API.
+    #[cfg(test)]
+    pub(super) fn apply_late_clear_mutation_for_test(&mut self) {
+        if test_fault_is(ConsAllocatorFault::ClearNextFlagAtSweepCompletion) {
+            for base in &self.state.sweep_work {
+                self.state
+                    .block_for_base(*base)
+                    .young
+                    .store(false, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1286,7 +1681,7 @@ impl ConsStopAll<'_> {
                 // SAFETY: this guard proves stopped mutators/closed regions,
                 // and its caller retains every listed block's storage.
                 let cell = unsafe { &*block.cells_ptr().add(index) };
-                if cell.car.bits() != TaggedValue::DEAD.bits() && !block.trailer().is_old(index) {
+                if !cell.car.is_dead() && !block.trailer().is_old(index) {
                     assert!(
                         metadata.young.load(Ordering::Relaxed),
                         "allocated young cell missing flag"
@@ -1312,6 +1707,11 @@ impl ConsStopAll<'_> {
     fn verify_stale_marks(&self, blocks: &[ConsBlock]) {
         for block in blocks {
             let metadata = self.state.block_for_base(ConsBlockBase::of(block));
+            assert_eq!(
+                metadata.old_count,
+                block.count_old(),
+                "cached old count differs from bitmap"
+            );
             if !metadata.young.load(Ordering::Relaxed) {
                 for index in 0..block.next_index as usize {
                     assert!(
@@ -1332,6 +1732,7 @@ pub(super) enum ConsAllocatorFault {
     SkipCarveRecording,
     KeepFlagAfterPromotion,
     CorruptAvailable,
+    ClearNextFlagAtSweepCompletion,
 }
 
 #[cfg(test)]

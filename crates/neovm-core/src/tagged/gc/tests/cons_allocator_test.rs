@@ -323,6 +323,8 @@ fn cons_allocator_dense_slots_reuse_identity_after_unlink_and_withhold() {
             let entry = state.block(removed_slot);
             assert!(!entry.young.load(Ordering::Relaxed));
             assert_eq!(entry.young_log_slot, None);
+            assert_eq!(entry.old_count, 0);
+            assert_eq!(entry.free_before_sweep, None);
             assert_eq!(entry.head, 0);
             assert_eq!(entry.count, 0);
             assert_eq!(entry.available_slot, None);
@@ -371,6 +373,7 @@ fn sole_allocator_admission_preserves_free_run_inventory() {
     }
     let slot = allocator.with_state(|state, _| state.slot(base));
     assert_eq!(allocator.free_count(), 5);
+    assert!(allocator.sweep_work_snapshot().is_empty());
     // SAFETY: a stopped fixture owns every cell and has no marker or worker.
     unsafe { allocator.stopped_world() }.admit_threads();
     assert!(allocator.threads_admitted());
@@ -405,8 +408,8 @@ fn sole_allocator_stop_all_unwind_is_poisoned() {
 }
 
 // Additional C2 canonical-registry regressions. This is an UNCOMPILED scratch
-// extension layered AFTER the canonical C2 fixture migration; production and
-// all previously delivered patches remain unchanged.
+// extension projected onto actual C3 with complete sweep obligations; production
+// and all previously delivered C2 patches remain unchanged.
 fn canonical_fixture_mode(allocator: &mut ConsAllocator, mode: AllocatorAccessMode) {
     match mode {
         AllocatorAccessMode::Sole => {}
@@ -695,7 +698,7 @@ fn cons_allocator_canonical_unlinks_swapped_owner_positions_before_base_reuse() 
                 );
                 assert!(!work.contains(&bases[1]));
                 // Every run was completely refunded: actual promotion has no live
-                // young cell. This is the real C2 flags-only post-promotion handoff.
+                // young cell. C3 additionally hands off and withholds sweep work.
                 for base in &work {
                     let block = blocks
                         .iter_mut()
@@ -703,9 +706,49 @@ fn cons_allocator_canonical_unlinks_swapped_owner_positions_before_base_reuse() 
                         .unwrap();
                     assert_eq!(block.promote_marked_world_stopped(), 0);
                 }
-                stopped.finish_promotion(logs).unwrap();
+                stopped
+                    .finish_promotion(
+                        super::super::generational::GenerationCycle::Minor,
+                        &blocks,
+                        0,
+                        logs,
+                    )
+                    .unwrap();
                 assert!(stopped.state.mark_work.is_empty());
                 assert!(stopped.state.pending_mutators.is_empty());
+                stopped.verify_registry(logs).unwrap();
+                let sweep_work = stopped.state.sweep_work.clone();
+                assert_eq!(sweep_work, work);
+                // Release metadata access before publication reacquires it.
+                // The outer canonical world still excludes every mutator.
+                drop(stopped);
+                for base in &sweep_work {
+                    let block = blocks
+                        .iter_mut()
+                        .find(|block| ConsBlockBase::of(block) == *base)
+                        .unwrap();
+                    let mut head = std::ptr::null_mut();
+                    let live = block.sweep_generational(&mut head);
+                    assert_eq!(live, 0);
+                    // SAFETY: every grant was fully refunded, no worker runs,
+                    // storage is owned and this withheld list was rebuilt exactly.
+                    unsafe { allocator.publish_generational_verified(block, head, live) };
+                }
+                assert_eq!(allocator.take_completed_sweep_freed(), 0);
+                let candidates = allocator.take_empty_candidates();
+                assert_eq!(
+                    candidates
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::HashSet<_>>(),
+                    sweep_work
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::HashSet<_>>()
+                );
+                // SAFETY: SAME physical stop-all, all sweep visits completed,
+                // metadata accounting consumed, no region/worker/marker exists.
+                let mut stopped = unsafe { allocator.stopped_world() };
                 stopped.verify_registry(logs).unwrap();
                 for base in &bases {
                     // A1 is already absent; all remaining canonical links must be

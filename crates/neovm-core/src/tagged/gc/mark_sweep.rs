@@ -136,8 +136,15 @@ impl TaggedHeap {
         let partitioned = self.partition_dump && self.dump_blackened;
 
         // -- Clear marks (heap cons) --
-        for block in &mut self.cons_blocks {
-            block.clear_marks();
+        if self.generational.enabled && self.is_minor_collection() {
+            for base in self.cons_allocator.mark_work_snapshot() {
+                let index = self.cons_block_index_by_base[&base.addr()];
+                self.cons_blocks[index].clear_marks();
+            }
+        } else {
+            for block in &mut self.cons_blocks {
+                block.clear_marks();
+            }
         }
         let clear_cons_done = std::time::Instant::now();
         // -- Mapped (pdump) marks: permanent black region when partitioned --
