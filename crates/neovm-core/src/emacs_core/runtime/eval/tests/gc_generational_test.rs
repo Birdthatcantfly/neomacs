@@ -183,7 +183,7 @@ fn compiled_old_cons_stores_remember_young_children_each_cycle() {
         let context_ptr = &mut context as *mut Context as *mut u8;
         let result = leaf.call(context_ptr, &[owner, child]);
         assert!(matches!(result, NativeRun::Ok(bits) if Value::from_bits(bits) == child));
-        assert_eq!(context.tagged_heap.remembered_log_len_for_test(), 1);
+        assert!(context.tagged_heap.owner_card_is_dirty_for_test(owner));
         context.restore_specpdl_roots(child_roots);
 
         run_minor(&mut context);
@@ -195,6 +195,6 @@ fn compiled_old_cons_stores_remember_young_children_each_cycle() {
         assert_eq!(stored, child);
         assert_eq!(stored.cons_car(), Value::fixnum(71 + index as i64));
         assert!(context.tagged_heap.value_is_old_for_test(stored));
-        assert_eq!(context.tagged_heap.remembered_log_len_for_test(), 0);
+        assert!(!context.tagged_heap.owner_card_is_dirty_for_test(owner));
     }
 }
