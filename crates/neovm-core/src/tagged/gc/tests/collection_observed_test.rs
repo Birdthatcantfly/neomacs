@@ -117,9 +117,7 @@ fn gen1_sweep_preserves_untraced_old_and_marked_young_cons_observations() {
         assert!(mark_collection_observed(bits));
     }
     block.trailer().set_old(0);
-    block.trailer().set_unlogged(0);
     block.trailer().set_old(63);
-    block.trailer().set_unlogged(63);
     block.mark_cell_offset(std::mem::size_of::<ConsCell>());
     block.mark_cell_offset(64 * std::mem::size_of::<ConsCell>());
     let live = [0, 1, 63, 64];
@@ -129,9 +127,7 @@ fn gen1_sweep_preserves_untraced_old_and_marked_young_cons_observations() {
         assert_eq!(collection_observed(bits), live.contains(&index));
     }
     assert!(block.trailer().is_old(0));
-    assert!(block.trailer().is_unlogged(0));
     assert!(block.trailer().is_old(63));
-    assert!(block.trailer().is_unlogged(63));
 }
 
 #[test]

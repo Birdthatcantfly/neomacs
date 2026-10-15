@@ -3,7 +3,7 @@
 //! and P3.1).
 //!
 //! * the `GcHeader` byte map, including the sticky collection-observed byte;
-//! * the cons-block trailer (the mark bitmap after the cells);
+//! * the cons-block trailer (the mark bitmap and age bytes after the cells);
 //! * a float's value word and slot stride;
 //! * the `JitHeapState` words (allocation cursors, barrier window);
 //! * the GEN1 card table's published base and index geometry;
@@ -17,8 +17,8 @@ use std::mem::{offset_of, size_of};
 
 pub(crate) use crate::tagged::gc::{
     CARD_CHUNK_SHIFT, CARD_DIRTY, CARD_INDEX_MASK, CARD_SHIFT, CHUNK_SUMMARY_OFFSET,
-    CONS_BLOCK_BYTES, CONS_BLOCK_CELLS, CONS_MARK_WORDS, CONS_MARKS_OFFSET, CONS_OLD_OFFSET,
-    FLOAT_SLOT_BYTES, HEAP_JIT_BARRIER_LEN, HEAP_JIT_BARRIER_LO, HEAP_JIT_CARD_TABLE,
+    CONS_AGE_OFFSET, CONS_BLOCK_BYTES, CONS_BLOCK_CELLS, CONS_MARK_WORDS, CONS_MARKS_OFFSET,
+    ConsAge, FLOAT_SLOT_BYTES, HEAP_JIT_BARRIER_LEN, HEAP_JIT_BARRIER_LO, HEAP_JIT_CARD_TABLE,
     HEAP_JIT_CONS_CUR, HEAP_JIT_CONS_LIM, HEAP_JIT_EXCLUSION_LEN, HEAP_JIT_EXCLUSION_LO,
     HEAP_JIT_FLOAT_CUR, HEAP_JIT_FLOAT_LIM, HEAP_JIT_SINGLE_CONS, HEAP_JIT_SLOT_BARRIER_LEN,
     HEAP_JIT_SLOT_BARRIER_LO,
@@ -111,6 +111,10 @@ const _: () = {
     // The cons-block trailer: the mark words sit right after the cells,
     // inside the block.
     assert!(CONS_MARKS_OFFSET + CONS_MARK_WORDS * size_of::<usize>() <= CONS_BLOCK_BYTES);
+    // ... then the old bitmap and one age byte per cell, which GEN1 stores
+    // test.
+    assert!(CONS_AGE_OFFSET == CONS_MARKS_OFFSET + 2 * CONS_MARK_WORDS * size_of::<u64>());
+    assert!(CONS_AGE_OFFSET + CONS_BLOCK_CELLS <= CONS_BLOCK_BYTES);
     assert!(CONS_BLOCK_BYTES.is_power_of_two());
     assert!(CONS_BLOCK_CELLS > 0);
 };

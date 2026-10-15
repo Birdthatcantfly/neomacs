@@ -204,26 +204,31 @@ fn old_box_owner_logs_without_a_card() {
 }
 
 #[test]
-fn verify_mode_rejects_a_logged_owner_with_a_clean_card() {
+fn verify_mode_rejects_an_old_cons_edge_with_a_clean_card() {
     let mut heap = verified_heap();
     set_tagged_heap(&mut heap);
     let roots = ScratchRoots::new();
     let owner = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
     roots.keep(owner);
     minor(&mut heap, &[owner]);
+    assert!(heap.value_is_old_for_test(owner));
     let child = heap.alloc_cons(TaggedValue::T, TaggedValue::NIL);
-    // A cons the window path logged (a concurrent mark, tracking) marks its
-    // card too; the minor would reach it only through that card.
+    // The window path remembers an old cons by its card alone; the minor
+    // would reach the young child only through that card.
     heap.remember_owner(owner);
     unsafe { (*(owner.xcons_ptr() as *mut ConsCell)).set_car(child) };
-    assert_eq!(heap.current_mutator_gc().remset, [owner]);
+    assert!(heap.current_mutator_gc().remset.is_empty());
+    assert!(heap.owner_card_is_dirty_for_test(owner));
     heap.card_table()
-        .expect("logging built the table")
+        .expect("GEN1 built the table")
         .clear(card_addr(owner));
     heap.begin_minor_collection();
     heap.seed_root(owner);
+    // A second root keeps the child marked, so the missed-child check passes
+    // and the card check alone must reject the edge the next minor would miss.
+    heap.seed_root(child);
     let panic = catch_unwind(AssertUnwindSafe(|| heap.complete_minor_collection()))
-        .expect_err("a logged owner with a clean card must fail verification");
+        .expect_err("an old cons edge behind a clean card must fail verification");
     let message = panic
         .downcast_ref::<String>()
         .map(String::as_str)

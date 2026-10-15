@@ -330,32 +330,34 @@ pub(crate) fn emit_cons_store_barrier(
     GENERATIONAL_CARD_MARKS_EMITTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The old bit of the untagged, owned OWNER cell in its block trailer's old
-/// bitmap (nonzero when old). Old bits change only at a stop-all promotion,
-/// which a safe point inside this leaf may run, so the word is reloaded at
-/// every store. Mapped cells never get here: the window refused them.
+/// The age byte of the untagged, owned OWNER cell in its block trailer
+/// (nonzero when old): one byte load at the cell's index past the age
+/// offset. Ages change only at a stop-all promotion, which a safe point
+/// inside this leaf may run, so the byte is reloaded at every store. Mapped
+/// cells never get here: the window refused them.
 fn emit_cons_old_bit(fb: &mut FunctionBuilder, owner: ClifValue) -> ClifValue {
-    use super::jit_layout::heap::{CONS_BLOCK_BYTES, CONS_OLD_OFFSET};
+    use super::jit_layout::heap::{CONS_AGE_OFFSET, CONS_BLOCK_BYTES, ConsAge};
+    // A block is 64 KiB, so the cell's block offset is the owner's low half
+    // word: one zero-extending move instead of a copy and a mask.
+    const _: () = assert!(CONS_BLOCK_BYTES == 1 << u16::BITS);
     let base = band_imm_p(fb, owner, !((CONS_BLOCK_BYTES - 1) as i64));
-    let offset = fb.ins().isub(owner, base);
+    let low = fb.ins().ireduce(types::I16, owner);
+    let offset = fb.ins().uextend(types::I64, low);
     let index = ushr_imm_p(
         fb,
         offset,
         std::mem::size_of::<ConsCell>().trailing_zeros() as i64,
     );
-    let word = ushr_imm_p(fb, index, u64::BITS.trailing_zeros() as i64);
-    let word_bytes = ishl_imm_p(fb, word, std::mem::size_of::<u64>().trailing_zeros() as i64);
-    let address = fb.ins().iadd(base, word_bytes);
-    let bits = fb.ins().load(
-        types::I64,
+    let address = fb.ins().iadd(base, index);
+    let age = fb.ins().load(
+        types::I8,
         MemFlagsData::trusted(),
         address,
-        CONS_OLD_OFFSET as i32,
+        CONS_AGE_OFFSET as i32,
     );
-    // Cranelift 0.134.3 defines ushr's shift amount modulo the operand width,
-    // so the I64 shift already selects index modulo 64 within this word.
-    let shifted = fb.ins().ushr(bits, index);
-    band_imm_p(fb, shifted, 1)
+    // A compare against the young age lets the load fold into it.
+    fb.ins()
+        .icmp_imm_u(IntCC::NotEqual, age, i64::from(ConsAge::Young as u8))
 }
 
 /// Mark the GEN1 card of the untagged OWNER in HEAP's card table,

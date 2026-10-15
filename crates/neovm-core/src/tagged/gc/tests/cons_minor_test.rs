@@ -46,7 +46,6 @@ fn minor_sweep_keeps_unmarked_old_cells_and_marked_young_cells() {
     fill(&mut block, 132);
     for index in [0, 64, 131] {
         block.trailer().set_old(index);
-        block.trailer().set_unlogged(index);
     }
     // The overlapping mark/old bit must count only once.
     for index in [0, 1, 65] {
@@ -66,7 +65,6 @@ fn minor_sweep_keeps_unmarked_old_cells_and_marked_young_cells() {
     }
     for index in expected_free {
         assert!(!block.trailer().is_old(index));
-        assert!(!block.trailer().is_unlogged(index));
     }
 }
 
@@ -85,15 +83,12 @@ fn bitmap_promotion_counts_each_new_old_cell_once_across_words() {
     // closures: the exclusive extent required for promotion/reset.
     assert_eq!(block.promote_marked_world_stopped(), 2);
     assert_eq!(block.count_live_generational(), 4);
-    assert!(block.trailer().try_claim_unlogged(1));
     assert_eq!(block.promote_marked_world_stopped(), 0);
-    assert!(block.trailer().is_unlogged(1));
     block.clear_marks();
     assert_eq!(block.count_marked(), 0);
     assert_eq!(block.count_live_generational(), 4);
     for index in [1, 64, 65, CONS_BLOCK_SIZE - 1] {
         assert!(block.trailer().is_old(index));
-        assert!(block.trailer().is_unlogged(index));
     }
 }
 

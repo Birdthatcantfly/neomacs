@@ -1746,11 +1746,12 @@ impl TaggedHeap {
                     self.current_mutator_gc_mut().remset.push(owner);
                 }
             } else if owner.is_cons() {
-                if !major_mark
-                    && let Some((trailer, index)) = self.old_cons_trailer(owner)
-                    && trailer.try_claim_unlogged(index)
+                // An old owned cons is remembered by its card alone, as
+                // compiled stores do; the minor traces its dirty cards.
+                if self
+                    .old_cons_trailer(owner)
+                    .is_some_and(|(trailer, index)| trailer.age_is_old(index))
                 {
-                    self.current_mutator_gc_mut().remset.push(owner);
                     self.mark_owner_card(owner.xcons_ptr() as usize);
                 }
             } else if let Some(addr) = Self::value_heap_addr(owner) {
@@ -2820,8 +2821,8 @@ mod cons_blocks;
 /// The cons-block trailer's shape, for `jit_layout::heap`.
 #[cfg_attr(not(feature = "jit"), allow(unused_imports))]
 pub(crate) use cons_block_trailer::{
-    CONS_BLOCK_BYTES, CONS_BLOCK_SIZE as CONS_BLOCK_CELLS, CONS_MARK_WORDS, CONS_MARKS_OFFSET,
-    CONS_OLD_OFFSET,
+    CONS_AGE_OFFSET, CONS_BLOCK_BYTES, CONS_BLOCK_SIZE as CONS_BLOCK_CELLS, CONS_MARK_WORDS,
+    CONS_MARKS_OFFSET, ConsAge,
 };
 use cons_blocks::*;
 
@@ -2956,6 +2957,9 @@ fn maybe_resize_for_test(ht: &mut crate::emacs_core::value::LispHashTable) {
     }
 }
 
+#[cfg(test)]
+#[path = "gc/tests/age_mirror_test.rs"]
+mod age_mirror_tests;
 #[cfg(test)]
 #[path = "gc/tests/card_table_test.rs"]
 mod card_table_tests;

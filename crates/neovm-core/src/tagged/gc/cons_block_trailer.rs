@@ -2,7 +2,7 @@
 //! Watch bits belong in a side table, never in this trailer.
 
 use super::{ConsCell, size_of};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 pub(crate) const CONS_BLOCK_BYTES: usize = 64 * 1024;
 pub(super) const CONS_MARK_BITS_PER_WORD: usize = usize::BITS as usize;
@@ -11,10 +11,13 @@ pub(super) const fn cons_mark_words(cells: usize) -> usize {
     cells.div_ceil(CONS_MARK_BITS_PER_WORD)
 }
 
+/// Each mark word covers 64 cells, which own a mark bit, an old bit and an
+/// age byte each; the age bytes are padded to whole words.
 const fn cell_count() -> usize {
     let mut cells = CONS_BLOCK_BYTES / size_of::<ConsCell>();
     while cells * size_of::<ConsCell>()
-        + cons_mark_words(cells) * (size_of::<AtomicUsize>() + 2 * size_of::<AtomicU64>())
+        + cons_mark_words(cells)
+            * (size_of::<AtomicUsize>() + size_of::<AtomicU64>() + CONS_MARK_BITS_PER_WORD)
         > CONS_BLOCK_BYTES
     {
         cells -= 1;
@@ -26,10 +29,42 @@ pub(crate) const CONS_BLOCK_SIZE: usize = cell_count();
 pub(crate) const CONS_MARK_WORDS: usize = cons_mark_words(CONS_BLOCK_SIZE);
 pub(super) const CONS_CELLS_BYTES: usize = CONS_BLOCK_SIZE * size_of::<ConsCell>();
 pub(crate) const CONS_MARKS_OFFSET: usize = CONS_CELLS_BYTES;
-pub(crate) const CONS_OLD_OFFSET: usize =
+pub(super) const CONS_OLD_OFFSET: usize =
     CONS_MARKS_OFFSET + CONS_MARK_WORDS * size_of::<AtomicUsize>();
-pub(crate) const CONS_UNLOGGED_OFFSET: usize =
+pub(crate) const CONS_AGE_OFFSET: usize =
     CONS_OLD_OFFSET + CONS_MARK_WORDS * size_of::<AtomicU64>();
+const CONS_AGE_BYTES: usize = CONS_MARK_WORDS * CONS_MARK_BITS_PER_WORD;
+/// Age bytes written as one word, eight cells at a time.
+const AGE_LANE_CELLS: usize = size_of::<u64>();
+const AGE_LANES_PER_WORD: usize = CONS_MARK_BITS_PER_WORD / AGE_LANE_CELLS;
+
+/// A cell's age byte, the per-cell mirror of its old bit. Compiled GEN1
+/// stores test it with one byte load; the collector keeps working on whole
+/// old-bitmap words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum ConsAge {
+    Young = 0,
+    Old = 1,
+}
+
+/// `SPREAD_AGES[b]` has byte i set to `ConsAge::Old` exactly where bit i of
+/// `b` is set: eight cells' old bits as eight age bytes.
+const SPREAD_AGES: [u64; 256] = {
+    let mut table = [0u64; 256];
+    let mut bits = 0;
+    while bits < 256 {
+        let mut cell = 0;
+        while cell < AGE_LANE_CELLS {
+            if bits >> cell & 1 != 0 {
+                table[bits] |= (ConsAge::Old as u64) << (cell * 8);
+            }
+            cell += 1;
+        }
+        bits += 1;
+    }
+    table
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ConsMarkBit {
@@ -37,11 +72,15 @@ pub(super) struct ConsMarkBit {
     pub(super) mask: usize,
 }
 
+/// The old bitmap is the collector's view of age; the age bytes mirror it
+/// cell by cell for the mutator's store test. Both change together and only
+/// at a stop-all promotion with the marker joined, so the word-wide writes
+/// of the mirror never race with a byte read.
 #[repr(C)]
 pub(super) struct ConsBlockTrailer {
     mark: [AtomicUsize; CONS_MARK_WORDS],
     old: [AtomicU64; CONS_MARK_WORDS],
-    unlogged: [AtomicU64; CONS_MARK_WORDS],
+    age: [AtomicU8; CONS_AGE_BYTES],
 }
 
 // The generation methods land with the layout, ahead of their C2.4/C2.5 users.
@@ -165,15 +204,6 @@ impl ConsBlockTrailer {
     }
 
     #[inline]
-    fn generation_bit(index: usize) -> (usize, u64) {
-        debug_assert!(index < CONS_BLOCK_SIZE);
-        (
-            index / u64::BITS as usize,
-            1u64 << (index % u64::BITS as usize),
-        )
-    }
-
-    #[inline]
     fn old_atomic(&self, word_index: usize) -> &AtomicU64 {
         debug_assert!(word_index < CONS_MARK_WORDS);
         // SAFETY: the word index belongs to this live block's cells.
@@ -181,10 +211,22 @@ impl ConsBlockTrailer {
     }
 
     #[inline]
-    fn unlogged_atomic(&self, word_index: usize) -> &AtomicU64 {
-        debug_assert!(word_index < CONS_MARK_WORDS);
-        // SAFETY: the word index belongs to this live block's cells.
-        unsafe { self.unlogged.get_unchecked(word_index) }
+    fn age(&self, index: usize) -> &AtomicU8 {
+        debug_assert!(index < CONS_AGE_BYTES);
+        // SAFETY: the index belongs to this live block's cells or the
+        // padding of their last word.
+        unsafe { self.age.get_unchecked(index) }
+    }
+
+    /// The age bytes of `lane` of mark word `word_index` as one word.
+    #[inline]
+    fn age_lane(&self, word_index: usize, lane: usize) -> &AtomicU64 {
+        debug_assert!(word_index < CONS_MARK_WORDS && lane < AGE_LANES_PER_WORD);
+        let first = word_index * CONS_MARK_BITS_PER_WORD + lane * AGE_LANE_CELLS;
+        // SAFETY: the eight bytes lie inside `age`, word-aligned (asserted
+        // below). The mirror is written only at a stop-all promotion, so a
+        // word-wide access never races with a byte access.
+        unsafe { AtomicU64::from_ptr(self.age.as_ptr().add(first).cast::<u64>().cast_mut()) }
     }
 
     #[inline]
@@ -192,84 +234,129 @@ impl ConsBlockTrailer {
         self.old_atomic(word_index).load(Ordering::Relaxed)
     }
 
-    #[inline]
-    pub(super) fn unlogged_word(&self, word_index: usize) -> u64 {
-        self.unlogged_atomic(word_index).load(Ordering::Relaxed)
-    }
-
+    /// The collector's test: one word covers 64 cells, so its scans and
+    /// marking stay as dense in cache as before the mirror.
     #[inline]
     pub(super) fn is_old(&self, index: usize) -> bool {
-        let (word, mask) = Self::generation_bit(index);
-        self.old_word(word) & mask != 0
+        let bit = Self::mark_bit(index);
+        self.old_word(bit.word_index) & bit.mask as u64 != 0
     }
 
+    /// The mutator's test, as compiled stores make it: one byte load from
+    /// the mirror, which always equals the old bit while a mutator runs.
     #[inline]
-    pub(super) fn is_unlogged(&self, index: usize) -> bool {
-        let (word, mask) = Self::generation_bit(index);
-        self.unlogged_word(word) & mask != 0
+    pub(super) fn age_is_old(&self, index: usize) -> bool {
+        debug_assert!(index < CONS_BLOCK_SIZE);
+        self.age(index).load(Ordering::Relaxed) != ConsAge::Young as u8
     }
 
-    #[inline]
+    /// Test setup only: production age changes are the two promotions,
+    /// so no other writer can bypass the mirror. Writes both copies.
+    #[cfg(test)]
     pub(super) fn set_old(&self, index: usize) {
-        let (word, mask) = Self::generation_bit(index);
-        self.old_atomic(word).fetch_or(mask, Ordering::Relaxed);
+        let bit = Self::mark_bit(index);
+        self.old_atomic(bit.word_index)
+            .fetch_or(bit.mask as u64, Ordering::Relaxed);
+        self.age(index).store(ConsAge::Old as u8, Ordering::Relaxed);
     }
 
-    #[inline]
+    /// Test setup only, as `set_old`. Writes both copies.
+    #[cfg(test)]
     pub(super) fn clear_old(&self, index: usize) {
-        let (word, mask) = Self::generation_bit(index);
-        self.old_atomic(word).fetch_and(!mask, Ordering::Relaxed);
+        let bit = Self::mark_bit(index);
+        self.old_atomic(bit.word_index)
+            .fetch_and(!(bit.mask as u64), Ordering::Relaxed);
+        self.age(index)
+            .store(ConsAge::Young as u8, Ordering::Relaxed);
     }
 
+    /// Write mirror lane `lane` of mark word `word_index` from old bits OLD.
+    /// Called only by the two stop-all promotions.
     #[inline]
-    pub(super) fn set_unlogged(&self, index: usize) {
-        let (word, mask) = Self::generation_bit(index);
-        self.unlogged_atomic(word).fetch_or(mask, Ordering::Relaxed);
+    fn store_age_lane(&self, word_index: usize, lane: usize, old: u64) {
+        let bits = (old >> (lane * AGE_LANE_CELLS)) as u8;
+        self.age_lane(word_index, lane)
+            .store(SPREAD_AGES[bits as usize], Ordering::Relaxed);
     }
 
-    /// Claim one owner's logging responsibility without losing adjacent bits
-    /// to a concurrent update of the same bitmap word.
-    #[inline]
-    pub(super) fn try_claim_unlogged(&self, index: usize) -> bool {
-        let (word, mask) = Self::generation_bit(index);
-        self.unlogged_atomic(word)
-            .fetch_and(!mask, Ordering::Relaxed)
-            & mask
-            != 0
+    /// Whether the age bytes agree with the old bitmap (GEN1 verify).
+    pub(super) fn ages_match_old_bits(&self) -> bool {
+        (0..CONS_MARK_WORDS).all(|word| {
+            let old = self.old_word(word);
+            (0..AGE_LANES_PER_WORD).all(|lane| {
+                self.age_lane(word, lane).load(Ordering::Relaxed)
+                    == SPREAD_AGES[(old >> (lane * AGE_LANE_CELLS)) as u8 as usize]
+            })
+        })
     }
 
     /// Stop-all handshake required: the marker must be joined and every
-    /// mutation extent and allocation region closed before promotion/reset.
-    /// There are no concurrent bit updates to merge while these stores run.
+    /// mutation extent and allocation region closed before promotion.
     /// Return only newly-old cells, so repeated promotions never charge the
     /// old-generation accounting for a cell twice.
+    ///
+    /// One of the two writers of cons age (with `promote_major_world_stopped`):
+    /// both run only at stop-all, so the bitmap and its age-byte mirror change
+    /// together while no mutator can read either. Lanes without a newly-old
+    /// cell keep their bytes.
     #[cold]
     #[inline(never)]
     pub(super) fn promote_marked_world_stopped(&self, cells: usize) -> usize {
         let mut promoted = 0usize;
         for w in 0..cons_mark_words(cells) {
-            let previous_old = self.old_word(w);
             let marked = self.mark_word(w).load(Ordering::Relaxed) as u64;
-            promoted += (marked & !previous_old).count_ones() as usize;
+            let previous_old = self.old_word(w);
+            let newly_old = marked & !previous_old;
+            if newly_old == 0 {
+                continue;
+            }
+            promoted += newly_old.count_ones() as usize;
             let old = previous_old | marked;
             self.old_atomic(w).store(old, Ordering::Relaxed);
-            self.unlogged_atomic(w).store(old, Ordering::Relaxed);
+            #[cfg(test)]
+            if mirror_fault::is(mirror_fault::MirrorFault::SkipPromotionLanes) {
+                continue;
+            }
+            for lane in 0..AGE_LANES_PER_WORD {
+                if (newly_old >> (lane * AGE_LANE_CELLS)) as u8 != 0 {
+                    self.store_age_lane(w, lane, old);
+                }
+            }
         }
         promoted
     }
 
     /// Stop-all and joined-marker boundary: major liveness replaces age.
-    /// Unused region tails have already been unmarked. Whole-word stores
-    /// are safe because no mutator can claim or update adjacent bits here.
+    /// Unused region tails have already been unmarked.
+    ///
+    /// The other writer of cons age, at stop-all like
+    /// `promote_marked_world_stopped`. Every lane whose old bits change is
+    /// rewritten, so a cell that died here reads young in the mirror before
+    /// the sweep can hand its slot to a new cons.
     #[cold]
     #[inline(never)]
     pub(super) fn promote_major_world_stopped(&self) -> usize {
         let mut promoted = 0;
         for w in 0..CONS_MARK_WORDS {
             let marked = self.mark_word(w).load(Ordering::Relaxed) as u64;
-            promoted += (marked & !self.old_word(w)).count_ones() as usize;
+            let previous_old = self.old_word(w);
+            promoted += (marked & !previous_old).count_ones() as usize;
+            if marked == previous_old {
+                continue;
+            }
             self.old_atomic(w).store(marked, Ordering::Relaxed);
-            self.unlogged_atomic(w).store(marked, Ordering::Relaxed);
+            let changed = marked ^ previous_old;
+            #[cfg(test)]
+            let changed = if mirror_fault::is(mirror_fault::MirrorFault::SkipMajorClear) {
+                changed & marked
+            } else {
+                changed
+            };
+            for lane in 0..AGE_LANES_PER_WORD {
+                if (changed >> (lane * AGE_LANE_CELLS)) as u8 != 0 {
+                    self.store_age_lane(w, lane, marked);
+                }
+            }
         }
         promoted
     }
@@ -289,27 +376,47 @@ impl ConsBlockTrailer {
             marked
         }
     }
+}
 
-    /// Stop-all handshake required, as for promotion: no mutator or marker
-    /// may claim or set an unlogged bit while this reset runs.
-    #[cold]
-    #[inline(never)]
-    pub(super) fn reset_unlogged_world_stopped(&self, cells: usize) {
-        for w in 0..cons_mark_words(cells) {
-            self.unlogged_atomic(w)
-                .store(self.old_word(w), Ordering::Relaxed);
-        }
+/// Test-only faults that make a promotion skip mirror writes, so GEN1
+/// verify can be shown to catch a dropped age write.
+#[cfg(test)]
+pub(super) mod mirror_fault {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(u8)]
+    pub(crate) enum MirrorFault {
+        None = 0,
+        /// Minor promotion updates the bitmap but not the age bytes.
+        SkipPromotionLanes = 1,
+        /// Major promotion leaves dead cells old in the age bytes.
+        SkipMajorClear = 2,
+    }
+
+    // Promotion runs on the stopping mutator's thread, as in these tests.
+    thread_local! {
+        static FAULT: Cell<MirrorFault> = const { Cell::new(MirrorFault::None) };
+    }
+
+    pub(crate) fn set(fault: MirrorFault) {
+        FAULT.with(|current| current.set(fault));
+    }
+
+    pub(super) fn is(fault: MirrorFault) -> bool {
+        FAULT.with(Cell::get) == fault
     }
 }
 
 const _: () = {
     assert!(usize::BITS == u64::BITS);
-    assert!(CONS_BLOCK_SIZE == 4001);
+    assert!(CONS_BLOCK_SIZE == 3796);
     assert!(CONS_CELLS_BYTES + size_of::<ConsBlockTrailer>() <= CONS_BLOCK_BYTES);
     assert!(CONS_OLD_OFFSET == CONS_CELLS_BYTES + std::mem::offset_of!(ConsBlockTrailer, old));
-    assert!(
-        CONS_UNLOGGED_OFFSET == CONS_CELLS_BYTES + std::mem::offset_of!(ConsBlockTrailer, unlogged)
-    );
+    assert!(CONS_AGE_OFFSET == CONS_CELLS_BYTES + std::mem::offset_of!(ConsBlockTrailer, age));
+    // Word-wide access to the age bytes needs word alignment.
+    assert!(CONS_AGE_OFFSET.is_multiple_of(align_of::<AtomicU64>()));
+    assert!(CONS_BLOCK_SIZE <= CONS_AGE_BYTES);
 };
 
 #[cfg(test)]

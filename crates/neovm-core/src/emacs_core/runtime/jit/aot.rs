@@ -137,7 +137,9 @@ pub(crate) const ABI_TAG: u32 = compute_abi_tag();
 // v50: the reserved Context word becomes the owner's binding slab
 // (`CONTEXT_OWNER_OFFSET`, salted below); its offset is unchanged.
 // v51: GEN1 cons stores mark a card through the heap's published card-table
-// base (HEAP_JIT_CARD_TABLE) instead of testing the cons unlogged bitmap.
+// base (HEAP_JIT_CARD_TABLE) instead of testing the cons unlogged bitmap; the
+// cons-block trailer drops the unlogged and old bitmaps for one age byte per
+// cell (fewer cells per block), which those stores test.
 const ABI_TAG_VERSION: u32 = 51;
 
 /// Format version of the AOT descriptor spec-section + the runtime spec ABI

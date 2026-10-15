@@ -167,13 +167,9 @@ impl TaggedHeap {
             if self.owner_is_mapped(owner) {
                 continue;
             }
-            if owner.is_cons() {
-                if let Some((trailer, index)) = self.old_cons_trailer(owner)
-                    && trailer.is_old(index)
-                {
-                    trailer.set_unlogged(index);
-                }
-            } else if let Some(addr) = Self::value_heap_addr(owner) {
+            // Owned conses are remembered by their cards, never logged.
+            debug_assert!(!owner.is_cons(), "an owned cons in the remembered set");
+            if let Some(addr) = Self::value_heap_addr(owner) {
                 // All appenders are stopped, and no header has been freed.
                 unsafe { &*(addr as *const GcHeader) }
                     .remembered
@@ -281,8 +277,11 @@ impl TaggedHeap {
             // Every mutator is stopped and the weak/finalizer fixpoints are
             // complete. Check before promotion could hide a missing mark and
             // before any sweep can reclaim the missed young child.
-            self.verify_remembered_owner_cards_world_stopped();
+            // An unmarked young child first: that is the missed barrier
+            // itself. A marked one behind a clean card was reached another
+            // way, but the next minor would miss it.
             self.verify_dump_partition();
+            self.verify_old_cons_edge_cards_world_stopped();
         }
         let partition_first = self.partition_dump && !self.dump_blackened;
         let mut headers = std::mem::take(&mut self.generational.promo);
@@ -319,6 +318,9 @@ impl TaggedHeap {
             old_count += block.count_old();
         }
         self.generational.old_cons_count = old_count;
+        if self.generational.verify {
+            self.verify_age_mirror_world_stopped();
+        }
         let newly_promoted_cons_bytes = promoted.saturating_mul(size_of::<ConsCell>());
         self.generational.old_bytes = self
             .generational
@@ -383,6 +385,14 @@ impl TaggedHeap {
         } else {
             self.value_is_tenured(value)
         }
+    }
+
+    /// Whether VALUE, an owned cons, reads old in the age mirror that the
+    /// write barrier tests.
+    #[cfg(test)]
+    pub(crate) fn cons_age_is_old_for_test(&self, value: TaggedValue) -> bool {
+        let (trailer, index) = self.old_cons_trailer(value).expect("owned cons");
+        trailer.age_is_old(index)
     }
 
     /// Whether OWNER's GEN1 card is dirty (false without a card table).
@@ -576,27 +586,62 @@ impl TaggedHeap {
         }
     }
 
-    /// Every unmapped cons in R_seed or a mutator R log has a dirty card: the
-    /// minor reaches logged conses only through their cards. Runs in GEN1
-    /// verify mode with every mutator stopped.
+    /// Every edge from an old owned cons to a young owned object has a dirty
+    /// card: the minor reaches such an edge only through the card, and only
+    /// a store after the last promotion can create one. Runs in GEN1 verify
+    /// mode with every mutator stopped, before promotion and the card reset.
     #[cold]
     #[inline(never)]
-    pub(super) fn verify_remembered_owner_cards_world_stopped(&self) {
-        let logged = self
-            .generational
-            .r_seed
-            .iter()
-            .chain(self.mutators().flat_map(|mutator| mutator.remset.iter()));
-        for &owner in logged {
-            if !self.owner_is_card_scanned(owner) {
-                continue;
-            }
-            if let Some(addr) = Self::owner_card_addr(owner) {
-                assert!(
-                    self.owner_card_is_dirty(addr),
-                    "GC verify: remembered owner {owner:?} has a clean card"
-                );
+    pub(super) fn verify_old_cons_edge_cards_world_stopped(&self) {
+        for block in &self.cons_blocks {
+            for word in 0..cons_mark_words(block.next_index as usize) {
+                let mut old = block.trailer().old_word(word);
+                while old != 0 {
+                    let index = word * CONS_MARK_BITS_PER_WORD + old.trailing_zeros() as usize;
+                    old &= old - 1;
+                    // SAFETY: an old cell of an owned block is a live cons.
+                    let cell = unsafe { block.cells_ptr().add(index) };
+                    let children = unsafe { [(*cell).load_car(), (*cell).load_cdr()] };
+                    for child in children {
+                        assert!(
+                            !self.value_is_young_owned(child)
+                                || self.owner_card_is_dirty(cell as usize),
+                            "GC verify: old cons {cell:p} has a young child {child:?} and a clean card"
+                        );
+                    }
+                }
             }
         }
+    }
+
+    /// Every cons block's age bytes equal its old bits, the mirror compiled
+    /// stores test. Runs in GEN1 verify mode right after every minor and
+    /// major promotion, the only writers of either copy.
+    #[cold]
+    #[inline(never)]
+    fn verify_age_mirror_world_stopped(&self) {
+        for block in &self.cons_blocks {
+            assert!(
+                block.trailer().ages_match_old_bits(),
+                "GC verify: cons block {:#x} age bytes differ from its old bits",
+                block.base_addr()
+            );
+        }
+    }
+
+    /// Whether VALUE is an owned heap object of the young generation.
+    fn value_is_young_owned(&self, value: TaggedValue) -> bool {
+        if let Some((trailer, index)) = self.old_cons_trailer(value) {
+            return !trailer.is_old(index);
+        }
+        if value.is_cons() || self.owner_is_mapped(value) {
+            return false;
+        }
+        Self::value_heap_addr(value).is_some_and(|addr| {
+            // SAFETY: a non-cons heap value points at a GcHeader-prefixed
+            // object; ownership is checked before the header decides.
+            self.owns_heap_value_object(value, addr)
+                && !unsafe { &*(addr as *const GcHeader) }.tenured
+        })
     }
 }

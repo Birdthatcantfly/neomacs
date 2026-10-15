@@ -1771,7 +1771,7 @@ fn note_cons_write_slow(
             with_tagged_heap(|heap| {
                 if heap
                     .old_cons_trailer(owner)
-                    .is_some_and(|(trailer, index)| trailer.is_old(index))
+                    .is_some_and(|(trailer, index)| trailer.age_is_old(index))
                 {
                     heap.mark_owner_card(addr);
                 }
@@ -1841,7 +1841,7 @@ pub(super) fn barrier_needs_heap(
                     .contains(&record.owner.bits())
             } else if record.owner.is_cons() {
                 heap.old_cons_trailer(record.owner)
-                    .is_some_and(|(trailer, index)| trailer.is_unlogged(index))
+                    .is_some_and(|(trailer, index)| trailer.age_is_old(index))
             } else {
                 TaggedHeap::value_heap_addr(record.owner).is_some_and(|addr| unsafe {
                     GcHeader::needs_remembering(addr as *const GcHeader)

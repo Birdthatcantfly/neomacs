@@ -112,7 +112,6 @@ fn generational_cons_protocol_window_marks_symbols_and_keeps_preimages() {
     let owner = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
     let (trailer, index) = heap.old_cons_trailer(owner).unwrap();
     trailer.set_old(index);
-    trailer.set_unlogged(index);
     owner.set_car(TaggedValue::fixnum(1));
     assert!(!heap.owner_card_is_dirty_for_test(owner));
     owner.set_car(TaggedValue::T);
@@ -138,7 +137,6 @@ fn generational_cold_cons_reject_skips_full_hook_for_immediates_and_ineligible_o
     let old = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
     let (trailer, index) = heap.old_cons_trailer(old).unwrap();
     trailer.set_old(index);
-    trailer.set_unlogged(index);
     let before = BARRIER_SLOW_CALLS.with(Cell::get);
     old.set_car(TaggedValue::fixnum(7));
     old.set_cdr(TaggedValue::char('x'));

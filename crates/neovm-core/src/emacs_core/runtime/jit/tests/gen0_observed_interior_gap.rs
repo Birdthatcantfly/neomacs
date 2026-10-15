@@ -7,6 +7,7 @@ use super::*;
 use crate::tagged::collection_reads::{
     CompiledJournalMode, capture, force_compiled_journal_for_test, is_observed,
 };
+use crate::tagged::gc::CONS_BLOCK_BYTES;
 use crate::tagged::mutate::LispCollectionRevision;
 use crate::tagged::value::TAG_MASK;
 
@@ -28,23 +29,36 @@ fn gen0_native_interior_gap_skips_repeat_shims_without_admitting_growth() {
     let mut other_context = super::context(false);
     crate::tagged::gc::set_tagged_heap(&mut context.tagged_heap);
     let roots = context.save_specpdl_roots();
-    let mut owners = std::array::from_fn::<_, 3, _>(|_| {
-        context
-            .tagged_heap
-            .alloc_cons(Value::make_int(97), Value::NIL)
-    });
-    owners.sort_unstable_by_key(|owner| owner.bits() & !TAG_MASK);
+    // Three owners and a growth cons allocated in a row from one cons block,
+    // so the growth lies past the owners' hull. A run that crosses into
+    // another block can place the growth between them; retry such a run.
+    let same_block =
+        |a: Value, b: Value| a.bits() / CONS_BLOCK_BYTES == b.bits() / CONS_BLOCK_BYTES;
+    let (owners, growth) = (0..4)
+        .find_map(|_| {
+            let owners = std::array::from_fn::<_, 3, _>(|_| {
+                context
+                    .tagged_heap
+                    .alloc_cons(Value::make_int(97), Value::NIL)
+            });
+            let growth = context
+                .tagged_heap
+                .alloc_cons(Value::make_int(31), Value::NIL);
+            owners
+                .iter()
+                .all(|&owner| same_block(owner, growth))
+                .then_some((owners, growth))
+        })
+        .expect("four consecutive conses share a block");
     let [left, target, right] = owners;
     assert!(left.bits() < target.bits() && target.bits() < right.bits());
+    assert!(right.bits() < growth.bits());
     for owner in owners {
         context.push_specpdl_root(owner);
     }
+    context.push_specpdl_root(growth);
     let (_, endpoints) = capture(|| (left.cons_car(), right.cons_car()));
     let endpoints = endpoints.expect("the observed endpoints are retained");
-    let growth = context
-        .tagged_heap
-        .alloc_cons(Value::make_int(31), Value::NIL);
-    context.push_specpdl_root(growth);
     let hull = context.tagged_heap.jit_barrier_window_for_test();
     assert!(hull.covers(target.bits() & !TAG_MASK));
     assert!(!hull.covers(growth.bits() & !TAG_MASK));

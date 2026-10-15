@@ -26,7 +26,7 @@ impl ConsBlockCacheEntry {
 }
 
 /// A GNU-shaped cons block with cells at the front of a fixed-size aligned
-/// storage area, followed by the mark, old and unlogged bitmaps.
+/// storage area, followed by the mark bitmap and the cells' age bytes.
 pub(super) struct ConsBlock {
     /// Aligned raw storage for cons cells plus `ConsBlockTrailer`.
     pub(super) storage: *mut u8,
@@ -203,10 +203,6 @@ impl ConsBlock {
             if self.trailer().is_live_generational(i) {
                 live += 1;
             } else {
-                debug_assert!(
-                    !self.trailer().is_unlogged(i),
-                    "a free cell cannot be unlogged"
-                );
                 unsafe { (*cell).set_free_next(*free_list) };
                 *free_list = cell;
             }
