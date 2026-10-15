@@ -1435,7 +1435,7 @@ pub(super) fn emit(mut ctx: EmitContext<'_, '_>) -> Result<(), CompileError> {
                         None => (ctx.fb.create_block(), &[][..]),
                     };
                     let bools: Vec<_> = reps.iter().map(|rep| *rep == SlotRep::Bool).collect();
-                    let checks = switches.guards.after_poll(id);
+                    let checks = switches.after_poll(id);
                     let serviced = (!checks.is_empty()).then(|| ctx.fb.create_block());
                     emit_backedge_jump_with_representations(
                         ctx.fb,
@@ -1711,7 +1711,7 @@ fn emit_term(
                 stale,
                 &mut landings,
                 inline,
-                if switches.guards.is_hoisted(block) {
+                if switches.is_hoisted(block) {
                     switch_dispatch::EpochCheck::LoopEntry
                 } else {
                     switch_dispatch::EpochCheck::AtDispatch
