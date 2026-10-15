@@ -51,6 +51,19 @@ pub(crate) struct GreenRuntime {
     /// `set-standard-case-table` sets it here, and each thread installs it
     /// as it resumes.
     pub(super) standard_case_table: std::cell::Cell<Option<crate::emacs_core::value::Value>>,
+    /// An error signalled into a thread before it first ran, as
+    /// `(SYMBOL, DATA)`: held from its start to its first switch, as GNU
+    /// `post_acquire_global_lock` raises nothing while a thread has no
+    /// handlers.
+    pub(super) deferred_errors: std::cell::RefCell<
+        rustc_hash::FxHashMap<
+            ThreadKey,
+            (
+                crate::emacs_core::value::Value,
+                crate::emacs_core::value::Value,
+            ),
+        >,
+    >,
 }
 
 impl std::fmt::Debug for GreenRuntime {
@@ -100,6 +113,10 @@ impl GreenRuntime {
         }
         if let Some(table) = self.standard_case_table.get() {
             visit(table);
+        }
+        for (symbol, data) in self.deferred_errors.borrow().values() {
+            visit(*symbol);
+            visit(*data);
         }
     }
 }
@@ -173,6 +190,7 @@ impl Context {
             pending_starts: Default::default(),
             exit: Default::default(),
             standard_case_table: std::cell::Cell::new(self.cached_standard_case_table),
+            deferred_errors: Default::default(),
         }));
         Ok(baton)
     }

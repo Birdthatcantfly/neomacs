@@ -149,7 +149,7 @@ impl Context {
         // while this one is parked: its current buffer and its errors.
         let current = self.buffers.current_buffer_id();
         self.threads.set_thread_current_buffer(key.id(), current);
-        self.threads.restore_deferred_thread_error(key.id());
+        self.restore_deferred_error(&baton, key);
         let parked = self.park_owner();
         self.exchange_world_threads(&baton);
         let roots = self.collect_parked_roots();
@@ -289,6 +289,18 @@ impl Context {
         }
     }
 
+    /// KEY's error held since its start is pending again
+    /// (`GreenRuntime::deferred_errors`).
+    fn restore_deferred_error(&mut self, baton: &Baton, key: ThreadKey) {
+        let deferred = baton
+            .green_runtime()
+            .as_ref()
+            .and_then(|runtime| runtime.deferred_errors.borrow_mut().remove(&key));
+        if let Some((symbol, data)) = deferred {
+            self.threads.restore_thread_error(key.id(), symbol, data);
+        }
+    }
+
     /// Keep ROOTS traced while KEY is parked.
     fn publish_parked_roots(&self, baton: &Baton, key: ThreadKey, roots: Vec<Value>) {
         if let Some(runtime) = baton.green_runtime().as_ref() {
@@ -384,11 +396,13 @@ fn run_worker(key: ThreadKey, receiver: mpsc::Receiver<Baton>, control: Arc<Cont
     owner.threads.start_thread(key.id());
     // GNU raises an error signalled into a thread that has not run yet at
     // its first switch, once it has handlers.
-    owner.threads.defer_thread_error(key.id());
-    let function = baton
-        .green_runtime()
-        .as_ref()
-        .and_then(|runtime| runtime.pending_starts.borrow_mut().remove(&key));
+    let deferred = owner.threads.take_thread_error(key.id());
+    let function = baton.green_runtime().as_ref().and_then(|runtime| {
+        if let Some(error) = deferred {
+            runtime.deferred_errors.borrow_mut().insert(key, error);
+        }
+        runtime.pending_starts.borrow_mut().remove(&key)
+    });
     owner.take_green_seat(key, Arc::clone(&control), receiver, baton);
     let outcome = match function {
         Some(function) => {
@@ -407,13 +421,13 @@ fn run_worker(key: ThreadKey, receiver: mpsc::Receiver<Baton>, control: Arc<Cont
         key.id(),
         outcome,
     );
-    owner.threads.restore_deferred_thread_error(key.id());
     owner.threads.mark_thread_exited(key.id());
     let seat = owner.green_seat().expect("seated above");
     let baton = seat
         .baton
         .take()
         .expect("a finishing thread holds the Baton");
+    owner.restore_deferred_error(&baton, key);
     owner.exchange_world_threads(&baton);
     if let Some(request) = exit
         && control.lifecycle() == Lifecycle::Running

@@ -91,6 +91,9 @@ pub enum ThreadStatus {
     Finished,
     /// Thread was terminated by an error / signal.
     Signaled,
+    /// A Green thread's function returned: GNU's thread is dead from then
+    /// on, joined or not (`thread_live_p`).
+    Exited,
 }
 
 /// Per-thread bookkeeping.
@@ -122,13 +125,6 @@ pub struct ThreadState {
     pub error_data: Value,
     /// Resume thunk or remaining top-level forms for a cooperative block.
     pub blocked_remaining_forms: Value,
-    /// A Green thread's function returned: GNU's thread is dead from then
-    /// on, joined or not.
-    pub exited: bool,
-    /// A `(SYMBOL . DATA)` error signalled into a Green thread before it
-    /// first ran, held until its first switch (GNU `post_acquire_global_lock`
-    /// delays it while the thread has no handlers).
-    pub deferred_error: Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -205,8 +201,6 @@ impl ThreadManager {
                 error_symbol: Value::NIL,
                 error_data: Value::NIL,
                 blocked_remaining_forms: Value::NIL,
-                exited: false,
-                deferred_error: Value::NIL,
             },
         );
         let mut thread_handles = HashMap::new();
@@ -248,8 +242,6 @@ impl ThreadManager {
                 error_symbol: Value::NIL,
                 error_data: Value::NIL,
                 blocked_remaining_forms: Value::NIL,
-                exited: false,
-                deferred_error: Value::NIL,
             },
         );
         self.thread_handles
@@ -378,13 +370,10 @@ impl ThreadManager {
 
     /// Check if a thread is alive from Elisp's point of view.
     pub fn thread_alive_p(&self, id: u64) -> bool {
-        self.threads.get(&id).is_some_and(|t| {
-            !t.exited
-                && match t.status {
-                    ThreadStatus::Created | ThreadStatus::Running | ThreadStatus::Blocked => true,
-                    ThreadStatus::Finished => !t.joined,
-                    ThreadStatus::Signaled => false,
-                }
+        self.threads.get(&id).is_some_and(|t| match t.status {
+            ThreadStatus::Created | ThreadStatus::Running | ThreadStatus::Blocked => true,
+            ThreadStatus::Finished => !t.joined,
+            ThreadStatus::Signaled | ThreadStatus::Exited => false,
         })
     }
 
@@ -548,7 +537,7 @@ impl ThreadManager {
     /// Green thread ID's function returned (GNU's `run_thread` end).
     pub fn mark_thread_exited(&mut self, id: u64) {
         if let Some(thread) = self.threads.get_mut(&id) {
-            thread.exited = true;
+            thread.status = ThreadStatus::Exited;
         }
     }
 
@@ -563,39 +552,34 @@ impl ThreadManager {
         }
     }
 
-    /// Thread ID starts running without handlers: hold its pending error
-    /// until its first switch ([`ThreadState::deferred_error`]).
-    pub fn defer_thread_error(&mut self, id: u64) {
-        if let Some(thread) = self.threads.get_mut(&id)
-            && !thread.error_symbol.is_nil()
-        {
-            thread.deferred_error = Value::cons(thread.error_symbol, thread.error_data);
-            thread.error_symbol = Value::NIL;
-            thread.error_data = Value::NIL;
+    /// Take thread ID's pending error, as `(SYMBOL, DATA)`, leaving none.
+    pub fn take_thread_error(&mut self, id: u64) -> Option<(Value, Value)> {
+        let thread = self.threads.get_mut(&id)?;
+        if thread.error_symbol.is_nil() {
+            return None;
         }
+        let symbol = std::mem::replace(&mut thread.error_symbol, Value::NIL);
+        let data = std::mem::replace(&mut thread.error_data, Value::NIL);
+        Some((symbol, data))
     }
 
-    /// Thread ID reached its first switch: its held error is pending again,
-    /// unless a newer one replaced it.
-    pub fn restore_deferred_thread_error(&mut self, id: u64) {
+    /// Make SYMBOL and DATA thread ID's pending error again, unless a newer
+    /// one is pending.
+    pub fn restore_thread_error(&mut self, id: u64, symbol: Value, data: Value) {
         if let Some(thread) = self.threads.get_mut(&id)
-            && thread.deferred_error.is_cons()
+            && thread.error_symbol.is_nil()
         {
-            let error = std::mem::replace(&mut thread.deferred_error, Value::NIL);
-            if thread.error_symbol.is_nil() {
-                thread.error_symbol = error.cons_car();
-                thread.error_data = error.cons_cdr();
-            }
+            thread.error_symbol = symbol;
+            thread.error_data = data;
         }
     }
 
     /// Whether a live Green thread has not ended.
     fn green_thread_live(thread: &ThreadState) -> bool {
-        !thread.exited
-            && matches!(
-                thread.status,
-                ThreadStatus::Created | ThreadStatus::Running | ThreadStatus::Blocked
-            )
+        matches!(
+            thread.status,
+            ThreadStatus::Created | ThreadStatus::Running | ThreadStatus::Blocked
+        )
     }
 
     /// GNU `thread_check_current_buffer`: whether a live thread other than
@@ -835,7 +819,6 @@ impl GcTrace for ThreadManager {
             roots.push(thread.error_symbol);
             roots.push(thread.error_data);
             roots.push(thread.blocked_remaining_forms);
-            roots.push(thread.deferred_error);
             if let Some(buffer_id) = thread.current_buffer {
                 roots.push(Value::make_buffer(buffer_id));
             }
