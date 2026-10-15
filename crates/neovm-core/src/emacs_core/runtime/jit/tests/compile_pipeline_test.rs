@@ -108,9 +108,11 @@ fn jit_pipeline_first_sight_and_direct_origins() {
 }
 
 /// Mask what legitimately differs between two compiles of one body: baked
-/// addresses (hex literals of 6+ digits) and module-local external-name
-/// indices (`userextname3`).
+/// addresses (hex literals of 6+ digits, and aarch64 `movz`/`movk` runs that
+/// build a runtime address) and module-local external-name indices
+/// (`userextname3`).
 pub(crate) fn mask_code_text(text: &str) -> String {
+    let text = &mask_aarch64_address_materialization(text);
     let mut out = String::with_capacity(text.len());
     let bytes = text.as_bytes();
     let mut i = 0;
@@ -139,6 +141,126 @@ pub(crate) fn mask_code_text(text: &str) -> String {
         i += ch.len_utf8();
     }
     out
+}
+
+/// One aarch64 wide-immediate move: `movz xN, #imm[, LSL #s]` or
+/// `movk xN, xN, #imm, LSL #s`, as Cranelift's disassembly prints them.
+struct WideMove<'a> {
+    keeps: bool,
+    reg: &'a str,
+    imm: u64,
+    shift: u32,
+}
+
+fn parse_wide_move(line: &str) -> Option<WideMove<'_>> {
+    let trimmed = line.trim_start();
+    let (keeps, operands) = if let Some(rest) = trimmed.strip_prefix("movz ") {
+        (false, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("movk ") {
+        (true, rest)
+    } else {
+        return None;
+    };
+    let mut parts = operands.split(", ");
+    let reg = parts.next()?;
+    let mut imm = None;
+    let mut shift = 0;
+    for part in parts {
+        if let Some(amount) = part.strip_prefix("LSL #") {
+            shift = amount.trim().parse().ok()?;
+        } else if let Some(value) = part.strip_prefix('#') {
+            imm = Some(value.trim().parse().ok()?);
+        }
+    }
+    Some(WideMove {
+        keeps,
+        reg,
+        imm: imm?,
+        shift,
+    })
+}
+
+/// Marker for an aarch64 address materialization folded by
+/// [`mask_aarch64_address_materialization`]. Its instruction count, and so the
+/// leaf's size, depends on the address (a zero 16-bit half needs no `movk`).
+const AARCH64_ADDRESS_RUN: &str = "movaddr";
+
+/// Fold every aarch64 `movz` + `movk`... run that builds a runtime address
+/// (see [`is_runtime_address`]) into one `movaddr xN, #ADDR` line. aarch64 has
+/// no 64-bit immediate move, so a baked address arrives as 16-bit halves that
+/// no hex mask sees, and an address with a zero half takes one move fewer:
+/// two compiles of one body baking different boxes differ only there. A run
+/// building any other constant is left alone, so a changed constant still
+/// shows.
+fn mask_aarch64_address_materialization(text: &str) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let Some(first) = parse_wide_move(lines[i]).filter(|m| !m.keeps) else {
+            out.push(lines[i].to_owned());
+            i += 1;
+            continue;
+        };
+        let mut value = first.imm << first.shift;
+        let mut end = i + 1;
+        while let Some(next) = lines.get(end).and_then(|line| parse_wide_move(line)) {
+            if !next.keeps || next.reg != first.reg {
+                break;
+            }
+            value = (value & !(0xffff << next.shift)) | (next.imm << next.shift);
+            end += 1;
+        }
+        if is_runtime_address(value) {
+            let indent = &lines[i][..lines[i].len() - lines[i].trim_start().len()];
+            out.push(format!(
+                "{indent}{AARCH64_ADDRESS_RUN} {}, #ADDR",
+                first.reg
+            ));
+        } else {
+            out.extend(lines[i..end].iter().map(|line| (*line).to_owned()));
+        }
+        i = end;
+    }
+    out.join("\n")
+}
+
+/// A `movz`/`movk` run that builds an address folds whole, whatever its
+/// length; one building a constant, a lone small `movz`, and other registers'
+/// moves stay visible.
+#[test]
+fn mask_code_text_hides_aarch64_materialized_addresses_only() {
+    let base = "  movz x15, #39616\n  movk x15, x15, #53645, LSL #16\n  movk x15, x15, #8, LSL #32\n  ldr x0, [x15]";
+    let moved = "  movz x15, #39616\n  movk x15, x15, #53834, LSL #16\n  movk x15, x15, #8, LSL #32\n  ldr x0, [x15]";
+    // An address whose low half is zero starts at LSL #16: one move fewer.
+    let zero_low = "  movz x15, #53834, LSL #16\n  movk x15, x15, #8, LSL #32\n  ldr x0, [x15]";
+    assert_eq!(mask_code_text(base), mask_code_text(moved));
+    assert_eq!(mask_code_text(base), mask_code_text(zero_low));
+    assert_eq!(
+        mask_code_text(base),
+        "  movaddr x15, #ADDR\n  ldr x0, [x15]"
+    );
+    // 0xffff_ffff is a mask, not an address: the run stays as it is.
+    let constant = "  movz x3, #65535\n  movk x3, x3, #65535, LSL #16";
+    assert_eq!(mask_code_text(constant), constant);
+    // A lone small `movz` and a changed small immediate are not hidden.
+    assert_ne!(
+        mask_code_text("  movz x1, #24"),
+        mask_code_text("  movz x1, #32")
+    );
+    // A `movk` of another register ends the run.
+    let split = "  movz x15, #39616\n  movk x16, x16, #53645, LSL #16";
+    assert_eq!(mask_code_text(split), split);
+}
+
+/// The `size=` header of a captured leaf: exact, unless the masked code folded
+/// an aarch64 address run, whose length depends on the address.
+fn captured_size(size: &str, masked_code: &str) -> String {
+    if masked_code.contains(AARCH64_ADDRESS_RUN) {
+        "size=ADDRESS-DEPENDENT".to_owned()
+    } else {
+        size.to_owned()
+    }
 }
 
 /// Hex immediates in `[ADDRESS_FLOOR, ADDRESS_CEILING)` are runtime
@@ -248,7 +370,8 @@ pub(crate) fn captured_code(compile: impl FnOnce()) -> Vec<String> {
                 .find(|field| field.starts_with("size="))
                 .expect("size field");
             let code = rest.split(";; bytes:").next().expect("disassembly");
-            format!("{size}\n{}", mask_code_text(code))
+            let masked = mask_code_text(code);
+            format!("{}\n{masked}", captured_size(size, &masked))
         })
         .collect()
 }
