@@ -93,17 +93,20 @@ const _: () = assert!(CONS_CDR_OFFSET >= TAG_CONS);
 // The compile environment
 // ---------------------------------------------------------------------------
 
-/// What a compile needs from the running `Context` to classify a variable:
-/// its obarray and its runtime projection mask. Raw pointers, valid for the
-/// [`CompileEnvScope`] that set them.
+/// The dormant compile's Context and its runtime projection mask. The Context
+/// owns the obarray and the stable World mode; borrowing those through this
+/// pointer needs no extra TLS word. Both pointers last only for their
+/// [`CompileEnvScope`], while the Context is live and unmoved.
 #[derive(Clone, Copy)]
 struct CompileEnv {
-    obarray: *const Obarray,
+    context: *const Context,
     projection: *const [u64],
-    /// The stable World mode is known before admission. Green arithmetic
-    /// leaves guard call semantics even when compiled before the first thread.
-    green_function_epoch: Option<u64>,
 }
+// Keep the original obarray-pointer + projection-slice layout, including its
+// Option discriminant. Growing this TLS cell would move unrelated Sim hot
+// state at FS offsets even though only cold compilation uses this environment.
+static_assertions::assert_eq_size!(CompileEnv, (*const Obarray, *const [u64]));
+static_assertions::assert_eq_size!(Option<CompileEnv>, Option<(*const Obarray, *const [u64])>);
 
 thread_local! {
     static ENV: Cell<Option<CompileEnv>> = const { Cell::new(None) };
@@ -135,9 +138,8 @@ impl CompileEnvScope {
                 let ctx = unsafe { &*ctx };
                 let green = ctx.threading_mode() == crate::emacs_core::eval::ThreadingMode::Green;
                 (jit_inline_vars().any() || green).then(|| CompileEnv {
-                    obarray: std::ptr::from_ref(&ctx.obarray),
+                    context: std::ptr::from_ref(ctx),
                     projection: std::ptr::from_ref(ctx.runtime_projection_mask()),
-                    green_function_epoch: green.then(|| ctx.obarray.function_epoch()),
                 })
             })
             .flatten();
@@ -149,15 +151,24 @@ impl CompileEnvScope {
 
 /// Green's stable World choice predates the first make-thread. All cache entry,
 /// retier and OSR compiles lend this scope; the backend worker only sees CLIF.
+/// Frontend classification and lowering run without Lisp, a callback, GC or a
+/// Baton handoff, so the current epoch cannot change between the arithmetic
+/// binding proof and this guard emission. No epoch or mode is cached in TLS.
 /// Sim and context-free/AOT compiles retain the original arithmetic emission.
 pub(super) fn green_function_epoch() -> Option<u64> {
-    ENV.with(Cell::get).and_then(|env| env.green_function_epoch)
+    let env = ENV.with(Cell::get)?;
+    // SAFETY: the scope retains its original dormant, unmoved Context.
+    let context = unsafe { &*env.context };
+    (context.threading_mode() == crate::emacs_core::eval::ThreadingMode::Green)
+        .then(|| context.obarray.function_epoch())
 }
 
 fn with_env<R>(f: impl FnOnce(&Obarray, &[u64]) -> Option<R>) -> Option<R> {
     let env = ENV.with(Cell::get)?;
-    // SAFETY: `CompileEnvScope::enter`'s contract.
-    f(unsafe { &*env.obarray }, unsafe { &*env.projection })
+    // SAFETY: `CompileEnvScope::enter`'s contract retains the Context, its
+    // obarray and the projection slice through this noncalling read.
+    let context = unsafe { &*env.context };
+    f(&context.obarray, unsafe { &*env.projection })
 }
 
 // ---------------------------------------------------------------------------
