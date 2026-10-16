@@ -284,6 +284,65 @@ fn closing_keeps_scannable_roots_until_the_explicit_reader_finishes() {
 }
 
 #[test]
+fn locked_collector_readers_keep_closing_and_invalid_batches_scannable() {
+    let mut heap = TaggedHeap::new();
+    let exclusion = exclude_fresh(&mut heap);
+    let value = heap.alloc_float(7.75);
+    let lease = publish(&heap, &exclusion, &[value]);
+    let ownership = lease.ownership.as_ref().unwrap();
+    let control = &ownership.control;
+    for state in [SlotState::Live.into(), SlotState::Closing.into(), u8::MAX] {
+        control.state.store(state, Ordering::Release);
+        let cells = ownership.table.lock();
+        let slots = cells.batches.as_ref().unwrap();
+        let reader = RootBatchReader::admit_locked_scan(slots, control, &heap).unwrap();
+        assert!(
+            reader._epoch.is_none(),
+            "the locked publication holds exclusion"
+        );
+        assert_eq!(control.readers.load(Ordering::Acquire), 1);
+        let mut copied = Vec::new();
+        reader.append_roots(&mut copied);
+        assert_eq!(copied, vec![value]);
+        reader.finish().unwrap();
+        let mut scanned = Vec::new();
+        slots.collect_roots(&heap, &mut scanned);
+        assert_eq!(scanned, vec![value]);
+        assert_eq!(control.readers.load(Ordering::Acquire), 0);
+        assert_eq!(control.abandoned.load(Ordering::Acquire), 0);
+    }
+    // Conservative scans of inconsistent metadata leave no reader obligation
+    // behind once the original owner repairs it and explicitly retires.
+    control.set_state(SlotState::Closing);
+    lease.try_finish().unwrap();
+    assert!(roots(&heap).is_empty());
+    drop(exclusion);
+    assert!(!heap.facade_mark_is_excluded());
+}
+
+#[test]
+fn rejected_locked_collector_reader_leaves_no_completion_obligation() {
+    let mut heap = TaggedHeap::new();
+    let foreign = TaggedHeap::new();
+    let exclusion = exclude_fresh(&mut heap);
+    let value = heap.alloc_float(7.875);
+    let lease = publish(&heap, &exclusion, &[value]);
+    let ownership = lease.ownership.as_ref().unwrap();
+    {
+        let cells = ownership.table.lock();
+        let slots = cells.batches.as_ref().unwrap();
+        assert!(matches!(
+            RootBatchReader::admit_locked_scan(slots, &ownership.control, &foreign),
+            Err(RootBatchError::ForeignHeap { .. })
+        ));
+        assert_eq!(ownership.control.readers.load(Ordering::Acquire), 0);
+        assert_eq!(ownership.control.abandoned.load(Ordering::Acquire), 0);
+    }
+    assert_eq!(roots(&heap), vec![value]);
+    lease.try_finish().unwrap();
+}
+
+#[test]
 fn abandoned_reader_cannot_be_mistaken_for_explicit_completion() {
     let mut heap = TaggedHeap::new();
     let exclusion = exclude_fresh(&mut heap);
