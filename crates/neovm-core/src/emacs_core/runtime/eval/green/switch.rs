@@ -9,6 +9,7 @@ use super::super::world::Baton;
 use super::super::{Context, Flow, Value};
 use super::scheduler::{Control, Handoff, Lifecycle, Peers, ThreadKey, Wait};
 use crate::emacs_core::error::signal;
+use crate::emacs_core::intern::SymId;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -38,6 +39,10 @@ pub(crate) struct GreenSeat {
     receiver: Option<mpsc::Receiver<Baton>>,
     /// The World's Baton, while this thread runs.
     baton: Option<Baton>,
+    /// Rebinding an alias to a constant failed on resume. Deliver this at
+    /// the normal signal point, after condition-wait retakes its mutex.
+    /// The original specpdl symbol is a scalar, with no hidden Lisp roots.
+    binding_resume_error: Option<SymId>,
 }
 
 impl std::fmt::Debug for GreenSeat {
@@ -119,6 +124,7 @@ impl Context {
                 control,
                 receiver: Some(receiver),
                 baton: Some(baton),
+                binding_resume_error: None,
             }));
     }
 
@@ -255,8 +261,24 @@ impl Context {
         self.green_raise_pending_signal(key)
     }
 
-    /// Raise the error another thread signalled into KEY, if any.
+    /// Preserve GNU's first failed rebind until the safe resume signal point.
+    pub(crate) fn green_defer_binding_resume_error(&mut self, symbol: SymId) {
+        if let Some(seat) = self.green_seat() {
+            seat.binding_resume_error.get_or_insert(symbol);
+        }
+    }
+
+    /// Raise a failed rebind or an error another thread signalled into KEY.
     pub(super) fn green_raise_pending_signal(&mut self, key: ThreadKey) -> Result<(), Flow> {
+        if let Some(symbol) = self
+            .green_seat()
+            .and_then(|seat| seat.binding_resume_error.take())
+        {
+            return Err(signal(
+                crate::emacs_core::error::LispCondition::SettingConstant,
+                vec![Value::from_sym_id(symbol)],
+            ));
+        }
         match self.threads.take_pending_thread_signal(key.id()) {
             Some(flow) => Err(flow),
             None => Ok(()),

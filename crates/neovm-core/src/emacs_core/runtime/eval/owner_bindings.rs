@@ -606,12 +606,6 @@ impl OwnerSlab {
             })
     }
 
-    /// Whether this owner binds SYM at all (GNU's `kind >= SPECPDL_LET` scan
-    /// for SYM, `src/eval.c:706-710`).
-    pub(crate) fn binds(&self, sym: SymId) -> bool {
-        self.records_of(sym).next().is_some()
-    }
-
     /// GNU `let_shadows_buffer_binding_p` (`src/eval.c:3593-3610`): a
     /// default binding of SYM made with BUFFER current.
     pub(crate) fn shadows_buffer_binding(&self, sym: SymId, buffer: Option<BufferId>) -> bool {
@@ -1342,21 +1336,199 @@ impl Context {
         self.publish_owner_binding(record.sym);
     }
 
+    /// GNU keeps the original symbol in each specpdl entry. If another
+    /// thread aliases it while this owner is parked, resuming that entry
+    /// exchanges its saved binding with the alias's new default storage
+    /// (`eval.c:4181-4208`). Rebuild only the affected owner slots, in the
+    /// original specpdl order, so interleaved bindings of source and target
+    /// become one binding chain. The specpdl reference retains the original
+    /// symbol for GNU's EQ-based let-bound and toplevel scans.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn reconcile_aliased_owner_bindings(&mut self) {
+        let Some(slab) = self.owner.slab() else {
+            return;
+        };
+        let changed = self.specpdl.iter().any(|entry| {
+            let SpecBinding::NativeUnwind {
+                action: NativeUnwindAction::OwnerBinding(binding),
+            } = entry
+            else {
+                return false;
+            };
+            slab.record(binding.record).is_some_and(|record| {
+                record.channel == Channel::Default
+                    && !matches!(record.undo, UndoTarget::Captured(_) | UndoTarget::Retired)
+                    && self
+                        .obarray
+                        .indirect_variable_id(binding.symbol())
+                        .is_some_and(|base| base != record.sym)
+            })
+        });
+        if !changed {
+            return;
+        }
+        let mut records: Vec<_> = self
+            .specpdl
+            .iter()
+            .filter_map(|entry| {
+                let SpecBinding::NativeUnwind {
+                    action: NativeUnwindAction::OwnerBinding(binding),
+                } = entry
+                else {
+                    return None;
+                };
+                let record = slab.record(binding.record).copied()?;
+                Some((*binding, record, record.sym, record.index))
+            })
+            .collect();
+        let mut affected = rustc_hash::FxHashSet::default();
+        let mut constants = Vec::new();
+        for (binding, record, target, index) in &mut records {
+            if record.channel != Channel::Default
+                || matches!(record.undo, UndoTarget::Captured(_) | UndoTarget::Retired)
+            {
+                continue;
+            }
+            let Some(base) = self.obarray.indirect_variable_id(binding.symbol()) else {
+                continue;
+            };
+            if base == record.sym {
+                continue;
+            }
+            if self.obarray.is_constant_id(base) {
+                let value = self.variable_value(base).unwrap_or(Value::UNBOUND);
+                constants.push((binding.record, base, value));
+                affected.insert((record.index, record.channel));
+                continue;
+            }
+            let Some(projection) = self.obarray.owned_thread_projection(base) else {
+                continue;
+            };
+            *target = base;
+            *index = projection.index();
+            affected.insert((record.index, record.channel));
+            affected.insert((*index, record.channel));
+        }
+        if affected.is_empty() {
+            return;
+        }
+        records.retain(|(_, record, _, index)| {
+            affected.contains(&(record.index, record.channel))
+                || affected.contains(&(*index, record.channel))
+        });
+        let slab = self.owner.slab_mut().expect("owner records have a slab");
+        let mut old_slots = FxHashMap::default();
+        let mut values = vec![SlotState::NoBinding; records.len()];
+        for (position, (_, record, _, _)) in records.iter().enumerate().rev() {
+            let current = old_slots
+                .entry((record.index, record.channel))
+                .or_insert_with(|| slab.slot(record.index, record.channel));
+            values[position] = *current;
+            *current = match record.undo {
+                UndoTarget::Inherited { suspended: None } => SlotState::NoBinding,
+                UndoTarget::Inherited {
+                    suspended: Some(saved),
+                }
+                | UndoTarget::Previous(saved) => SlotState::Bound(saved),
+                UndoTarget::Captured(_) | UndoTarget::Retired => SlotState::NoBinding,
+            };
+        }
+        for &(index, channel) in &affected {
+            slab.set_slot(index, channel, SlotState::NoBinding);
+        }
+        let mut resume_error = None;
+        for ((binding, record, target, index), value) in records.into_iter().zip(values) {
+            if let Some((_, base, canonical)) =
+                constants.iter().find(|(id, _, _)| *id == binding.record)
+            {
+                // GNU saves the constant's value before its attempted
+                // rebind signals. Keep a restoring record: popping the let
+                // can signal again, even if an inner handler caught the
+                // resume error. No owner overlay may remain on the old cell.
+                let assigned = value.value().map_or(*canonical, SlotValue::get);
+                if matches!(
+                    self.obarray.classify_constant_write(*base, assigned),
+                    crate::emacs_core::symbol::ConstantWrite::Refused
+                ) {
+                    resume_error.get_or_insert(binding.symbol());
+                }
+                slab.replace_undo(
+                    binding.record,
+                    UndoTarget::Captured(SlotValue::new(*canonical)),
+                );
+                slab.records[binding.record.position()]
+                    .as_mut()
+                    .expect("live constant alias record")
+                    .sym = binding.symbol();
+                continue;
+            }
+            if matches!(record.undo, UndoTarget::Retired | UndoTarget::Captured(_)) {
+                continue;
+            }
+            let undo = match (value, slab.slot(index, record.channel), record.undo) {
+                (
+                    SlotState::NoBinding,
+                    SlotState::NoBinding,
+                    suspended @ UndoTarget::Inherited { suspended: Some(_) },
+                ) => suspended,
+                (_, SlotState::Bound(previous), _) => UndoTarget::Previous(previous),
+                (_, SlotState::NoBinding, _) => UndoTarget::Inherited { suspended: None },
+            };
+            slab.replace_undo(binding.record, undo);
+            let migrated = slab.records[binding.record.position()]
+                .as_mut()
+                .expect("live record in the reconciliation plan");
+            migrated.sym = target;
+            migrated.index = index;
+            slab.set_slot(index, record.channel, value);
+        }
+        if let Some(symbol) = resume_error {
+            // condition-wait must first retake its mutex, as it does for a
+            // pending external signal, before this internal error is raised.
+            self.green_defer_binding_resume_error(symbol);
+        }
+    }
+
+    /// Owner entries naming SYMBOL, preserving GNU's original specpdl
+    /// symbol even after their effective storage followed an alias.
+    fn original_owner_records(
+        &self,
+        symbol: SymId,
+    ) -> impl Iterator<Item = (OwnerRecordId, &OwnerBindingRecord)> {
+        let slab = self.owner.slab();
+        self.specpdl.iter().filter_map(move |entry| {
+            let SpecBinding::NativeUnwind {
+                action: NativeUnwindAction::OwnerBinding(binding),
+            } = entry
+            else {
+                return None;
+            };
+            if binding.symbol() != symbol {
+                return None;
+            }
+            Some((binding.record, slab?.record(binding.record)?))
+        })
+    }
+
     /// GNU `Fdefault_toplevel_value`'s answer for an owner binding
     /// (`src/eval.c:811-825`): the value the outermost default binding of ID
     /// hides, `Some(None)` when void, or `None` when this owner has no
     /// default binding of ID.
     pub(crate) fn owner_default_toplevel_value(&mut self, id: SymId) -> Option<Option<Value>> {
-        let outermost = self.owner.slab()?.records_of(id).find(|record| {
-            matches!(
-                record.kind,
-                BindingKind::Let | BindingKind::LetDefault { .. }
-            )
-        })?;
+        let outermost = self
+            .original_owner_records(id)
+            .find(|(_, record)| {
+                matches!(
+                    record.kind,
+                    BindingKind::Let | BindingKind::LetDefault { .. }
+                )
+            })
+            .map(|(_, record)| *record)?;
         let value = match outermost.undo {
             UndoTarget::Previous(value) | UndoTarget::Captured(value) => value.get(),
             UndoTarget::Inherited { .. } | UndoTarget::Retired => {
-                self.owner_canonical_value(id, outermost.channel)
+                self.owner_canonical_value(outermost.sym, outermost.channel)
             }
         };
         Some(SlotValue::new(value).bound())
@@ -1369,14 +1541,16 @@ impl Context {
         let Some(slab) = self.owner.slab() else {
             return false;
         };
-        let Some(outermost) = slab.record_ids_of(id).into_iter().find(|record| {
-            slab.record(*record).is_some_and(|record| {
+        let Some(outermost) = self
+            .original_owner_records(id)
+            .find(|(_, record)| {
                 matches!(
                     record.kind,
                     BindingKind::Let | BindingKind::LetDefault { .. }
                 )
             })
-        }) else {
+            .map(|(record, _)| record)
+        else {
             return false;
         };
         let Some(record) = slab.record(outermost).copied() else {
@@ -1393,7 +1567,7 @@ impl Context {
                 }
             }
             UndoTarget::Inherited { .. } | UndoTarget::Retired => {
-                self.owner_canonical_store(id, record.channel, value);
+                self.owner_canonical_store(record.sym, record.channel, value);
             }
         }
         true
@@ -1461,7 +1635,7 @@ impl Context {
     /// Whether this owner binds ID (`Fdefvaralias`'s let-bound refusal).
     #[inline]
     pub(crate) fn owner_binds(&self, id: SymId) -> bool {
-        self.owner.slab().is_some_and(|slab| slab.binds(id))
+        self.original_owner_records(id).next().is_some()
     }
 
     /// This owner's default-channel binding of the projected variable ID, if

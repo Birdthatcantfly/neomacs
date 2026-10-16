@@ -554,6 +554,19 @@ impl Context {
 
         // `case SYMBOL_VARALIAS: sym = SYMBOL_ALIAS (sym); goto start;`
         let resolved = builtins::resolve_variable_alias_id_in_obarray(&self.obarray, sym_id)?;
+        // A parked binding can acquire an alias to a constant in another
+        // thread. Its eventual restore re-enters GNU's constant check with
+        // the original specpdl symbol (data.c:set_internal).
+        if resolved != sym_id
+            && let Some(result) = builtins::constant_set_outcome_in_obarray(
+                &self.obarray,
+                resolved,
+                Value::from_sym_id(sym_id),
+                value,
+            )
+        {
+            return result.map(|_| ());
+        }
         let unbinding = value.is_unbound();
         if unbinding {
             // "Built-in variable may not be unbound", named by the symbol the

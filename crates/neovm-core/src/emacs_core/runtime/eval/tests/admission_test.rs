@@ -465,13 +465,45 @@ fn a_default_binding_of_a_per_buffer_variable_reaches_direct_slot_readers() {
 
 /// Review condition 2 of round 3: `defvaralias` of a plain variable another
 /// owner has let-bound. GNU's let-bound refusal walks only the current
-/// thread's specpdl (`src/eval.c:703-711`), so GNU succeeds. Needs a second
-/// owner (3d) and the generated GNU oracle (3e); match GNU if its answer is
-/// deterministic, else document the refusal.
+/// thread's specpdl (`src/eval.c:703-711`), so GNU succeeds. The generated
+/// `oracle_green_threads` pin confirms the deterministic result: the parked
+/// owner's binding follows the alias and restores the target's outer value.
 #[test]
-#[ignore = "3e: needs a second owner (3d) and the GNU oracle"]
 fn defvaralias_of_a_variable_another_owner_binds_follows_the_gnu_oracle() {
-    unimplemented!("3e: two owners, one binding tad-alias-base; the other runs defvaralias")
+    #[cfg(feature = "jit")]
+    crate::emacs_core::jit::force_jit_off_for_test(true);
+    let mut ev = green();
+    assert_eq!(
+        eval(
+            &mut ev,
+            r##"(eval '
+(progn
+  (defvar g3e-source 'source-global)
+  (defvar g3e-target 'target-global)
+  (let* ((mutex (make-mutex))
+         (condition (make-condition-variable mutex))
+         (ready nil) (go nil) (worker nil))
+    (mutex-lock mutex)
+    (setq worker
+          (make-thread
+           (lambda ()
+             (let ((g3e-source 'source-bound))
+               (mutex-lock mutex)
+               (setq ready t)
+               (condition-notify condition)
+               (while (null go) (condition-wait condition))
+               (mutex-unlock mutex)
+               (list g3e-source g3e-target (default-toplevel-value 'g3e-source) (default-toplevel-value 'g3e-target))))))
+    (while (null ready) (condition-wait condition))
+    (let ((aliased (defvaralias 'g3e-source 'g3e-target)))
+      (setq go t)
+      (condition-notify condition)
+      (mutex-unlock mutex)
+      (list aliased (thread-join worker) g3e-source g3e-target))))
+ t)"##
+        ),
+        "(g3e-target (source-bound source-bound target-global source-bound) target-global target-global)"
+    );
 }
 
 fn truncate_slot(ev: &Context, buffer: crate::buffer::BufferId) -> Value {

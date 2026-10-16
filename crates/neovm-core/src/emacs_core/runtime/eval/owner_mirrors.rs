@@ -71,6 +71,7 @@ impl Context {
     #[cold]
     #[inline(never)]
     pub(crate) fn refresh_owner_mirrors(&mut self) {
+        self.reconcile_aliased_owner_bindings();
         self.swap_host_bindings(HostBindingSwap::In);
         self.retire_dead_owner_locals();
         self.republish_owner_mirrors();
