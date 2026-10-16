@@ -425,6 +425,20 @@ impl PreparedRootBatch {
         })
     }
 
+    /// Grow a uniquely prepared buffer only when its next census exceeds the
+    /// previous high-water mark. Published storage is never changed here.
+    pub(crate) fn ensure_capacity(&mut self, capacity: usize) -> Result<(), RootBatchError> {
+        let payload = Arc::get_mut(&mut self.payload).ok_or(RootBatchError::NonUniquePayload)?;
+        debug_assert_eq!(payload.used, 0, "only an empty prepared batch can grow");
+        if capacity > payload.words.len() {
+            let mut words = Vec::new();
+            words.try_reserve_exact(capacity)?;
+            words.resize(capacity, None);
+            payload.words = words.into_boxed_slice();
+        }
+        Ok(())
+    }
+
     /// Admit the owner's postexchange census without allocating or calling Lisp.
     ///
     /// # Safety
@@ -540,6 +554,91 @@ impl RootBatchLease {
     ) -> Result<RootBatchReader<'r>, RootBatchError> {
         let ownership = self.ownership.as_ref().ok_or(RootBatchError::Retired)?;
         RootBatchReader::admit(ownership, heap)
+    }
+
+    /// Retire a restored owner's publication and reserve the next generation,
+    /// reusing its control and initialized storage. The caller needs the same
+    /// restored-owner and quiescent-collector proofs as `try_finish`.
+    ///
+    /// Unlike ordinary slot reuse, this requires that no old control or payload
+    /// observer exists at all. The table lock excludes synchronous scans and
+    /// reader admission; Closing excludes later readers. Only after those
+    /// checks can Arc uniqueness authorize changing the old immutable objects.
+    /// Failure retains the rooted lease for retry, as ordinary retirement does.
+    pub(crate) fn try_recycle(mut self) -> Result<PreparedRootBatch, RootBatchFinishFailure> {
+        let check = (|| {
+            let ownership = self.ownership.as_ref().ok_or(RootBatchError::Retired)?;
+            let table = Arc::clone(&ownership.table);
+            let mut cells = table.try_lock().ok_or(RootBatchError::Busy)?;
+            let batches = cells
+                .batches
+                .as_mut()
+                .ok_or(RootBatchError::StaleReservation)?;
+            batches.validate(&ownership.control)?;
+            match ownership.control.state()? {
+                SlotState::Live => ownership.control.set_state(SlotState::Closing),
+                SlotState::Closing => {}
+                SlotState::Retired => return Err(RootBatchError::Retired),
+                SlotState::Reserved | SlotState::Cancelled => {
+                    return Err(RootBatchError::NotPublished);
+                }
+            }
+            let readers = ownership.control.readers.load(Ordering::Acquire);
+            let abandoned = ownership.control.abandoned.load(Ordering::Acquire);
+            if readers != 0 || abandoned != 0 {
+                return Err(RootBatchError::ReadersOutstanding { readers, abandoned });
+            }
+            let payload = ownership
+                .control
+                .payload
+                .get()
+                .ok_or(RootBatchError::NotPublished)?;
+            if Arc::strong_count(&ownership.control) != 2
+                || Arc::weak_count(&ownership.control) != 0
+                || Arc::strong_count(payload) != 1
+                || Arc::weak_count(payload) != 0
+            {
+                return Err(RootBatchError::NonUniquePayload);
+            }
+            let generation = batches
+                .next_generation
+                .checked_add(1)
+                .and_then(NonZeroU64::new)
+                .ok_or(RootBatchError::GenerationExhausted)?;
+            let slot = ownership.control.key.slot;
+            ownership.control.set_state(SlotState::Retired);
+            let BatchOwnership {
+                table: owned_table,
+                control,
+                epoch,
+            } = self.ownership.take().expect("checked ownership");
+            drop(control);
+            // No new reference can appear: the only table accessor holds this
+            // same lock, no reader remains, and the unique lease was consumed.
+            let control = Arc::get_mut(&mut batches.slots[slot])
+                .expect("the checked table reference is now unique");
+            let mut payload = control.payload.take().expect("checked published payload");
+            let words = Arc::get_mut(&mut payload).expect("checked unique payload");
+            words.words[..words.used].fill(None);
+            words.used = 0;
+            control.key.generation = BatchGeneration(generation);
+            control.set_state(SlotState::Reserved);
+            batches.next_generation = generation.get();
+            let control = Arc::clone(&batches.slots[slot]);
+            Ok(PreparedRootBatch {
+                reservation: BatchReservation {
+                    ownership: Some(BatchOwnership {
+                        table: owned_table,
+                        control,
+                        epoch,
+                    }),
+                    _confined: PhantomData,
+                },
+                payload,
+                _confined: PhantomData,
+            })
+        })();
+        check.map_err(|error| RootBatchFinishFailure { lease: self, error })
     }
 
     /// Nonblocking close and retirement after explicit reader completion.

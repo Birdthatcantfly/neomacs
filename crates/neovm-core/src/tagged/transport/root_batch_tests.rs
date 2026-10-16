@@ -403,3 +403,191 @@ fn exhausted_abandonment_never_wraps_into_a_retirable_zero() {
     drop(exclusion);
     assert!(heap.facade_mark_is_excluded());
 }
+
+#[test]
+fn restored_batch_reuses_control_payload_and_words_with_a_new_generation() {
+    let mut heap = TaggedHeap::new();
+    let exclusion = exclude_fresh(&mut heap);
+    let mut prepared = PreparedRootBatch::reserve(&heap, &exclusion, 8).unwrap();
+    let control_address = Arc::as_ptr(&prepared.reservation.ownership.as_ref().unwrap().control);
+    let payload_address = Arc::as_ptr(&prepared.payload);
+    let words_address = prepared.payload.words.as_ptr();
+    let mut previous_generation = prepared
+        .reservation
+        .ownership
+        .as_ref()
+        .unwrap()
+        .control
+        .key
+        .generation;
+    for index in 0..64 {
+        prepared.ensure_capacity(8).unwrap();
+        let value = heap.alloc_cons(TaggedValue::fixnum(index), TaggedValue::NIL);
+        // SAFETY: this fixture owns the heap and freshly allocated value; no
+        // collection or callback occurs between finalization and publication.
+        let lease = unsafe { prepared.finalize(&[value, TaggedValue::fixnum(index)]) }
+            .unwrap()
+            .publish()
+            .unwrap();
+        let reader = lease.reader(&heap).unwrap();
+        let mut read = Vec::new();
+        reader.append_roots(&mut read);
+        assert_eq!(read, vec![value]);
+        reader.finish().unwrap();
+        heap.collect_exact(roots(&heap).into_iter());
+        assert_eq!(value.cons_car(), TaggedValue::fixnum(index));
+        prepared = lease.try_recycle().unwrap();
+        assert!(roots(&heap).is_empty());
+        assert_eq!(Arc::as_ptr(&prepared.payload), payload_address);
+        assert_eq!(prepared.payload.words.as_ptr(), words_address);
+        assert_eq!(
+            Arc::as_ptr(&prepared.reservation.ownership.as_ref().unwrap().control),
+            control_address
+        );
+        let generation = prepared
+            .reservation
+            .ownership
+            .as_ref()
+            .unwrap()
+            .control
+            .key
+            .generation;
+        assert_ne!(generation, previous_generation);
+        previous_generation = generation;
+        assert_eq!(prepared.payload.used, 0);
+        assert!(prepared.payload.words.iter().all(Option::is_none));
+        heap.collect_exact(roots(&heap).into_iter());
+        assert!(!heap.owns_heap_value_for_test(value));
+    }
+    prepared.ensure_capacity(16).unwrap();
+    assert_eq!(prepared.payload.words.len(), 16);
+    assert!(prepared.payload.words.iter().all(Option::is_none));
+    assert_eq!(Arc::as_ptr(&prepared.payload), payload_address);
+    assert_eq!(
+        Arc::as_ptr(&prepared.reservation.ownership.as_ref().unwrap().control),
+        control_address
+    );
+}
+
+#[test]
+fn recycling_refuses_old_control_and_payload_observers_without_unrooting() {
+    let mut heap = TaggedHeap::new();
+    let exclusion = exclude_fresh(&mut heap);
+    let value = heap.alloc_cons(TaggedValue::fixnum(7), TaggedValue::NIL);
+    let lease = publish(&heap, &exclusion, &[value]);
+    let old_control = Arc::clone(&lease.ownership.as_ref().unwrap().control);
+    let failure = lease.try_recycle().unwrap_err();
+    assert!(matches!(failure.error(), RootBatchError::NonUniquePayload));
+    assert_eq!(roots(&heap), vec![value]);
+    let (lease, _) = failure.into_parts();
+    drop(old_control);
+    let old_payload = Arc::clone(
+        lease
+            .ownership
+            .as_ref()
+            .unwrap()
+            .control
+            .payload
+            .get()
+            .unwrap(),
+    );
+    let failure = lease.try_recycle().unwrap_err();
+    assert!(matches!(failure.error(), RootBatchError::NonUniquePayload));
+    assert_eq!(roots(&heap), vec![value]);
+    let (lease, _) = failure.into_parts();
+    drop(old_payload);
+    let prepared = lease.try_recycle().unwrap();
+    assert!(roots(&heap).is_empty());
+    drop(prepared);
+}
+
+#[test]
+fn recycling_retains_abandoned_reader_obligations() {
+    let mut heap = TaggedHeap::new();
+    let exclusion = exclude_fresh(&mut heap);
+    let value = heap.alloc_cons(TaggedValue::fixnum(7), TaggedValue::NIL);
+    let lease = publish(&heap, &exclusion, &[value]);
+    drop(lease.reader(&heap).unwrap());
+    let failure = lease.try_recycle().unwrap_err();
+    assert!(matches!(
+        failure.error(),
+        RootBatchError::ReadersOutstanding {
+            readers: 0,
+            abandoned: 1
+        }
+    ));
+    assert_eq!(roots(&heap), vec![value]);
+    // Unfinished lease Drop must retain the live batch and exclusion.
+    drop(failure);
+    assert_eq!(roots(&heap), vec![value]);
+}
+
+#[test]
+fn recycling_retains_a_forgotten_live_reader() {
+    let mut heap = TaggedHeap::new();
+    let exclusion = exclude_fresh(&mut heap);
+    let value = heap.alloc_cons(TaggedValue::fixnum(7), TaggedValue::NIL);
+    let lease = publish(&heap, &exclusion, &[value]);
+    std::mem::forget(lease.reader(&heap).unwrap());
+    let failure = lease.try_recycle().unwrap_err();
+    assert!(matches!(
+        failure.error(),
+        RootBatchError::ReadersOutstanding {
+            readers: 1,
+            abandoned: 0
+        }
+    ));
+    assert_eq!(roots(&heap), vec![value]);
+    drop(failure);
+    assert_eq!(roots(&heap), vec![value]);
+}
+
+#[test]
+fn recycled_storage_preserves_heap_identity_and_rejects_stale_generation() {
+    let mut heap = TaggedHeap::new();
+    let exclusion = exclude_fresh(&mut heap);
+    let foreign = TaggedHeap::new();
+    let value = heap.alloc_cons(TaggedValue::fixnum(7), TaggedValue::NIL);
+    let lease = publish(&heap, &exclusion, &[value]);
+    let old_key = lease.ownership.as_ref().unwrap().control.key;
+    let mut prepared = lease.try_recycle().unwrap();
+    let words_address = prepared.payload.words.as_ptr();
+    assert!(matches!(
+        prepared.ensure_capacity(usize::MAX),
+        Err(RootBatchError::StorageAllocation(_))
+    ));
+    assert_eq!(prepared.payload.words.as_ptr(), words_address);
+    let stale = Arc::new(BatchControl {
+        key: old_key,
+        state: AtomicU8::new(SlotState::Retired.into()),
+        payload: OnceLock::new(),
+        readers: AtomicUsize::new(0),
+        abandoned: AtomicUsize::new(0),
+    });
+    let ownership = prepared.reservation.ownership.as_ref().unwrap();
+    assert!(matches!(
+        ownership
+            .table
+            .lock()
+            .batches
+            .as_ref()
+            .unwrap()
+            .validate(&stale),
+        Err(RootBatchError::StaleReservation)
+    ));
+    assert_eq!(prepared.payload.heap, heap.heap_identity());
+    // SAFETY: the same freshly allocated value remains live in this fixture;
+    // no collection, callback or handoff has occurred while it was unrooted.
+    let lease = unsafe { prepared.finalize(&[value]) }
+        .unwrap()
+        .publish()
+        .unwrap();
+    assert_eq!(lease.heap_identity(), heap.heap_identity());
+    assert!(matches!(
+        lease.reader(&foreign),
+        Err(RootBatchError::ForeignHeap { .. })
+    ));
+    assert_eq!(roots(&heap), vec![value]);
+    assert!(roots(&foreign).is_empty());
+    lease.try_finish().unwrap();
+}
