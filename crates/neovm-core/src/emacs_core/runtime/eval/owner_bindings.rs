@@ -643,6 +643,9 @@ impl OwnerSlab {
                 visit(current.get());
             }
         }
+        if let Some(seat) = &self.green {
+            seat.trace_binding_resume_error(visit);
+        }
     }
 }
 
@@ -1370,6 +1373,67 @@ impl Context {
     #[cold]
     #[inline(never)]
     pub(super) fn reconcile_aliased_owner_bindings(&mut self) {
+        self.reconcile_owner_alias_redirect(None);
+    }
+
+    /// GNU's next exchange of a previously failed constant alias will fail
+    /// again. Keywords assigned their own value remain an allowed no-op.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn failed_constant_owner_binding(&self, outgoing: bool) -> Option<SymId> {
+        let slab = self.owner.slab()?;
+        let mut failure = None;
+        // Outgoing exchanges walk inner to outer; returning exchanges walk
+        // outer to inner. Selecting the last or first failure preserves both
+        // orders without allocating a temporary record vector at every park.
+        for (_, record) in slab.live_records() {
+            let UndoTarget::Captured(saved) = record.undo else {
+                continue;
+            };
+            if record.channel != Channel::Default || !self.obarray.is_alias_id(record.sym) {
+                continue;
+            }
+            let Some(base) = self.obarray.indirect_variable_id(record.sym) else {
+                continue;
+            };
+            if matches!(
+                self.obarray.classify_constant_write(base, saved.get()),
+                crate::emacs_core::symbol::ConstantWrite::Refused
+            ) {
+                failure = Some(record.sym);
+                if !outgoing {
+                    break;
+                }
+            }
+        }
+        failure
+    }
+
+    /// The old plain canonical cell is otherwise lost when this owner aliases
+    /// a cell that an older, differently named binding currently reaches.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn owner_alias_redirect_value(&mut self, alias: SymId) -> Option<Value> {
+        if !self
+            .owner
+            .slab()?
+            .live_records()
+            .any(|(_, record)| record.sym == alias && record.channel == Channel::Default)
+        {
+            return None;
+        }
+        Some(self.owner_canonical_value(alias, Channel::Default))
+    }
+
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn finish_owner_alias_redirect(&mut self, alias: SymId, old_value: Value) {
+        self.reconcile_owner_alias_redirect(Some((alias, old_value)));
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn reconcile_owner_alias_redirect(&mut self, active: Option<(SymId, Value)>) {
         let Some(slab) = self.owner.slab() else {
             return;
         };
@@ -1441,6 +1505,63 @@ impl Context {
             affected.contains(&(record.index, record.channel))
                 || affected.contains(&(*index, record.channel))
         });
+        // At an active redirect GNU abandons the old cell's live binding.
+        // Simulate its next reverse exchange now: no peer can run before a
+        // park, and the rebuilt overlay keeps this owner's visible value.
+        let mut active_values = None;
+        if let Some((alias, old_canonical)) = active {
+            let mut physical = FxHashMap::default();
+            let mut assigned = vec![SlotState::NoBinding; records.len()];
+            let mut destinations = FxHashMap::default();
+            for (_, record, target, index) in &records {
+                let key = (*index, record.channel);
+                if !physical.contains_key(&key) {
+                    let canonical = self.owner_canonical_value(*target, record.channel);
+                    let current = self
+                        .owner
+                        .slab()
+                        .and_then(|slab| slab.slot(*index, record.channel).value())
+                        .map_or(canonical, SlotValue::get);
+                    physical.insert(key, current);
+                    destinations.insert(key, *target);
+                }
+            }
+            for (position, (_, record, _, index)) in records.iter().enumerate().rev() {
+                let key = (*index, record.channel);
+                assigned[position] = SlotState::Bound(SlotValue::new(physical[&key]));
+                let restores = match record.undo {
+                    UndoTarget::Inherited { suspended: None } if record.sym == alias => {
+                        old_canonical
+                    }
+                    UndoTarget::Inherited { suspended: None } => {
+                        self.owner_canonical_value(record.sym, record.channel)
+                    }
+                    UndoTarget::Inherited {
+                        suspended: Some(saved),
+                    }
+                    | UndoTarget::Previous(saved)
+                    | UndoTarget::Captured(saved) => saved.get(),
+                    UndoTarget::Retired => continue,
+                };
+                physical.insert(key, restores);
+            }
+            for (key, value) in physical {
+                self.owner_canonical_store(destinations[&key], key.1, value);
+            }
+            active_values = Some(assigned);
+        }
+        let target_canonical: Vec<_> = records
+            .iter()
+            .map(|(_, record, target, _)| self.owner_canonical_value(*target, record.channel))
+            .collect();
+        let target_forwarders: Vec<_> = records
+            .iter()
+            .map(|(_, _, target, _)| {
+                self.obarray
+                    .thread_projection_of(*target)
+                    .and_then(|p| p.logical_forwarder())
+            })
+            .collect();
         let slab = self.owner.slab_mut().expect("owner records have a slab");
         let mut old_slots = FxHashMap::default();
         let mut values = vec![SlotState::NoBinding; records.len()];
@@ -1458,11 +1579,17 @@ impl Context {
                 UndoTarget::Captured(_) | UndoTarget::Retired => SlotState::NoBinding,
             };
         }
+        if let Some(active_values) = active_values {
+            values = active_values;
+        }
         for &(index, channel) in &affected {
             slab.set_slot(index, channel, SlotState::NoBinding);
         }
         let mut resume_error = None;
-        for ((binding, record, target, index), value) in records.into_iter().zip(values) {
+        let mut forward_error = None;
+        for (position, ((binding, record, target, index), mut value)) in
+            records.into_iter().zip(values).enumerate()
+        {
             if let Some((_, base, canonical)) =
                 constants.iter().find(|(id, _, _)| *id == binding.record)
             {
@@ -1475,7 +1602,9 @@ impl Context {
                     self.obarray.classify_constant_write(*base, assigned),
                     crate::emacs_core::symbol::ConstantWrite::Refused
                 ) {
-                    resume_error.get_or_insert(binding.symbol());
+                    if resume_error.is_none() && forward_error.is_none() {
+                        resume_error = Some(binding.symbol());
+                    }
                 }
                 slab.replace_undo(
                     binding.record,
@@ -1489,6 +1618,29 @@ impl Context {
             }
             if matches!(record.undo, UndoTarget::Retired | UndoTarget::Captured(_)) {
                 continue;
+            }
+            if let (Some(forwarder), SlotState::Bound(assigned)) =
+                (target_forwarders[position], value)
+            {
+                match forwarder.store(assigned.get()) {
+                    Ok(stored) => {
+                        value = SlotState::Bound(SlotValue::new(stored.canonical_value()))
+                    }
+                    Err(error) => {
+                        if resume_error.is_none() && forward_error.is_none() {
+                            forward_error = Some((error, assigned.get()));
+                        }
+                        slab.replace_undo(
+                            binding.record,
+                            UndoTarget::Captured(SlotValue::new(target_canonical[position])),
+                        );
+                        slab.records[binding.record.position()]
+                            .as_mut()
+                            .expect("live refused alias record")
+                            .sym = binding.symbol();
+                        continue;
+                    }
+                }
             }
             let undo = match (value, slab.slot(index, record.channel), record.undo) {
                 (
@@ -1511,6 +1663,8 @@ impl Context {
             // condition-wait must first retake its mutex, as it does for a
             // pending external signal, before this internal error is raised.
             self.green_defer_binding_resume_error(symbol);
+        } else if let Some((error, value)) = forward_error {
+            self.green_defer_forward_resume_error(error, value);
         }
     }
 

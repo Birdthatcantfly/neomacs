@@ -524,10 +524,14 @@ pub(crate) fn install_defvaralias_state(
     ctx.obarray.make_special_id(state_change.alias_id);
     // `defvaralias` refused forwarded and buffer-local NEW-ALIAS cells
     // before this state change was built.
+    let old_owner_value = ctx.owner_alias_redirect_value(state_change.alias_id);
     let installed = ctx
         .obarray
         .make_alias(state_change.alias_id, state_change.base_id);
     debug_assert!(installed.is_ok(), "defvaralias checked the redirect");
+    if let Some(old_value) = old_owner_value {
+        ctx.finish_owner_alias_redirect(state_change.alias_id, old_value);
+    }
     ctx.obarray.make_special_id(state_change.base_id);
     ctx.mark_user_test_gc_settings_volatile_if_gc_symbol(state_change.alias_id);
     ctx.refresh_gc_runtime_settings_after_change_by_id(state_change.alias_id);

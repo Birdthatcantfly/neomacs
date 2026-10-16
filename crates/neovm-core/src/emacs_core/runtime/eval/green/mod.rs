@@ -50,6 +50,12 @@ pub(crate) struct GreenRuntime {
     pub(super) owner_carried: std::cell::RefCell<Option<owner_carried::OwnerCarried>>,
     /// A `kill-emacs` run by another thread, for main to exit with.
     pub(super) exit: std::cell::Cell<Option<super::ShutdownRequest>>,
+    /// GNU reports an outgoing owner's failed constant exchange in the next
+    /// owner, which has already become current. Scalar identities need no GC
+    /// roots. A same-owner reacquire consumes the marker without signalling.
+    pub(super) outgoing_constant_error:
+        std::cell::Cell<Option<(ThreadKey, crate::emacs_core::intern::SymId)>>,
+
     /// The standard case table, one for every thread as in GNU:
     /// `set-standard-case-table` sets it here, and each thread installs it
     /// as it resumes.
@@ -194,6 +200,7 @@ impl Context {
             carried: std::cell::RefCell::new(carried::CarriedState::placeholders()),
             owner_carried: Default::default(),
             standard_case_table: std::cell::Cell::new(self.cached_standard_case_table),
+            outgoing_constant_error: std::cell::Cell::new(None),
             deferred_errors: Default::default(),
         }));
         Ok(baton)

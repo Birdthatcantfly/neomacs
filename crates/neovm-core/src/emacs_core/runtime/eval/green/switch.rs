@@ -32,6 +32,13 @@ pub(crate) enum SelectTurn {
 pub(crate) static SELECT_SLICES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// A failed GNU binding exchange, kept as allocation-free metadata until delivery.
+#[derive(Clone, Copy, Debug)]
+enum BindingResumeError {
+    Constant(SymId),
+    Forward(crate::emacs_core::forward::ForwardStoreError, Value),
+}
+
 /// A Lisp thread's place in its Green runtime, kept in its owner slab.
 pub(crate) struct GreenSeat {
     pub(crate) key: ThreadKey,
@@ -39,10 +46,18 @@ pub(crate) struct GreenSeat {
     receiver: Option<mpsc::Receiver<Baton>>,
     /// The World's Baton, while this thread runs.
     baton: Option<Baton>,
-    /// Rebinding an alias to a constant failed on resume. Deliver this at
-    /// the normal signal point, after condition-wait retakes its mutex.
-    /// The original specpdl symbol is a scalar, with no hidden Lisp roots.
-    binding_resume_error: Option<SymId>,
+    /// A constant or native forwarder refused a rebind. Deliver this after
+    /// condition-wait retakes its mutex. The owner slab traces a forwarded
+    /// error's offending Lisp value, including while this owner is running.
+    binding_resume_error: Option<BindingResumeError>,
+}
+
+impl GreenSeat {
+    pub(crate) fn trace_binding_resume_error(&self, visit: &mut dyn FnMut(Value)) {
+        if let Some(BindingResumeError::Forward(_, value)) = self.binding_resume_error {
+            visit(value);
+        }
+    }
 }
 
 impl std::fmt::Debug for GreenSeat {
@@ -184,6 +199,12 @@ impl Context {
         self.threads.set_thread_current_buffer(key.id(), current);
         self.restore_deferred_error(&baton, key);
         let parked = self.park_owner();
+        if let Some(runtime) = baton.green_runtime().as_ref() {
+            runtime.outgoing_constant_error.set(
+                self.failed_constant_owner_binding(true)
+                    .map(|symbol| (key, symbol)),
+            );
+        }
         stow_owner_state(self, &baton);
         stow_carried_state(&baton);
         let roots = self.collect_parked_roots();
@@ -196,6 +217,16 @@ impl Context {
         self.retire_parked_roots(&baton, key);
         unstow_carried_state(&baton);
         unstow_owner_state(self, &baton);
+        let changed_owner = self.threads.current_thread_id() != key.id();
+        let outgoing_error = baton
+            .green_runtime()
+            .as_ref()
+            .and_then(|runtime| runtime.outgoing_constant_error.take())
+            .filter(|(previous, _)| *previous != key)
+            .map(|(_, symbol)| symbol);
+        let returning_error = changed_owner
+            .then(|| self.failed_constant_owner_binding(false))
+            .flatten();
         self.threads.enter_thread(key.id());
         let (exit, case_table) = baton
             .green_runtime()
@@ -210,6 +241,12 @@ impl Context {
         let seat = self.green_seat().expect("seated above");
         seat.receiver = Some(receiver);
         seat.baton = Some(baton);
+        // GNU enters this owner before unbinding the previous one. Its
+        // failure wins over this owner's own rebind, and condition-wait
+        // still retakes its mutex before either error is delivered.
+        if let Some(symbol) = outgoing_error.or(returning_error) {
+            self.green_defer_binding_resume_error(symbol);
+        }
         // GNU `post_acquire_global_lock` sets the thread's buffer again: a
         // thread that killed it moved this one to another, which the
         // owner's mirrors must read from as they come back.
@@ -266,20 +303,40 @@ impl Context {
     /// Preserve GNU's first failed rebind until the safe resume signal point.
     pub(crate) fn green_defer_binding_resume_error(&mut self, symbol: SymId) {
         if let Some(seat) = self.green_seat() {
-            seat.binding_resume_error.get_or_insert(symbol);
+            seat.binding_resume_error
+                .get_or_insert(BindingResumeError::Constant(symbol));
+        }
+    }
+
+    pub(crate) fn green_defer_forward_resume_error(
+        &mut self,
+        error: crate::emacs_core::forward::ForwardStoreError,
+        value: Value,
+    ) {
+        if let Some(seat) = self.green_seat() {
+            seat.binding_resume_error
+                .get_or_insert(BindingResumeError::Forward(error, value));
         }
     }
 
     /// Raise a failed rebind or an error another thread signalled into KEY.
     pub(super) fn green_raise_pending_signal(&mut self, key: ThreadKey) -> Result<(), Flow> {
-        if let Some(symbol) = self
-            .green_seat()
-            .and_then(|seat| seat.binding_resume_error.take())
-        {
-            return Err(signal(
-                crate::emacs_core::error::LispCondition::SettingConstant,
-                vec![Value::from_sym_id(symbol)],
-            ));
+        if let Some(error) = self.green_seat().and_then(|seat| seat.binding_resume_error) {
+            // Keep a forwarded offending value rooted in the seat while
+            // constructing signal data, which may allocate a Lisp string.
+            let flow = match error {
+                BindingResumeError::Constant(symbol) => signal(
+                    crate::emacs_core::error::LispCondition::SettingConstant,
+                    vec![Value::from_sym_id(symbol)],
+                ),
+                BindingResumeError::Forward(error, value) => {
+                    super::super::forward_store_signal(error, value)
+                }
+            };
+            self.green_seat()
+                .expect("seated above")
+                .binding_resume_error = None;
+            return Err(flow);
         }
         match self.threads.take_pending_thread_signal(key.id()) {
             Some(flow) => Err(flow),
@@ -458,6 +515,12 @@ fn run_worker(key: ThreadKey, receiver: mpsc::Receiver<Baton>, control: Arc<Cont
         control.finish(key, baton);
         return;
     }
+    let outgoing_error = baton
+        .green_runtime()
+        .as_ref()
+        .and_then(|runtime| runtime.outgoing_constant_error.take())
+        .filter(|(previous, _)| *previous != key)
+        .map(|(_, symbol)| symbol);
     // Enter the thread before its buffer: a buffer switch records itself as
     // the current thread's buffer.
     owner.threads.enter_thread(key.id());
@@ -479,15 +542,22 @@ fn run_worker(key: ThreadKey, receiver: mpsc::Receiver<Baton>, control: Arc<Cont
     if PANIC_NEXT_WORKER.swap(false, std::sync::atomic::Ordering::Relaxed) {
         panic!("test hook: a Green worker panics");
     }
-    let outcome = match function {
-        Some(function) => {
+    // GNU's analogous failure before a newborn thread has handlers crashes
+    // the process. Keep the internal error as this thread's last-error;
+    // established threads take the exact catchable path in green_park.
+    let outcome = match (outgoing_error, function) {
+        (Some(symbol), _) => Err(signal(
+            crate::emacs_core::error::LispCondition::SettingConstant,
+            vec![Value::from_sym_id(symbol)],
+        )),
+        (None, Some(function)) => {
             owner.push_vm_root_frame();
             owner.push_vm_frame_root(function);
             let outcome = owner.apply(function, Vec::new());
             owner.pop_vm_root_frame();
             outcome
         }
-        None => Ok(Value::NIL),
+        (None, None) => Ok(Value::NIL),
     };
     let exit = outcome.as_ref().err().and_then(Flow::shutdown_request);
     // A kill-emacs is the process's, not this thread's: it is not recorded.
@@ -503,6 +573,10 @@ fn run_worker(key: ThreadKey, receiver: mpsc::Receiver<Baton>, control: Arc<Cont
         .take()
         .expect("a finishing thread holds the Baton");
     owner.restore_deferred_error(&baton, key);
+    if let Some(runtime) = baton.green_runtime().as_ref() {
+        // GNU clears prev_thread when a thread exits: no outgoing unbind.
+        runtime.outgoing_constant_error.set(None);
+    }
     if let Some(request) = exit
         && control.lifecycle() == Lifecycle::Running
         && let Some(runtime) = baton.green_runtime().as_ref()
