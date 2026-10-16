@@ -24,26 +24,31 @@ struct NativeTables {
     subr_objects: Vec<Option<TaggedValue>>,
 }
 
-/// Set once a Green runtime captured the subr tables: a later registration
-/// would reach only the registering thread (debug builds check it).
+/// Active Green snapshots: registration while any snapshot lives would reach
+/// only the registering thread. Retirement must reopen startup for later Worlds.
 #[cfg(debug_assertions)]
-static NATIVE_TABLES_CAPTURED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static NATIVE_TABLES_CAPTURED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(debug_assertions)]
+impl Drop for NativeTables {
+    fn drop(&mut self) {
+        NATIVE_TABLES_CAPTURED.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 /// A subr is being registered: no Green runtime may have captured the
 /// tables already, or its further owners would never see it.
 #[cfg(debug_assertions)]
 pub(crate) fn debug_assert_native_tables_open(name: &str) {
     debug_assert!(
-        !NATIVE_TABLES_CAPTURED.load(std::sync::atomic::Ordering::Relaxed),
+        NATIVE_TABLES_CAPTURED.load(std::sync::atomic::Ordering::Relaxed) == 0,
         "subr {name} registered after a Green runtime captured the subr tables"
     );
 }
 
 impl NativeTables {
     fn capture() -> Self {
-        #[cfg(debug_assertions)]
-        NATIVE_TABLES_CAPTURED.store(true, std::sync::atomic::Ordering::Relaxed);
         let subrs = super::super::GLOBAL_SUBR_TABLE.with(|table| table.borrow().clone());
         crate::tagged::value::mint_static_subr_objects(
             subrs
@@ -52,12 +57,17 @@ impl NativeTables {
                 .filter(|(_, entry)| entry.is_some())
                 .map(|(index, _)| SymId(index as u32)),
         );
-        Self {
+        let native = Self {
             subrs,
             inline: super::super::INLINE_SUBR_TABLE.with(|table| table.borrow().clone()),
             leaves: crate::emacs_core::subr::leaf::snapshot_subr_leaves(),
             subr_objects: crate::tagged::value::snapshot_static_subr_objects(),
-        }
+        };
+        // Count only a fully built snapshot. Every such snapshot has exactly
+        // one Drop; simultaneously live Worlds keep registration closed.
+        #[cfg(debug_assertions)]
+        NATIVE_TABLES_CAPTURED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        native
     }
 
     fn install(&self) {
