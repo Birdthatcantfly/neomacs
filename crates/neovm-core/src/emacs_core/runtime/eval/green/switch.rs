@@ -165,6 +165,9 @@ impl Context {
         if let Some(refusal) = switch_refusal(self) {
             return Err(signal("error", vec![Value::string(refusal)]));
         }
+        // A failed retirement kept the restored owner's lease in the World.
+        // Finish that obligation before publishing another census for this key.
+        self.finish_retained_parked_roots(key)?;
         // Capture exact sources before any binding exchange. Operand roots
         // are copied below from trace_roots' jit_window on this owner only.
         #[cfg(feature = "jit")]
@@ -181,6 +184,17 @@ impl Context {
         let mut roots = self.collect_parked_roots();
         #[cfg(feature = "jit")]
         roots.extend_from_slice(parked_jit.roots());
+        macro_rules! cancel_park {
+            ($error:expr) => {{
+                self.return_parked_root_buffer(roots);
+                #[cfg(feature = "jit")]
+                parked_jit.return_scratch(
+                    &mut self.green_seat().expect("seated above").parked_jit_scratch,
+                );
+                self.resume_owner(parked);
+                return Err(signal("error", vec![Value::string($error.to_string())]));
+            }};
+        }
         let prepared = self
             .green_seat()
             .expect("seated above")
@@ -204,24 +218,28 @@ impl Context {
         };
         let prepared = match prepared {
             Ok(prepared) => prepared,
-            Err(error) => {
-                self.return_parked_root_buffer(roots);
-                #[cfg(feature = "jit")]
-                parked_jit.return_scratch(
-                    &mut self.green_seat().expect("seated above").parked_jit_scratch,
-                );
-                self.resume_owner(parked);
-                return Err(signal("error", vec![Value::string(error.to_string())]));
-            }
+            Err(error) => cancel_park!(error),
         };
         // SAFETY: this is the original sole mutator, holding the Baton and
         // its marking exclusion after park_owner completed. The census was
         // copied from this heap's live roots; no GC, Lisp or handoff occurs
         // between its collection, finalization and publication.
-        let publication = unsafe { prepared.finalize(&roots) }
-            .expect("the prepared capacity fits the exact owner census")
-            .publish()
-            .expect("a unique reserved batch publishes exactly once");
+        let finalized = match unsafe { prepared.finalize(&roots) } {
+            Ok(finalized) => finalized,
+            Err(failure) => {
+                let (prepared, error) = failure.into_parts();
+                self.green_seat().expect("seated above").parked_root_batch = Some(prepared);
+                cancel_park!(error);
+            }
+        };
+        let publication = match finalized.publish() {
+            Ok(publication) => publication,
+            Err(failure) => {
+                let (finalized, error) = failure.into_parts();
+                drop(finalized);
+                cancel_park!(error);
+            }
+        };
         // The immutable typed publication now owns the census. Native scratch
         // can be cleared and retained before another owner receives the Baton.
         self.return_parked_root_buffer(roots);
@@ -310,7 +328,6 @@ impl Context {
             case_table.map(Value::bits) != self.cached_standard_case_table.map(Value::bits);
         self.cached_standard_case_table = case_table;
         self.resume_owner(parked);
-        self.retire_parked_roots(key);
         if case_table_changed {
             crate::emacs_core::casetab::activate_casetab_thread_locals(case_table);
         }
@@ -321,6 +338,7 @@ impl Context {
         // syntax tables these caches answer from.
         crate::emacs_core::string_pos_cache::reset_string_pos_cache();
         crate::emacs_core::regex::reset_regex_thread_locals();
+        let retirement = self.retire_parked_roots(key);
         if let Some(request) = exit {
             // The process exits: like GNU's `exit`, no cleanup form of this
             // thread runs on the way out.
@@ -328,6 +346,7 @@ impl Context {
             self.command_loop.running = false;
             return Err(Flow::shutdown(request));
         }
+        retirement?;
         if deadlocked {
             return Err(signal(
                 "error",
@@ -484,6 +503,21 @@ impl Context {
         for (_, os_thread) in control.take_join_handles() {
             let _ = os_thread.join();
         }
+        // All continuations have restored or terminated, and their scoped
+        // collectors/readers have returned. Finish any retained failure before
+        // dropping the main reservation; keep the Baton for post-teardown
+        // inspection until this Context itself retires.
+        self.finish_ended_parked_roots();
+        self.green_seat().expect("main is seated").parked_root_batch = None;
+    }
+
+    /// Context retirement, while its ordinary views still keep the World alive.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn green_release_seat(&mut self) {
+        if let Some(slab) = self.owner.slab_mut() {
+            drop(slab.take_green_seat());
+        }
     }
 
     /// KEY's error held since its start is pending again
@@ -518,19 +552,73 @@ impl Context {
     }
 
     /// KEY runs again: its roots are its own Context's once more.
-    fn retire_parked_roots(&mut self, key: ThreadKey) {
+    fn retire_parked_roots(&mut self, key: ThreadKey) -> Result<(), Flow> {
+        self.quiesce_parked_collector()?;
         let publication = self
             .with_green_runtime(|runtime| runtime.parked.borrow_mut().remove(&key))
             .expect("each returning owner has a parked batch");
         // Called only after ParkedJit::resume and resume_owner have restored
         // the original continuation. The retained Green epoch excludes a
         // concurrent marker, and no synchronous collection is active here.
-        let prepared = publication
-            .try_recycle()
-            .expect("restored owner and synchronous collector have no readers");
+        let prepared = match publication.try_recycle() {
+            Ok(prepared) => prepared,
+            Err(failure) => {
+                // Storage reuse is optional. Busy, generation exhaustion or
+                // a retained observer must never abandon the rooted lease.
+                let (publication, _) = failure.into_parts();
+                return self.finish_restored_publication(key, publication);
+            }
+        };
         let seat = self.green_seat().expect("a returning owner is seated");
         assert!(seat.parked_root_batch.is_none(), "one batch per owner");
         seat.parked_root_batch = Some(prepared);
+        Ok(())
+    }
+
+    fn finish_retained_parked_roots(&mut self, key: ThreadKey) -> Result<(), Flow> {
+        if !self.with_green_runtime(|runtime| runtime.parked.borrow().contains_key(&key)) {
+            return Ok(());
+        }
+        self.quiesce_parked_collector()?;
+        let retained = self.with_green_runtime(|runtime| runtime.parked.borrow_mut().remove(&key));
+        match retained {
+            Some(publication) => self.finish_restored_publication(key, publication),
+            None => Ok(()),
+        }
+    }
+
+    fn finish_restored_publication(
+        &mut self,
+        key: ThreadKey,
+        publication: crate::tagged::transport::RootBatchLease,
+    ) -> Result<(), Flow> {
+        match super::root_registry::finish(publication) {
+            Ok(()) => Ok(()),
+            Err(failure) => {
+                let (publication, error) = failure.into_parts();
+                self.with_green_runtime(|runtime| {
+                    runtime.parked.borrow_mut().insert(key, publication);
+                });
+                Err(signal("error", vec![Value::string(error.to_string())]))
+            }
+        }
+    }
+
+    /// Mint quiescence only after the restored owner has completed both mark
+    /// and sweep. Keep publications rooted throughout the complete drain.
+    fn quiesce_parked_collector(&mut self) -> Result<(), Flow> {
+        let heap: *mut crate::tagged::gc::TaggedHeap = &mut *self.tagged_heap;
+        // SAFETY: the Baton holder has restored its owner; no Lisp, callback
+        // or handoff runs until retirement. Reseeding uses the full registered
+        // census, including every still-published owner and symbol cell.
+        let collector = unsafe {
+            (*heap).drain_to_quiescent(|heap| {
+                self.seed_registered_mutator_roots_world_stopped(heap);
+            })
+        }
+        .map_err(|error| signal("error", vec![Value::string(error.to_string())]))?;
+        drop(collector);
+        Ok(())
     }
 
     /// Retain census scratch without retaining any of its raw Lisp words.

@@ -389,6 +389,12 @@ fn existing_table(heap: HeapIdentity) -> Option<Arc<RootTable>> {
     root_tables().get(&heap).and_then(Weak::upgrade)
 }
 
+/// Inspect metadata lifetime after the heap itself has gone away.
+#[cfg(test)]
+pub(crate) fn root_table_is_alive_for_test(heap: HeapIdentity) -> bool {
+    existing_table(heap).is_some()
+}
+
 /// Append every live shared root of `heap` to `out`, for the collector's root
 /// walk on that heap's mutator.
 pub(crate) fn collect_shared_root_gc_roots(heap: &TaggedHeap, out: &mut Vec<TaggedValue>) {
@@ -410,6 +416,14 @@ pub(crate) fn collect_shared_root_gc_roots(heap: &TaggedHeap, out: &mut Vec<Tagg
             batches.collect_roots(heap, out);
         }
     });
+}
+
+/// Deterministic host-side contention, without sharing a heap or Lisp words.
+#[cfg(test)]
+pub(crate) fn with_root_table_lock_for_test(heap: HeapIdentity, op: impl FnOnce()) {
+    let table = existing_table(heap).expect("fixture owns a root table");
+    let _cells = table.lock();
+    op();
 }
 
 /// Live and retired-but-unrecycled cells of `heap`'s table.

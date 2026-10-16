@@ -67,6 +67,7 @@ struct World {
 
 impl Drop for World {
     fn drop(&mut self) {
+        self.finish_green_registry();
         // The obarray's projection scope names this World's table; it goes
         // with the World, on the World's own thread.
         let generation = self.obarray.get_mut().generation();
@@ -88,6 +89,17 @@ static_assertions::assert_not_impl_any!(World: Send, Sync);
 pub(crate) struct WorldLease(Arc<World>);
 static_assertions::assert_not_impl_any!(WorldLease: Send, Sync, Clone);
 static_assertions::assert_eq_size!(WorldLease, Arc<World>);
+
+#[cfg(test)]
+impl Context {
+    /// Observe allocation lifetime without extending it or exposing World data.
+    pub(in crate::emacs_core::eval) fn world_lifetime_probe_for_test(
+        &self,
+    ) -> impl Fn() -> bool + use<> {
+        let world = Arc::downgrade(&self.obarray.lease.0);
+        move || world.upgrade().is_some()
+    }
+}
 
 impl fmt::Debug for WorldLease {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

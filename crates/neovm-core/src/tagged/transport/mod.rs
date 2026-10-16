@@ -21,6 +21,8 @@ pub use root_batch::{
     RootBatchReader,
 };
 pub(crate) use root_table::collect_shared_root_gc_roots;
+#[cfg(test)]
+pub(crate) use root_table::{root_table_is_alive_for_test, with_root_table_lock_for_test};
 pub use shared_root::{LocalRoot, SharedRoot, SharedRootError};
 
 #[cfg(test)]

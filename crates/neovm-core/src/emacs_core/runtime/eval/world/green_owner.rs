@@ -35,13 +35,49 @@
 
 use super::*;
 
+impl World {
+    /// Finish publications before automatic field destruction reaches the heap.
+    /// World exclusivity proves that every former owner has terminated.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn finish_green_registry(&mut self) {
+        let Some(runtime) = self.green.get_mut().as_mut() else {
+            return;
+        };
+        if !runtime.parked.get_mut().is_empty() {
+            let heap = self.tagged_heap.get_mut();
+            // SAFETY: the final World owns every view exclusively; no owner,
+            // callback or collection extent remains. Its last publications
+            // still exclude concurrent launch. With no Context left, the
+            // transport table contains all remaining external heap roots.
+            let collector = unsafe {
+                heap.drain_to_quiescent(|heap| {
+                    let mut roots = Vec::new();
+                    crate::tagged::transport::collect_shared_root_gc_roots(heap, &mut roots);
+                    for root in roots {
+                        heap.seed_root(root);
+                    }
+                })
+            }
+            .expect("the terminated Green World's collector drains completely");
+            runtime.finish_terminated_roots(&collector);
+        }
+        drop(self.green.get_mut().take());
+        debug_assert!(
+            !self.tagged_heap.get_mut().facade_mark_is_excluded(),
+            "Green publications, reservations and Baton epochs finish before the heap"
+        );
+    }
+}
+
 /// The right to run Lisp in a Green World: whoever holds it is the one OS
 /// thread that may touch the World. See the module's safety argument.
 #[must_use = "the World's Lisp stops while its Baton is dropped"]
 pub(crate) struct Baton {
-    world: Arc<World>,
     /// Keeps concurrent marking excluded for the Green era (point 5).
+    /// Release before `world`: this Baton can own the final World reference.
     _retention: crate::tagged::gc::FacadeEpochRetention,
+    world: Arc<World>,
 }
 
 // SAFETY: the Baton is the World's single, unshareable token (point 1); the

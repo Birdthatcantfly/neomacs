@@ -2546,6 +2546,7 @@ impl Drop for Context {
     fn drop(&mut self) {
         // A Green World's main thread ends its other threads first.
         self.green_teardown();
+        self.green_release_seat();
         super::super::dynamic_module::retire_dynamic_module_registry(&self.dynamic_module_registry);
         // Context is !Send, pinned by thread contracts, so Drop stays on its
         // owner thread. Retain upstream policy retirement as defence in depth.

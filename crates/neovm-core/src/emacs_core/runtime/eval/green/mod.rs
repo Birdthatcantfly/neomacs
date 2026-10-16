@@ -16,6 +16,7 @@ mod api;
 mod bootstrap;
 mod carried;
 mod owner_carried;
+mod root_registry;
 mod scheduler;
 mod switch;
 
@@ -240,6 +241,10 @@ mod switch_tests;
 #[cfg(test)]
 #[path = "../tests/green_parked_root_equivalence_test.rs"]
 mod parked_root_equivalence_tests;
+
+#[cfg(test)]
+#[path = "../tests/green_root_lifecycle_test.rs"]
+mod root_lifecycle_tests;
 
 #[cfg(all(test, feature = "jit"))]
 #[path = "../tests/green_jit_switch_test.rs"]

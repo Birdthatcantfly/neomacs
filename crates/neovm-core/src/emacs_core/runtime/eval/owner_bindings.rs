@@ -520,6 +520,12 @@ impl OwnerSlab {
         self.green.as_deref_mut()
     }
 
+    /// A Context's cold retirement breaks the seat's Baton -> World cycle
+    /// and cancels any unused root-batch reservation before heap destruction.
+    pub(crate) fn take_green_seat(&mut self) -> Option<Box<super::green::GreenSeat>> {
+        self.green.take()
+    }
+
     /// Seat this owner in a Green runtime (once).
     pub(crate) fn install_green_seat(&mut self, seat: Box<super::green::GreenSeat>) {
         debug_assert!(self.green.is_none(), "an owner takes one seat");
