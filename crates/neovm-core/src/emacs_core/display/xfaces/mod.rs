@@ -3043,7 +3043,7 @@ pub(crate) fn builtin_internal_make_lisp_face(
         vector
     };
     eval.face_table.ensure_face(&face_name);
-    *eval.face_change_count += 1;
+    eval.face_change_count += 1;
     Ok(result)
 }
 
@@ -3115,7 +3115,7 @@ pub(crate) fn builtin_internal_copy_lisp_face(
 
     let result = args[1];
 
-    *eval.face_change_count += 1;
+    eval.face_change_count += 1;
 
     Ok(result)
 }
@@ -3376,7 +3376,7 @@ pub(crate) fn builtin_internal_set_lisp_face_attribute(
         }
     }
 
-    *eval.face_change_count += 1;
+    eval.face_change_count += 1;
 
     Ok(result)
 }
@@ -3772,7 +3772,7 @@ pub(crate) fn builtin_internal_merge_in_global_face(
         sync_face_overrides_from_lisp_face_vector(&face_name, local_vector, false);
     }
 
-    *eval.face_change_count += 1;
+    eval.face_change_count += 1;
     Ok(Value::NIL)
 }
 

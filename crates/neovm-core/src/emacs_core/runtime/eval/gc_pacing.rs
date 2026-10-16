@@ -266,10 +266,10 @@ impl Context {
             visit(hook.overlay);
         }
         if !self.interval_insert_behind_hooks.is_nil() {
-            visit(*self.interval_insert_behind_hooks);
+            visit(self.interval_insert_behind_hooks);
         }
         if !self.interval_insert_in_front_hooks.is_nil() {
-            visit(*self.interval_insert_in_front_hooks);
+            visit(self.interval_insert_in_front_hooks);
         }
         if !self.current_local_map.is_nil() {
             visit(self.current_local_map);

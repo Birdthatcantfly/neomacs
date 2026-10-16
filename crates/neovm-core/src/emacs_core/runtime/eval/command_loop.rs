@@ -1435,7 +1435,7 @@ impl Context {
     /// (bumped by `force-mode-line-update`, display-variable writes, media
     /// changes). Caches of redisplay-derived data key on it.
     pub fn redisplay_generation(&self) -> u64 {
-        *self.redisplay_generation
+        self.redisplay_generation
     }
 
     /// Generation of GNU `update_menu_bar` rebuild requests.
@@ -1496,7 +1496,7 @@ impl Context {
 
     pub(crate) fn invalidate_redisplay(&mut self) {
         tracing::debug!(target: "neomacs::redisplay_sig", "invalidate_redisplay");
-        *self.redisplay_generation = self.redisplay_generation.wrapping_add(1);
+        self.redisplay_generation = self.redisplay_generation.wrapping_add(1);
         *self.last_redisplay_signature = None;
     }
 
@@ -1515,7 +1515,7 @@ impl Context {
     pub fn force_body_redisplay(&mut self, target: ForcedBodyRedisplay) {
         match target {
             ForcedBodyRedisplay::AllWindows => {
-                *self.body_redisplay_all = self.body_redisplay_all.wrapping_add(1);
+                self.body_redisplay_all = self.body_redisplay_all.wrapping_add(1);
             }
             ForcedBodyRedisplay::Window(window) => {
                 let counter = self.body_redisplay_by_window.entry(window).or_insert(0);
@@ -1542,7 +1542,7 @@ impl Context {
         buffer: BufferId,
     ) -> BodyRedisplayRevision {
         BodyRedisplayRevision::new(
-            *self.body_redisplay_all,
+            self.body_redisplay_all,
             self.body_redisplay_by_window
                 .get(&window)
                 .copied()
@@ -1662,7 +1662,7 @@ impl Context {
             // A display-affecting variable changed: the incremental fast paths
             // key on this counter so they re-lay instead of reusing rows shaped
             // under the old setting (the four buffer/face ticks do not move here).
-            *self.display_var_change_count = self.display_var_change_count.wrapping_add(1);
+            self.display_var_change_count = self.display_var_change_count.wrapping_add(1);
         }
     }
 
@@ -1985,10 +1985,10 @@ impl Context {
             current_message: self.current_message.clone(),
             active_minibuffer_window: self.active_minibuffer_window.map(|id| id.0),
             minibuffer_selected_window: self.minibuffer_selected_window.map(|id| id.0),
-            face_change_count: (*self.face_change_count),
+            face_change_count: self.face_change_count,
             obarray_function_epoch: self.obarray.function_epoch(),
             symbol_property_revision: crate::emacs_core::symbol::SymbolPropertyRevision::current(),
-            redisplay_generation: (*self.redisplay_generation),
+            redisplay_generation: self.redisplay_generation,
             frame,
         }
     }

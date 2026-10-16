@@ -301,7 +301,7 @@ fn host_projected_variables_are_still_republished() {
             ev.obarray
                 .is_plain_value_cell_id(intern("glyphless-char-display"))
         );
-        let before = *ev.display_var_change_count;
+        let before = ev.display_var_change_count;
         assert_eq!(
             fast_path_visits(
                 &mut ev,
@@ -313,10 +313,10 @@ fn host_projected_variables_are_still_republished() {
             "{engine:?}: a plain display variable takes the publishing path"
         );
         assert!(
-            (*ev.display_var_change_count) > before,
+            ev.display_var_change_count > before,
             "{engine:?}: a plain display variable's write reaches redisplay"
         );
-        let before = *ev.display_var_change_count;
+        let before = ev.display_var_change_count;
         run_setq(
             &mut ev,
             engine,
@@ -325,7 +325,7 @@ fn host_projected_variables_are_still_republished() {
         )
         .expect("setq");
         assert!(
-            (*ev.display_var_change_count) > before,
+            ev.display_var_change_count > before,
             "{engine:?}: a display variable write reaches redisplay"
         );
     }

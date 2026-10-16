@@ -145,8 +145,8 @@ impl Context {
         ev.buffers.reset_for_minimal_runtime();
         *ev.xwidgets = super::super::xwidget::XwidgetState::new();
         ev.last_overlay_modification_hooks.clear();
-        *ev.interval_insert_behind_hooks = Value::NIL;
-        *ev.interval_insert_in_front_hooks = Value::NIL;
+        ev.interval_insert_behind_hooks = Value::NIL;
+        ev.interval_insert_in_front_hooks = Value::NIL;
         ev.match_data = None;
         *ev.processes = ProcessManager::new();
         *ev.watchers = VariableWatcherList::new();
@@ -170,7 +170,7 @@ impl Context {
         ev.redisplay_fn = None;
         ev.mode_line_display_flow = None;
         ev.redisplay_prepare_fn = None;
-        *ev.gnu_redisplay_hooks = redisplay_hooks::RedisplayHookOwnership::initial();
+        ev.gnu_redisplay_hooks = redisplay_hooks::RedisplayHookOwnership::initial();
         ev.display_idle_maintenance_fn = None;
         ev.scroll_preview_fn = None;
         ev.frame_snapshot_fn = None;
@@ -179,10 +179,10 @@ impl Context {
         ev.display_host = None;
         *ev.coding_systems = CodingSystemManager::new();
         *ev.face_table = FaceTable::new();
-        *ev.face_change_count = 0;
-        *ev.display_var_change_count = 0;
-        *ev.redisplay_generation = 0;
-        *ev.body_redisplay_all = 0;
+        ev.face_change_count = 0;
+        ev.display_var_change_count = 0;
+        ev.redisplay_generation = 0;
+        ev.body_redisplay_all = 0;
         ev.body_redisplay_by_window.clear();
         ev.body_redisplay_by_buffer.clear();
         *ev.menu_bar_rebuild_generation = 0;
@@ -2135,12 +2135,12 @@ impl Context {
             last_uncaught_signal_backtrace: None,
             buffers: world.buffers,
             xwidgets: world.global.xwidgets,
-            last_overlay_modification_hooks: world.global.last_overlay_modification_hooks,
-            interval_insert_behind_hooks: world.global.interval_insert_behind_hooks,
-            interval_insert_in_front_hooks: world.global.interval_insert_in_front_hooks,
+            last_overlay_modification_hooks: Vec::new(),
+            interval_insert_behind_hooks: Value::NIL,
+            interval_insert_in_front_hooks: Value::NIL,
             match_data: None,
-            combine_after_change_list: world.global.combine_after_change_list,
-            combine_after_change_buffer: world.global.combine_after_change_buffer,
+            combine_after_change_list: Vec::new(),
+            combine_after_change_buffer: None,
             _reserved_message_log_need_newline: false,
             processes: world.global.processes,
             watchers: world.watchers,
@@ -2199,17 +2199,17 @@ impl Context {
             code_conversion_workspace:
                 crate::code_conversion_workspace::CodeConversionWorkspace::default(),
             face_table: world.global.face_table,
-            face_change_count: world.global.face_change_count,
+            face_change_count: 0,
             materialized_face_table_source: world.global.materialized_face_table_source,
-            display_var_change_count: world.global.display_var_change_count,
+            display_var_change_count: 0,
             input_progress: Default::default(),
-            redisplay_generation: world.global.redisplay_generation,
-            body_redisplay_all: world.global.body_redisplay_all,
-            body_redisplay_by_window: world.global.body_redisplay_by_window,
-            body_redisplay_by_buffer: world.global.body_redisplay_by_buffer,
+            redisplay_generation: 0,
+            body_redisplay_all: 0,
+            body_redisplay_by_window: FxHashMap::default(),
+            body_redisplay_by_buffer: FxHashMap::default(),
             menu_bar_rebuild_generation: world.global.menu_bar_rebuild_generation,
-            chrome_dirty: world.global.chrome_dirty,
-            gnu_redisplay_hooks: world.global.gnu_redisplay_hooks,
+            chrome_dirty: Default::default(),
+            gnu_redisplay_hooks: redisplay_hooks::RedisplayHookOwnership::initial(),
             context_instance_id: next_context_instance_id(),
             media_generation: 0,
             last_redisplay_signature: world.global.last_redisplay_signature,

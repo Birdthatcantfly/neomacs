@@ -991,7 +991,7 @@ pub(crate) fn update_face_from_frame_parameter(
         };
         set_lisp_face_vector_attr(vector, attr, value);
         realize_default_lisp_face_for_frame(eval, frame_id);
-        *eval.face_change_count += 1;
+        eval.face_change_count += 1;
     }
     Ok(())
 }
@@ -1066,7 +1066,7 @@ pub fn seed_live_frame_default_face_from_font_parameter(
     for (attr_name, attr_value) in derived_face_attrs_from_font_value(&font_value) {
         set_lisp_face_vector_attr(vector, attr_name, attr_value);
     }
-    *eval.face_change_count += 1;
+    eval.face_change_count += 1;
 }
 
 // ---------------------------------------------------------------------------

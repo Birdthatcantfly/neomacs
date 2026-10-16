@@ -58,16 +58,6 @@ global_state! {
     cached_system_name: Value,
     /// xwidget.c `internal_xwidget_list`.
     xwidgets: super::super::xwidget::XwidgetState,
-    /// buffer.c `last_overlay_modification_hooks`.
-    last_overlay_modification_hooks: Vec<OverlayModificationHook>,
-    /// textprop.c `interval_insert_behind_hooks`.
-    interval_insert_behind_hooks: Value,
-    /// textprop.c `interval_insert_in_front_hooks`.
-    interval_insert_in_front_hooks: Value,
-    /// insdel.c `combine_after_change_list`.
-    combine_after_change_list: Vec<(i64, i64, i64)>,
-    /// insdel.c `combine_after_change_buffer`.
-    combine_after_change_buffer: Option<crate::buffer::BufferId>,
     /// process.c `Vprocess_alist`, `chan_process[]`.
     processes: ProcessManager,
     /// keymap.c `current_global_map`.
@@ -108,26 +98,10 @@ global_state! {
     command_loop: crate::keyboard::CommandLoop,
     /// xfaces.c `face_alist` / frame face caches.
     face_table: FaceTable,
-    /// xfaces.c `face_change_count`.
-    face_change_count: u64,
     /// The face table's materialized source (xfaces.c frame caches).
     materialized_face_table_source: Option<(crate::window::FrameId, u64)>,
-    /// xdisp.c display-variable change tracking.
-    display_var_change_count: u64,
-    /// xdisp.c redisplay generation.
-    redisplay_generation: u64,
-    /// xdisp.c `windows_or_buffers_changed`-style body revision.
-    body_redisplay_all: u64,
-    /// xdisp.c per-window redisplay revisions.
-    body_redisplay_by_window: FxHashMap<WindowId, u64>,
-    /// xdisp.c per-buffer redisplay revisions.
-    body_redisplay_by_buffer: FxHashMap<BufferId, u64>,
     /// xmenu.c menu-bar rebuild generation.
     menu_bar_rebuild_generation: u64,
-    /// xdisp.c chrome (mode/header/tab line) dirtiness.
-    chrome_dirty: crate::emacs_core::chrome_dirty::ChromeDirty,
-    /// xdisp.c `pre-redisplay-function` / hook ownership.
-    gnu_redisplay_hooks: redisplay_hooks::RedisplayHookOwnership,
     /// xdisp.c last redisplay's inputs.
     last_redisplay_signature: Option<RedisplaySignature>,
     /// xdisp.c `safe_call` queue.
@@ -144,11 +118,6 @@ impl GlobalState {
         Self {
             cached_system_name: Value::NIL,
             xwidgets: super::super::xwidget::XwidgetState::new(),
-            last_overlay_modification_hooks: Vec::new(),
-            interval_insert_behind_hooks: Value::NIL,
-            interval_insert_in_front_hooks: Value::NIL,
-            combine_after_change_list: Vec::new(),
-            combine_after_change_buffer: None,
             processes: ProcessManager::new(),
             selected_global_map: super::super::keymap::SelectedGlobalMap::default(),
             registers: RegisterManager::new(),
@@ -169,16 +138,8 @@ impl GlobalState {
             kmacro: KmacroManager::new(),
             command_loop,
             face_table: FaceTable::new(),
-            face_change_count: 0,
             materialized_face_table_source: None,
-            display_var_change_count: 0,
-            redisplay_generation: 0,
-            body_redisplay_all: 0,
-            body_redisplay_by_window: FxHashMap::default(),
-            body_redisplay_by_buffer: FxHashMap::default(),
             menu_bar_rebuild_generation: 0,
-            chrome_dirty: Default::default(),
-            gnu_redisplay_hooks: redisplay_hooks::RedisplayHookOwnership::initial(),
             last_redisplay_signature: None,
             pending_safe_funcalls: Vec::new(),
             fringe_bitmaps: super::super::builtins::fringe_bitmap::FringeBitmapRegistry::new(),
@@ -224,13 +185,13 @@ impl Context {
     /// GNU's `face_change_count`: bumped on every face change.
     #[inline]
     pub fn face_change_count(&self) -> u64 {
-        *self.face_change_count
+        self.face_change_count
     }
 
     /// Bumped when a display-affecting variable changes.
     #[inline]
     pub fn display_var_change_count(&self) -> u64 {
-        *self.display_var_change_count
+        self.display_var_change_count
     }
 
     /// xdisp.c `message_log_need_newline`.

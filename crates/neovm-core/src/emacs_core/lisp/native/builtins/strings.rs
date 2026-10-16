@@ -3909,7 +3909,7 @@ pub(crate) fn builtin_clear_face_cache(
     args: Vec<Value>,
 ) -> EvalResult {
     expect_max_args("clear-face-cache", &args, 1)?;
-    *ctx.face_change_count += 1;
+    ctx.face_change_count += 1;
     Ok(Value::NIL)
 }
 

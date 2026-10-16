@@ -668,3 +668,37 @@ fn green_a_profiler_started_by_a_thread_runs_for_every_thread() {
         expect_test::expect![[r#""OK (t t)""#]],
     );
 }
+
+#[test]
+fn green_after_change_calls_a_thread_deferred_run_from_main() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(let ((buffer (generate-new-buffer "g3w-combine"))
+      (log nil))
+  (unwind-protect
+      (progn
+        (with-current-buffer buffer
+          (insert "0123456789")
+          (setq-local after-change-functions
+                      (list (lambda (beg end len) (push (list beg end len) log)))))
+        (setq combine-after-change-calls t)
+        (thread-join
+         (make-thread
+          (lambda ()
+            (with-current-buffer buffer
+              (goto-char 3)
+              (insert "ab")
+              (goto-char 9)
+              (insert "cd")))))
+        (setq combine-after-change-calls nil)
+        (with-current-buffer buffer
+          (let ((before (copy-sequence log)))
+            (combine-after-change-execute)
+            (list before log (buffer-string)))))
+    (setq combine-after-change-calls nil)
+    (kill-buffer buffer)))
+"##,
+        expect_test::expect![[r#""OK (nil ((3 11 4)) \"01ab2345cd6789\")""#]],
+    );
+}

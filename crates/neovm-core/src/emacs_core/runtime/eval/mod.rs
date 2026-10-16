@@ -3032,7 +3032,7 @@ pub(crate) struct DaemonState {
 /// `WorldSlot`) moves no other field. `context_layout_test` pins the offsets.
 #[repr(C)]
 pub struct Context {
-    pub(crate) combine_after_change_buffer: WorldSlot<Option<crate::buffer::BufferId>>,
+    pub(crate) combine_after_change_buffer: Option<crate::buffer::BufferId>,
     /// Global keymap selected by `use-global-map`.
     ///
     /// GNU stores this separately from the dynamically bindable Lisp variable
@@ -3061,7 +3061,7 @@ pub struct Context {
     materialized_face_table_source: WorldSlot<Option<(crate::window::FrameId, u64)>>,
     /// Pending GNU display ownership and private transaction state. Each
     /// exclusively borrowed Context owns it; never a process/TLS Lisp cache.
-    pub(crate) gnu_redisplay_hooks: WorldSlot<redisplay_hooks::RedisplayHookOwnership>,
+    pub(crate) gnu_redisplay_hooks: redisplay_hooks::RedisplayHookOwnership,
     /// Cached Lisp-visible GC tuning variables used on every safe point.
     ///
     /// GNU updates its low-level GC tuning state when the watched variables
@@ -3130,7 +3130,7 @@ pub struct Context {
     pub(crate) load_read_cursors: Vec<LoadReadCursor>,
     /// GNU `last_overlay_modification_hooks`: hook-list/overlay pairs recorded
     /// by the before-change overlay scan and replayed by the after-change scan.
-    pub(crate) last_overlay_modification_hooks: WorldSlot<Vec<OverlayModificationHook>>,
+    pub(crate) last_overlay_modification_hooks: Vec<OverlayModificationHook>,
     /// Deferred after-change records, mirroring GNU Emacs's
     /// `combine_after_change_list` (insdel.c). When
     /// `combine-after-change-calls` is non-nil and no incompatible
@@ -3139,7 +3139,7 @@ pub struct Context {
     /// `after-change-functions` immediately. Each entry is the GNU triple
     /// `(charpos - BEG, Z - (charpos - lendel + lenins), lenins - lendel)`
     /// in 1-based character coordinates.
-    pub(crate) combine_after_change_list: WorldSlot<Vec<(i64, i64, i64)>>,
+    pub(crate) combine_after_change_list: Vec<(i64, i64, i64)>,
     /// Bookmark manager — persistent named positions.
     pub(crate) bookmarks: WorldSlot<BookmarkManager>,
     /// Rectangle state — stores the last killed rectangle for yank-rectangle.
@@ -3292,11 +3292,11 @@ pub struct Context {
     /// Face table — global registry of named face definitions.
     pub(crate) face_table: WorldSlot<FaceTable>,
     pub input_progress: neomacs_display_protocol::input_progress::InputProgress,
-    body_redisplay_by_window: WorldSlot<FxHashMap<WindowId, u64>>,
-    body_redisplay_by_buffer: WorldSlot<FxHashMap<BufferId, u64>>,
+    body_redisplay_by_window: FxHashMap<WindowId, u64>,
+    body_redisplay_by_buffer: FxHashMap<BufferId, u64>,
     /// Which windows' chrome (mode/header/tab line) must be re-generated on
     /// the next redisplay. See [`ChromeDirty`].
-    chrome_dirty: WorldSlot<crate::emacs_core::chrome_dirty::ChromeDirty>,
+    chrome_dirty: crate::emacs_core::chrome_dirty::ChromeDirty,
     /// See `SymbolByteCodeCallCache`: what each symbol's function cell resolves
     /// to for a bytecode stack call, epoch-tagged.
     pub(crate) symbol_bytecode_call_cache: crate::emacs_core::bytecode::vm::SymbolByteCodeCallCache,
@@ -3353,11 +3353,11 @@ pub struct Context {
     /// GNU `interval_insert_behind_hooks`: text-property hook list recorded
     /// by `verify_interval_modification` before an insertion and replayed by
     /// `report_interval_modification` after the inserted text exists.
-    pub(crate) interval_insert_behind_hooks: WorldSlot<Value>,
+    pub(crate) interval_insert_behind_hooks: Value,
     /// GNU `interval_insert_in_front_hooks`: text-property hook list recorded
     /// by `verify_interval_modification` before an insertion and replayed by
     /// `report_interval_modification` after the inserted text exists.
-    pub(crate) interval_insert_in_front_hooks: WorldSlot<Value>,
+    pub(crate) interval_insert_in_front_hooks: Value,
     /// Canonical Lisp object returned by `standard-syntax-table`.
     ///
     /// GNU Emacs stores this in `Vstandard_syntax_table`; NeoVM keeps the
@@ -3457,7 +3457,7 @@ pub struct Context {
     pub(crate) tty_frame_host_factory: Option<Box<dyn TtyFrameHostFactory>>,
     /// Incremented when any face attribute changes; layout engine uses
     /// this to invalidate its resolved face cache.
-    pub(crate) face_change_count: WorldSlot<u64>,
+    pub(crate) face_change_count: u64,
     /// Incremented when any display-affecting buffer-local/global variable is
     /// set (truncate-lines, bidi-*, ctl-arrow, buffer-display-table,
     /// buffer-invisibility-spec, fill-column-indicator, overlay-arrow,
@@ -3465,18 +3465,18 @@ pub struct Context {
     /// overlay tick, so the incremental fast paths key on this counter to force
     /// a full rebuild (adversarial-review fix). Rare event → a global counter
     /// (over-invalidating all windows) is acceptable and simpler than per-var keys.
-    pub(crate) display_var_change_count: WorldSlot<u64>,
+    pub(crate) display_var_change_count: u64,
     /// Explicit redisplay invalidation generation, used for state that GNU
     /// marks with update_mode_lines/window redisplay flags.
     ///
     /// This counter also moves for presentation-only work (chrome, menu,
     /// mode-line), so it must NOT be the reason a window relayouts its body
     /// text; retained bodies key on [`BodyRedisplayRevision`] instead.
-    redisplay_generation: WorldSlot<u64>,
+    redisplay_generation: u64,
     /// Body-only redisplay revisions for `(force-window-update)`; see
     /// [`BodyRedisplayRevision`]. Kept per window and per buffer so a targeted
     /// force does not rebuild unrelated windows.
-    body_redisplay_all: WorldSlot<u64>,
+    body_redisplay_all: u64,
     /// GNU `update_menu_bar` invalidation boundary.  This is narrower than
     /// `redisplay_generation`; see [`MenuBarRebuildGeneration`].
     menu_bar_rebuild_generation: WorldSlot<u64>,
@@ -5811,7 +5811,7 @@ impl Context {
     /// Refresh the render-facing face table from this frame's Lisp face
     /// vectors before redisplay.
     pub fn sync_runtime_faces_for_frame(&mut self, frame_id: crate::window::FrameId) -> bool {
-        let source = (frame_id, *self.face_change_count);
+        let source = (frame_id, self.face_change_count);
         if (*self.materialized_face_table_source) == Some(source) {
             return false;
         }
@@ -5834,7 +5834,7 @@ impl Context {
         let _ = super::xfaces::ensure_lisp_face_id_property(self, face_name);
         let changed = self.face_table.set_attribute(face_name, attr, value);
         if changed {
-            *self.face_change_count += 1;
+            self.face_change_count += 1;
         }
         changed
     }
