@@ -1088,3 +1088,102 @@ mod two_owner_tests;
 
 #[path = "green_alias_test.rs"]
 mod alias_tests;
+/// The park walk must preserve execution-only values without visiting
+/// canonical World cells. Compare every root group too, so adding an owner
+/// group to the full walk cannot silently omit it at a thread switch.
+#[test]
+fn parking_traces_private_roots_without_world_cells() {
+    let mut ev = green();
+    let world = ev
+        .eval_str("(setq g3f-world-root (list 'world-only))")
+        .unwrap();
+    let private = Value::list(vec![Value::fixnum(37)]);
+    ev.eval_temp_roots.push(private);
+    let mut full = Vec::new();
+    ev.trace_roots(&mut |_| {}, &mut |v| full.push(v));
+    assert!(full.contains(&world));
+    let mut parked = Vec::new();
+    ev.trace_private_roots(&mut |v| parked.push(v));
+    assert!(parked.contains(&private));
+    assert!(!parked.contains(&world));
+    let is_world = std::cell::Cell::new(false);
+    let mut expected = Vec::new();
+    ev.trace_roots(
+        &mut |name| {
+            is_world.set(matches!(
+                name,
+                "owned_native"
+                    | "owner_bindings"
+                    | "treesit"
+                    | "shared_roots"
+                    | "ccl_registry"
+                    | "charset_registry"
+                    | "terminal_registry"
+                    | "font_registry"
+                    | "hash_table_test_registry"
+                    | "file_notify_registry"
+                    | "dynamic_module_registry"
+                    | "obarray"
+                    | "autoloads"
+                    | "buffers"
+                    | "frames"
+                    | "coding_systems"
+                    | "proc_timer"
+                    | "registers"
+                    | "interactive"
+                    | "xwidgets"
+                    | "face_table"
+                    | "threads"
+                    | "kmacro"
+                    | "command_loop"
+                    | "modes"
+            ))
+        },
+        &mut |v| {
+            if !is_world.get() {
+                expected.push(v)
+            }
+        },
+    );
+    assert_eq!(parked, expected);
+    ev.eval_temp_roots.pop();
+}
+/// Fixed wall-time wait with a runnable peer: report select parks and peer
+/// throughput independently of the peer's machine-dependent turn count.
+#[test]
+#[ignore = "wait throughput micro; run explicitly"]
+fn green_select_wait_micro() {
+    let millis: u64 = std::env::var("TGSELECT_MICRO_MS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(150);
+    let mut ev = green();
+    eval(
+        &mut ev,
+        "(progn
+           (setq g3f-micro-done nil g3f-micro-turns 0)
+           (setq g3f-micro-thread
+             (make-thread (lambda ()
+               (while (not g3f-micro-done)
+                 (setq g3f-micro-turns (1+ g3f-micro-turns))
+                 (thread-yield)))))
+           (thread-yield))",
+    );
+    let wait = ev
+        .eval_str(&format!("'(sleep-for {})", millis as f64 / 1000.0))
+        .expect("read wait micro");
+    let parks = select_slices();
+    let start = std::time::Instant::now();
+    ev.eval_form(wait).expect("wait micro");
+    let elapsed = start.elapsed();
+    let parks = select_slices() - parks;
+    let turns = eval(
+        &mut ev,
+        "(progn (setq g3f-micro-done t)
+           (thread-join g3f-micro-thread) g3f-micro-turns)",
+    );
+    eprintln!(
+        "green_select_wait_micro requested_ms={millis} elapsed_ns={} parks={parks} peer_turns={turns}",
+        elapsed.as_nanos()
+    );
+}

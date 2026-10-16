@@ -51,11 +51,27 @@ impl Context {
         );
     }
 
-    /// Every root this Context holds, in named groups. Inlined into each of
-    /// its two callers (the collector's seeding and a Green thread's
-    /// parking), so each specializes the walk for its own visitor.
+    /// Every root this Context holds, in named groups.
     #[inline(always)]
     pub(super) fn trace_roots(
+        &self,
+        group: &mut dyn FnMut(&'static str),
+        visit: &mut dyn FnMut(Value),
+    ) {
+        self.trace_root_groups::<true>(group, visit);
+    }
+
+    /// Only this owner's execution roots. World cells are traced by the
+    /// collecting owner; parking must not walk them merely to discard them.
+    #[inline(always)]
+    pub(super) fn trace_private_roots(&self, visit: &mut dyn FnMut(Value)) {
+        self.trace_root_groups::<false>(&mut |_| {}, visit);
+    }
+
+    /// Compile separate walks: the collection walk has no runtime mode
+    /// test, and the parking walk never enters a World root group.
+    #[inline(always)]
+    fn trace_root_groups<const WORLD: bool>(
         &self,
         group: &mut dyn FnMut(&'static str),
         visit: &mut dyn FnMut(Value),
@@ -66,10 +82,12 @@ impl Context {
                 visit(root);
             }
         }
-        group("owned_native");
-        self.owned_roots.trace_roots(visit);
-        group("owner_bindings");
-        self.trace_owner_slabs(visit);
+        if WORLD {
+            group("owned_native");
+            self.owned_roots.trace_roots(visit);
+            group("owner_bindings");
+            self.trace_owner_slabs(visit);
+        }
         group("eval_temp");
         for root in self.eval_temp_roots.iter().copied() {
             visit(root);
@@ -80,9 +98,11 @@ impl Context {
         for root in self.eval_call_roots.iter().copied() {
             visit(root);
         }
-        group("treesit");
-        for root in self.treesit.roots() {
-            visit(root);
+        if WORLD {
+            group("treesit");
+            for root in self.treesit.roots() {
+                visit(root);
+            }
         }
         group("bc");
         for root in self.bc_buf.iter().copied() {
@@ -301,105 +321,114 @@ impl Context {
         for root in registry_roots.drain(..) {
             visit(root);
         }
-        // Values that any thread holds through this heap's `SharedRoot`s.
-        group("shared_roots");
-        crate::tagged::transport::collect_shared_root_gc_roots(
-            &self.tagged_heap,
-            &mut registry_roots,
-        );
-        for root in registry_roots.drain(..) {
-            visit(root);
+        if WORLD {
+            // Values that any thread holds through this heap's `SharedRoot`s.
+            group("shared_roots");
+            crate::tagged::transport::collect_shared_root_gc_roots(
+                &self.tagged_heap,
+                &mut registry_roots,
+            );
+            for root in registry_roots.drain(..) {
+                visit(root);
+            }
+            group("ccl_registry");
+            super::super::ccl::collect_ccl_registry_gc_roots(
+                &self.ccl_registry,
+                &mut registry_roots,
+            );
+            for root in registry_roots.drain(..) {
+                visit(root);
+            }
+            group("charset_registry");
+            super::super::charset::collect_charset_registry_gc_roots(
+                &self.charset_registry,
+                &mut registry_roots,
+            );
+            for root in registry_roots.drain(..) {
+                visit(root);
+            }
+            group("terminal_registry");
+            super::super::terminal::pure::collect_terminal_registry_gc_roots(
+                &self.terminal_registry,
+                &mut registry_roots,
+            );
+            for root in registry_roots.drain(..) {
+                visit(root);
+            }
+            group("font_registry");
+            super::super::xfaces::collect_font_registry_gc_roots(
+                &self.font_registry,
+                &mut registry_roots,
+            );
+            for root in registry_roots.drain(..) {
+                visit(root);
+            }
+            group("hash_table_test_registry");
+            super::super::builtins::collect_hash_table_test_registry_gc_roots(
+                &self.hash_table_test_registry,
+                &mut registry_roots,
+            );
+            for root in registry_roots.drain(..) {
+                visit(root);
+            }
+            group("file_notify_registry");
+            super::super::builtins::collect_file_notify_registry_gc_roots(
+                &self.file_notify_registry,
+                &mut registry_roots,
+            );
+            for root in registry_roots.drain(..) {
+                visit(root);
+            }
+            group("dynamic_module_registry");
+            super::super::dynamic_module::collect_dynamic_module_registry_gc_roots(
+                &self.dynamic_module_registry,
+                &mut registry_roots,
+            );
+            for root in registry_roots.drain(..) {
+                visit(root);
+            }
+            // Registry values are already seeded. Release their scratch storage
+            // before the larger root walks so it does not stay live across them.
         }
-        group("ccl_registry");
-        super::super::ccl::collect_ccl_registry_gc_roots(&self.ccl_registry, &mut registry_roots);
-        for root in registry_roots.drain(..) {
-            visit(root);
-        }
-        group("charset_registry");
-        super::super::charset::collect_charset_registry_gc_roots(
-            &self.charset_registry,
-            &mut registry_roots,
-        );
-        for root in registry_roots.drain(..) {
-            visit(root);
-        }
-        group("terminal_registry");
-        super::super::terminal::pure::collect_terminal_registry_gc_roots(
-            &self.terminal_registry,
-            &mut registry_roots,
-        );
-        for root in registry_roots.drain(..) {
-            visit(root);
-        }
-        group("font_registry");
-        super::super::xfaces::collect_font_registry_gc_roots(
-            &self.font_registry,
-            &mut registry_roots,
-        );
-        for root in registry_roots.drain(..) {
-            visit(root);
-        }
-        group("hash_table_test_registry");
-        super::super::builtins::collect_hash_table_test_registry_gc_roots(
-            &self.hash_table_test_registry,
-            &mut registry_roots,
-        );
-        for root in registry_roots.drain(..) {
-            visit(root);
-        }
-        group("file_notify_registry");
-        super::super::builtins::collect_file_notify_registry_gc_roots(
-            &self.file_notify_registry,
-            &mut registry_roots,
-        );
-        for root in registry_roots.drain(..) {
-            visit(root);
-        }
-        group("dynamic_module_registry");
-        super::super::dynamic_module::collect_dynamic_module_registry_gc_roots(
-            &self.dynamic_module_registry,
-            &mut registry_roots,
-        );
-        for root in registry_roots.drain(..) {
-            visit(root);
-        }
-        // Registry values are already seeded. Release their scratch storage
-        // before the larger root walks so it does not stay live across them.
         drop(registry_roots);
-        // Full ~all-interned-symbols walk on STW collections; only the
-        // BLV-pool residual under `ObarraySymbolCellSkipGuard` (both
-        // concurrent handshakes).
-        group("obarray");
-        self.obarray.trace_roots_with(visit);
-        group("proc_timer");
-        self.processes.trace_roots_with(visit);
-        self.watchers.trace_roots_with(visit);
-        group("registers");
-        self.registers.trace_roots_with(visit);
+        if WORLD {
+            // Full ~all-interned-symbols walk on STW collections; only the
+            // BLV-pool residual under `ObarraySymbolCellSkipGuard` (both
+            // concurrent handshakes).
+            group("obarray");
+            self.obarray.trace_roots_with(visit);
+            group("proc_timer");
+            self.processes.trace_roots_with(visit);
+            self.watchers.trace_roots_with(visit);
+            group("registers");
+            self.registers.trace_roots_with(visit);
+        }
         group("custom");
         self.custom.trace_roots_with(visit);
-        group("autoloads");
-        self.autoloads.trace_roots_with(visit);
-        group("interactive");
-        self.interactive.trace_roots_with(visit);
-        group("buffers");
-        self.buffers.trace_roots_with(visit);
-        group("xwidgets");
-        self.xwidgets.trace_roots_with(visit);
-        group("face_table");
-        self.face_table.trace_roots_with(visit);
-        group("threads");
-        self.threads.trace_roots_with(visit);
-        group("kmacro");
-        self.kmacro.trace_roots_with(visit);
-        group("command_loop");
-        crate::gc_trace::GcTrace::trace_roots_with(&*self.command_loop, visit);
-        group("modes");
-        self.modes.trace_roots_with(visit);
-        group("frames");
-        self.frames.trace_roots_with(visit);
-        group("coding_systems");
-        self.coding_systems.trace_roots_with(visit);
+        if WORLD {
+            group("autoloads");
+            self.autoloads.trace_roots_with(visit);
+            group("interactive");
+            self.interactive.trace_roots_with(visit);
+            group("buffers");
+            self.buffers.trace_roots_with(visit);
+            group("xwidgets");
+            self.xwidgets.trace_roots_with(visit);
+            group("face_table");
+            self.face_table.trace_roots_with(visit);
+            group("threads");
+            self.threads.trace_roots_with(visit);
+            group("kmacro");
+            self.kmacro.trace_roots_with(visit);
+            group("command_loop");
+            crate::gc_trace::GcTrace::trace_roots_with(&*self.command_loop, visit);
+            group("modes");
+            self.modes.trace_roots_with(visit);
+            group("frames");
+            self.frames.trace_roots_with(visit);
+            group("coding_systems");
+            self.coding_systems.trace_roots_with(visit);
+        }
         group("match_data");
         if let Some(ref md) = self.match_data
             && let Some(crate::emacs_core::regex::SearchedString::Heap(val)) = md.searched_string()

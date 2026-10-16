@@ -69,38 +69,6 @@ impl std::fmt::Debug for GreenSeat {
     }
 }
 
-/// The root groups of `Context::trace_roots` that name World storage: the
-/// running owner's own trace covers them, so a parked owner's record leaves
-/// them out (else every record would copy every other one).
-const WORLD_ROOT_GROUPS: &[&str] = &[
-    "owned_native",
-    "owner_bindings",
-    "treesit",
-    "shared_roots",
-    "ccl_registry",
-    "charset_registry",
-    "terminal_registry",
-    "font_registry",
-    "hash_table_test_registry",
-    "file_notify_registry",
-    "dynamic_module_registry",
-    "obarray",
-    "autoloads",
-    "buffers",
-    "frames",
-    "coding_systems",
-    // GNU-global state the World owns since round 3w.
-    "proc_timer",
-    "registers",
-    "interactive",
-    "xwidgets",
-    "face_table",
-    "threads",
-    "kmacro",
-    "command_loop",
-    "modes",
-];
-
 /// Why a thread may not give the Baton up here.
 fn switch_refusal(ctx: &Context) -> Option<&'static str> {
     if ctx.gc_inhibit_depth != 0 {
@@ -145,19 +113,11 @@ impl Context {
     /// and its thread-local roots, without the World's storage.
     fn collect_parked_roots(&mut self) -> Vec<Value> {
         let mut roots = Vec::new();
-        let world_group = std::cell::Cell::new(false);
         // The vm_frames group includes drain_unwind_to's carried result or
         // Flow and PoppedBindingScope's popped entry and restoration lexenv.
         // These copies are published before a cleanup runs Lisp, so parking
         // inside that cleanup never exposes native-stack state to a peer.
-        self.trace_roots(
-            &mut |name| world_group.set(WORLD_ROOT_GROUPS.contains(&name)),
-            &mut |value| {
-                if !world_group.get() {
-                    roots.push(value);
-                }
-            },
-        );
+        self.trace_private_roots(&mut |value| roots.push(value));
         let mut thread_local = Vec::new();
         let mut stats = Vec::new();
         super::super::collect_thread_local_gc_roots(
