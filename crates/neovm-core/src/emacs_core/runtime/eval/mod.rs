@@ -2250,97 +2250,6 @@ thread_local! {
     static SCRATCH_GC_ROOTS: RefCell<Vec<ScratchGcRoot>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Collect GC roots from runtime-global side tables that hold Values.
-///
-/// These side tables are invisible to the normal GC root scan (which only
-/// walks the Evaluator struct and its sub-managers).  This function calls each
-/// module's `collect_*_gc_roots` helper to ensure those Values are marked as
-/// live during garbage collection.
-fn collect_thread_local_gc_roots(
-    roots: &mut Vec<(Value, &'static str)>,
-    heap_id: usize,
-    collection_epoch: usize,
-    scan: crate::tagged::gc::CacheRootScan,
-    stats: &mut Vec<crate::tagged::gc::RootGroup>,
-) {
-    fn collect_group(
-        roots: &mut Vec<(Value, &'static str)>,
-        origin: &'static str,
-        stats: &mut Vec<crate::tagged::gc::RootGroup>,
-        collect: impl FnOnce(&mut Vec<Value>),
-    ) {
-        // GC handshake instrumentation: per-side-table build cost + volume
-        // (the JIT reloc walk in particular scales with the COMPILED cache).
-        let t0 = std::time::Instant::now();
-        let mut group = Vec::new();
-        collect(&mut group);
-        stats.push((origin, t0.elapsed().as_micros() as u64, group.len()));
-        roots.extend(group.into_iter().map(|root| (root, origin)));
-    }
-
-    for_each_thread_local_root_source(heap_id, collection_epoch, scan, |origin, collect| {
-        collect_group(roots, origin, stats, collect);
-    });
-}
-
-/// One enumeration for collection and parked owners. Each sink chooses its
-/// destination and instrumentation; the source callback only appends Values.
-/// Parking supplies its retained Vec and never needs per-group scratch.
-#[inline(always)]
-fn for_each_thread_local_root_source(
-    heap_id: usize,
-    collection_epoch: usize,
-    scan: crate::tagged::gc::CacheRootScan,
-    mut sink: impl FnMut(&'static str, &mut dyn FnMut(&mut Vec<Value>)),
-) {
-    // R1a: heap-object constants loaded by JIT-compiled leaves through their reloc
-    // vectors — generated code holds only indices, so these must be rooted here.
-    #[cfg(feature = "jit")]
-    sink("jit-reloc-thread-local", &mut |group| {
-        super::jit::cache::collect_jit_reloc_gc_roots_for_heap(group, heap_id)
-    });
-    sink("syntax-thread-local", &mut |group| {
-        super::syntax::collect_syntax_gc_roots(group, heap_id)
-    });
-    sink("casetab-thread-local", &mut |group| {
-        super::casetab::collect_casetab_gc_roots(group, heap_id)
-    });
-    sink("string-pos-cache-thread-local", &mut |group| {
-        super::string_pos_cache::collect_string_pos_cache_gc_roots(
-            group,
-            heap_id,
-            collection_epoch,
-            scan,
-        )
-    });
-    sink("category-thread-local", &mut |group| {
-        super::category::collect_category_gc_roots(group, heap_id)
-    });
-    // Terminal Lisp state is traced from Context, including after migration.
-    sink("dynamic-module-thread-local", &mut |group| {
-        super::dynamic_module::collect_dynamic_module_gc_roots(group, heap_id)
-    });
-    sink("regex-thread-local", &mut |group| {
-        super::regex::collect_regex_gc_roots(group, heap_id, collection_epoch, scan)
-    });
-    sink("symbol-name-thread-local", &mut |group| {
-        super::intern::collect_symbol_name_gc_roots(group, heap_id)
-    });
-    sink("scratch-thread-local", &mut |roots| {
-        SCRATCH_GC_ROOTS.with(|scratch| {
-            for root in scratch.borrow().iter() {
-                // Without an installed heap only immediate values can be
-                // shared. Never trace an unattributed object pointer.
-                if root.heap_identity == heap_id
-                    || (root.heap_identity == 0 && !root.value.is_heap_object())
-                {
-                    roots.push(root.value);
-                }
-            }
-        });
-    });
-}
-
 #[inline]
 pub fn save_scratch_gc_roots() -> usize {
     // SAFETY: a `borrow_mut` of the roots never outlives the call taking it.
@@ -7727,6 +7636,8 @@ fn value_list_to_values(list: &Value) -> LispArgVec {
 // Tests
 // ---------------------------------------------------------------------------
 mod gc_pacing;
+mod thread_local_roots;
+use thread_local_roots::{collect_thread_local_gc_roots, for_each_thread_local_root_source};
 mod hash_test_gc_inhibit;
 
 mod attention;
