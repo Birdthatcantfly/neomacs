@@ -90,6 +90,12 @@ fn recovery_retains_owned_and_flagged_indexed_args_until_unbind() {
 #[test]
 fn held_pending_callee_keeps_cleanup_backtrace_args_after_recovery() {
     crate::test_utils::init_test_tracing();
+    // The pending fallback needs a held background worker. Where workers
+    // cannot start (anything but x86-64 Linux), compiles run inline and the
+    // callee is already compiled, so the state under test cannot arise.
+    if !bg::workers_supported() {
+        return;
+    }
     // All Lisp state stays on this fresh mutator; only join's unit crosses
     // the thread boundary. Worker holds release on panic as well as success.
     std::thread::spawn(|| {
