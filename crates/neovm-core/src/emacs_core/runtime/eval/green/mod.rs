@@ -237,6 +237,10 @@ mod tests;
 #[path = "../tests/green_switch_test.rs"]
 mod switch_tests;
 
+#[cfg(test)]
+#[path = "../tests/green_parked_root_equivalence_test.rs"]
+mod parked_root_equivalence_tests;
+
 #[cfg(all(test, feature = "jit"))]
 #[path = "../tests/green_jit_switch_test.rs"]
 mod jit_switch_tests;

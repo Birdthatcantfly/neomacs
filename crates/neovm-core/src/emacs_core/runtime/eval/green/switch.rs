@@ -117,7 +117,7 @@ impl Context {
 
     /// Copy every root only this owner holds: its private execution state
     /// and its thread-local roots, without the World's storage.
-    fn collect_parked_roots(&mut self) -> Vec<Value> {
+    pub(in crate::emacs_core::eval) fn collect_parked_roots(&mut self) -> Vec<Value> {
         let mut roots = std::mem::take(
             &mut self
                 .green_seat()
@@ -143,23 +143,8 @@ impl Context {
         let heap = self.tagged_heap.identity();
         let epoch = self.tagged_heap.gc_collections();
         let scan = crate::tagged::gc::CacheRootScan::Parked;
-        #[cfg(feature = "jit")]
-        crate::emacs_core::jit::cache::collect_jit_reloc_gc_roots_for_heap(&mut roots, heap);
-        crate::emacs_core::syntax::collect_syntax_gc_roots(&mut roots, heap);
-        crate::emacs_core::casetab::collect_casetab_gc_roots(&mut roots, heap);
-        crate::emacs_core::string_pos_cache::collect_string_pos_cache_gc_roots(
-            &mut roots, heap, epoch, scan,
-        );
-        crate::emacs_core::category::collect_category_gc_roots(&mut roots, heap);
-        crate::emacs_core::dynamic_module::collect_dynamic_module_gc_roots(&mut roots, heap);
-        crate::emacs_core::regex::collect_regex_gc_roots(&mut roots, heap, epoch, scan);
-        crate::emacs_core::intern::collect_symbol_name_gc_roots(&mut roots, heap);
-        super::super::SCRATCH_GC_ROOTS.with(|scratch| {
-            roots.extend(scratch.borrow().iter().filter_map(|root| {
-                (root.heap_identity == heap
-                    || (root.heap_identity == 0 && !root.value.is_heap_object()))
-                .then_some(root.value)
-            }));
+        super::super::for_each_thread_local_root_source(heap, epoch, scan, |_, collect| {
+            collect(&mut roots);
         });
         roots
     }

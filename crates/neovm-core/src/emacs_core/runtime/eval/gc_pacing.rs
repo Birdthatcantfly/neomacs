@@ -18,30 +18,31 @@ impl Context {
     /// (`jit::cache::pin_redefined_function`): rooted while a backtrace frame
     /// -- this thread's or a suspended one's -- records the symbol.
     #[cfg(feature = "jit")]
-    fn trace_jit_redefined_functions(&self, visit: &mut dyn FnMut(Value)) {
+    fn trace_jit_redefined_functions(&self, visit: &mut dyn FnMut(Value), called: &mut Vec<SymId>) {
         let symbol_mode = self.symbol_mode();
         use crate::emacs_core::jit::cache;
+        called.clear();
         if !cache::has_redefined_pins() {
             return;
         }
-        let mut called: Vec<SymId> = self
-            .specpdl
-            .iter()
-            .chain(
-                self.suspended_thread_bindings
-                    .iter()
-                    .flat_map(|state| state.specpdl.iter()),
-            )
-            .filter_map(|entry| match entry {
-                SpecBinding::Backtrace { function, .. }
-                | SpecBinding::Backtrace1 { function, .. }
-                | SpecBinding::Backtrace2 { function, .. }
-                | SpecBinding::BacktraceNative { function, .. } => {
-                    function.as_symbol_id(symbol_mode)
-                }
-                _ => None,
-            })
-            .collect();
+        called.extend(
+            self.specpdl
+                .iter()
+                .chain(
+                    self.suspended_thread_bindings
+                        .iter()
+                        .flat_map(|state| state.specpdl.iter()),
+                )
+                .filter_map(|entry| match entry {
+                    SpecBinding::Backtrace { function, .. }
+                    | SpecBinding::Backtrace1 { function, .. }
+                    | SpecBinding::Backtrace2 { function, .. }
+                    | SpecBinding::BacktraceNative { function, .. } => {
+                        function.as_symbol_id(symbol_mode)
+                    }
+                    _ => None,
+                }),
+        );
         called.sort_unstable_by_key(|sym| sym.0);
         called.dedup();
         cache::trace_redefined_pins(
@@ -49,6 +50,7 @@ impl Context {
             &|sym| called.binary_search_by_key(&sym.0, |s| s.0).is_ok(),
             visit,
         );
+        called.clear();
     }
 
     /// Every root this Context holds, in named groups.
@@ -65,22 +67,11 @@ impl Context {
     /// collecting owner; parking must not walk them merely to discard them.
     #[inline(always)]
     pub(super) fn trace_private_roots(&self, roots: &mut Vec<Value>) {
-        self.trace_root_groups::<false>(&mut |_| {}, &mut |value| roots.push(value));
-        #[cfg(feature = "jit")]
-        self.trace_jit_redefined_functions(&mut |value| roots.push(value));
-        // The registry is owner-private, but its collector takes a Vec.
-        // Append directly to the parking buffer instead of allocating a
-        // scratch Vec on every park while a Rust-held Flow is live.
-        super::super::error::collect_in_flight_registry_gc_roots(
-            roots,
-            &self.in_flight_registry,
-            self.tagged_heap.identity(),
-        );
+        self.trace_private_roots_reusing(roots, &mut Vec::new());
     }
 
     /// Green's private census reuses the called-symbol buffer after JIT source
-    /// capture has cleared it. The ordinary collection helper is unchanged.
-    #[cfg(feature = "jit")]
+    /// capture has cleared it. Both paths use the same pin and Flow collectors.
     #[inline(always)]
     pub(super) fn trace_private_roots_reusing(
         &self,
@@ -88,42 +79,31 @@ impl Context {
         called: &mut Vec<SymId>,
     ) {
         self.trace_root_groups::<false>(&mut |_| {}, &mut |value| roots.push(value));
-        debug_assert!(called.is_empty());
-        use crate::emacs_core::jit::cache;
-        if cache::has_redefined_pins() {
-            let symbol_mode = self.symbol_mode();
-            called.extend(
-                self.specpdl
-                    .iter()
-                    .chain(
-                        self.suspended_thread_bindings
-                            .iter()
-                            .flat_map(|state| state.specpdl.iter()),
-                    )
-                    .filter_map(|entry| match entry {
-                        SpecBinding::Backtrace { function, .. }
-                        | SpecBinding::Backtrace1 { function, .. }
-                        | SpecBinding::Backtrace2 { function, .. }
-                        | SpecBinding::BacktraceNative { function, .. } => {
-                            function.as_symbol_id(symbol_mode)
-                        }
-                        _ => None,
-                    }),
-            );
-            called.sort_unstable_by_key(|symbol| symbol.0);
-            called.dedup();
-            cache::trace_redefined_pins(
-                self.tagged_heap.identity(),
-                &|symbol| called.binary_search_by_key(&symbol.0, |s| s.0).is_ok(),
-                &mut |value| roots.push(value),
-            );
-            called.clear();
-        }
+        #[cfg(feature = "jit")]
+        self.trace_jit_redefined_functions(&mut |value| roots.push(value), called);
+        #[cfg(not(feature = "jit"))]
+        let _ = called;
+        self.collect_in_flight_roots(roots);
+    }
+
+    /// Flow payloads belong to the owner. The full walk supplies its registry
+    /// scratch, while parking appends directly to its reusable census buffer.
+    #[inline(always)]
+    fn collect_in_flight_roots(&self, roots: &mut Vec<Value>) {
         super::super::error::collect_in_flight_registry_gc_roots(
             roots,
             &self.in_flight_registry,
             self.tagged_heap.identity(),
         );
+    }
+
+    /// Derive private group membership from the same const-generic guards
+    /// that select the actual park walk, without maintaining another list.
+    #[cfg(test)]
+    pub(super) fn private_root_group_names(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        self.trace_root_groups::<false>(&mut |name| names.push(name), &mut |_| {});
+        names
     }
 
     /// Compile separate walks: the collection walk has no runtime mode
@@ -296,7 +276,7 @@ impl Context {
         {
             group("jit_redefined");
             if WORLD {
-                self.trace_jit_redefined_functions(visit);
+                self.trace_jit_redefined_functions(visit, &mut Vec::new());
             }
         }
         group("profiler");
@@ -370,15 +350,13 @@ impl Context {
         if let Some(table) = self.cached_standard_case_table {
             visit(table);
         }
+        // The Flow registry is private even though the full walk uses the
+        // same temporary buffer for it and the following World registries.
+        group("in_flight_registry");
         if WORLD {
             let mut registry_roots = Vec::new();
             // Rust-held signals, throws and yields stay rooted when this Context moves.
-            group("in_flight_registry");
-            super::super::error::collect_in_flight_registry_gc_roots(
-                &mut registry_roots,
-                &self.in_flight_registry,
-                self.tagged_heap.identity(),
-            );
+            self.collect_in_flight_roots(&mut registry_roots);
             for root in registry_roots.drain(..) {
                 visit(root);
             }

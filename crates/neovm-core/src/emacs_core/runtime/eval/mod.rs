@@ -2278,19 +2278,34 @@ fn collect_thread_local_gc_roots(
         roots.extend(group.into_iter().map(|root| (root, origin)));
     }
 
+    for_each_thread_local_root_source(heap_id, collection_epoch, scan, |origin, collect| {
+        collect_group(roots, origin, stats, collect);
+    });
+}
+
+/// One enumeration for collection and parked owners. Each sink chooses its
+/// destination and instrumentation; the source callback only appends Values.
+/// Parking supplies its retained Vec and never needs per-group scratch.
+#[inline(always)]
+fn for_each_thread_local_root_source(
+    heap_id: usize,
+    collection_epoch: usize,
+    scan: crate::tagged::gc::CacheRootScan,
+    mut sink: impl FnMut(&'static str, &mut dyn FnMut(&mut Vec<Value>)),
+) {
     // R1a: heap-object constants loaded by JIT-compiled leaves through their reloc
     // vectors — generated code holds only indices, so these must be rooted here.
     #[cfg(feature = "jit")]
-    collect_group(roots, "jit-reloc-thread-local", stats, |group| {
+    sink("jit-reloc-thread-local", &mut |group| {
         super::jit::cache::collect_jit_reloc_gc_roots_for_heap(group, heap_id)
     });
-    collect_group(roots, "syntax-thread-local", stats, |group| {
+    sink("syntax-thread-local", &mut |group| {
         super::syntax::collect_syntax_gc_roots(group, heap_id)
     });
-    collect_group(roots, "casetab-thread-local", stats, |group| {
+    sink("casetab-thread-local", &mut |group| {
         super::casetab::collect_casetab_gc_roots(group, heap_id)
     });
-    collect_group(roots, "string-pos-cache-thread-local", stats, |group| {
+    sink("string-pos-cache-thread-local", &mut |group| {
         super::string_pos_cache::collect_string_pos_cache_gc_roots(
             group,
             heap_id,
@@ -2298,39 +2313,32 @@ fn collect_thread_local_gc_roots(
             scan,
         )
     });
-    collect_group(roots, "category-thread-local", stats, |group| {
+    sink("category-thread-local", &mut |group| {
         super::category::collect_category_gc_roots(group, heap_id)
     });
     // Terminal Lisp state is traced from Context, including after migration.
-    collect_group(roots, "dynamic-module-thread-local", stats, |group| {
+    sink("dynamic-module-thread-local", &mut |group| {
         super::dynamic_module::collect_dynamic_module_gc_roots(group, heap_id)
     });
-    collect_group(roots, "regex-thread-local", stats, |group| {
+    sink("regex-thread-local", &mut |group| {
         super::regex::collect_regex_gc_roots(group, heap_id, collection_epoch, scan)
     });
-    collect_group(roots, "symbol-name-thread-local", stats, |group| {
+    sink("symbol-name-thread-local", &mut |group| {
         super::intern::collect_symbol_name_gc_roots(group, heap_id)
     });
-    let scratch_t0 = std::time::Instant::now();
-    let mut scratch_count = 0usize;
-    SCRATCH_GC_ROOTS.with(|scratch| {
-        let scratch = scratch.borrow();
-        for root in scratch.iter() {
-            // Without an installed heap only immediate values can be
-            // shared. Never trace an unattributed object pointer.
-            if root.heap_identity == heap_id
-                || (root.heap_identity == 0 && !root.value.is_heap_object())
-            {
-                roots.push((root.value, "scratch-thread-local"));
-                scratch_count += 1;
+    sink("scratch-thread-local", &mut |roots| {
+        SCRATCH_GC_ROOTS.with(|scratch| {
+            for root in scratch.borrow().iter() {
+                // Without an installed heap only immediate values can be
+                // shared. Never trace an unattributed object pointer.
+                if root.heap_identity == heap_id
+                    || (root.heap_identity == 0 && !root.value.is_heap_object())
+                {
+                    roots.push(root.value);
+                }
             }
-        }
+        });
     });
-    stats.push((
-        "scratch-thread-local",
-        scratch_t0.elapsed().as_micros() as u64,
-        scratch_count,
-    ));
 }
 
 #[inline]
