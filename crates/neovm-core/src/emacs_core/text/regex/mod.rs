@@ -745,6 +745,10 @@ pub(crate) fn collect_regex_gc_roots(
                 epoch.set(Some(collection_epoch + 1));
             });
         }
+        crate::tagged::gc::CacheRootScan::Parked => {
+            // A publication preserves roots without advancing a collection stamp.
+            activate_regex_thread_locals(heap_identity, collection_epoch, false);
+        }
         #[cfg(test)]
         crate::tagged::gc::CacheRootScan::Snapshot {
             collection_in_progress,

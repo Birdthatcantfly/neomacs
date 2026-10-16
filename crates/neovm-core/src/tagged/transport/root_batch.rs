@@ -379,6 +379,22 @@ impl PreparedRootBatch {
         capacity: usize,
     ) -> Result<Self, RootBatchError> {
         exclusion.validate(heap)?;
+        Self::reserve_retained(heap, exclusion.retain()?, capacity)
+    }
+
+    /// Reserve under the Green Baton's already retained marking exclusion.
+    /// The heap identity check prevents using another World's authority.
+    pub(crate) fn reserve_retained(
+        heap: &TaggedHeap,
+        epoch: FacadeEpochRetention,
+        capacity: usize,
+    ) -> Result<Self, RootBatchError> {
+        if epoch.heap_identity() != heap.heap_identity() {
+            return Err(RootBatchError::ForeignHeap {
+                owner: epoch.heap_identity(),
+                reader: heap.heap_identity(),
+            });
+        }
         let mut words = Vec::new();
         words.try_reserve_exact(capacity)?;
         words.resize(capacity, None);
@@ -387,7 +403,6 @@ impl PreparedRootBatch {
             words: words.into_boxed_slice(),
             used: 0,
         });
-        let epoch = exclusion.retain()?;
         let table = table_for(heap.heap_identity());
         let control = {
             let mut cells = table.lock();
@@ -420,13 +435,6 @@ impl PreparedRootBatch {
     /// prevents concurrent marking but does not inhibit synchronous collection.
     /// The heap must outlive all root-table scans and reader materializations.
     /// Part B must additionally require its completed reverse-exchange witness.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Part B will finalize roots under its owner admission proof"
-        )
-    )]
     pub(crate) unsafe fn finalize(
         mut self,
         values: &[TaggedValue],
@@ -462,13 +470,6 @@ impl PreparedRootBatch {
 impl FinalizedRootBatch {
     /// Commit the immutable allocation to its reserved slot, with Release
     /// publication. Errors preserve this stage for original-owner recovery.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Part B will publish the registry's finalized root batches"
-        )
-    )]
     pub(crate) fn publish(mut self) -> Result<RootBatchLease, RootBatchPublishFailure> {
         let commit = (|| {
             let ownership = self
@@ -546,13 +547,6 @@ impl RootBatchLease {
     /// The facade registry must
     /// additionally require restored/terminated-owner and quiescent-collector
     /// proofs before invoking this transport primitive; it mints neither.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Part B will retire publications with restoration and quiescence proofs"
-        )
-    )]
     pub(crate) fn try_finish(mut self) -> Result<RetiredRootBatch, RootBatchFinishFailure> {
         let result = (|| {
             let ownership = self.ownership.as_ref().ok_or(RootBatchError::Retired)?;

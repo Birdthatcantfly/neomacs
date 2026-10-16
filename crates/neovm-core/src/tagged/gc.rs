@@ -48,6 +48,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[derive(Clone, Copy)]
 pub(crate) enum CacheRootScan {
     Collection,
+    /// Copy the current owner's cache roots without certifying coverage of a
+    /// future collection. Green's held facade epoch keeps the collector idle.
+    Parked,
     #[cfg(test)]
     Snapshot {
         collection_in_progress: bool,

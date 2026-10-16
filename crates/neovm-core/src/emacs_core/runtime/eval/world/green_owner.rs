@@ -82,6 +82,21 @@ impl Baton {
         WorldStorageBuilder::publish_views(&lease, BufferSelection::for_owner(current))
     }
 
+    /// Reserve a parked root publication under this World's held exclusion.
+    pub(in crate::emacs_core::eval) fn prepare_parked_batch(
+        &self,
+        heap: &crate::tagged::gc::TaggedHeap,
+        capacity: usize,
+    ) -> Result<crate::tagged::transport::PreparedRootBatch, crate::tagged::transport::RootBatchError>
+    {
+        debug_assert!(self.held_here(), "root publication prepared off the Baton");
+        crate::tagged::transport::PreparedRootBatch::reserve_retained(
+            heap,
+            self._retention.retain()?,
+            capacity,
+        )
+    }
+
     /// The World's Green runtime.
     pub(crate) fn green_runtime(
         &self,
