@@ -2084,6 +2084,18 @@ pub(crate) fn note_string_interval_preimage(
 }
 
 #[cfg(test)]
+#[path = "tests/cons_region_young_test.rs"]
+mod cons_region_young_tests;
+
+#[cfg(test)]
+#[path = "tests/inline_cons_owner_test.rs"]
+mod inline_cons_owner_tests;
+
+#[cfg(test)]
+#[path = "tests/inline_slot_barrier_test.rs"]
+mod inline_slot_barrier_tests;
+
+#[cfg(test)]
 #[path = "tests/concurrent_major_worker_test.rs"]
 mod concurrent_major_worker_tests;
 

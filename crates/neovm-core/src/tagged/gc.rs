@@ -2852,9 +2852,6 @@ mod chunk_map_tests;
 #[cfg(test)]
 #[path = "gc/tests/cons_alloc_test.rs"]
 mod cons_alloc_tests;
-#[cfg(test)]
-#[path = "gc/tests/cons_region_young_test.rs"]
-mod cons_region_young_tests;
 /// A fake pdump image in one allocation (see the module doc for why one).
 #[cfg(test)]
 #[path = "gc/tests/fake_image.rs"]
@@ -2867,12 +2864,6 @@ mod generation_tests;
 #[cfg(test)]
 #[path = "gc/tests/generational_verifier_test.rs"]
 mod generational_verifier_tests;
-#[cfg(test)]
-#[path = "gc/tests/inline_cons_owner_test.rs"]
-mod inline_cons_owner_tests;
-#[cfg(test)]
-#[path = "gc/tests/inline_slot_barrier_test.rs"]
-mod inline_slot_barrier_tests;
 #[cfg(test)]
 #[path = "gc/tests/marker_arena_test.rs"]
 mod marker_arena_tests;
