@@ -221,6 +221,10 @@ pub(crate) mod retreat;
 #[cfg(feature = "jit")]
 pub(crate) mod bg;
 
+/// Cold admission and restoration of parked Green native continuations.
+#[cfg(feature = "jit")]
+pub(crate) mod green_owner;
+
 /// Per-source feedback (`SourceFeedback`). Always built: `RuntimeState`
 /// holds it.
 pub(crate) mod feedback;
@@ -1733,3 +1737,7 @@ impl Clone for Runtime {
 #[cfg(test)]
 #[path = "tests/jit_test.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "jit"))]
+#[path = "tests/green_owner.rs"]
+mod green_owner_tests;

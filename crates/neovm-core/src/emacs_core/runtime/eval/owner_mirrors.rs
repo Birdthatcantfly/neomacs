@@ -126,6 +126,7 @@ impl Context {
             self.obarray.generation(),
             "an owner resumes in its own World"
         );
+        self.obarray.refresh_admission();
         self.setup_thread_locals();
         self.refresh_owner_mirrors();
     }

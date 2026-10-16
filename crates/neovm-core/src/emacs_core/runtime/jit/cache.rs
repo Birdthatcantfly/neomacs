@@ -416,6 +416,61 @@ fn bump_leaf_slot_epoch() {
     LEAF_SLOT_EPOCH.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Green admission reuses the existing generated/Rust epoch probes. Each
+/// acquiring owner invalidates source slots before dispatch, so a World-shared
+/// RuntimeState never admits a foreign owner's TLS leaf.
+#[cold]
+pub(crate) fn invalidate_green_leaf_slots() {
+    bump_leaf_slot_epoch();
+}
+
+/// A parked owner cannot observe another owner's TLS reverse-dependency map.
+/// On return after a function epoch move, retire its dependents before the next
+/// dispatch. Retired entry leaves remain allocated for suspended native frames.
+#[cold]
+pub(crate) fn retire_green_inline_dependents() {
+    let symbols: Vec<_> = INLINE_DEPS.with(|deps| deps.borrow().keys().copied().collect());
+    for symbol in symbols {
+        evict_inline_dependents(symbol);
+    }
+    // Legacy OSR does not register baseline arithmetic dependencies. A running
+    // transfer owns an Rc, but that alone does not root the leaf's relocations
+    // after its parked publication retires. Keep evicted OSR leaves in the same
+    // traced retirement store as entry leaves until this heap is replaced.
+    OSR_PENDING.with(|pending| pending.borrow_mut().clear());
+    let retired_osr: Vec<_> = OSR_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .drain()
+            .filter_map(|(_, entry)| entry.map(|entry| entry.leaf))
+            .collect()
+    });
+    COMPILED.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        for leaf in retired_osr {
+            cache.retire(leaf);
+        }
+    });
+}
+
+/// Cold source classification; raw executable pointers never escape this phase.
+#[cold]
+pub(crate) fn green_source_has_native_state(func: &ByteCodeFunction) -> bool {
+    let Some(id) = func.jit_runtime().compiled_id() else {
+        return false;
+    };
+    COMPILED.with(|cache| {
+        let cache = cache.borrow();
+        cache.get(id).and_then(CacheEntry::live_leaf).is_some()
+            || cache.retired.iter().any(|leaf| leaf.obs.id == id)
+    }) || OSR_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .iter()
+            .any(|((fid, _), leaf)| *fid == id && leaf.is_some())
+    })
+}
+
 #[derive(Clone)]
 struct OsrEntry {
     leaf: Rc<CompiledLeaf>,
@@ -510,36 +565,36 @@ enum OsrLookup {
     Pending,
 }
 
-#[cfg(debug_assertions)]
+#[cfg(any(test, debug_assertions))]
 thread_local! {
-    /// Nesting depth of native leaf executions on this thread (debug builds
-    /// only). `clear()` asserts it is 0: the soundness of every spec-slot leaf
+    /// Nesting depth of native leaf executions on this thread (debug and test
+    /// builds). `clear()` asserts it is 0: the soundness of every spec-slot leaf
     /// pointer and every baked box address rests on "no clear() fires while a
     /// native frame is live" (`resolve_compiled_leaf_ptr`), so a violation must
     /// be loud in debug/test builds instead of a silent use-after-free.
     static NATIVE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
-/// Current native nesting depth (0 outside any leaf). Always 0 in release
-/// builds, where the counter does not exist.
+/// Current native nesting depth (0 outside any leaf). Always 0 in production
+/// release builds, where the counter does not exist.
 #[inline]
 pub(crate) fn native_depth() -> u32 {
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     {
         NATIVE_DEPTH.with(|d| d.get())
     }
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(any(test, debug_assertions)))]
     {
         0
     }
 }
 
 /// RAII marker for one native leaf execution (see `NATIVE_DEPTH`). Zero-sized
-/// and a no-op in release builds; unwind-safe (the decrement is in `Drop`).
+/// and a no-op in production release builds; unwind-safe (the decrement is in `Drop`).
 #[must_use = "the thread-local extent ends when this guard drops"]
 #[derive(Debug)]
 pub(crate) struct NativeDepthGuard {
-    #[cfg(debug_assertions)]
+    #[cfg(any(test, debug_assertions))]
     _scope: crate::tls_scope::TlsScope<u32, std::cell::Cell<u32>>,
     _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
@@ -549,7 +604,7 @@ impl NativeDepthGuard {
     #[inline]
     pub(crate) fn enter() -> Self {
         Self {
-            #[cfg(debug_assertions)]
+            #[cfg(any(test, debug_assertions))]
             _scope: crate::tls_scope::TlsScope::restore(
                 &NATIVE_DEPTH,
                 NATIVE_DEPTH.with(|depth| depth.replace(depth.get().saturating_add(1))),

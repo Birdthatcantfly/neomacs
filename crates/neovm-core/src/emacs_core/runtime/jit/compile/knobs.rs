@@ -225,6 +225,31 @@ pub(crate) fn force_profit_gate_for_test(on: bool) {
     PROFIT_GATE_TEST_OVERRIDE.with(|c| c.set(Some(on)));
 }
 
+/// Exact owner-local test policy, including restoration of an unset override.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProfitGateTestPolicy {
+    Runtime,
+    Enforce,
+    Bypass,
+}
+#[cfg(test)]
+static_assertions::assert_impl_all!(ProfitGateTestPolicy: Send, Sync);
+
+#[cfg(test)]
+pub(crate) fn replace_profit_gate_for_test(policy: ProfitGateTestPolicy) -> ProfitGateTestPolicy {
+    let override_value = match policy {
+        ProfitGateTestPolicy::Runtime => None,
+        ProfitGateTestPolicy::Enforce => Some(true),
+        ProfitGateTestPolicy::Bypass => Some(false),
+    };
+    match PROFIT_GATE_TEST_OVERRIDE.with(|value| value.replace(override_value)) {
+        None => ProfitGateTestPolicy::Runtime,
+        Some(true) => ProfitGateTestPolicy::Enforce,
+        Some(false) => ProfitGateTestPolicy::Bypass,
+    }
+}
+
 /// Is the JIT profitability gate enabled? Default yes; `NEOVM_JIT_PROFIT=off`
 /// disables it, so the gate can be A/B-measured against the old behavior in a
 /// single build.

@@ -164,7 +164,7 @@ impl Context {
             &mut thread_local,
             self.tagged_heap.identity(),
             self.tagged_heap.gc_collections(),
-            crate::tagged::gc::CacheRootScan::Collection,
+            crate::tagged::gc::CacheRootScan::Parked,
             &mut stats,
         );
         roots.extend(thread_local.into_iter().map(|(value, _)| value));
@@ -187,6 +187,38 @@ impl Context {
         if let Some(refusal) = switch_refusal(self) {
             return Err(signal("error", vec![Value::string(refusal)]));
         }
+        // Capture exact sources before any binding exchange. Operand roots
+        // are copied below from trace_roots' jit_window on this owner only.
+        #[cfg(feature = "jit")]
+        let parked_jit = crate::emacs_core::jit::green_owner::ParkedJit::prepare(self)
+            .map_err(|error| signal("error", vec![Value::string(error.to_string())]))?;
+        let parked = self.park_owner();
+        #[allow(unused_mut)]
+        let mut roots = self.collect_parked_roots();
+        #[cfg(feature = "jit")]
+        roots.extend_from_slice(parked_jit.roots());
+        let prepared = self
+            .owner
+            .slab_mut()
+            .and_then(|slab| slab.green_seat_mut())
+            .and_then(|seat| seat.baton.as_ref())
+            .expect("the running thread holds the Baton")
+            .prepare_parked_batch(&self.tagged_heap, roots.len());
+        let prepared = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.resume_owner(parked);
+                return Err(signal("error", vec![Value::string(error.to_string())]));
+            }
+        };
+        // SAFETY: this is the original sole mutator, holding the Baton and
+        // its marking exclusion after park_owner completed. The census was
+        // copied from this heap's live roots; no GC, Lisp or handoff occurs
+        // between its collection, finalization and publication.
+        let publication = unsafe { prepared.finalize(&roots) }
+            .expect("the prepared capacity fits the exact owner census")
+            .publish()
+            .expect("a unique reserved batch publishes exactly once");
         let seat = self.green_seat().expect("seated above");
         let baton = seat
             .baton
@@ -198,7 +230,6 @@ impl Context {
         let current = self.buffers.current_buffer_id();
         self.threads.set_thread_current_buffer(key.id(), current);
         self.restore_deferred_error(&baton, key);
-        let parked = self.park_owner();
         if let Some(runtime) = baton.green_runtime().as_ref() {
             runtime.outgoing_constant_error.set(
                 self.failed_constant_owner_binding(true)
@@ -207,14 +238,22 @@ impl Context {
         }
         stow_owner_state(self, &baton);
         stow_carried_state(&baton);
-        let roots = self.collect_parked_roots();
-        self.publish_parked_roots(&baton, key, roots);
+        self.publish_parked_roots(&baton, key, publication);
         let outcome = control.transfer(key, wait, baton, &receiver);
         let (baton, deadlocked) = match outcome {
             Ok(baton) => (baton, false),
             Err(Handoff::NoRunnable(baton)) => (baton, true),
         };
-        self.retire_parked_roots(&baton, key);
+        // Only the returning continuation refreshes its private dispatch
+        // header from canonical cells. A peer's function write updates its own
+        // header, so comparing our stale header would miss that redefinition.
+        self.obarray.refresh_admission();
+        // Invalidate shared leaf slots before dispatch or owner mirror work,
+        // and restore old-source pins while the immutable batch still roots them.
+        #[cfg(feature = "jit")]
+        parked_jit
+            .resume(self)
+            .expect("the original owner resumes in its own heap");
         unstow_carried_state(&baton);
         unstow_owner_state(self, &baton);
         let changed_owner = self.threads.current_thread_id() != key.id();
@@ -261,6 +300,12 @@ impl Context {
             case_table.map(Value::bits) != self.cached_standard_case_table.map(Value::bits);
         self.cached_standard_case_table = case_table;
         self.resume_owner(parked);
+        let publication = self
+            .with_green_runtime(|runtime| runtime.parked.borrow_mut().remove(&key))
+            .expect("each returning owner has a parked batch");
+        publication
+            .try_finish()
+            .expect("restored owner and synchronous collector have no readers");
         if case_table_changed {
             crate::emacs_core::casetab::activate_casetab_thread_locals(case_table);
         }
@@ -426,17 +471,22 @@ impl Context {
     }
 
     /// Keep ROOTS traced while KEY is parked.
-    fn publish_parked_roots(&self, baton: &Baton, key: ThreadKey, roots: Vec<Value>) {
-        if let Some(runtime) = baton.green_runtime().as_ref() {
-            runtime.parked.borrow_mut().insert(key, roots);
-        }
-    }
-
-    /// KEY runs again: its roots are its own Context's once more.
-    fn retire_parked_roots(&self, baton: &Baton, key: ThreadKey) {
-        if let Some(runtime) = baton.green_runtime().as_ref() {
-            runtime.parked.borrow_mut().remove(&key);
-        }
+    fn publish_parked_roots(
+        &self,
+        baton: &Baton,
+        key: ThreadKey,
+        publication: crate::tagged::transport::RootBatchLease,
+    ) {
+        let runtime = baton.green_runtime();
+        let runtime = runtime.as_ref().expect("a seated owner has a runtime");
+        assert!(
+            runtime
+                .parked
+                .borrow_mut()
+                .insert(key, publication)
+                .is_none(),
+            "an owner parks exactly once before resuming"
+        );
     }
 
     /// GNU `make-thread` (ARGS: FUNCTION, NAME, BUFFER-DISPOSITION) in a
@@ -500,6 +550,8 @@ fn run_worker(key: ThreadKey, receiver: mpsc::Receiver<Baton>, control: Arc<Cont
         return;
     };
     baton.enter();
+    #[cfg(feature = "jit")]
+    crate::emacs_core::jit::green_owner::begin_owner_turn();
     unstow_carried_state(&baton);
     let mut owner = Context::new_green_owner(&baton);
     unstow_owner_state(&mut owner, &baton);

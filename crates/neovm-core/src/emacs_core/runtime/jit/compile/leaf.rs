@@ -1206,6 +1206,10 @@ impl CompiledLeaf {
         out: &mut i64,
     ) -> i64 {
         debug_assert_eq!(self.entry_shape, EntryShape::RawMemory);
+        // Raw entries bypass invoke_native_frame. Test witnesses still need
+        // their exact native extent, including optimized test binaries.
+        #[cfg(test)]
+        let _native_depth = super::super::cache::NativeDepthGuard::enter();
         debug_assert!(
             self.dynamic_prefix == 0 || !consts.is_null(),
             "a dynamic-prefix leaf needs the callee's constant base"
@@ -1241,6 +1245,10 @@ impl CompiledLeaf {
         args_ptr: *const i64,
     ) -> super::reg_abi::NativeRet {
         debug_assert_eq!(self.entry_shape, EntryShape::RawRegister);
+        // Raw entries bypass invoke_native_frame. Test witnesses still need
+        // their exact native extent, including optimized test binaries.
+        #[cfg(test)]
+        let _native_depth = super::super::cache::NativeDepthGuard::enter();
         // SAFETY: the thunk of the entry's arity, and `args_ptr` addresses
         // that many words (the contract above).
         unsafe { (self.register_thunk)(self.entry, vmctx, consts.cast(), args_ptr) }

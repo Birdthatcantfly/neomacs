@@ -23,6 +23,18 @@
 //! everything Lisp can observe: the mode moves where code is produced, never
 //! what it does.
 //!
+//! # Green owners
+//!
+//! A backend worker can finish while a different Lisp owner holds the Baton.
+//! It publishes only `BackendOut` through `JobCell`: the output mutex and the
+//! release/acquire completion flag synchronize the sealed code with its reader.
+//! Its only access to the shared source runtime is atomic tier-up release under
+//! `JobCell::parked`'s mutex. It never installs or dereferences a Lisp leaf.
+//! `install` runs later on the originating owner, after that owner has acquired
+//! the Baton; `serialize_instruction_stream` synchronizes instruction fetch on
+//! that OS thread. The owner's pending leaf and relocation roots remain in its
+//! parked RootBatch meanwhile. No worker takes or borrows a Baton.
+//!
 //! # A deferred compile's life
 //!
 //! A compile the cache allows to defer (a [`DeferScope`] around it) whose

@@ -37,8 +37,9 @@ pub(crate) struct GreenRuntime {
     pub(super) bootstrap: GreenBootstrap,
     pub(super) control: std::sync::Arc<scheduler::Control>,
     /// Each parked thread's private roots (plan-3d §4).
-    pub(super) parked:
-        std::cell::RefCell<rustc_hash::FxHashMap<ThreadKey, Vec<crate::emacs_core::value::Value>>>,
+    pub(super) parked: std::cell::RefCell<
+        rustc_hash::FxHashMap<ThreadKey, crate::tagged::transport::RootBatchLease>,
+    >,
     /// A started thread's function until its OS thread runs it.
     pub(super) pending_starts:
         std::cell::RefCell<rustc_hash::FxHashMap<ThreadKey, crate::emacs_core::value::Value>>,
@@ -109,11 +110,8 @@ impl GreenRuntime {
     #[inline(never)]
     pub(super) fn trace_roots(&self, visit: &mut dyn FnMut(crate::emacs_core::value::Value)) {
         self.bootstrap.trace_roots(visit);
-        for values in self.parked.borrow().values() {
-            for value in values {
-                visit(*value);
-            }
-        }
+        // Parked RootBatches are traced by the heap's transport root table,
+        // including compiled operand windows and the pinned source objects.
         for value in self.pending_starts.borrow().values() {
             visit(*value);
         }
@@ -135,11 +133,9 @@ impl GreenRuntime {
 pub(crate) enum GreenStartError {
     #[error("the World does not run green Lisp threads")]
     NotGreen,
-    #[error(
-        "green Lisp threads need the interpreter: run with NEOVM_JIT=0 \
-         (compiled continuations across thread switches are not supported yet)"
-    )]
-    JitEnabled,
+    #[cfg(feature = "jit")]
+    #[error(transparent)]
+    JitAdmission(#[from] crate::emacs_core::jit::green_owner::AdmissionError),
     #[error("green Lisp threads are unavailable while a display or input host is attached")]
     ThreadAffineHost,
     #[error("green Lisp threads cannot start while garbage collection is inhibited")]
@@ -152,24 +148,11 @@ pub(crate) enum GreenStartError {
     MarkExclusion(#[from] FacadeMarkExclusionError),
 }
 
-/// Whether compiled code may run: Green owners refuse it (round 3d2 ports
-/// compiled continuations across switches).
-fn jit_enabled() -> bool {
-    #[cfg(feature = "jit")]
-    {
-        crate::emacs_core::jit::jit_runtime_enabled()
-    }
-    #[cfg(not(feature = "jit"))]
-    {
-        false
-    }
-}
-
 impl Context {
     /// Start this World's Green runtime from its first owner: admit
     /// threads, capture the bootstrap further owners are built from, and
     /// issue the World's Baton to this thread. Refused unless the World is
-    /// Green, the JIT is off, no display or input host is attached and
+    /// Green, the JIT mode supports parked frames, no display or input host is attached and
     /// collection is not inhibited.
     #[cold]
     #[inline(never)]
@@ -177,9 +160,8 @@ impl Context {
         if self.threading_mode() != ThreadingMode::Green {
             return Err(GreenStartError::NotGreen);
         }
-        if jit_enabled() {
-            return Err(GreenStartError::JitEnabled);
-        }
+        #[cfg(feature = "jit")]
+        crate::emacs_core::jit::green_owner::certify_admission()?;
         if self.display_host.is_some() || self.input_rx.is_some() {
             return Err(GreenStartError::ThreadAffineHost);
         }
@@ -236,8 +218,6 @@ impl Context {
         owner.ensure_owner_slab();
         owner.setup_thread_locals();
         owner.republish_owner_mirrors();
-        #[cfg(all(test, feature = "jit"))]
-        crate::emacs_core::jit::force_jit_off_for_test(true);
         owner
     }
 
@@ -261,3 +241,7 @@ mod tests;
 #[cfg(test)]
 #[path = "../tests/green_switch_test.rs"]
 mod switch_tests;
+
+#[cfg(all(test, feature = "jit"))]
+#[path = "../tests/green_jit_switch_test.rs"]
+mod jit_switch_tests;
