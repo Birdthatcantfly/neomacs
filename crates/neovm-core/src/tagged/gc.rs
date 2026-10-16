@@ -2852,6 +2852,9 @@ mod chunk_map_tests;
 #[cfg(test)]
 #[path = "gc/tests/cons_alloc_test.rs"]
 mod cons_alloc_tests;
+#[cfg(test)]
+#[path = "gc/tests/cons_region_young_test.rs"]
+mod cons_region_young_tests;
 /// A fake pdump image in one allocation (see the module doc for why one).
 #[cfg(test)]
 #[path = "gc/tests/fake_image.rs"]

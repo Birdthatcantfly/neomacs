@@ -110,6 +110,7 @@ fn generational_cons_protocol_window_marks_symbols_and_keeps_preimages() {
     heap.publish_barrier_window();
     set_tagged_heap(&mut heap);
     let owner = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
+    heap.close_alloc_regions();
     let (trailer, index) = heap.old_cons_trailer(owner).unwrap();
     trailer.set_old(index);
     owner.set_car(TaggedValue::fixnum(1));
@@ -135,6 +136,7 @@ fn generational_cold_cons_reject_skips_full_hook_for_immediates_and_ineligible_o
     heap.publish_barrier_window();
     set_tagged_heap(&mut heap);
     let old = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
+    heap.close_alloc_regions();
     let (trailer, index) = heap.old_cons_trailer(old).unwrap();
     trailer.set_old(index);
     let before = BARRIER_SLOW_CALLS.with(Cell::get);

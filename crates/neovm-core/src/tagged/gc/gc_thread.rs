@@ -1786,12 +1786,22 @@ fn barrier_gate(owner: TaggedValue) -> bool {
 /// already own their journal/observation policy. No arm safepoints.
 #[inline(always)]
 fn generation_only_cons_is_old(heap: &TaggedHeap, owner: TaggedValue) -> bool {
-    let ptr = (owner.bits() & !crate::tagged::value::TAG_MASK) as *const ConsCell;
+    let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
+    let cur = heap.jit.cons_cur.get();
+    let first = (cur & !(CONS_BLOCK_ALIGN - 1)) | heap.region_book.cons_first_offset as usize;
+    // All handed-out cells of this region are young. Regions close before
+    // every collection/promotion; a reused free-list cell has its old age
+    // cleared before the allocator can reserve it. The zeroed closed range
+    // is empty. This range proof needs no foreign-pointer metadata access.
+    debug_assert!(first <= cur);
+    if addr.wrapping_sub(first) < cur.wrapping_sub(first) {
+        return false;
+    }
+    let ptr = addr as *const ConsCell;
     if !ConsBlock::ptr_is_cell_aligned(ptr) {
         return false;
     }
     let base = ConsBlock::block_base_for_ptr(ptr);
-    let cur = heap.jit.cons_cur.get();
     // An open region's cursor belongs to a live owned block, even when it
     // equals its limit (the payload ends before the block boundary). Every
     // collector entry closes regions before releasing storage. This proves
@@ -1799,7 +1809,7 @@ fn generation_only_cons_is_old(heap: &TaggedHeap, owner: TaggedValue) -> bool {
     if cur == 0 || ConsBlock::block_base_for_ptr(cur as *const ConsCell) != base {
         let owned = match heap.chunk_map.as_ref() {
             Some(map) => map.get(ptr as usize).is(ChunkClass::Cons),
-            None => heap.cons_block_index_by_base.contains_key(&base),
+            None => return generation_only_registered_cons_is_old(heap, ptr),
         };
         if !owned {
             return false;
@@ -1808,6 +1818,22 @@ fn generation_only_cons_is_old(heap: &TaggedHeap, owner: TaggedValue) -> bool {
     // SAFETY: cursor, map or registry proves a live owned block; the first
     // check proves a cell index inside its payload. Release and promotion
     // require mutator exclusion, and this leaf has no safe point.
+    let trailer = unsafe { ConsBlockTrailer::from_block_base(base) };
+    trailer.age_is_old(ConsBlock::index_of_ptr(ptr))
+}
+
+/// Keep registry lookup temporaries inside the map-off fallback. Carrying
+/// its base and index across `contains_key` otherwise adds callee-saved
+/// registers to every setter, including the GEN0 immediate fast path.
+#[cold]
+#[inline(never)]
+fn generation_only_registered_cons_is_old(heap: &TaggedHeap, ptr: *const ConsCell) -> bool {
+    let base = ConsBlock::block_base_for_ptr(ptr);
+    if !heap.cons_block_index_by_base.contains_key(&base) {
+        return false;
+    }
+    // SAFETY: the caller checked cell alignment and payload bounds; the
+    // registry proves this mutator owns the block. This leaf cannot safepoint.
     let trailer = unsafe { ConsBlockTrailer::from_block_base(base) };
     trailer.age_is_old(ConsBlock::index_of_ptr(ptr))
 }

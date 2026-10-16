@@ -77,15 +77,32 @@ pub(super) enum RegionColor {
     Black,
 }
 
-/// The open regions' bookkeeping that only Rust reads.
+/// The open regions' bookkeeping that only Rust reads. Keep the previous
+/// field offsets and use its trailing padding for the cons range offset.
+#[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub(super) struct RegionBook {
     pub(super) cons: ConsRegionSource,
-    pub(super) cons_color: RegionColor,
     /// Floats have no color: a slot is born at the current parity, which a
     /// region cannot outlive (it closes before every parity flip).
     pub(super) float: FloatRegionSource,
+    pub(super) cons_color: RegionColor,
+    /// Low 16 bits of the first handed-out cons in the current region.
+    /// Every cell in `[first, cons_cur)` is young until the region closes
+    /// before collection/promotion. Closed regions have offset and cursor 0.
+    pub(super) cons_first_offset: u16,
 }
+
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(CONS_BLOCK_ALIGN == 1 << 16);
+    assert!(std::mem::size_of::<RegionBook>() == 40);
+    assert!(std::mem::align_of::<RegionBook>() == 8);
+    assert!(std::mem::offset_of!(RegionBook, cons) == 0);
+    assert!(std::mem::offset_of!(RegionBook, float) == 16);
+    assert!(std::mem::offset_of!(RegionBook, cons_color) == 32);
+    assert!(std::mem::offset_of!(RegionBook, cons_first_offset) == 34);
+};
 
 impl RegionBook {
     pub(super) const fn new() -> Self {
@@ -93,6 +110,7 @@ impl RegionBook {
             cons: ConsRegionSource::Closed,
             cons_color: RegionColor::White,
             float: FloatRegionSource::Closed,
+            cons_first_offset: 0,
         }
     }
 }
@@ -179,6 +197,7 @@ impl TaggedHeap {
         stats.cons_cells_granted += n as u64;
         stats.cons_short_runs += u64::from(n < 8);
         let first_addr = first as usize;
+        self.region_book.cons_first_offset = (first_addr & (CONS_BLOCK_ALIGN - 1)) as u16;
         self.jit.cons_cur.set(first_addr + size_of::<ConsCell>());
         self.jit
             .cons_lim
@@ -421,6 +440,7 @@ impl TaggedHeap {
         self.close_black_cons_region(cur);
         self.jit.cons_cur.set(0);
         self.jit.cons_lim.set(0);
+        self.region_book.cons_first_offset = 0;
         self.region_book.cons = ConsRegionSource::Closed;
         if source == ConsRegionSource::Closed {
             debug_assert!(cur == 0 && lim == 0, "a closed region has no cursor");
