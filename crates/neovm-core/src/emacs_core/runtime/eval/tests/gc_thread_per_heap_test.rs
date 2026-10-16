@@ -38,6 +38,12 @@ fn launch_concurrent_mark(ev: &mut Context) {
     panic!("the World never launched a concurrent mark");
 }
 
+/// How long a body may run before it counts as stuck. A stuck collector never
+/// finishes, so this only needs to exceed the slowest healthy run: about 55 s
+/// for `two_worlds_on_one_thread_collect_while_both_mark` alone under TSan on
+/// arm64 (GEN1), and over 60 s with eight tests in parallel there.
+const STUCK_AFTER: Duration = Duration::from_secs(300);
+
 /// Run `body` on its own thread, failing (rather than hanging the test
 /// binary) if it does not finish in time.
 fn within_timeout(body: impl FnOnce() + Send + 'static) {
@@ -46,7 +52,7 @@ fn within_timeout(body: impl FnOnce() + Send + 'static) {
         body();
         let _ = done_tx.send(());
     });
-    match done_rx.recv_timeout(Duration::from_secs(60)) {
+    match done_rx.recv_timeout(STUCK_AFTER) {
         Ok(()) => worker.join().expect("the body panicked after finishing"),
         // The body panicked: surface its message.
         Err(mpsc::RecvTimeoutError::Disconnected) => {
