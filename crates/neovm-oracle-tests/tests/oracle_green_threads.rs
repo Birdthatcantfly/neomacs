@@ -575,7 +575,9 @@ fn green_a_process_made_by_one_thread_is_every_threads() {
                (process-live-p proc))
     (delete-process proc)))
 "##,
-        expect_test::expect![[r##""OK (\"g3w-pipe\" t t \"#<process g3w-pipe>\" (open listen connect stop))""##]],
+        expect_test::expect![[
+            r##""OK (\"g3w-pipe\" t t \"#<process g3w-pipe>\" (open listen connect stop))""##
+        ]],
     );
 }
 
@@ -618,7 +620,9 @@ fn green_a_minor_mode_and_a_face_defined_by_a_thread_are_mains() {
         (face-attribute 'g3w-face :weight)
         (and (memq 'g3w-face (face-list)) t)))
 "##,
-        expect_test::expect![[r#""OK (t t t [face unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified] bold t)""#]],
+        expect_test::expect![[
+            r#""OK (t t t [face unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified unspecified] bold t)""#
+        ]],
     );
 }
 
