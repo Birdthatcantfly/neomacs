@@ -1092,7 +1092,7 @@ impl TaggedHeap {
             mark_in_progress: false,
             incremental_mark_us: 0,
             concurrent_mark_running: false,
-            satb_shared: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            satb_shared: std::sync::Arc::new(MarkQueue::default()),
             satb_snapshotted_owners: FxHashSet::default(),
             _satb_layout_reserve: std::ptr::NonNull::dangling(),
             gc_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2771,7 +2771,7 @@ pub use concurrent::MarkFinishError;
 mod heap_identity;
 pub use heap_identity::HeapIdentity;
 mod mark_word;
-use mark_word::{MarkStack, MarkWord, SharedMarkQueue};
+use mark_word::{MarkQueue, MarkStack, MarkWord, SharedMarkQueue};
 pub(crate) mod mapped_veclike_scan;
 pub(crate) mod scan_contract;
 use mapped_veclike_scan::MappedVeclikeScanSnapshot;

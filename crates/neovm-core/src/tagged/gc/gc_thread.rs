@@ -1475,10 +1475,14 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
             }
         }
         // Fold the mutator's SATB log (overwritten children) into gray.
-        let batch = { std::mem::take(&mut *job.satb.lock().unwrap()) };
+        let batch = job.satb.take_all().unwrap();
         if batch.is_empty() {
             // Tentatively drained. Advertise done; exit if the mutator asked.
-            job.done.store(true, Ordering::Release);
+            // Only this worker writes done during a job. A repeated idle pass
+            // can read it without taking ownership of the mutator-polled line.
+            if !job.done.load(Ordering::Relaxed) {
+                job.done.store(true, Ordering::Release);
+            }
             if job.stop.load(Ordering::Acquire) {
                 break 'mark;
             }
@@ -1498,7 +1502,9 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
                     .unwrap();
             }
         } else {
-            job.done.store(false, Ordering::Release);
+            if job.done.load(Ordering::Relaxed) {
+                job.done.store(false, Ordering::Release);
+            }
             job.gray.extend_words(batch);
         }
     }

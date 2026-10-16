@@ -133,7 +133,7 @@ struct WorkerHarness {
 impl WorkerHarness {
     fn new(heap: &TaggedHeap, major: bool) -> Self {
         let (exited, result) = std::sync::mpsc::channel();
-        let satb = Arc::new(Mutex::new(Vec::new()));
+        let satb = Arc::new(MarkQueue::default());
         Self {
             job: ConcurrentMarkJob {
                 gray: MarkStack::default(),
