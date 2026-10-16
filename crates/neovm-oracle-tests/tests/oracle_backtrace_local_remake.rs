@@ -13,7 +13,7 @@ mod common;
 use common::return_if_neovm_enable_oracle_proptest_not_set;
 
 const SIM: &[(&str, &str)] = &[("NEOVM_THREADS", "sim"), ("NEOVM_JIT", "0")];
-const GREEN: &[(&str, &str)] = &[("NEOVM_THREADS", "green"), ("NEOVM_JIT", "0")];
+const GREEN: &[(&str, &str)] = &[("NEOVM_THREADS", "green")];
 
 /// An exchanged binding alone does not overwrite the replacement local on pop.
 #[test]

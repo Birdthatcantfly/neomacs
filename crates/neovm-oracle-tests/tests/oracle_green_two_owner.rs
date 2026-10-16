@@ -9,7 +9,7 @@ mod common;
 
 use common::return_if_neovm_enable_oracle_proptest_not_set;
 
-const GREEN_THREADS: &[(&str, &str)] = &[("NEOVM_THREADS", "green"), ("NEOVM_JIT", "0")];
+const GREEN_THREADS: &[(&str, &str)] = &[("NEOVM_THREADS", "green")];
 
 #[test]
 fn green_two_owner_creator_let_and_unbound_peer_write() {

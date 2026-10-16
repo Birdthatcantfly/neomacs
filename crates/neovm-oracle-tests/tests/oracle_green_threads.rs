@@ -16,8 +16,8 @@ mod common;
 
 use common::return_if_neovm_enable_oracle_proptest_not_set;
 
-/// Green threads, which refuse a JIT-enabled session (round 3d2).
-const GREEN_THREADS: &[(&str, &str)] = &[("NEOVM_THREADS", "green"), ("NEOVM_JIT", "0")];
+/// Green threads with the default JIT enabled (round 3d2).
+const GREEN_THREADS: &[(&str, &str)] = &[("NEOVM_THREADS", "green")];
 
 fn assert_green_oracle(form: &str, expected: expect_test::Expect) {
     common::assert_oracle_parity_under_envs_expect(form, &[GREEN_THREADS], expected);
