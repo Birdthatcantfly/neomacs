@@ -359,6 +359,63 @@ impl OwnerSlab {
         }
     }
 
+    /// Replace a default-channel binding without the local-channel map
+    /// dispatch. This is used only after a projected binding has selected
+    /// its channel; ordinary specbind and unbind paths remain unchanged.
+    #[inline(always)]
+    fn replace_default_slot(&mut self, index: TlsIndex, state: SlotState) -> SlotState {
+        let slot = index.slot();
+        let old = match self
+            .pages
+            .get_mut(slot / SLOT_PAGE)
+            .and_then(Option::as_deref_mut)
+        {
+            Some(page) => std::mem::replace(&mut page[slot % SLOT_PAGE], state),
+            None if matches!(state, SlotState::NoBinding) => SlotState::NoBinding,
+            None => {
+                self.new_page(slot)[slot % SLOT_PAGE] = state;
+                SlotState::NoBinding
+            }
+        };
+        note_dropped(old.value());
+        if let Some((debugger, cell)) = self.debugger
+            && debugger == index
+        {
+            cell.set(debugger_armed(state));
+        }
+        old
+    }
+
+    /// Restore an unwatched default binding without materializing its
+    /// complete record in the unwinder's frame. Eligibility is checked
+    /// against the record's current storage symbol: alias migration can
+    /// change it while the specpdl reference keeps the original symbol.
+    #[inline(always)]
+    fn pop_default_binding(
+        &mut self,
+        id: OwnerRecordId,
+        unwatched: impl FnOnce(SymId) -> bool,
+    ) -> Option<SymId> {
+        let record = self.record(id)?;
+        if record.channel != Channel::Default {
+            return None;
+        }
+        let state = match record.undo {
+            UndoTarget::Previous(outer) => SlotState::Bound(outer),
+            UndoTarget::Inherited { .. } => SlotState::NoBinding,
+            UndoTarget::Captured(_) | UndoTarget::Retired => return None,
+        };
+        let (sym, index) = (record.sym, record.index);
+        if !unwatched(sym) {
+            return None;
+        }
+        // The record was validated above and nothing mutated it. Discard
+        // the returned payload so only stack retirement is needed here.
+        let _ = self.take_record(id);
+        self.replace_default_slot(index, state);
+        Some(sym)
+    }
+
     /// Keep VALUES traced while the owner is parked.
     pub(crate) fn park(&mut self, values: Vec<Value>) {
         debug_assert!(self.parked.is_empty(), "an owner parks once");
@@ -884,6 +941,30 @@ impl Context {
         projection: &'static ThreadProjectionDescriptor,
         value: Value,
     ) -> Result<(), Flow> {
+        // An unwatched plain projection always binds the default channel:
+        // no type rule, buffer lookup, or post-watcher routing is needed.
+        if projection.arm() == CanonicalArm::Plain && !self.watchers.has_watchers(resolved) {
+            let index = projection.index();
+            let slab = self.ensure_owner_slab();
+            let old = slab.replace_default_slot(index, SlotState::Bound(SlotValue::new(value)));
+            let undo = match old {
+                SlotState::Bound(outer) => UndoTarget::Previous(outer),
+                SlotState::NoBinding => UndoTarget::Inherited { suspended: None },
+            };
+            // Rust Vec growth cannot collect Lisp values or run Lisp. The
+            // old slot value remains in OLD until its record owns it, and
+            // the slab already roots VALUE before either stack can grow.
+            let record =
+                slab.push_record(resolved, index, BindingKind::Let, Channel::Default, undo);
+            self.push_specpdl_with(|| SpecBinding::NativeUnwind {
+                action: NativeUnwindAction::OwnerBinding(OwnerBindingRef {
+                    sym: resolved,
+                    record,
+                }),
+            });
+            self.publish_owner_binding(resolved);
+            return Ok(());
+        }
         let (kind, channel) = binding_shape(&self.buffers, resolved, projection);
         // A buffer's own per-buffer slot binds in place (design §1.3b).
         if let (
@@ -1025,7 +1106,7 @@ impl Context {
     }
 
     /// Republish host mirrors of RESOLVED after an owner binding changed.
-    #[inline]
+    #[inline(always)]
     fn publish_owner_binding(&mut self, resolved: SymId) {
         if resolved == super::owner_mirrors::debug_on_next_call_symbol() {
             self.point_owner_debugger();
@@ -1033,13 +1114,21 @@ impl Context {
         // The mask includes the GC settings, so an unmirrored variable needs
         // neither publication nor the GC-binding sync.
         if self.runtime_binding_has_projection(resolved) {
-            let visible = match self.find_symbol_value_by_id(resolved) {
-                Ok(super::SymbolValueLookup::Bound(value)) => value,
-                _ => Value::NIL,
-            };
-            self.publish_runtime_binding_write_by_resolved_id(resolved, visible);
-            self.sync_user_test_gc_binding_by_id(resolved);
+            self.publish_owner_binding_mirrors(resolved);
         }
+    }
+
+    /// Keep the value lookup and publication frame outside the ordinary
+    /// unmirrored bind/pop path, whose inline gate is only a bit test.
+    #[cold]
+    #[inline(never)]
+    fn publish_owner_binding_mirrors(&mut self, resolved: SymId) {
+        let visible = match self.find_symbol_value_by_id(resolved) {
+            Ok(super::SymbolValueLookup::Bound(value)) => value,
+            _ => Value::NIL,
+        };
+        self.publish_runtime_binding_write_by_resolved_id(resolved, visible);
+        self.sync_user_test_gc_binding_by_id(resolved);
     }
 
     /// GNU `do_one_unbind` (`src/eval.c:3806-3885`) of an owner binding.
@@ -1054,6 +1143,24 @@ impl Context {
     #[cold]
     #[inline(never)]
     pub(super) fn unbind_owner_binding(&mut self, binding: OwnerBindingRef) -> Result<(), Flow> {
+        let restored = {
+            let watchers = &self.watchers;
+            self.owner.slab_mut().and_then(|slab| {
+                slab.pop_default_binding(binding.record, |sym| !watchers.has_watchers(sym))
+            })
+        };
+        if let Some(sym) = restored {
+            self.publish_owner_binding(sym);
+            return Ok(());
+        }
+        self.unbind_owner_binding_slow(binding)
+    }
+
+    /// Full-record restoration is needed only for watched, local, captured
+    /// or retired bindings. Keep its larger frame off the common pop.
+    #[cold]
+    #[inline(never)]
+    fn unbind_owner_binding_slow(&mut self, binding: OwnerBindingRef) -> Result<(), Flow> {
         let Some(record) = self
             .owner
             .slab_mut()
@@ -1072,7 +1179,7 @@ impl Context {
             if let Some(state) = state
                 && let Some(slab) = self.owner.slab_mut()
             {
-                slab.set_slot(record.index, record.channel, state);
+                slab.replace_default_slot(record.index, state);
                 self.publish_owner_binding(record.sym);
                 return Ok(());
             }
