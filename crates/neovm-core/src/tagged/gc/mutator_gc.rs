@@ -112,12 +112,38 @@ impl TaggedHeap {
 
     #[inline]
     pub(super) fn mutators(&self) -> impl Iterator<Item = &MutatorGcState> {
-        std::iter::once(self.current_mutator_gc())
+        #[cfg(not(test))]
+        {
+            std::iter::once(self.current_mutator_gc())
+        }
+        #[cfg(test)]
+        {
+            std::iter::once(&self.mutator_gc).chain(
+                self._satb_layout_reserve
+                    .0
+                    .registered
+                    .iter()
+                    .map(|entry| &entry.gc),
+            )
+        }
     }
 
     #[inline]
     pub(super) fn mutators_mut(&mut self) -> impl Iterator<Item = &mut MutatorGcState> {
-        std::iter::once(self.current_mutator_gc_mut())
+        #[cfg(not(test))]
+        {
+            std::iter::once(self.current_mutator_gc_mut())
+        }
+        #[cfg(test)]
+        {
+            std::iter::once(&mut self.mutator_gc).chain(
+                self._satb_layout_reserve
+                    .0
+                    .registered
+                    .iter_mut()
+                    .map(|entry| &mut entry.gc),
+            )
+        }
     }
 
     #[inline]
@@ -150,5 +176,439 @@ impl TaggedHeap {
             .map(|state| state.mutators_world_stopped())
             .unwrap_or_default()
             .into_iter()
+    }
+}
+
+use super::satb::{SatbBuffer, SatbHandoff, SatbPoisoned, SatbRetired};
+use super::scan_contract::{SatbDrainError, StoppedMutatorsProof};
+
+/// One postponement is allowed at a tentative-done poll in each epoch.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SatbDoneFlush {
+    #[default]
+    Available,
+    Used,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SatbDoneDecision {
+    Finish,
+    DeferOnce,
+}
+
+/// A published tentative-done partial grants the marker one safepoint of
+/// grace. Its done flag cannot revoke the next safepoint's termination debt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SatbTerminationObligation {
+    WaitForMarker,
+    FinishAtNextSafepoint,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum SatbMutatorLifecycle {
+    #[default]
+    Active,
+    Retired,
+}
+
+/// Owner-confined cold half of the same logical MutatorGcState. The existing
+/// inline hot half stays exactly 800 bytes; no inactive-mark path follows this
+/// sidecar pointer. A retired half remains registered until stopped termination
+/// has folded its partial and consumed its dirty-owner insertion repair log.
+#[derive(Debug)]
+pub(super) struct SatbMutatorState {
+    pub(super) satb: SatbBuffer,
+    pub(super) satb_snapshotted_owners: FxHashSet<usize>,
+    pub(super) satb_string_preimage_addrs: FxHashSet<usize>,
+    done_flush: SatbDoneFlush,
+    lifecycle: SatbMutatorLifecycle,
+}
+
+static_assertions::assert_not_impl_any!(SatbMutatorState: Send, Sync, Clone, Copy);
+static_assertions::assert_impl_all!(SatbMutatorState: std::fmt::Debug);
+
+impl SatbMutatorState {
+    pub(super) fn new() -> Self {
+        Self {
+            satb: SatbBuffer::new(),
+            satb_snapshotted_owners: FxHashSet::default(),
+            satb_string_preimage_addrs: FxHashSet::default(),
+            done_flush: SatbDoneFlush::Available,
+            lifecycle: SatbMutatorLifecycle::Active,
+        }
+    }
+
+    pub(super) fn termination_obligation(&self) -> SatbTerminationObligation {
+        match self.done_flush {
+            SatbDoneFlush::Available => SatbTerminationObligation::WaitForMarker,
+            SatbDoneFlush::Used => SatbTerminationObligation::FinishAtNextSafepoint,
+        }
+    }
+
+    /// Called only on a normal done-poll, never on the allocation hard cap.
+    pub(super) fn publish_at_done(
+        &mut self,
+        handoff: &SatbHandoff,
+    ) -> Result<SatbDoneDecision, SatbPoisoned> {
+        match self.done_flush {
+            SatbDoneFlush::Used => Ok(SatbDoneDecision::Finish),
+            SatbDoneFlush::Available => {
+                if self.satb.is_empty() {
+                    return Ok(SatbDoneDecision::Finish);
+                }
+                self.satb.publish_partial(handoff)?;
+                self.done_flush = SatbDoneFlush::Used;
+                Ok(SatbDoneDecision::DeferOnce)
+            }
+        }
+    }
+
+    #[must_use = "retirement must succeed before removing the registration"]
+    pub(super) fn retire(&mut self, handoff: &SatbHandoff) -> Result<SatbRetired, SatbPoisoned> {
+        let retired = std::mem::take(&mut self.satb).retire(handoff);
+        self.lifecycle = SatbMutatorLifecycle::Retired;
+        retired
+    }
+
+    /// Residual words are an error, never a reason to clear the log at begin.
+    pub(super) fn begin_cycle(&mut self, _: &StoppedMutatorsProof) -> Result<(), SatbDrainError> {
+        if !self.satb.is_empty() {
+            return Err(SatbDrainError::Residual);
+        }
+        self.satb_snapshotted_owners.clear();
+        self.satb_string_preimage_addrs.clear();
+        self.done_flush = SatbDoneFlush::Available;
+        Ok(())
+    }
+}
+
+/// One registered test owner includes a real hot MutatorGcState, not merely a
+/// transport buffer. The ordinary iterator family and the stopped SATB fold
+/// both enumerate this exact same set of registrations.
+#[cfg(test)]
+struct RegisteredMutatorGc {
+    gc: MutatorGcState,
+    satb: SatbMutatorState,
+}
+
+/// Cold storage owned by the existing inline mutator's pointer-sized reserve.
+/// This is the legacy one-mutator representation, not a parallel registry:
+/// a real future registry must own each hot/cold pair as one registration.
+struct MutatorSatbRegistry {
+    current: SatbMutatorState,
+    #[cfg(test)]
+    registered: Vec<RegisteredMutatorGc>,
+}
+
+#[repr(transparent)]
+pub(super) struct MutatorSatbSlot(Box<MutatorSatbRegistry>);
+
+impl std::fmt::Debug for MutatorSatbSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MutatorSatbSlot")
+            .field("current", &self.0.current)
+            .finish_non_exhaustive()
+    }
+}
+
+static_assertions::assert_not_impl_any!(MutatorSatbSlot: Send, Sync, Clone, Copy);
+static_assertions::assert_impl_all!(MutatorSatbSlot: std::fmt::Debug);
+const _: () = {
+    assert!(std::mem::size_of::<MutatorSatbSlot>() == std::mem::size_of::<std::ptr::NonNull<()>>());
+    assert!(
+        std::mem::align_of::<MutatorSatbSlot>() == std::mem::align_of::<std::ptr::NonNull<()>>()
+    );
+    assert!(
+        std::mem::size_of::<Option<MutatorSatbSlot>>() == std::mem::size_of::<MutatorSatbSlot>()
+    );
+};
+
+impl MutatorSatbSlot {
+    pub(super) fn new() -> Self {
+        Self(Box::new(MutatorSatbRegistry {
+            current: SatbMutatorState::new(),
+            #[cfg(test)]
+            registered: Vec::new(),
+        }))
+    }
+
+    /// Include this Box and the cfg(test) registry descriptor allocation in
+    /// memory_inventory, in addition to logs/hash payloads counted per owner.
+    #[cfg(feature = "gc-memory-telemetry")]
+    pub(super) fn allocation_bytes(&self) -> usize {
+        let bytes = std::mem::size_of::<MutatorSatbRegistry>();
+        #[cfg(not(test))]
+        {
+            bytes
+        }
+        #[cfg(test)]
+        {
+            bytes + self.0.registered.capacity() * std::mem::size_of::<RegisteredMutatorGc>()
+        }
+    }
+
+    /// Terminal abandonment only. Heap storage has already been retained;
+    /// destructor fallback cannot take locks, wait, or publish any new work.
+    pub(super) fn abandon(&mut self) {
+        self.0.current.satb.abandon();
+        #[cfg(test)]
+        for registration in &mut self.0.registered {
+            registration.satb.satb.abandon();
+        }
+    }
+}
+
+pub(super) struct StoppedMutatorGc<'h> {
+    pub(super) gc: &'h mut MutatorGcState,
+    pub(super) satb: &'h mut SatbMutatorState,
+}
+
+impl std::fmt::Debug for StoppedMutatorGc<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoppedMutatorGc")
+            .field("bytes_since_gc", &self.gc.bytes_since_gc)
+            .field("satb", &self.satb)
+            .finish()
+    }
+}
+
+static_assertions::assert_not_impl_any!(StoppedMutatorGc<'static>: Send, Sync, Clone, Copy);
+static_assertions::assert_impl_all!(StoppedMutatorGc<'static>: std::fmt::Debug);
+
+impl TaggedHeap {
+    #[inline]
+    pub(super) fn current_mutator_satb(&self) -> &SatbMutatorState {
+        &self._satb_layout_reserve.0.current
+    }
+
+    #[inline]
+    pub(super) fn current_mutator_satb_mut(&mut self) -> &mut SatbMutatorState {
+        debug_assert_eq!(
+            self._satb_layout_reserve.0.current.lifecycle,
+            SatbMutatorLifecycle::Active
+        );
+        &mut self._satb_layout_reserve.0.current
+    }
+
+    pub(super) fn satb_parts(&mut self) -> (&mut SatbMutatorState, &SatbHandoff) {
+        (&mut self._satb_layout_reserve.0.current, &self.satb_handoff)
+    }
+
+    /// Inventory reads the same registrations as the hot iterator family.
+    pub(super) fn mutator_satb_states(&self) -> impl Iterator<Item = &SatbMutatorState> {
+        let current = std::iter::once(self.current_mutator_satb());
+        #[cfg(not(test))]
+        {
+            current
+        }
+        #[cfg(test)]
+        {
+            current.chain(
+                self._satb_layout_reserve
+                    .0
+                    .registered
+                    .iter()
+                    .map(|entry| &entry.satb),
+            )
+        }
+    }
+
+    /// All noncurrent writes are gated by the closed stopped-world proof.
+    pub(super) fn mutator_gc_entries_world_stopped(
+        &mut self,
+        _: &StoppedMutatorsProof,
+    ) -> impl Iterator<Item = StoppedMutatorGc<'_>> {
+        let registry = &mut self._satb_layout_reserve.0;
+        let current = std::iter::once(StoppedMutatorGc {
+            gc: &mut self.mutator_gc,
+            satb: &mut registry.current,
+        });
+        #[cfg(not(test))]
+        {
+            current
+        }
+        #[cfg(test)]
+        {
+            current.chain(
+                registry
+                    .registered
+                    .iter_mut()
+                    .map(|entry| StoppedMutatorGc {
+                        gc: &mut entry.gc,
+                        satb: &mut entry.satb,
+                    }),
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub(super) struct TestMutatorGcId(std::num::NonZeroUsize);
+
+#[cfg(test)]
+impl TestMutatorGcId {
+    fn for_index(index: usize) -> Self {
+        Self(
+            index
+                .checked_add(1)
+                .and_then(std::num::NonZeroUsize::new)
+                .expect("test mutator registration ID space exhausted"),
+        )
+    }
+
+    fn index(self) -> usize {
+        self.0.get() - 1
+    }
+}
+
+#[cfg(test)]
+impl TaggedHeap {
+    /// Only the capability exposes registration to tests; IDs stay valid
+    /// through retirement and final fold, so exited logs cannot disappear.
+    pub(super) fn register_mutator_gc_for_test(
+        &mut self,
+        _: &StoppedMutatorsProof,
+    ) -> TestMutatorGcId {
+        let records = &mut self._satb_layout_reserve.0.registered;
+        let id = TestMutatorGcId::for_index(records.len());
+        records.push(RegisteredMutatorGc {
+            gc: MutatorGcState::new(),
+            satb: SatbMutatorState::new(),
+        });
+        id
+    }
+
+    pub(super) fn registered_mutator_gc_for_test(
+        &mut self,
+        id: TestMutatorGcId,
+        _: &StoppedMutatorsProof,
+    ) -> StoppedMutatorGc<'_> {
+        let entry = &mut self._satb_layout_reserve.0.registered[id.index()];
+        StoppedMutatorGc {
+            gc: &mut entry.gc,
+            satb: &mut entry.satb,
+        }
+    }
+}
+
+// Pin the actual hot physical layout on every x86-64 compilation, including
+// unit tests. A new cold field must never silently migrate into this prefix.
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
+    assert!(size_of::<MutatorGcState>() == 800);
+    assert!(align_of::<MutatorGcState>() == 8);
+    assert!(offset_of!(MutatorGcState, black_cons_region_start) == 0);
+    assert!(offset_of!(MutatorGcState, black_float_region_start) == 16);
+    assert!(offset_of!(MutatorGcState, remset) == 32);
+    assert!(offset_of!(MutatorGcState, black_born) == 56);
+    assert!(offset_of!(MutatorGcState, black_born_regions) == 80);
+    assert!(offset_of!(MutatorGcState, major_symbol_preimages) == 104);
+    assert!(offset_of!(MutatorGcState, major_cons_writes) == 128);
+    assert!(offset_of!(MutatorGcState, r_mapped_seen) == 152);
+    assert!(offset_of!(MutatorGcState, allocated_count) == 184);
+    assert!(offset_of!(MutatorGcState, memory_use_counts) == 192);
+    assert!(offset_of!(MutatorGcState, bytes_since_gc) == 248);
+    assert!(offset_of!(MutatorGcState, bytes_banked_at_resets) == 256);
+    assert!(offset_of!(MutatorGcState, remembered_cache) == 264);
+    assert!(offset_of!(MutatorGcState, pacing) == 776);
+};
+
+#[cfg(test)]
+#[derive(Debug, thiserror::Error)]
+pub(super) enum TestMutatorSwitchError {
+    #[error("unknown registered test mutator")]
+    Unknown,
+    #[error("retired test mutator cannot become a writer")]
+    Retired,
+}
+
+#[cfg(test)]
+struct TestMutatorSwitch<'h> {
+    heap: &'h mut TaggedHeap,
+    id: TestMutatorGcId,
+}
+
+#[cfg(test)]
+impl TestMutatorSwitch<'_> {
+    /// Refresh the existing heap's owner mirrors without a fallible TLS access.
+    /// Same-heap owner switching changes no compiled barrier-window field.
+    fn refresh_tls(heap: &mut TaggedHeap) {
+        let _ = TAGGED_HEAP.try_with(|slot| slot.set(heap as *mut TaggedHeap));
+        let _ = TAGGED_HEAP_ID.try_with(|slot| slot.set(Some(heap.identity())));
+        let _ =
+            TAGGED_HEAP_WRITE_TRACKING_MODE.try_with(|slot| slot.set(heap.write_tracking_mode()));
+        let _ = TAGGED_HEAP_PARTITION_ACTIVE.try_with(|slot| slot.set(heap.partition_dump));
+        let _ =
+            TAGGED_HEAP_CONCURRENT_ACTIVE.try_with(|slot| slot.set(heap.concurrent_mark_running));
+        let _ = TAGGED_HEAP_CONCURRENT_HASH_ACTIVE.try_with(|slot| {
+            slot.set(
+                heap.concurrent_mark_running
+                    && heap.concurrent_claims()
+                    && heap.concurrent_hash_snapshot().is_some(),
+            )
+        });
+        let _ =
+            TAGGED_HEAP_DUMP_SPAN.try_with(|slot| slot.set((heap.dump_addr_lo, heap.dump_addr_hi)));
+        let window = heap.barrier_window();
+        let _ = TAGGED_HEAP_BARRIER_WINDOW.try_with(|slot| slot.set(window));
+        let _ = TAGGED_HEAP_CONS_BARRIER_WINDOW
+            .try_with(|slot| slot.set(heap.cons_barrier_window(window)));
+        let _ = TAGGED_HEAP_SATB_CACHE.try_with(|slots| {
+            for slot in slots {
+                slot.set(0);
+            }
+        });
+        heap.current_mutator_gc_mut().remembered_cache.fill(0);
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestMutatorSwitch<'_> {
+    fn drop(&mut self) {
+        // Construction validated the ID; no test API removes registrations.
+        // get_mut keeps Drop total even if a future test API violates that
+        // assumption. There is no allocation, lock, callback or assertion.
+        let registry = &mut *self.heap._satb_layout_reserve.0;
+        if let Some(entry) = registry.registered.get_mut(self.id.index()) {
+            std::mem::swap(&mut self.heap.mutator_gc, &mut entry.gc);
+            std::mem::swap(&mut registry.current, &mut entry.satb);
+        }
+        Self::refresh_tls(self.heap);
+    }
+}
+
+#[cfg(test)]
+impl TaggedHeap {
+    /// Called only by SingleMutatorWorld's test wrapper. Run actual barriers
+    /// with the selected registration's real hot and SATB state installed.
+    /// The closure must not start/finish a GC, allocate Lisp objects, run Lisp,
+    /// mutate registry membership, or open allocation regions. Preallocate the
+    /// stress graph before using this helper. Rust log-vector growth is fine.
+    pub(super) fn with_registered_mutator_gc_for_test<R>(
+        &mut self,
+        id: TestMutatorGcId,
+        _: &StoppedMutatorsProof,
+        body: impl FnOnce(&mut TaggedHeap) -> R,
+    ) -> Result<R, TestMutatorSwitchError> {
+        let registry = &mut *self._satb_layout_reserve.0;
+        let entry = registry
+            .registered
+            .get_mut(id.index())
+            .ok_or(TestMutatorSwitchError::Unknown)?;
+        if entry.satb.lifecycle == SatbMutatorLifecycle::Retired {
+            return Err(TestMutatorSwitchError::Retired);
+        }
+        std::mem::swap(&mut self.mutator_gc, &mut entry.gc);
+        std::mem::swap(&mut registry.current, &mut entry.satb);
+        let guard = TestMutatorSwitch { heap: self, id };
+        // Guard exists before any TLS call that could unwind. This also clears
+        // the SATB repeat-owner cache between two mutators writing one owner.
+        set_tagged_heap(guard.heap);
+        let result = body(guard.heap);
+        drop(guard);
+        Ok(result)
     }
 }

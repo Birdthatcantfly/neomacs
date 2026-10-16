@@ -212,12 +212,8 @@ fn poisoned_collector_queues_fail_finish_before_reclamation() {
     heap.alloc_float(11.5);
     let tx = stalled_mark(&mut heap);
     tx.send(ConcurrentMarkResult::default()).unwrap();
-    let buffer = Arc::clone(&heap.satb_shared);
-    let poison = std::panic::catch_unwind(|| {
-        let _held = buffer.lock().unwrap();
-        panic!("poison collector queue for failed-finish test");
-    });
-    assert!(poison.is_err());
+    heap.satb_handoff.poison_for_test();
+    assert!(heap.satb_handoff.is_poisoned());
     assert!(matches!(
         heap.finish_concurrent_mark(),
         Err(MarkFinishError::PoisonedCollectorState)

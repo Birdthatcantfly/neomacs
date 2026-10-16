@@ -716,37 +716,17 @@ pub struct TaggedHeap {
     /// True between a concurrent mark's start and termination handshakes — the
     /// mutator runs while the GC thread marks.
     concurrent_mark_running: bool,
-    /// Mutator->GC channel (Phase 5): the SATB barrier appends the overwritten
-    /// children here (locked); the GC thread drains them into its gray worklist.
-    satb_shared: SharedMarkQueue,
-    /// Per-cycle dedup for the COARSE (bulk) SATB barrier. A bulk mutator
-    /// (`with_hash_table_mut`, `with_vector_data_mut`, char-table, …) hands a
-    /// `&mut` to an arbitrary closure, so the barrier — which runs BEFORE the
-    /// store and cannot know which slot the closure will touch — conservatively
-    /// snapshots the owner's WHOLE pre-image. Doing that on every write is O(n)
-    /// per write => O(n²) to build an n-element container (the `(ucs-names)` OOM).
-    /// SATB only needs each owner's start-of-cycle child set logged ONCE: at the
-    /// owner's FIRST mutation this cycle, all its snapshot-time children are still
-    /// present (a child can only be unlinked by a mutation of this owner, which is
-    /// itself this first write firing the barrier pre-store), so that single
-    /// snapshot is a superset of every child reachable at snapshot time. Later
-    /// writes can only overwrite values already logged (or born-black new ones),
-    /// so re-snapshotting is pure waste. We record owners snapshotted this cycle
-    /// here and skip the re-enumeration. Cleared at every mark start
-    /// (`concurrent_begin`/`begin_collection`). Conses (2 children, O(1) barrier)
-    /// bypass it; only multi-child veclike/string owners are deduped.
-    ///
-    /// SECOND ROLE (task 01, load-bearing): this set is exactly "every
-    /// multi-child owner MUTATED this cycle", and `join_concurrent_mark`
-    /// drains it to re-gray each such owner's CURRENT children at the STW
-    /// termination — the INSERTION-COVERAGE re-trace that keeps mid-cycle
-    /// insertions (root→heap motion) live now that concurrently-CLAIMED
-    /// owners (page vectors; interval-free strings that gained a table) are
-    /// no longer re-traced by the termination's `mark_value`.
-    satb_snapshotted_owners: FxHashSet<usize>,
-    /// Preserve the hot heap layout while marker-only deferred work moves into
-    /// ConcurrentMarkResult. This slot owns no allocation or shared cache line.
-    _satb_layout_reserve: std::ptr::NonNull<()>,
+    /// Completed owner-local SATB chunks; the marker polls without locking
+    /// when empty. The owning mutator's partial stays in its cold extension.
+    satb_handoff: std::sync::Arc<SatbHandoff>,
+    /// Inert physical reserve for the former heap-wide owner-dedup set.
+    /// Semantic state belongs to each paired SatbMutatorState. Keeping the
+    /// exact field type and position protects GEN0/JIT-visible heap offsets.
+    _satb_owner_layout_reserve: FxHashSet<usize>,
+    /// Owner-confined SATB cold extension reuses the old pointer-sized slot.
+    /// Its Box retains the original NonNull size/alignment/niche; allocation
+    /// and inactive barriers never follow this pointer.
+    _satb_layout_reserve: mutator_gc::MutatorSatbSlot,
     /// GC thread sets this (Release) when gray + SATB are drained; the mutator
     /// polls it (Acquire) at safe points to decide when to terminate.
     gc_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -774,12 +754,9 @@ pub struct TaggedHeap {
     /// in-flight cycle (see `ConcurrentClaimJob::bc_claimed`) + fold.
     concurrent_bc_claimed: std::sync::Arc<AtomicUsize>,
     last_concurrent_bc_claimed: usize,
-    /// CONCURRENT STRING MARKING: per-cycle dedup for the ENFORCED in-mutator
-    /// string interval SATB barrier (`note_string_interval_preimage`), keyed by
-    /// `LispString` address — stable for the whole cycle because nothing is
-    /// freed while a mark runs. Cleared at `begin_collection`, like
-    /// `satb_snapshotted_owners`.
-    satb_string_preimage_addrs: FxHashSet<usize>,
+    /// Inert physical reserve for former heap-wide string preimage dedup.
+    /// Owner-local sets live in SatbMutatorState; this set stays empty.
+    _satb_string_layout_reserve: FxHashSet<usize>,
     /// Mutator sets this (Release) to ask the GC thread to finish and exit.
     gc_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Task #7 stage 2a (Fix B): wakeup latch for the GC thread's idle nap.
@@ -1092,9 +1069,9 @@ impl TaggedHeap {
             mark_in_progress: false,
             incremental_mark_us: 0,
             concurrent_mark_running: false,
-            satb_shared: std::sync::Arc::new(MarkQueue::default()),
-            satb_snapshotted_owners: FxHashSet::default(),
-            _satb_layout_reserve: std::ptr::NonNull::dangling(),
+            satb_handoff: std::sync::Arc::new(SatbHandoff::new()),
+            _satb_owner_layout_reserve: FxHashSet::default(),
+            _satb_layout_reserve: mutator_gc::MutatorSatbSlot::new(),
             gc_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             concurrent_str_claimed: std::sync::Arc::new(AtomicUsize::new(0)),
             last_concurrent_str_claimed: 0,
@@ -1106,7 +1083,7 @@ impl TaggedHeap {
             last_concurrent_vec_claimed: 0,
             concurrent_bc_claimed: std::sync::Arc::new(AtomicUsize::new(0)),
             last_concurrent_bc_claimed: 0,
-            satb_string_preimage_addrs: FxHashSet::default(),
+            _satb_string_layout_reserve: FxHashSet::default(),
             gc_stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             gc_wake: std::sync::Arc::new((std::sync::Mutex::new(()), std::sync::Condvar::new())),
             gc_exited: None,
@@ -1706,7 +1683,7 @@ impl TaggedHeap {
             // the shared buffer it drains (not the local gray queue, which
             // belongs to the GC thread for the duration). This SATB barrier keeps
             // the start-of-cycle snapshot live without re-reading a mutated owner.
-            self.push_value_children_to_satb_shared(record.owner);
+            self.push_value_children_to_satb(record.owner);
         }
         if self.write_tracking_mode == WriteTrackingMode::Disabled {
             return;
@@ -2611,6 +2588,7 @@ impl Drop for TaggedHeap {
         if let Some(collector) = retire_collector(self.identity) {
             collector.join();
         }
+        self._satb_layout_reserve.abandon();
         // No marker is active, so Tier-H's snapshot and retired originals are
         // freed with the claims state when the census carrier drops below;
         // Drop takes none of its locks.
@@ -2771,8 +2749,14 @@ pub use concurrent::MarkFinishError;
 mod heap_identity;
 pub use heap_identity::HeapIdentity;
 mod mark_word;
-use mark_word::{MarkQueue, MarkStack, MarkWord, SharedMarkQueue};
+use mark_word::{MarkStack, MarkWord};
+mod satb;
+pub(crate) use mutator_gc::{SatbDoneDecision, SatbTerminationObligation};
+use satb::SatbHandoff;
 pub(crate) mod mapped_veclike_scan;
+#[cfg(test)]
+#[path = "gc/tests/mutator_registry_test.rs"]
+mod mutator_registry_tests;
 pub(crate) mod scan_contract;
 use mapped_veclike_scan::MappedVeclikeScanSnapshot;
 #[cfg(test)]
@@ -2966,3 +2950,7 @@ mod symbol_barrier_tests;
 #[cfg(test)]
 #[path = "gc/tests/chartable_contract_test.rs"]
 mod chartable_contract_tests;
+
+#[cfg(test)]
+#[path = "gc/tests/satb_gc_stress_test.rs"]
+mod satb_gc_stress_tests;

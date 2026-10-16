@@ -268,7 +268,7 @@ const _: () = {
     assert!(offset_of!(TaggedHeap, string_arena) == 1368);
     assert!(offset_of!(TaggedHeap, vector_arena) == 1472);
     assert!(offset_of!(TaggedHeap, non_cons_object_addrs) == 3048);
-    assert!(offset_of!(TaggedHeap, satb_shared) == 3432);
+    assert!(offset_of!(TaggedHeap, satb_handoff) == 3432);
     assert!(offset_of!(TaggedHeap, jit) == 3608);
     assert!(jit_state::HEAP_JIT_CONS_CUR == 3608);
     assert!(jit_state::HEAP_JIT_CONS_LIM == 3616);

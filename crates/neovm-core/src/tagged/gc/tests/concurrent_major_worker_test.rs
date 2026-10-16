@@ -128,12 +128,12 @@ fn claim_job(heap: &TaggedHeap, major: bool) -> ConcurrentClaimJob {
 struct WorkerHarness {
     job: ConcurrentMarkJob,
     result: std::sync::mpsc::Receiver<ConcurrentMarkResult>,
-    satb: SharedMarkQueue,
+    satb: Arc<SatbHandoff>,
 }
 impl WorkerHarness {
     fn new(heap: &TaggedHeap, major: bool) -> Self {
         let (exited, result) = std::sync::mpsc::channel();
-        let satb = Arc::new(MarkQueue::default());
+        let satb = Arc::new(SatbHandoff::new());
         Self {
             job: ConcurrentMarkJob {
                 gray: MarkStack::default(),
@@ -477,11 +477,11 @@ fn generational_worker_gray_and_satb_symbols_reach_major_result_only() {
         let second = symbol("u34-worker-satb");
         let mut harness = WorkerHarness::new(&heap, major);
         harness.job.gray.push(first);
-        harness
-            .satb
-            .lock()
-            .unwrap()
-            .extend([first, second].map(MarkWord::of));
+        let mut buffer = satb::SatbBuffer::new();
+        for value in [first, second] {
+            buffer.push(MarkWord::of(value), &harness.satb);
+        }
+        buffer.retire(&harness.satb).unwrap().acknowledge();
         let (result, deferred) = harness.run();
         assert!(deferred.is_empty());
         assert!(result.promo.is_empty());

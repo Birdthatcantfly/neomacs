@@ -165,7 +165,7 @@ fn concurrent_mapped_chartable_scan_and_builtin_range_writes_are_atomic() {
             bc_claimed: Arc::new(AtomicUsize::new(0)),
             subr_dropped: Arc::new(AtomicUsize::new(0)),
         },
-        satb: heap.satb_shared.clone(),
+        satb: heap.satb_handoff.clone(),
         done: Arc::new(AtomicBool::new(false)),
         // The flat first-partition scan always completes before the loop
         // honors stop, so the job terminates without an idle wait.
@@ -199,9 +199,17 @@ fn concurrent_mapped_chartable_scan_and_builtin_range_writes_are_atomic() {
     assert!(result.symbols.contains(&purpose_id));
     assert!(result.symbols.contains(&sentinel_id));
     assert!(result.promo.is_empty());
-    assert!(heap.satb_snapshotted_owners.contains(&table.bits()));
+    assert!(
+        heap.current_mutator_satb()
+            .satb_snapshotted_owners
+            .contains(&table.bits())
+    );
     let leaf_bits = *headers.last().unwrap() | crate::tagged::value::TAG_VECLIKE;
-    assert!(heap.satb_snapshotted_owners.contains(&leaf_bits));
+    assert!(
+        heap.current_mutator_satb()
+            .satb_snapshotted_owners
+            .contains(&leaf_bits)
+    );
     assert_eq!(
         builtin_char_table_range(vec![table, TaggedValue::fixnum(0)], None).unwrap(),
         TaggedValue::fixnum((REPEATS - 1) as i64),
@@ -308,7 +316,11 @@ fn concurrent_subchartable_snapshot_retains_mapped_span_after_builtin_cow() {
     );
     assert_eq!(original[0], TaggedValue::fixnum(70));
     let leaf_bits = leaf as usize | crate::tagged::value::TAG_VECLIKE;
-    assert!(heap.satb_snapshotted_owners.contains(&leaf_bits));
+    assert!(
+        heap.current_mutator_satb()
+            .satb_snapshotted_owners
+            .contains(&leaf_bits)
+    );
     finish_fixture_epoch(
         &mut heap,
         table,

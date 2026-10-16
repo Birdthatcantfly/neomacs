@@ -283,7 +283,7 @@ fn paused_worker_with_policy(
             bc_claimed: heap.concurrent_bc_claimed.clone(),
             subr_dropped: heap.concurrent_subr_dropped.clone(),
         },
-        satb: heap.satb_shared.clone(),
+        satb: heap.satb_handoff.clone(),
         done: heap.gc_done.clone(),
         stop: heap.gc_stop.clone(),
         wake: heap.gc_wake.clone(),

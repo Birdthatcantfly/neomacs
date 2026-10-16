@@ -438,15 +438,22 @@ impl TaggedHeap {
             // A worker finish already folded these queues. An unpublished
             // start can also hold owner-fed SATB work; fold it under the same
             // stopped-owner proof instead of leaving a queue behind.
-            let satb = {
-                let mut satb = self
-                    .satb_shared
-                    .lock()
-                    .map_err(|_| CollectorQuiescenceError::PoisonedCollectorState)?;
-                std::mem::take(&mut *satb)
-            };
-            self.gray_queue
-                .extend(satb.into_iter().map(MarkWord::value));
+            // SAFETY: drain_to_quiescent's caller holds closed admission;
+            // finish above joined any worker, and the reseed has returned.
+            let mut world = unsafe { scan_contract::SingleMutatorWorld::from_heap(self) };
+            world
+                .fold_satb()
+                .map_err(|_| CollectorQuiescenceError::PoisonedCollectorState)?;
+            match world.ensure_satb_empty() {
+                Ok(()) => {}
+                Err(scan_contract::SatbDrainError::Poisoned(_)) => {
+                    return Err(CollectorQuiescenceError::PoisonedCollectorState);
+                }
+                Err(scan_contract::SatbDrainError::Residual) => {
+                    return Err(CollectorQuiescenceError::ResidualMark);
+                }
+            }
+            drop(world);
             // A full obarray reseed in the owner's callback covers this range;
             // no old start boundary is allowed to escape into the next cycle.
             self.take_concurrent_obarray_start_slots();
@@ -483,14 +490,19 @@ impl TaggedHeap {
         if !self.gray_queue.is_empty() {
             return Err(CollectorQuiescenceError::ResidualMark);
         }
-        if !self
-            .satb_shared
-            .lock()
-            .map_err(|_| CollectorQuiescenceError::PoisonedCollectorState)?
-            .is_empty()
-        {
-            return Err(CollectorQuiescenceError::ResidualMark);
+        // SAFETY: the same closed admission remains in force and no worker
+        // or synchronous collection remains after the drain above.
+        let world = unsafe { scan_contract::SingleMutatorWorld::from_heap(self) };
+        match world.ensure_satb_empty() {
+            Ok(()) => {}
+            Err(scan_contract::SatbDrainError::Poisoned(_)) => {
+                return Err(CollectorQuiescenceError::PoisonedCollectorState);
+            }
+            Err(scan_contract::SatbDrainError::Residual) => {
+                return Err(CollectorQuiescenceError::ResidualMark);
+            }
         }
+        drop(world);
         if self.pending_obarray_scan.is_some()
             || self.concurrent_obarray_start_slots.is_some()
             || self.staged_mapped_cons_scan.is_some()

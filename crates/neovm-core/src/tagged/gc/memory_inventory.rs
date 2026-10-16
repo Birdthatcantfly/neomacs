@@ -712,6 +712,23 @@ fn hash_buffer<T>(name: &'static str, buffer: &FxHashSet<T>) -> BufferInventory 
     }
 }
 
+fn satb_storage_buffer(
+    name: &'static str,
+    elements: usize,
+    capacity_elements: usize,
+    element_bytes: usize,
+) -> BufferInventory {
+    BufferInventory {
+        name,
+        elements,
+        capacity_elements,
+        element_bytes,
+        logical_bytes: elements.saturating_mul(element_bytes),
+        capacity_bytes: capacity_elements.saturating_mul(element_bytes),
+        hash_capacity_entries: None,
+    }
+}
+
 fn buffer_inventory(heap: &TaggedHeap) -> Vec<BufferInventory> {
     let mut out = vec![
         vector_buffer("collector-r-seed", &heap.generational.r_seed),
@@ -719,8 +736,6 @@ fn buffer_inventory(heap: &TaggedHeap) -> Vec<BufferInventory> {
         vector_buffer("collector-gray", &heap.gray_queue),
         vector_buffer("write-records", &heap.dirty_writes),
         hash_buffer("persistent-mapped-remset", &heap.mapped_remembered),
-        hash_buffer("satb-snapshotted-owners", &heap.satb_snapshotted_owners),
-        hash_buffer("satb-string-preimages", &heap.satb_string_preimage_addrs),
         hash_buffer("concurrent-cloned-vectors", &heap.concurrent_cloned_vectors),
         vector_buffer(
             "retired-vector-buffer-descriptors",
@@ -748,10 +763,48 @@ fn buffer_inventory(heap: &TaggedHeap) -> Vec<BufferInventory> {
         .capacity_elements
         .saturating_mul(retired.element_bytes);
     out.push(retired);
-    out.push(vector_buffer(
-        "shared-satb",
-        &heap.satb_shared.lock().unwrap(),
+    let handoff = heap.satb_handoff.storage_usage().unwrap();
+    out.push(satb_storage_buffer(
+        "satb-handoff-control",
+        1,
+        1,
+        satb::SATB_HANDOFF_ALLOCATION_BYTES,
     ));
+    out.push(satb_storage_buffer(
+        "satb-chunk-descriptors",
+        handoff.chunks,
+        handoff.capacity_chunks,
+        size_of::<satb::SatbChunk>(),
+    ));
+    out.push(satb_storage_buffer(
+        "satb-chunk-payloads",
+        handoff.payload.words,
+        handoff.payload.capacity_words,
+        size_of::<MarkWord>(),
+    ));
+    out.push(satb_storage_buffer(
+        "mutator-satb-sidecar",
+        1,
+        1,
+        heap._satb_layout_reserve.allocation_bytes(),
+    ));
+    for mutator in heap.mutator_satb_states() {
+        let usage = mutator.satb.storage_usage();
+        out.push(satb_storage_buffer(
+            "mutator-satb-partial",
+            usage.words,
+            usage.capacity_words,
+            size_of::<MarkWord>(),
+        ));
+        out.push(hash_buffer(
+            "mutator-satb-snapshotted-owners",
+            &mutator.satb_snapshotted_owners,
+        ));
+        out.push(hash_buffer(
+            "mutator-satb-string-preimages",
+            &mutator.satb_string_preimage_addrs,
+        ));
+    }
     // Deferred work is worker-owned, then channel-owned, until finish folds
     // the owned result. It has no heap-owned shared backing to inventory here.
     for mutator in heap.mutators() {

@@ -66,6 +66,14 @@ impl TaggedHeap {
         );
         #[cfg(debug_assertions)]
         crate::tagged::mutate::debug_assert_no_heap_mut_closure();
+        // SAFETY: collection entry has the sole stopped owner, no worker,
+        // callbacks, or allocation safepoint. Residual words must survive a
+        // failed entry for diagnosis; begin never clears a SATB buffer.
+        let mut world = unsafe { scan_contract::SingleMutatorWorld::from_heap(self) };
+        world
+            .begin_satb_cycle()
+            .expect("collection cannot discard residual SATB work");
+        drop(world);
         if stw_entry {
             self.generational.cycle = generational::GenerationCycle::Major;
         }
@@ -178,14 +186,12 @@ impl TaggedHeap {
         // so each owner's full pre-image is snapshotted once for THIS cycle's
         // start-of-cycle reachability (a carried-over entry would wrongly suppress
         // the snapshot of an owner whose children differ this cycle).
-        self.satb_snapshotted_owners.clear();
         clear_barrier_cache(&TAGGED_HEAP_SATB_CACHE);
         for mutator in self.mutators_mut() {
             mutator.remembered_cache.fill(0);
         }
         // CONCURRENT STRING MARKING: same per-cycle reset for the enforced
         // in-mutator string interval pre-image dedup (`note_string_interval_preimage`).
-        self.satb_string_preimage_addrs.clear();
         // Stage 2 Tier B CONCURRENT VECTOR SCAN: the per-cycle clone-on-write dedup
         // set must start empty so each vector owner is cloned+retired at most once
         // per cycle (a carried-over entry would wrongly suppress this cycle's clone).

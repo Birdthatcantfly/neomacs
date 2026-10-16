@@ -2198,7 +2198,21 @@ impl Context {
                 let cap = (*heap_ptr).gc_threshold().saturating_mul(4);
                 let must_finish = (*heap_ptr).bytes_since_gc() > cap;
                 let mark_done = (*heap_ptr).concurrent_mark_done();
-                if mark_done || must_finish {
+                let satb_obligation = (*heap_ptr).satb_termination_obligation();
+                if mark_done
+                    && !must_finish
+                    && satb_obligation
+                        == crate::tagged::gc::SatbTerminationObligation::WaitForMarker
+                    && (*heap_ptr).satb_done_poll()
+                        == crate::tagged::gc::SatbDoneDecision::DeferOnce
+                {
+                    return;
+                }
+                if mark_done
+                    || must_finish
+                    || satb_obligation
+                        == crate::tagged::gc::SatbTerminationObligation::FinishAtNextSafepoint
+                {
                     if must_finish && !mark_done {
                         // Cap-forced: the GC thread had NOT drained — the
                         // residual mark now runs synchronously in the
@@ -2862,6 +2876,11 @@ impl Context {
     /// cons -- every sweep runs inside that body, past this point.
     fn concurrent_mark_is_still_the_gc_thread_s(&self) -> bool {
         if !self.tagged_heap.concurrent_mark_running() || self.tagged_heap.concurrent_mark_done() {
+            return false;
+        }
+        if self.tagged_heap.satb_termination_obligation()
+            == crate::tagged::gc::SatbTerminationObligation::FinishAtNextSafepoint
+        {
             return false;
         }
         let cap = self.tagged_heap.gc_threshold().saturating_mul(4);

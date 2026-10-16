@@ -2787,7 +2787,7 @@ fn satb_barrier_on_growing_hash_table_is_linear_not_quadratic() {
         });
     }
 
-    let satb_len = heap.satb_shared.lock().unwrap().len();
+    let satb_len = heap.satb_words_for_test().len();
 
     // Disarm before dropping the heap so no later mutation hits the barrier.
     heap.set_concurrent_active_for_test(false);
@@ -3175,11 +3175,15 @@ fn write_barrier_caches_skip_only_writes_with_nothing_to_record() {
         assert!(crate::tagged::mutate::set_vector_slot(young, 1, child));
     }
     assert_eq!(calls() - before, 1);
-    assert!(heap.satb_snapshotted_owners.contains(&young.bits()));
+    assert!(
+        heap.current_mutator_satb()
+            .satb_snapshotted_owners
+            .contains(&young.bits())
+    );
     arm(&mut heap, false);
 
     // The next cycle logs the owner's pre-image again.
-    heap.satb_shared.lock().unwrap().clear();
+    drop(heap.take_satb_shared_for_test());
     heap.begin_collection();
     heap.seed_root(root);
     heap.seed_root(young);
@@ -3217,19 +3221,14 @@ fn a_plain_variable_store_logs_its_pre_image_only_while_marking() {
 
     let second = heap.alloc_cons(TaggedValue::fixnum(2), TaggedValue::NIL);
     assert!(ob.set_plain_untrapped_value_id(sym, second));
-    assert!(
-        heap.satb_shared.lock().unwrap().is_empty(),
-        "no mark, no log"
-    );
+    assert!(heap.satb_words_for_test().is_empty(), "no mark, no log");
 
     heap.set_concurrent_active_for_test(true);
     let stored = ob.set_plain_untrapped_value_id(sym, TaggedValue::fixnum(3));
     let logged: Vec<usize> = heap
-        .satb_shared
-        .lock()
-        .unwrap()
+        .satb_words_for_test()
         .iter()
-        .map(|word| word.value().bits())
+        .map(|value| value.bits())
         .collect();
     heap.set_concurrent_active_for_test(false);
 
@@ -3260,19 +3259,14 @@ fn a_specbind_swap_logs_its_pre_image_only_while_marking() {
     let second = heap.alloc_cons(TaggedValue::fixnum(2), TaggedValue::NIL);
     let old = ob.swap_plain_untrapped_value_id(sym, second);
     assert_eq!(old.map(|v| v.bits()), Some(first.bits()));
-    assert!(
-        heap.satb_shared.lock().unwrap().is_empty(),
-        "no mark, no log"
-    );
+    assert!(heap.satb_words_for_test().is_empty(), "no mark, no log");
 
     heap.set_concurrent_active_for_test(true);
     let old = ob.swap_plain_untrapped_value_id(sym, TaggedValue::fixnum(3));
     let logged: Vec<usize> = heap
-        .satb_shared
-        .lock()
-        .unwrap()
+        .satb_words_for_test()
         .iter()
-        .map(|word| word.value().bits())
+        .map(|value| value.bits())
         .collect();
     heap.set_concurrent_active_for_test(false);
 

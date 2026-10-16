@@ -56,7 +56,7 @@ pub(super) struct ConcurrentMarkJob {
     /// block arithmetic; others (mapped/dump, or new blocks) are deferred.
     pub(super) claims: ConcurrentClaimJob,
     /// Overwritten children appended by the mutator's SATB barrier; drained here.
-    pub(super) satb: SharedMarkQueue,
+    pub(super) satb: std::sync::Arc<SatbHandoff>,
     /// Set when gray + SATB are drained (tentatively done); polled by the mutator.
     pub(super) done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Set by the mutator to ask this loop to exit.
@@ -1505,7 +1505,9 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
             if job.done.load(Ordering::Relaxed) {
                 job.done.store(false, Ordering::Release);
             }
-            job.gray.extend_words(batch);
+            for chunk in batch {
+                job.gray.extend_words(chunk.into_words());
+            }
         }
     }
     // Fix B: residual local gray (a mid-drain stop) joins the deferred
@@ -1959,23 +1961,27 @@ pub(crate) fn concurrent_hash_mutation_active() -> bool {
 /// owner) to the shared SATB buffer, deduped once per string address per cycle
 /// (`satb_string_preimage_addrs`, cleared at `begin_collection`): the first
 /// pre-image is a superset of the start-of-cycle children — the same argument
-/// as `push_value_children_to_satb_shared`'s owner dedup. The caller has
+/// as `push_value_children_to_satb`'s owner dedup. The caller has
 /// already checked `concurrent_mark_active()`.
 pub(crate) fn note_string_interval_preimage(
     string_addr: usize,
     table: &crate::buffer::text_props::TextPropertyTable,
 ) {
     with_tagged_heap(|heap| {
-        if !heap.satb_string_preimage_addrs.insert(string_addr) {
+        if !heap
+            .current_mutator_satb_mut()
+            .satb_string_preimage_addrs
+            .insert(string_addr)
+        {
             return; // this string's full pre-image was already logged this cycle
         }
         let major = heap.generational.major_in_progress;
-        let mut shared = heap.satb_shared.lock().unwrap();
+        let (mutator, handoff) = heap.satb_parts();
         table.for_each_root(|value| {
             if value.is_heap_object()
                 || (major && matches!(value.kind(), crate::tagged::value::ValueKind::Symbol(_)))
             {
-                shared.push(MarkWord::of(value));
+                mutator.satb.push(MarkWord::of(value), handoff);
             }
         });
     });

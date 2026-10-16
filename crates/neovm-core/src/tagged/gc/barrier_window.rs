@@ -543,12 +543,28 @@ pub(crate) fn current_collection_dump_window() -> BarrierWindow {
 
 #[cfg(test)]
 impl TaggedHeap {
-    /// Test hook: drain the SATB buffer the barrier logs pre-images into.
+    /// Synthetic no-worker fixtures only: publish the current owner's partial
+    /// through the ordinary owner API, then consume the published handoff.
+    /// This hook never bypasses the production stopped-world partial-drain key.
     pub(crate) fn take_satb_shared_for_test(&mut self) -> Vec<TaggedValue> {
-        std::mem::take(&mut *self.satb_shared.lock().unwrap())
+        let (mutator, handoff) = self.satb_parts();
+        mutator.satb.publish_partial(handoff).unwrap();
+        handoff
+            .take_all()
+            .unwrap()
             .into_iter()
+            .flat_map(satb::SatbChunk::into_words)
             .map(MarkWord::value)
             .collect()
+    }
+
+    /// Read the current synthetic fixture's words without consuming them.
+    pub(super) fn satb_words_for_test(&self) -> Vec<TaggedValue> {
+        let mut words = self.satb_handoff.snapshot_words_for_test().unwrap();
+        for mutator in self.mutator_satb_states() {
+            words.extend_from_slice(mutator.satb.words_for_test());
+        }
+        words.into_iter().map(MarkWord::value).collect()
     }
 
     /// Test hook: is this owner queued for remembered-child tracing?

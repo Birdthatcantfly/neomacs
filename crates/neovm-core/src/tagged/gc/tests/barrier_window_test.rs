@@ -214,7 +214,7 @@ fn a_concurrent_mark_matches_the_old_gate_for_every_owner() {
         published_barrier_window(),
         BarrierWindow::span(heap.dump_addr_lo, heap.dump_addr_hi)
     );
-    heap.satb_shared.lock().unwrap().clear();
+    drop(heap.take_satb_shared_for_test());
 }
 
 /// Owner tracking on: every heap write is recorded, owner and all.

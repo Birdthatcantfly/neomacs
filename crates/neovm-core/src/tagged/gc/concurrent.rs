@@ -261,6 +261,14 @@ impl TaggedHeap {
             !self.concurrent_mark_running,
             "an unfinished or failed marker cannot be replaced"
         );
+        // SAFETY: the admitted start excludes all mutators and TLS writers;
+        // no worker has launched. A prior epoch must have folded every log.
+        let world = unsafe { scan_contract::SingleMutatorWorld::from_heap(self) };
+        debug_assert!(
+            world.ensure_satb_empty().is_ok(),
+            "launch cannot discard residual SATB"
+        );
+        drop(world);
         debug_assert!(self.concurrent_hash_snapshot().is_none());
         // The GC thread's ownership snapshot of this world-stopped instant:
         // the cons blocks and the string, float, vector and bytecode pages
@@ -483,7 +491,7 @@ impl TaggedHeap {
                 vec_claimed: self.concurrent_vec_claimed.clone(),
                 bc_claimed: self.concurrent_bc_claimed.clone(),
             },
-            satb: self.satb_shared.clone(),
+            satb: self.satb_handoff.clone(),
             done: self.gc_done.clone(),
             stop: self.gc_stop.clone(),
             wake: self.gc_wake.clone(),
@@ -653,13 +661,9 @@ impl TaggedHeap {
         let result = rx.recv().map_err(MarkFinishError::Disconnected)?;
         // Poison in the SATB queue invalidates collector invariants. The
         // deferred log is owned by the worker until the completion handoff.
-        let satb = {
-            let mut satb = self
-                .satb_shared
-                .lock()
-                .map_err(|_| MarkFinishError::PoisonedCollectorState)?;
-            std::mem::take(&mut *satb)
-        };
+        self.satb_handoff
+            .check_poisoned()
+            .map_err(|_| MarkFinishError::PoisonedCollectorState)?;
         let deferred = result.deferred;
         // Tier-H's mutation protocol and dirty-owner logs are correctness
         // state too: prove them before changing active state. Poison means a
@@ -718,9 +722,14 @@ impl TaggedHeap {
         // The fold is timed (`last_termination_fold_us`) so the termination's
         // cheap push half is attributable separately from the mark fixpoint.
         let fold_t0 = std::time::Instant::now();
-        self.last_termination_satb = satb.len();
-        self.gray_queue
-            .extend(satb.into_iter().map(MarkWord::value));
+        // SAFETY: recv joined the marker, every mutator is parked, active
+        // TLS admission is disabled above, and this fold executes no Lisp.
+        let mut world = unsafe { scan_contract::SingleMutatorWorld::from_heap(self) };
+        let satb_words = world
+            .fold_satb()
+            .map_err(|_| MarkFinishError::PoisonedCollectorState)?;
+        drop(world);
+        self.last_termination_satb = satb_words;
         self.last_termination_deferred = deferred.len();
         self.max_termination_deferred = self.max_termination_deferred.max(deferred.len());
         // Strings/floats the GC thread claimed concurrently and subrs it
@@ -780,7 +789,11 @@ impl TaggedHeap {
         // whole point of claiming. Also covers claimed STRINGS that gained
         // interval tables mid-cycle (their wrapper barriers land the owner
         // in the same set).
-        let written = std::mem::take(&mut self.satb_snapshotted_owners);
+        // SAFETY: the marker is joined and all mutators remain parked through
+        // insertion repair; retired registrations retain their dirty-owner log.
+        let mut world = unsafe { scan_contract::SingleMutatorWorld::from_heap(self) };
+        let written = world.take_satb_written_owners();
+        drop(world);
         clear_barrier_cache(&TAGGED_HEAP_SATB_CACHE);
         for bits in written {
             self.push_value_children_to_gray(TaggedValue::from_bits(bits), "satb-written-retrace");
@@ -846,6 +859,14 @@ impl TaggedHeap {
             return Err(MarkFinishError::FacadeRetained(self.heap_identity()));
         }
         self.finish_concurrent_mark()?;
+        // The enclosing owner is consumed by this explicit shutdown extent.
+        // Retire before unregistration/native teardown; Drop itself never
+        // publishes, locks, or waits. A failed retirement forbids teardown.
+        let (mutator, handoff) = self.satb_parts();
+        mutator
+            .retire(handoff)
+            .map_err(|_| MarkFinishError::PoisonedCollectorState)?
+            .acknowledge();
         crate::tagged::gc::clear_tagged_heap_if_installed(&self);
         self.reclaim_intrusive_objects(ReclamationMode::Explicit);
         Ok(())
@@ -874,80 +895,92 @@ impl TaggedHeap {
         if self.concurrent_claims() {
             self.retain_concurrent_hash_storage_for_abandonment();
         }
+        self._satb_layout_reserve.abandon();
         // Intrusive lists own raw allocations; the Drop body skips their free
         // walks. Job-owned Arcs retain mark queues, counters and page metadata.
     }
 
-    /// SATB barrier path for concurrent marking: append the owner's current
-    /// (pre-overwrite) children to the shared buffer the GC thread drains. Reuses
-    /// the gray-queue child enumeration with `self.gray_queue` as scratch (it is
-    /// empty during concurrent marking — the snapshot was handed to the thread).
-    ///
-    /// Per-cycle dedup for multi-child owners (veclike/string): the barrier can't
-    /// know which slot the bulk closure will touch, so it logs the owner's WHOLE
-    /// pre-image; doing that on every write is O(n) per write => O(n²) to build an
-    /// n-element container (hash table, char-table, or a vector filled by `aset`
-    /// in a loop — the `(ucs-names)` OOM). SATB only needs each owner's
-    /// start-of-cycle child set logged ONCE: at the owner's FIRST mutation this
-    /// cycle every snapshot-time child is still present (a child can only be
-    /// unlinked by a mutation of THIS owner, i.e. this very first barrier firing
-    /// pre-store), so one snapshot is a superset of the snapshot-time children;
-    /// later writes overwrite only already-logged values (or born-black new ones,
-    /// which need no logging). So re-snapshotting is pure waste — skip it. The
-    /// snapshot set is cleared at every mark start (`concurrent_begin`).
-    ///
-    /// Conses (exactly two children) bypass the dedup: their barrier is already
-    /// O(1), and a per-write `HashSet` insert on the hot car/cdr path would cost
-    /// more than it saves. Re-logging a cons's 2 children is still SATB-correct.
-    /// Hand a batch of LIVE mutator roots to the concurrent marker via the
-    /// SATB channel. Extra live values in the SATB log are always safe (the
-    /// marker treats each entry as gray; already-marked entries are skipped
-    /// by the atomic mark test) — this exists so young data reachable ONLY
-    /// from the mutator's stack marks CONCURRENTLY instead of all at once in
-    /// the stop-the-world termination fold. A value that dies before the
-    /// cycle ends floats one cycle, the standard SATB trade.
-    pub(crate) fn feed_satb_roots(&self, values: &[TaggedValue]) {
-        let mut shared = self.satb_shared.lock().unwrap();
-        shared.extend(
-            values
-                .iter()
-                .copied()
-                .filter(|v| {
-                    v.is_heap_object()
-                        || (self.generational.major_in_progress
-                            && matches!(v.kind(), crate::tagged::value::ValueKind::Symbol(_)))
-                })
-                .map(MarkWord::of),
-        );
+    /// Feed owner-local live roots, then publish the partial for prompt pickup.
+    /// This is pacing only: termination still reseeds all external roots.
+    pub(crate) fn feed_satb_roots(&mut self, values: &[TaggedValue]) {
+        let major = self.generational.major_in_progress;
+        let (mutator, handoff) = self.satb_parts();
+        for &value in values {
+            if value.is_heap_object()
+                || (major && matches!(value.kind(), crate::tagged::value::ValueKind::Symbol(_)))
+            {
+                mutator.satb.push(MarkWord::of(value), handoff);
+            }
+        }
+        mutator
+            .satb
+            .publish_partial(handoff)
+            .expect("cannot continue root feed after SATB poison");
     }
 
-    pub(super) fn push_value_children_to_satb_shared(&mut self, owner: TaggedValue) {
-        debug_assert!(self.gray_queue.is_empty());
-        // Multi-child owners are deduped once per cycle; conses fall through to
-        // the cheap direct enumeration below.
+    /// Preserve the old child classifier's symbol side effects while sending
+    /// heap children directly to the owner's log, never through gray scratch.
+    #[inline(always)]
+    fn push_satb_child(&mut self, value: TaggedValue) {
+        match value.kind() {
+            crate::tagged::value::ValueKind::Symbol(id) => self.mark_symbol(id),
+            _ if value.is_heap_object() => {
+                self.debug_assert_heap_tag_matches_header(value, "satb-concurrent");
+                let (mutator, handoff) = self.satb_parts();
+                mutator.satb.push(MarkWord::of(value), handoff);
+            }
+            _ => {}
+        }
+    }
+
+    /// First-write pre-image snapshot belongs to the writing mutator. Conses
+    /// bypass owner dedup; every other owner logs its full pre-image once per
+    /// owner per epoch. The stopped union also supplies insertion repair.
+    pub(super) fn push_value_children_to_satb(&mut self, owner: TaggedValue) {
         if !owner.is_cons() {
             let bits = owner.bits();
             TAGGED_HEAP_SATB_CACHE.with(|slots| slots[barrier_cache_slot(bits)].set(bits));
-            if !self.satb_snapshotted_owners.insert(bits) {
-                return; // this owner's full pre-image was already logged this cycle
+            if !self
+                .current_mutator_satb_mut()
+                .satb_snapshotted_owners
+                .insert(bits)
+            {
+                return;
             }
         }
-        self.push_value_children_to_gray(owner, "satb-concurrent");
-        if !self.gray_queue.is_empty() {
-            let mut shared = self.satb_shared.lock().unwrap();
-            shared.extend(self.gray_queue.drain(..).map(MarkWord::of));
+        if owner.is_cons() {
+            let ptr = owner.xcons_ptr();
+            // SAFETY: the pre-store barrier retains this owner's allocation;
+            // the marker reads the same slots atomically and no sweep can run.
+            let (car, cdr) = unsafe { ((*ptr).load_car(), (*ptr).load_cdr()) };
+            self.push_satb_child(car);
+            self.push_satb_child(cdr);
+        } else if let Some(ptr) = owner.as_veclike_ptr() {
+            // Match ordinary gray enumeration: register weak tables, strongly
+            // log only their custom closures, and let weak fixpoint handle KV.
+            if let Some(children) = self.register_weak_hash_table_for_sweep(ptr) {
+                for child in children {
+                    self.push_satb_child(child);
+                }
+            } else {
+                Self::for_each_veclike_child(
+                    ptr as *mut VecLikeHeader,
+                    &mut mark_sweep::VisitChild(|child| {
+                        self.push_satb_child(child);
+                    }),
+                );
+            }
+        } else if let Some(ptr) = owner.as_string_ptr() {
+            // SAFETY: this is the owner's pre-store interval table, retained
+            // until this barrier returns; enumeration performs no Lisp GC.
+            let intervals = unsafe { (*ptr).data.intervals() };
+            intervals.for_each_root(|child| self.push_satb_child(child));
         }
     }
 
-    /// SATB sink for a ROOT-slot overwrite (a symbol value/function/plist cell):
-    /// log the pre-image VALUE itself so the concurrent mark grays and traces it
-    /// (`join_concurrent_mark` folds `satb_shared` into the gray queue), keeping a
-    /// symbol-only-reachable object live across the cycle. Unlike
-    /// `push_value_children_to_satb_shared`, the retained thing is the overwritten
-    /// value itself, not an owner's children — the symbol cell's "owner" is a
-    /// non-heap root. No `concurrent_mark_running` assert: the caller already gated
-    /// on the `TAGGED_HEAP_CONCURRENT_ACTIVE` thread-local (the source of truth),
-    /// and an extra entry is at worst one cycle of floating garbage.
+    /// Log the old root-cell VALUE before its store. Bare symbols retain the
+    /// existing major-symbol preimage protocol; heap values enter this owner's
+    /// bounded buffer. The caller already admitted the concurrent TLS gate.
     pub(super) fn note_root_overwrite_value(&mut self, pre_image: TaggedValue) {
         if let crate::tagged::value::ValueKind::Symbol(id) = pre_image.kind() {
             if self.generational.major_in_progress && self.concurrent_mark_running {
@@ -958,11 +991,23 @@ impl TaggedHeap {
             return;
         }
         if pre_image.is_heap_object() {
-            self.satb_shared
-                .lock()
-                .unwrap()
-                .push(MarkWord::of(pre_image));
+            let (mutator, handoff) = self.satb_parts();
+            mutator.satb.push(MarkWord::of(pre_image), handoff);
         }
+    }
+
+    /// The active-mark branch alone reads the cold owner's termination debt.
+    pub(crate) fn satb_termination_obligation(&self) -> SatbTerminationObligation {
+        self.current_mutator_satb().termination_obligation()
+    }
+
+    /// At a tentative done-poll, publish at most one partial per epoch before
+    /// allowing termination. Allocation-cap termination never calls this hook.
+    pub(crate) fn satb_done_poll(&mut self) -> SatbDoneDecision {
+        let (mutator, handoff) = self.satb_parts();
+        mutator
+            .publish_at_done(handoff)
+            .expect("cannot continue done polling after SATB poison")
     }
 
     /// Stage 2 Tier B CONCURRENT VECTOR SCAN clone-on-write hook. Called from

@@ -222,7 +222,7 @@ impl TaggedHeap {
     /// at their use sites on purpose — clearing poison would assert a
     /// coherence nothing can verify and erase the only evidence.
     pub(crate) fn gc_locks_poisoned(&self) -> bool {
-        self.satb_shared.is_poisoned()
+        self.satb_handoff.is_poisoned()
             || self.gc_wake.0.is_poisoned()
             || self
                 .concurrent_hash_snapshot()
@@ -238,11 +238,7 @@ impl TaggedHeap {
     /// heap (that is the point) — callers run process-per-test under nextest.
     #[cfg(test)]
     pub(crate) fn poison_gc_locks_for_test(&self) {
-        let lock = self.satb_shared.clone();
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let _guard = lock.lock().unwrap();
-            panic!("poison a GC lock for the containment probe test");
-        }));
+        self.satb_handoff.poison_for_test();
         assert!(self.gc_locks_poisoned(), "test poison must be observable");
     }
 

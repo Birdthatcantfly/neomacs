@@ -133,3 +133,158 @@ impl std::fmt::Debug for ScanStorageLease {
             .finish()
     }
 }
+
+/// Only this module can mint the drain key, after unsafe closed-world
+/// admission. The key cannot be sent to another owner or cloned.
+#[derive(Debug)]
+pub(super) struct StoppedMutatorsProof {
+    _owner: PhantomData<Rc<()>>,
+}
+
+static_assertions::assert_not_impl_any!(StoppedMutatorsProof: Send, Sync, Copy, Clone);
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum SatbDrainError {
+    #[error(transparent)]
+    Poisoned(#[from] super::satb::SatbPoisoned),
+    #[error("SATB words survived into a new collector epoch")]
+    Residual,
+}
+
+impl SingleMutatorWorld<'_> {
+    /// Fold only after the marker's last read has been joined. The caller
+    /// excludes all registered mutators under the existing admission contract.
+    pub(super) fn fold_satb(&mut self) -> Result<usize, super::satb::SatbPoisoned> {
+        assert!(
+            !self.heap.concurrent_mark_running(),
+            "SATB fold requires an explicit successful marker join"
+        );
+        let proof = StoppedMutatorsProof {
+            _owner: PhantomData,
+        };
+        let batches = self.heap.satb_handoff.take_all()?;
+        let mut words = 0;
+        for chunk in batches {
+            words += chunk.len();
+            self.heap
+                .gray_queue
+                .extend(chunk.into_words().into_iter().map(super::MarkWord::value));
+        }
+        // Split through the heap-wide iterator so a future K-mutator registry
+        // cannot accidentally leave an exited registration's partial behind.
+        let mut partials = Vec::new();
+        for mutator in self.heap.mutator_gc_entries_world_stopped(&proof) {
+            // Carry the paired hot-state loan through enumeration; future
+            // registries must not enumerate SATB state independently.
+            let _hot_owner = mutator.gc;
+            if let Some(chunk) = mutator.satb.satb.take_partial(&proof) {
+                words += chunk.len();
+                partials.push(chunk);
+            }
+        }
+        for chunk in partials {
+            self.heap
+                .gray_queue
+                .extend(chunk.into_words().into_iter().map(super::MarkWord::value));
+        }
+        Ok(words)
+    }
+
+    /// Production may choose a debug assertion at begin/launch while facade
+    /// quiescence maps this result to ResidualMark. Never clear on failure.
+    pub(super) fn ensure_satb_empty(&self) -> Result<(), SatbDrainError> {
+        if !self.heap.satb_handoff.is_empty()?
+            || self.heap.mutator_satb_states().any(|m| !m.satb.is_empty())
+        {
+            return Err(SatbDrainError::Residual);
+        }
+        Ok(())
+    }
+
+    /// Begin/launch calls validate before resetting only dedup and pacing.
+    pub(super) fn begin_satb_cycle(&mut self) -> Result<(), SatbDrainError> {
+        assert!(
+            !self.heap.concurrent_mark_running(),
+            "SATB begin requires a stopped collector"
+        );
+        self.ensure_satb_empty()?;
+        let proof = StoppedMutatorsProof {
+            _owner: PhantomData,
+        };
+        for mutator in self.heap.mutator_gc_entries_world_stopped(&proof) {
+            mutator.satb.begin_cycle(&proof)?;
+        }
+        Ok(())
+    }
+
+    /// Union the dirty-owner logs before insertion repair. Retired registrations
+    /// stay present and contribute exactly like active registrations.
+    pub(super) fn take_satb_written_owners(&mut self) -> rustc_hash::FxHashSet<usize> {
+        assert!(
+            !self.heap.concurrent_mark_running(),
+            "SATB insertion repair requires an explicit marker join"
+        );
+        let proof = StoppedMutatorsProof {
+            _owner: PhantomData,
+        };
+        let mut owners = rustc_hash::FxHashSet::default();
+        for mutator in self.heap.mutator_gc_entries_world_stopped(&proof) {
+            owners.extend(mutator.satb.satb_snapshotted_owners.drain());
+        }
+        owners
+    }
+
+    #[cfg(test)]
+    pub(super) fn register_mutator_gc_for_test(&mut self) -> super::mutator_gc::TestMutatorGcId {
+        let proof = StoppedMutatorsProof {
+            _owner: PhantomData,
+        };
+        self.heap.register_mutator_gc_for_test(&proof)
+    }
+
+    #[cfg(test)]
+    pub(super) fn mutator_gc_for_test(
+        &mut self,
+        id: super::mutator_gc::TestMutatorGcId,
+    ) -> super::mutator_gc::StoppedMutatorGc<'_> {
+        let proof = StoppedMutatorsProof {
+            _owner: PhantomData,
+        };
+        self.heap.registered_mutator_gc_for_test(id, &proof)
+    }
+
+    #[cfg(test)]
+    #[must_use = "test retirement must be acknowledged before unregistering"]
+    pub(super) fn retire_mutator_gc_for_test(
+        &mut self,
+        id: super::mutator_gc::TestMutatorGcId,
+    ) -> Result<super::satb::SatbRetired, super::satb::SatbPoisoned> {
+        let handoff = self.heap.satb_handoff.clone();
+        self.mutator_gc_for_test(id).satb.retire(&handoff)
+    }
+}
+
+#[cfg(test)]
+impl StoppedMutatorsProof {
+    /// Transport-only tests own every buffer locally and have no heap aliases.
+    pub(super) fn for_test() -> Self {
+        Self {
+            _owner: PhantomData,
+        }
+    }
+}
+
+#[cfg(test)]
+impl SingleMutatorWorld<'_> {
+    pub(super) fn with_mutator_gc_for_test<R>(
+        &mut self,
+        id: super::mutator_gc::TestMutatorGcId,
+        body: impl FnOnce(&mut TaggedHeap) -> R,
+    ) -> Result<R, super::mutator_gc::TestMutatorSwitchError> {
+        let proof = StoppedMutatorsProof {
+            _owner: PhantomData,
+        };
+        self.heap
+            .with_registered_mutator_gc_for_test(id, &proof, body)
+    }
+}
