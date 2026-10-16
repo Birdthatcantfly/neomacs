@@ -1336,6 +1336,18 @@ impl Context {
         self.publish_owner_binding(record.sym);
     }
 
+    /// The saved side of an owner entry after a backtrace exchange, with
+    /// GNU's original specpdl symbol rather than its migrated storage key.
+    #[cold]
+    pub(crate) fn owner_binding_saved_value(
+        &self,
+        binding: OwnerBindingRef,
+    ) -> Option<(SymId, Value)> {
+        let record = self.owner.slab()?.record(binding.record)?;
+        let value = record.undo.values()[0]?;
+        Some((binding.symbol(), value.get()))
+    }
+
     /// GNU keeps the original symbol in each specpdl entry. If another
     /// thread aliases it while this owner is parked, resuming that entry
     /// exchanges its saved binding with the alias's new default storage

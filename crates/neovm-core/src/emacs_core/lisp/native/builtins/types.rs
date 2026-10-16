@@ -335,9 +335,10 @@ pub(crate) fn builtin_cl_type_of(args: &[Value]) -> EvalResult {
         ValueKind::Veclike(VecLikeType::CondVar) => "condition-variable",
         ValueKind::Veclike(VecLikeType::UserPtr) => "user-ptr",
         ValueKind::Veclike(VecLikeType::ModuleFunction) => "module-function",
-        // `Qunbound` is internal and should never reach `type-of`
-        // from Lisp; treat it as `unknown` if it somehow leaks.
-        ValueKind::Unbound | ValueKind::Unknown => "unknown",
+        // GNU backtrace--locals exposes the real Qunbound symbol for a
+        // currently void binding. It retains its normal symbol identity.
+        ValueKind::Unbound => "symbol",
+        ValueKind::Unknown => "unknown",
     };
     Ok(Value::symbol(name))
 }

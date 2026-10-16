@@ -740,7 +740,9 @@ pub(crate) fn builtin_backtrace_frames_from_thread(
     ])]))
 }
 
-/// `(backtrace--locals NFRAMES &optional BASE)` -- batch-compatible helper.
+/// GNU `Fbacktrace__locals` (eval.c:4263-4330): exchange the suffix so each
+/// binding's saved side contains its bound value, inspect one activation,
+/// then restore the exchange through the normal unwind machinery.
 pub(crate) fn builtin_backtrace_locals(
     eval: &mut super::eval::Context,
     args: Vec<Value>,
@@ -762,7 +764,53 @@ pub(crate) fn builtin_backtrace_locals(
             vec![Value::string("Activation frame not found!")],
         ));
     }
-    Ok(Value::NIL)
+    let frame = frame_indices[nframes];
+    let previous_frame = frame_indices[nframes - 1];
+    let count = eval.specpdl.len();
+    let distance = count - frame;
+    eval.specpdl_swap_suffix_for_backtrace_eval(distance, true)?;
+    eval.push_specpdl_with(|| super::eval::SpecBinding::NativeUnwind {
+        action: super::eval::NativeUnwindAction::BacktraceEvalRewind { distance },
+    });
+
+    let mut result = Value::NIL;
+    for index in (frame + 1..=previous_frame).rev() {
+        use super::eval::{NativeUnwindAction, SpecBinding};
+        let binding = match &eval.specpdl[index] {
+            SpecBinding::Let { sym_id, old_value }
+            | SpecBinding::LetDefault {
+                sym_id, old_value, ..
+            } => Some((*sym_id, old_value.as_plain())),
+            SpecBinding::LetLocal {
+                sym_id, old_value, ..
+            } => Some((*sym_id, *old_value)),
+            SpecBinding::LexicalEnv { old_lexenv } => {
+                Some((eval.internal_interpreter_environment_symbol, *old_lexenv))
+            }
+            SpecBinding::NativeUnwind {
+                action: NativeUnwindAction::OwnerBinding(binding),
+            } => eval.owner_binding_saved_value(*binding),
+            _ => None,
+        };
+        if let Some((symbol, value)) = binding {
+            if symbol == eval.internal_interpreter_environment_symbol {
+                let mut environment = value;
+                while environment.is_cons() {
+                    let binding = environment.cons_car();
+                    if binding.is_cons() {
+                        result = Value::cons(
+                            Value::cons(binding.cons_car(), binding.cons_cdr()),
+                            result,
+                        );
+                    }
+                    environment = environment.cons_cdr();
+                }
+            } else {
+                result = Value::cons(Value::cons(Value::from_sym_id(symbol), value), result);
+            }
+        }
+    }
+    eval.unbind_to_with_result(count, Ok(result))
 }
 
 /// `(backtrace-debug LEVEL FLAG &optional BASE)` -- GNU `Fbacktrace_debug`

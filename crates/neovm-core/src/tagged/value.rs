@@ -373,9 +373,9 @@ impl TaggedValue {
     /// object, not as an immediate tag. Neomacs mirrors that shape with
     /// a noncanonical process-global symbol named `unbound`.
     ///
-    /// This must never leak into ordinary Lisp code — callers that
-    /// observe it should either signal `void-variable` or treat it
-    /// as "absent" depending on context.
+    /// Variable reads signal `void-variable` or treat this as "absent".
+    /// GNU's `backtrace--locals` deliberately exposes the actual symbol
+    /// when reporting a currently void binding; retain its symbol identity.
     pub const UNBOUND: Self = Self(
         (UNBOUND_SYM_ID.0 as usize) << TAG_BITS | TAG_SYMBOL,
         PhantomData,

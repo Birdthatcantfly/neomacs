@@ -79,7 +79,15 @@ fn diagnostic_symbol_string_preserves_general_renderer_domains_and_extent() {
         let id = value.as_bare_symbol_id().expect("bare symbol");
         reset_print_number_index();
         next_print_number_index();
-        let expected = print_value(&value);
+        let rendered = print_value(&value);
+        let expected = if value.is_unbound() {
+            // GNU backtrace--locals exposes Qunbound as a normal symbol.
+            // Diagnostics deliberately retain a distinct sentinel spelling.
+            assert_eq!(rendered, "unbound");
+            "#<unbound>".to_owned()
+        } else {
+            rendered
+        };
         let expected_depth = PRINT_CALL_DEPTH.with(Cell::get);
         let expected_index = PRINT_NUMBER_INDEX.with(Cell::get);
         reset_print_number_index();

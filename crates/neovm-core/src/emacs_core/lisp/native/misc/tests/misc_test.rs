@@ -952,7 +952,7 @@ fn handler_bind_sees_eval_symbol_frame_before_feval_unwind() {
 }
 
 #[test]
-fn backtrace_helper_stubs_shape_and_errors() {
+fn backtrace_helper_shape_and_errors() {
     crate::test_utils::init_test_tracing();
     let mut eval = super::super::eval::Context::new();
     let thread = super::super::threads::builtin_current_thread(&mut eval, vec![]).unwrap();
@@ -1013,6 +1013,102 @@ fn backtrace_helper_stubs_shape_and_errors() {
         )
         .expect("backtrace-eval should accept expression, frame number, and function base"),
         Value::fixnum(42)
+    );
+}
+
+/// Values and ordering measured from GNU 31.1; the integration oracle file
+/// also refreshes these cases directly from the pinned GNU binary.
+#[test]
+fn backtrace_locals_lists_bindings_in_sim_and_green() {
+    use crate::emacs_core::eval::ThreadingMode;
+    let cases = [
+        (
+            "(progn (fset 'btl-dynamic (eval '(lambda (btl-a btl-b &optional btl-c &rest btl-rest) (backtrace--locals 1)) nil)) (btl-dynamic 1 2 3 4 5))",
+            "((btl-a . 1) (btl-b . 2) (btl-c . 3) (btl-rest 4 5))",
+        ),
+        (
+            "(progn (defvar btl-special 'canonical) (fset 'btl-lexical (eval '(function (lambda (btl-a btl-special btl-b) (backtrace--locals 1))) t)) (btl-lexical 1 'bound 2))",
+            "((btl-a . 1) (btl-special . bound) (btl-b . 2))",
+        ),
+        (
+            "(eval '(let ((btl-a 'outer) (btl-a 'inner) (btl-empty)) (makunbound 'btl-empty) (backtrace--locals 1)) nil)",
+            "((btl-a . outer) (btl-a . inner) (btl-empty . unbound))",
+        ),
+        (
+            "(progn (fset 'btl-capture (lambda () (backtrace--locals 1 'btl-capture))) (fset 'btl-outer (eval '(function (lambda (btl-a) (let ((btl-b 2) (btl-a 3)) (btl-capture)))) t)) (btl-outer 1))",
+            "((btl-a . 1) (btl-b . 2) (btl-a . 3))",
+        ),
+        (
+            "(progn (defvar btl-local 'global) (set (make-local-variable 'btl-local) 'local) (list (eval '(let ((btl-local 'bound)) (backtrace--locals 1)) nil) btl-local (default-value 'btl-local)))",
+            "(((btl-local . bound)) local global)",
+        ),
+        (
+            "(progn (defvar btl-owner 'global) (thread-join (make-thread (lambda () nil))) (list (eval '(let ((btl-owner 'bound)) (backtrace--locals 1)) nil) btl-owner))",
+            "(((btl-owner . bound)) global)",
+        ),
+        (
+            r#"(progn
+              (setq btl-snapshot (eval '(let ((btl-empty 1) (btl-other 2))
+                (makunbound 'btl-empty) (makunbound 'btl-other)
+                (backtrace--locals 1)) nil))
+              (list (symbolp (cdr (car btl-snapshot))) (type-of (cdr (car btl-snapshot)))
+                (cl-type-of (cdr (car btl-snapshot))) (symbol-name (cdr (car btl-snapshot)))
+                (eq (cdr (car btl-snapshot)) 'unbound)
+                (eq (cdr (car btl-snapshot)) (cdr (car (cdr btl-snapshot))))
+                (let ((print-gensym nil)) (prin1-to-string (cdr (car btl-snapshot))))
+                (let ((print-gensym t)) (prin1-to-string (cdr (car btl-snapshot))))
+                (let ((print-gensym t) (print-circle t))
+                  (prin1-to-string (list (cdr (car btl-snapshot)) (cdr (car (cdr btl-snapshot))))))))"#,
+            r##"(t symbol symbol "unbound" nil t "unbound" "#:unbound" "(#1=#:unbound #1#)")"##,
+        ),
+    ];
+    for mode in [ThreadingMode::Sim, ThreadingMode::Green] {
+        #[cfg(feature = "jit")]
+        crate::emacs_core::jit::force_jit_off_for_test(true);
+        let mut context = Context::new_with_threading(mode);
+        // Keep one World after admission: every Green case below must inspect
+        // owner entries, including lexical/default/buffer-local combinations.
+        context
+            .eval_str("(thread-join (make-thread (lambda () nil)))")
+            .unwrap();
+        for (form, expected) in cases {
+            let value = context.eval_str(form).unwrap();
+            assert_eq!(
+                crate::emacs_core::print::print_value(&value),
+                expected,
+                "mode {mode:?}: {form}"
+            );
+        }
+    }
+}
+
+#[test]
+fn backtrace_locals_preserves_the_original_owner_alias_symbol() {
+    use crate::emacs_core::eval::ThreadingMode;
+    #[cfg(feature = "jit")]
+    crate::emacs_core::jit::force_jit_off_for_test(true);
+    let mut context = Context::new_with_threading(ThreadingMode::Green);
+    let value = context
+        .eval_str(
+            r#"(progn
+      (defvar btl-source 'source-global) (defvar btl-target 'target-global)
+      (setq btl-m (make-mutex) btl-c (make-condition-variable btl-m)
+        btl-ready nil btl-go nil)
+      (mutex-lock btl-m)
+      (setq btl-worker (make-thread (lambda ()
+        (let ((btl-source 'bound))
+          (mutex-lock btl-m) (setq btl-ready t) (condition-notify btl-c)
+          (while (null btl-go) (condition-wait btl-c))
+          (mutex-unlock btl-m) (backtrace--locals 1)))))
+      (while (null btl-ready) (condition-wait btl-c))
+      (defvaralias 'btl-source 'btl-target) (setq btl-go t)
+      (condition-notify btl-c) (mutex-unlock btl-m)
+      (list (thread-join btl-worker) btl-source btl-target))"#,
+        )
+        .unwrap();
+    assert_eq!(
+        crate::emacs_core::print::print_value(&value),
+        "(((btl-source . bound)) target-global target-global)"
     );
 }
 

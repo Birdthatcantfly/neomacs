@@ -1043,6 +1043,7 @@ fn is_print_circle_candidate(value: &Value, print_gensym: bool) -> bool {
             let name = resolve_sym_lisp_string(id);
             lookup_interned_lisp_string(name) != Some(id)
         }
+        ValueKind::Unbound => print_gensym,
         _ => false,
     }
 }
@@ -1053,6 +1054,7 @@ fn string_print_circle_candidate(value: &Value) -> bool {
 
 fn is_uninterned_symbol(value: &Value) -> bool {
     match value.kind() {
+        ValueKind::Unbound => true,
         ValueKind::Symbol(id) => {
             let name = resolve_sym_lisp_string(id);
             lookup_interned_lisp_string(name) != Some(id)
@@ -1079,6 +1081,7 @@ fn object_identity_key(value: &Value) -> Option<u64> {
             // Set the high bit to separate from pointer keys.
             Some((1u64 << 63) | (id.0 as u64))
         }
+        ValueKind::Unbound => Some((1u64 << 63) | (super::intern::UNBOUND_SYM_ID.0 as u64)),
         _ => None,
     }
 }
@@ -2059,7 +2062,10 @@ fn write_value_stateful_inner(
             out.push_str("#<module-function>");
         }
         ValueKind::Veclike(VecLikeType::Font) => out.push_str("#<font-object>"),
-        ValueKind::Unbound => out.push_str("#<unbound>"),
+        // backtrace--locals can expose GNU's actual noncanonical Qunbound.
+        ValueKind::Unbound => {
+            out.extend_from_slice(&symbol_bytes(super::intern::UNBOUND_SYM_ID, state.options))
+        }
         ValueKind::Unknown => write!(out, "#<unknown {:#x}>", value.0).unwrap(),
     }
 }
@@ -3439,7 +3445,7 @@ fn append_print_value_bytes(value: &Value, out: &mut Vec<u8>, options: PrintOpti
             out.extend_from_slice(b"#<font-object>");
         }
         ValueKind::Unbound => {
-            out.extend_from_slice(b"#<unbound>");
+            append_symbol_bytes(super::intern::UNBOUND_SYM_ID, out, options);
         }
         ValueKind::Unknown => {
             out.extend_from_slice(format!("#<unknown {:#x}>", value.0).as_bytes());

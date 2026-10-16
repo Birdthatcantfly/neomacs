@@ -678,6 +678,14 @@ pub(crate) fn builtin_symbol_name_value(
     symbol: Value,
     symbols_with_pos_enabled: bool,
 ) -> EvalResult {
+    // GNU backtrace--locals exposes the actual noncanonical Qunbound.
+    // The general internal-symbol guard rejects it, but Lisp can ask for
+    // the exposed symbol's name just as it can for any other symbol.
+    if symbol.is_unbound() {
+        return Ok(crate::emacs_core::intern::materialize_symbol_name_value(
+            crate::emacs_core::intern::UNBOUND_SYM_ID,
+        ));
+    }
     match super::symbols::symbol_id_checked(&symbol, symbols_with_pos_enabled) {
         Some(id) => Ok(crate::emacs_core::intern::materialize_symbol_name_value(id)),
         None => Err(signal(
