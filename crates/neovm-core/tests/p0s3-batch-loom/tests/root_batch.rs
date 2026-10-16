@@ -1240,4 +1240,214 @@ mod reuse {
             assert!(epoch.may_launch());
         });
     }
+
+    /// Collector state and the restored census are serialized by the owner
+    /// seat. The guard below models that sole-writer proof, not a production
+    /// mutex or a concurrent sweeper. Cooperative sweep uses already marked
+    /// objects and never consults the root table. Starting another mark must
+    /// acquire the seat and census the restored owner again.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CollectionPhase {
+        Idle,
+        Mark,
+        Sweep,
+    }
+
+    #[derive(Debug)]
+    struct CollectorState {
+        phase: CollectionPhase,
+        synchronous_extent: bool,
+        concurrent_marker: bool,
+        restored_roots: Option<Vec<usize>>,
+    }
+
+    impl CollectorState {
+        fn sweeping() -> Self {
+            Self {
+                phase: CollectionPhase::Sweep,
+                synchronous_extent: false,
+                concurrent_marker: false,
+                restored_roots: None,
+            }
+        }
+
+        fn roots(&self, table: &Arc<Mutex<Table>>) -> Vec<usize> {
+            let (_, mut roots) = Table::trace(table);
+            if let Some(restored) = &self.restored_roots {
+                roots.extend(restored);
+            }
+            roots.sort_unstable();
+            roots.dedup();
+            roots
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum RetirementProofError {
+        UnrestoredOwner,
+        Marking,
+        SynchronousExtent,
+        ConcurrentMarker,
+    }
+
+    #[derive(Debug)]
+    struct SweepRetirement<'a> {
+        _seat: loom::sync::MutexGuard<'a, CollectorState>,
+    }
+
+    impl<'a> SweepRetirement<'a> {
+        fn admit(collector: &'a Mutex<CollectorState>) -> Result<Self, RetirementProofError> {
+            let seat = collector.lock().unwrap();
+            if seat.restored_roots.is_none() {
+                return Err(RetirementProofError::UnrestoredOwner);
+            }
+            if seat.phase == CollectionPhase::Mark {
+                return Err(RetirementProofError::Marking);
+            }
+            if seat.synchronous_extent {
+                return Err(RetirementProofError::SynchronousExtent);
+            }
+            if seat.concurrent_marker {
+                return Err(RetirementProofError::ConcurrentMarker);
+            }
+            Ok(Self { _seat: seat })
+        }
+
+        fn recycle(&self, lease: ReusableLease) -> Result<ReusablePrepared, RecycleFailure> {
+            lease.try_recycle()
+        }
+
+        fn finish(&self, lease: ReusableLease) {
+            lease.finish();
+        }
+    }
+
+    fn pending_sweep_retirement(recycle: bool) {
+        check(move || {
+            let (epoch, table, lease) = initial();
+            let collector = Arc::new(Mutex::new(CollectorState::sweeping()));
+            let next_collector = Arc::clone(&collector);
+            let next_table = Arc::clone(&table);
+            let mut next_cycle = Some(thread::spawn(move || {
+                // Finishing a sweep has no root-table access. The next
+                // mark can begin before or after restoration/retirement.
+                next_collector.lock().unwrap().phase = CollectionPhase::Idle;
+                {
+                    let mut seat = next_collector.lock().unwrap();
+                    seat.phase = CollectionPhase::Mark;
+                    assert_eq!(seat.roots(&next_table), [11, 23]);
+                }
+                thread::yield_now();
+                next_collector.lock().unwrap().phase = CollectionPhase::Idle;
+            }));
+
+            collector.lock().unwrap().restored_roots = Some(vec![11, 23]);
+            let outcome = match SweepRetirement::admit(&collector) {
+                Ok(proof) => {
+                    if recycle {
+                        Some(proof.recycle(lease).unwrap())
+                    } else {
+                        proof.finish(lease);
+                        None
+                    }
+                }
+                Err(error) => {
+                    assert_eq!(error, RetirementProofError::Marking);
+                    // Failed proof admission leaves the exact live lease
+                    // and exclusion intact until the marker completes.
+                    assert_eq!(Table::trace(&table).1, [11, 23]);
+                    assert!(!epoch.may_launch());
+                    next_cycle.take().unwrap().join().unwrap();
+                    let proof = SweepRetirement::admit(&collector).unwrap();
+                    if recycle {
+                        Some(proof.recycle(lease).unwrap())
+                    } else {
+                        proof.finish(lease);
+                        None
+                    }
+                }
+            };
+            if let Some(next_cycle) = next_cycle {
+                next_cycle.join().unwrap();
+            }
+            drop(outcome);
+            assert!(Table::trace(&table).1.is_empty());
+            assert_eq!(collector.lock().unwrap().roots(&table), [11, 23]);
+            assert!(epoch.may_launch());
+        });
+    }
+
+    #[test]
+    fn pending_sweep_finish_preserves_the_next_mark_census() {
+        pending_sweep_retirement(false);
+    }
+
+    #[test]
+    fn pending_sweep_recycle_preserves_the_next_mark_census() {
+        pending_sweep_retirement(true);
+    }
+
+    #[test]
+    fn sweep_retirement_rejects_unrestored_marking_and_reader_obligations() {
+        check(|| {
+            let (epoch, table, lease) = initial();
+            let collector = Mutex::new(CollectorState::sweeping());
+            assert_eq!(
+                SweepRetirement::admit(&collector).unwrap_err(),
+                RetirementProofError::UnrestoredOwner
+            );
+            collector.lock().unwrap().restored_roots = Some(vec![11, 23]);
+            for error in [
+                RetirementProofError::Marking,
+                RetirementProofError::SynchronousExtent,
+                RetirementProofError::ConcurrentMarker,
+            ] {
+                {
+                    let mut seat = collector.lock().unwrap();
+                    seat.phase = if error == RetirementProofError::Marking {
+                        CollectionPhase::Mark
+                    } else {
+                        CollectionPhase::Sweep
+                    };
+                    seat.synchronous_extent = error == RetirementProofError::SynchronousExtent;
+                    seat.concurrent_marker = error == RetirementProofError::ConcurrentMarker;
+                }
+                assert_eq!(SweepRetirement::admit(&collector).unwrap_err(), error);
+                assert_eq!(Table::trace(&table).1, [11, 23]);
+                assert!(!epoch.may_launch());
+            }
+            {
+                let mut seat = collector.lock().unwrap();
+                seat.phase = CollectionPhase::Sweep;
+                seat.concurrent_marker = false;
+            }
+            let reader = Table::reader(&table, 1).unwrap();
+            let proof = SweepRetirement::admit(&collector).unwrap();
+            let failure = proof.recycle(lease).unwrap_err();
+            assert_eq!(failure.error, RecycleError::Readers);
+            assert_eq!(Table::trace(&table).1, [11, 23]);
+            reader.read();
+            reader.finish();
+            drop(proof.recycle(failure.lease).unwrap());
+            assert!(Table::trace(&table).1.is_empty());
+            assert!(epoch.may_launch());
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "subsequent mark lost restored owner roots")]
+    fn negative_control_sweep_alone_does_not_prove_owner_restoration() {
+        check(|| {
+            let (_, table, lease) = initial();
+            let collector = CollectorState::sweeping();
+            // Intentionally bypass proof admission. Sweep itself succeeds,
+            // but clearing the batch before restoration loses the next census.
+            drop(lease.try_recycle().unwrap());
+            assert_eq!(
+                collector.roots(&table),
+                [11, 23],
+                "subsequent mark lost restored owner roots"
+            );
+        });
+    }
 }
