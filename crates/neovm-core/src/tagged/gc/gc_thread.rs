@@ -1792,13 +1792,13 @@ fn generation_only_cons_is_old(heap: &TaggedHeap, owner: TaggedValue) -> bool {
     // close before every collection/promotion; a reused free-list cell has
     // its old age cleared before the allocator can reserve it. The closed range
     // is empty. This range proof needs no foreign-pointer metadata access.
-    if handed_young_cons_range_contains(cur, heap.region_book.cons_first_offset, addr) {
+    if handed_young_cons_range_contains(cur, heap.region_book.cons_young_bias, addr) {
         return false;
     }
+    let Some(offset) = generation_only_cons_cell_offset(addr) else {
+        return false;
+    };
     let ptr = addr as *const ConsCell;
-    if !ConsBlock::ptr_is_cell_aligned(ptr) {
-        return false;
-    }
     let base = ConsBlock::block_base_for_ptr(ptr);
     // An open region's cursor belongs to a live owned block, even when it
     // equals its limit (the payload ends before the block boundary). Every
@@ -1817,19 +1817,30 @@ fn generation_only_cons_is_old(heap: &TaggedHeap, owner: TaggedValue) -> bool {
     // check proves a cell index inside its payload. Release and promotion
     // require mutator exclusion, and this leaf has no safe point.
     let trailer = unsafe { ConsBlockTrailer::from_block_base(base) };
-    trailer.age_is_old(ConsBlock::index_of_ptr(ptr))
+    trailer.age_is_old(offset / size_of::<ConsCell>())
 }
 
-/// Membership in the handed-young half-open interval, without touching the
-/// candidate address. Reversing the distance preserves both endpoints and
-/// foreign-address rejection while avoiding reconstruction of the block base.
+/// Membership for an already untagged (8-aligned) cons owner, without
+/// touching its memory. The bias is negative first plus phase color 0/1.
+/// Black expands the interval by only first-1, which cannot be an aligned
+/// owner. Closed cursor 0 with bias 0/1 therefore rejects every owner too.
 #[inline(always)]
-fn handed_young_cons_range_contains(cur: usize, first_offset: u16, addr: usize) -> bool {
-    let low = cur & (CONS_BLOCK_ALIGN - 1);
-    let first_offset = first_offset as usize;
-    debug_assert!(first_offset <= low);
-    let used = low.wrapping_sub(first_offset);
-    cur.wrapping_sub(addr).wrapping_sub(1) < used
+fn handed_young_cons_range_contains(cur: usize, bias: usize, addr: usize) -> bool {
+    debug_assert_eq!(addr & crate::tagged::value::TAG_MASK, 0);
+    addr.wrapping_add(bias) < cur.wrapping_add(bias)
+}
+
+/// The existing cons payload/alignment test, expressed without a saturating
+/// subtraction: masking a block base cannot make it exceed the address.
+/// Return only a byte offset; ownership still precedes every trailer read.
+#[inline(always)]
+fn generation_only_cons_cell_offset(addr: usize) -> Option<usize> {
+    let offset = addr & (CONS_BLOCK_ALIGN - 1);
+    if offset < CONS_CELLS_BYTES && offset & (size_of::<ConsCell>() - 1) == 0 {
+        Some(offset)
+    } else {
+        None
+    }
 }
 
 /// Keep registry lookup temporaries inside the map-off fallback. Carrying
@@ -2100,6 +2111,10 @@ mod cons_region_young_tests;
 #[cfg(test)]
 #[path = "tests/handed_young_cons_range_test.rs"]
 mod handed_young_cons_range_tests;
+
+#[cfg(test)]
+#[path = "tests/cons_payload_alignment_test.rs"]
+mod cons_payload_alignment_tests;
 
 #[cfg(test)]
 #[path = "tests/inline_cons_owner_test.rs"]

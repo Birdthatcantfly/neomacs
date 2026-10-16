@@ -91,7 +91,7 @@ fn assert_extra_conses(before: (u64, usize, usize, usize), heap: &TaggedHeap, n:
 fn coalesced_cons_young_keeps_earlier_owners_across_adjacent_tail_grants() {
     for chunk_map in [false, true] {
         let mut heap = installed_heap(chunk_map);
-        // Start above offset zero so retaining the original offset is visible.
+        // Start above the block base so retaining the original first is visible.
         cell(&mut heap, -1);
         heap.close_alloc_regions();
         let before = counts(&heap);
@@ -102,7 +102,7 @@ fn coalesced_cons_young_keeps_earlier_owners_across_adjacent_tail_grants() {
             assert_eq!(address(pair[1]), address(pair[0]) + size_of::<ConsCell>());
         }
         assert_ne!(offset(fresh[0]), 0);
-        assert_eq!(heap.region_book.cons_first_offset, offset(fresh[0]));
+        assert_eq!(heap.region_book.cons_first(), address(fresh[0]));
         assert_eq!(heap.region_stats.cons_refills - refills_before, 3);
         assert_eq!(heap.cons_region_for_test().0, heap.cons_region_for_test().1);
         assert_extra_conses(before, &heap, n);
@@ -133,7 +133,7 @@ fn coalesced_cons_young_spans_adjacent_reclaimed_free_list_grants() {
             free_before
         );
         assert_eq!(heap.region_book.cons, ConsRegionSource::FreeListRun);
-        assert_eq!(heap.region_book.cons_first_offset, offset(fresh[0]));
+        assert_eq!(heap.region_book.cons_first(), address(fresh[0]));
         assert_eq!(heap.region_stats.cons_refills - refills_before, 3);
         assert_extra_conses(before, &heap, n);
         assert!(set_cons_cdr(fresh[0], fresh[n - 1]));
@@ -163,7 +163,7 @@ fn coalesced_cons_young_does_not_bridge_an_old_survivor_gap() {
         let second_run_first = cell(&mut heap, 701);
         assert_eq!(address(second_run_first), address(original[n + 1]));
         assert_ne!(address(second_run_first), old_cur);
-        assert_eq!(heap.region_book.cons_first_offset, offset(second_run_first));
+        assert_eq!(heap.region_book.cons_first(), address(second_run_first));
         let child = cell(&mut heap, 702);
         assert!(set_cons_car(first_run[0], TaggedValue::T));
         assert!(!heap.owner_card_is_dirty_for_test(first_run[0]));
@@ -190,12 +190,12 @@ fn coalesced_cons_young_resets_at_block_rollover() {
             cell(&mut heap, 802);
         }
         assert_eq!(heap.cons_region_for_test(), (payload_end, payload_end));
-        assert_eq!(heap.region_book.cons_first_offset, offset(first));
+        assert_eq!(heap.region_book.cons_first(), address(first));
         assert_ne!(offset(first), 0);
         let next_block = cell(&mut heap, 803);
         assert_ne!(address(next_block) & !(CONS_BLOCK_ALIGN - 1), old_base);
         assert_eq!(heap.cons_blocks.len(), 2);
-        assert_eq!(heap.region_book.cons_first_offset, offset(next_block));
+        assert_eq!(heap.region_book.cons_first(), address(next_block));
         assert_eq!(offset(next_block), 0);
         assert!(set_cons_cdr(first, next_block));
         assert!(!heap.owner_card_is_dirty_for_test(first));
@@ -213,18 +213,18 @@ fn coalesced_cons_young_does_not_survive_real_minor_or_major_close() {
             let original = cells(&mut heap, 2 * CONS_REGION_MAX_CELLS + 1);
             let owner = original[0];
             let last = *original.last().unwrap();
-            assert_eq!(heap.region_book.cons_first_offset, offset(owner));
+            assert_eq!(heap.region_book.cons_first(), address(owner));
             if use_major {
                 major(&mut heap, &[owner, last]);
             } else {
                 minor(&mut heap, &[owner, last]);
             }
             assert_eq!(heap.cons_region_for_test(), (0, 0));
-            assert_eq!(heap.region_book.cons_first_offset, 0);
+            assert_eq!(heap.region_book.cons_first(), 0);
             assert!(heap.cons_age_is_old_for_test(owner));
             let child = cell(&mut heap, 901);
             assert_eq!(address(child), address(original[1]));
-            assert_eq!(heap.region_book.cons_first_offset, offset(child));
+            assert_eq!(heap.region_book.cons_first(), address(child));
             assert_ne!(offset(child), offset(owner));
             assert!(set_cons_cdr(owner, child));
             assert!(heap.owner_card_is_dirty_for_test(owner));
@@ -246,16 +246,16 @@ fn coalesced_cons_young_partial_tail_close_refunds_only_current_grant() {
         let fresh = cells(&mut heap, n);
         let (cur, lim) = heap.cons_region_for_test();
         assert!(cur < lim);
-        assert_eq!(heap.region_book.cons_first_offset, offset(fresh[0]));
+        assert_eq!(heap.region_book.cons_first(), address(fresh[0]));
         assert_extra_conses(before, &heap, n);
         heap.close_alloc_regions();
         assert_eq!(heap.cons_region_for_test(), (0, 0));
-        assert_eq!(heap.region_book.cons_first_offset, 0);
+        assert_eq!(heap.region_book.cons_first(), 0);
         assert_eq!(heap.cons_blocks[0].next_index as usize, n + 1);
         assert_extra_conses(before, &heap, n);
         let child = cell(&mut heap, 1001);
         assert_eq!(address(child), cur);
-        assert_eq!(heap.region_book.cons_first_offset, offset(child));
+        assert_eq!(heap.region_book.cons_first(), address(child));
         assert_ne!(offset(child), offset(fresh[0]));
         assert!(set_cons_cdr(fresh[0], child));
         assert!(!heap.owner_card_is_dirty_for_test(fresh[0]));
@@ -278,17 +278,17 @@ fn coalesced_cons_young_partial_free_list_close_preserves_refund_order() {
         let fresh = cells(&mut heap, n);
         let (cur, lim) = heap.cons_region_for_test();
         assert!(cur < lim);
-        assert_eq!(heap.region_book.cons_first_offset, offset(fresh[0]));
+        assert_eq!(heap.region_book.cons_first(), address(fresh[0]));
         assert_extra_conses(before, &heap, n);
         heap.close_alloc_regions();
         assert_eq!(heap.cons_region_for_test(), (0, 0));
-        assert_eq!(heap.region_book.cons_first_offset, 0);
+        assert_eq!(heap.region_book.cons_first(), 0);
         assert_eq!(free_addresses(&heap), free_before[n..].to_vec());
         assert_extra_conses(before, &heap, n);
         let child = cell(&mut heap, 1101);
         assert_eq!(address(child), cur);
         assert_eq!(heap.region_book.cons, ConsRegionSource::FreeListRun);
-        assert_eq!(heap.region_book.cons_first_offset, offset(child));
+        assert_eq!(heap.region_book.cons_first(), address(child));
         assert_ne!(offset(child), offset(fresh[0]));
         assert!(set_cons_cdr(fresh[0], child));
         assert!(!heap.owner_card_is_dirty_for_test(fresh[0]));
@@ -312,7 +312,7 @@ fn coalesced_cons_young_does_not_coalesce_black_birth_grant_descriptors() {
         let n = 2 * CONS_REGION_MAX_CELLS + 1;
         let born = cells(&mut heap, n);
         let first_of_last_grant = born[2 * CONS_REGION_MAX_CELLS];
-        assert_eq!(heap.region_book.cons_first_offset, offset(born[0]));
+        assert_eq!(heap.region_book.cons_first(), address(born[0]));
         assert_eq!(
             heap.current_mutator_gc().black_cons_region_start,
             Some(address(first_of_last_grant)),

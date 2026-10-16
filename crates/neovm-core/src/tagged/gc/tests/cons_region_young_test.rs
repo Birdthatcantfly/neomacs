@@ -37,14 +37,12 @@ fn minor(heap: &mut TaggedHeap, roots: &[TaggedValue]) {
 fn cons_region_young_bookkeeping_preserves_existing_footprint() {
     use std::mem::{align_of, offset_of, size_of};
 
-    // The staged R2 shipping binary's DWARF records these old offsets and
-    // size. The new offset occupies padding instead of moving heap fields.
+    // The packed bias reuses the original final word; no heap fields move.
     assert_eq!(size_of::<RegionBook>(), 40);
     assert_eq!(align_of::<RegionBook>(), 8);
     assert_eq!(offset_of!(RegionBook, cons), 0);
     assert_eq!(offset_of!(RegionBook, float), 16);
-    assert_eq!(offset_of!(RegionBook, cons_color), 32);
-    assert_eq!(offset_of!(RegionBook, cons_first_offset), 34);
+    assert_eq!(offset_of!(RegionBook, cons_young_bias), 32);
     assert_eq!(size_of::<JitHeapState>(), 48);
 }
 

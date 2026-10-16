@@ -1,55 +1,62 @@
-//! The actual store-path predicate agrees with independent ordered intervals.
+//! The actual biased store-path predicate agrees with ordered owner intervals.
 
-use super::{CONS_BLOCK_ALIGN, CONS_CELLS_BYTES, handed_young_cons_range_contains};
+use super::{CONS_BLOCK_ALIGN, CONS_CELLS_BYTES, RegionBook, handed_young_cons_range_contains};
+use crate::tagged::gc::alloc_region::RegionColor;
+use crate::tagged::value::TAG_MASK;
 
 const GRANULE: usize = CONS_BLOCK_ALIGN;
 const MASK: usize = GRANULE - 1;
+const OWNER_STEP: usize = TAG_MASK + 1;
+
+fn bias(first: usize, color: RegionColor) -> usize {
+    let mut book = RegionBook::new();
+    book.set_cons_first_and_color(first, color);
+    book.cons_young_bias
+}
 
 #[test]
 fn handed_young_range_closed_rejects_endpoints_and_foreign_integers() {
-    for addr in [0, 1, 15, 16, MASK, GRANULE, usize::MAX - 1, usize::MAX] {
-        assert!(
-            !handed_young_cons_range_contains(0, 0, addr),
-            "closed range admitted {addr:#x}"
-        );
+    for color in [RegionColor::White, RegionColor::Black] {
+        let mut book = RegionBook::new();
+        book.set_cons_first_and_color(GRANULE, color);
+        book.clear_cons_first();
+        assert_eq!(book.cons_first(), 0);
+        for addr in [
+            0,
+            OWNER_STEP,
+            16,
+            MASK & !TAG_MASK,
+            GRANULE,
+            usize::MAX & !TAG_MASK,
+        ] {
+            assert!(
+                !handed_young_cons_range_contains(0, book.cons_young_bias, addr),
+                "closed {color:?} range admitted {addr:#x}"
+            );
+        }
     }
 }
 
 #[test]
 fn handed_young_range_preserves_half_open_endpoints_and_full_coalesced_payload() {
     for base in [GRANULE, usize::MAX & !MASK] {
-        for first_offset in [0u16, 16u16] {
-            let first = base + usize::from(first_offset);
+        for first_offset in [0usize, 16] {
+            let first = base + first_offset;
             let cur = base + CONS_CELLS_BYTES;
-            assert!(handed_young_cons_range_contains(cur, first_offset, first));
-            assert!(handed_young_cons_range_contains(
-                cur,
-                first_offset,
-                first + 1
-            ));
-            // Past several former 128-cell grant boundaries, still young.
-            assert!(handed_young_cons_range_contains(
-                cur,
-                first_offset,
-                base + 4096
-            ));
-            assert!(handed_young_cons_range_contains(cur, first_offset, cur - 1));
-            assert!(!handed_young_cons_range_contains(
-                cur,
-                first_offset,
-                first - 1
-            ));
-            assert!(!handed_young_cons_range_contains(cur, first_offset, cur));
-            assert!(!handed_young_cons_range_contains(
-                cur,
-                first_offset,
-                cur + 1
-            ));
-            assert!(!handed_young_cons_range_contains(
-                cur,
-                first_offset,
-                usize::MAX
-            ));
+            for color in [RegionColor::White, RegionColor::Black] {
+                let word = bias(first, color);
+                for addr in [first, first + OWNER_STEP, base + 4096, cur - OWNER_STEP] {
+                    assert!(handed_young_cons_range_contains(cur, word, addr));
+                }
+                for addr in [
+                    first - OWNER_STEP,
+                    cur,
+                    cur + OWNER_STEP,
+                    usize::MAX & !TAG_MASK,
+                ] {
+                    assert!(!handed_young_cons_range_contains(cur, word, addr));
+                }
+            }
         }
     }
 }
@@ -57,23 +64,25 @@ fn handed_young_range_preserves_half_open_endpoints_and_full_coalesced_payload()
 #[test]
 fn handed_young_range_rejects_foreign_granules_with_matching_low_bits() {
     for base in [0usize, GRANULE, usize::MAX & !MASK] {
-        let first_offset = 16u16;
-        let first = base + usize::from(first_offset);
+        let first = base + 16;
         let cur = base + 128;
-        assert!(handed_young_cons_range_contains(cur, first_offset, first));
-        for foreign in [
-            first.wrapping_sub(GRANULE),
-            first.wrapping_add(GRANULE),
-            cur.wrapping_sub(GRANULE),
-            cur.wrapping_add(GRANULE),
-            first.wrapping_sub(1),
-            0,
-            usize::MAX,
-        ] {
-            assert!(
-                !handed_young_cons_range_contains(cur, first_offset, foreign),
-                "foreign address {foreign:#x}, base {base:#x}"
-            );
+        for color in [RegionColor::White, RegionColor::Black] {
+            let word = bias(first, color);
+            assert!(handed_young_cons_range_contains(cur, word, first));
+            for foreign in [
+                first.wrapping_sub(GRANULE),
+                first.wrapping_add(GRANULE),
+                cur.wrapping_sub(GRANULE),
+                cur.wrapping_add(GRANULE),
+                first - OWNER_STEP,
+                0,
+                usize::MAX & !TAG_MASK,
+            ] {
+                assert!(
+                    !handed_young_cons_range_contains(cur, word, foreign),
+                    "foreign address {foreign:#x}, base {base:#x}, color {color:?}"
+                );
+            }
         }
     }
 }
@@ -90,35 +99,38 @@ fn handed_young_range_matches_independent_ordered_interval_at_integer_boundaries
     bases.dedup();
     for base in bases {
         for low_cur in [16usize, 32, 128, 2048, 4096, CONS_CELLS_BYTES] {
-            for first_offset in [0u16, 16, 32, 128, 2048, 4096] {
-                if usize::from(first_offset) > low_cur {
+            for first_offset in [0usize, 16, 32, 128, 2048, 4096] {
+                if first_offset > low_cur {
                     continue;
                 }
-                // Valid same-granule metadata, including empty intervals. The oracle
-                // uses ordinary interval ordering, not either distance test.
-                let first = base + usize::from(first_offset);
+                let first = base + first_offset;
                 let cur = base + low_cur;
                 let expected_interval = first..cur;
-                for addr in [
-                    0,
-                    1,
-                    usize::MAX - 1,
-                    usize::MAX,
-                    first,
-                    first + 1,
-                    first.wrapping_sub(1),
-                    first + (cur - first) / 2,
-                    cur - 1,
-                    cur,
-                    cur + 1,
-                    first.wrapping_sub(GRANULE),
-                    first.wrapping_add(GRANULE),
-                ] {
-                    assert_eq!(
-                        handed_young_cons_range_contains(cur, first_offset, addr),
-                        expected_interval.contains(&addr),
-                        "cur={cur:#x}, offset={first_offset}, addr={addr:#x}"
-                    );
+                // The production caller clears TAG_MASK. Black bias can admit
+                // first-1 as a raw byte integer; it is never a valid owner.
+                for color in [RegionColor::White, RegionColor::Black] {
+                    let word = bias(first, color);
+                    for addr in [
+                        0,
+                        OWNER_STEP,
+                        usize::MAX & !TAG_MASK,
+                        first,
+                        first + OWNER_STEP,
+                        first.wrapping_sub(OWNER_STEP),
+                        (first + (cur - first) / 2) & !TAG_MASK,
+                        cur - OWNER_STEP,
+                        cur,
+                        cur + OWNER_STEP,
+                        first.wrapping_sub(GRANULE),
+                        first.wrapping_add(GRANULE),
+                    ] {
+                        assert_eq!(addr & TAG_MASK, 0);
+                        assert_eq!(
+                            handed_young_cons_range_contains(cur, word, addr),
+                            expected_interval.contains(&addr),
+                            "cur={cur:#x}, first={first:#x}, addr={addr:#x}, color={color:?}"
+                        );
+                    }
                 }
             }
         }

@@ -42,6 +42,10 @@ use super::*;
 #[path = "tests/coalesced_cons_young_test.rs"]
 mod coalesced_cons_young_tests;
 
+#[cfg(test)]
+#[path = "tests/packed_cons_region_book_test.rs"]
+mod packed_cons_region_book_tests;
+
 /// The most cells one cons region takes (2 KiB).
 pub(super) const CONS_REGION_MAX_CELLS: usize = 128;
 /// The most slots one float region takes (2 KiB of slots, 1.5 KiB charged:
@@ -82,7 +86,7 @@ pub(super) enum RegionColor {
 }
 
 /// The open regions' bookkeeping that only Rust reads. Keep the previous
-/// field offsets and use its trailing padding for the cons range offset.
+/// footprint and pack the cons range and phase color in the final word.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub(super) struct RegionBook {
@@ -90,12 +94,11 @@ pub(super) struct RegionBook {
     /// Floats have no color: a slot is born at the current parity, which a
     /// region cannot outlive (it closes before every parity flip).
     pub(super) float: FloatRegionSource,
-    pub(super) cons_color: RegionColor,
-    /// Low 16 bits of the first cons in the contiguous handed-young prefix.
-    /// Adjacent grants may extend this prefix; every cell in
-    /// `[first, cons_cur)` stays young until an external close before
-    /// collection/promotion. Closed regions have offset and cursor 0.
-    pub(super) cons_first_offset: u16,
+    /// Negative first address plus the phase color (white 0, black 1).
+    /// The first cons is 16-aligned, so the low bit retains the color.
+    /// Adjacent grants extend the handed-young prefix until an external
+    /// close before collection/promotion. Closed regions retain only color.
+    pub(super) cons_young_bias: usize,
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -105,18 +108,46 @@ const _: () = {
     assert!(std::mem::align_of::<RegionBook>() == 8);
     assert!(std::mem::offset_of!(RegionBook, cons) == 0);
     assert!(std::mem::offset_of!(RegionBook, float) == 16);
-    assert!(std::mem::offset_of!(RegionBook, cons_color) == 32);
-    assert!(std::mem::offset_of!(RegionBook, cons_first_offset) == 34);
+    assert!(std::mem::offset_of!(RegionBook, cons_young_bias) == 32);
 };
 
 impl RegionBook {
     pub(super) const fn new() -> Self {
         Self {
             cons: ConsRegionSource::Closed,
-            cons_color: RegionColor::White,
             float: FloatRegionSource::Closed,
-            cons_first_offset: 0,
+            cons_young_bias: 0,
         }
+    }
+
+    #[inline]
+    pub(super) fn cons_first(&self) -> usize {
+        let bias = self.cons_young_bias;
+        (bias & 1).wrapping_sub(bias)
+    }
+
+    #[inline]
+    pub(super) fn cons_color(&self) -> RegionColor {
+        if self.cons_young_bias & 1 == 0 {
+            RegionColor::White
+        } else {
+            RegionColor::Black
+        }
+    }
+
+    #[inline]
+    pub(super) fn set_cons_first_and_color(&mut self, first: usize, color: RegionColor) {
+        debug_assert_eq!(first & (size_of::<ConsCell>() - 1), 0);
+        let color_bit = match color {
+            RegionColor::White => 0,
+            RegionColor::Black => 1,
+        };
+        self.cons_young_bias = 0usize.wrapping_sub(first).wrapping_add(color_bit);
+    }
+
+    #[inline]
+    pub(super) fn clear_cons_first(&mut self) {
+        self.cons_young_bias &= 1;
     }
 }
 
@@ -161,7 +192,7 @@ impl TaggedHeap {
     #[inline(never)]
     fn refill_cons_region(&mut self) -> *mut ConsCell {
         let previous_cur = self.jit.cons_cur.get();
-        let previous_first_offset = self.region_book.cons_first_offset;
+        let previous_first = self.region_book.cons_first();
         self.close_cons_region();
         let want = self.region_budget(size_of::<ConsCell>(), CONS_REGION_MAX_CELLS);
         let (first, n, source) = self.reserve_cons_run(want);
@@ -198,7 +229,6 @@ impl TaggedHeap {
         };
         self.charge_conses(n);
         self.region_book.cons = source;
-        self.region_book.cons_color = color;
         let stats = &mut self.region_stats;
         stats.cons_refills += 1;
         stats.cons_cells_granted += n as u64;
@@ -207,13 +237,15 @@ impl TaggedHeap {
         // No collection or callback occurs between closing and granting.
         // An adjacent run extends the already handed-young prefix; a gap,
         // block rollover or external close starts a new one. Only this
-        // barrier offset coalesces: black births and charges stay per grant.
+        // barrier prefix coalesces: black births and charges stay per grant.
         // A payload ends below its block boundary, so equality cannot bridge blocks.
-        self.region_book.cons_first_offset = if previous_cur != 0 && first_addr == previous_cur {
-            previous_first_offset
+        let prefix_first = if previous_cur != 0 && first_addr == previous_cur {
+            previous_first
         } else {
-            (first_addr & (CONS_BLOCK_ALIGN - 1)) as u16
+            first_addr
         };
+        self.region_book
+            .set_cons_first_and_color(prefix_first, color);
         self.jit.cons_cur.set(first_addr + size_of::<ConsCell>());
         self.jit
             .cons_lim
@@ -456,14 +488,14 @@ impl TaggedHeap {
         self.close_black_cons_region(cur);
         self.jit.cons_cur.set(0);
         self.jit.cons_lim.set(0);
-        self.region_book.cons_first_offset = 0;
+        self.region_book.clear_cons_first();
         self.region_book.cons = ConsRegionSource::Closed;
         if source == ConsRegionSource::Closed {
             debug_assert!(cur == 0 && lim == 0, "a closed region has no cursor");
             return;
         }
         debug_assert_eq!(
-            self.region_book.cons_color,
+            self.region_book.cons_color(),
             if self.allocates_black() {
                 RegionColor::Black
             } else {
@@ -480,7 +512,7 @@ impl TaggedHeap {
         let first = cur as *mut ConsCell;
         let base = ConsBlock::block_base_for_ptr(first);
         let start = ConsBlock::index_of_ptr(first);
-        if self.region_book.cons_color == RegionColor::Black {
+        if self.region_book.cons_color() == RegionColor::Black {
             ConsBlock::mark_run_at(base, start, unused, false);
         }
         if let ConsRegionSource::BlockTail { block } = source
