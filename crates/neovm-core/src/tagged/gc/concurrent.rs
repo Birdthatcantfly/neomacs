@@ -484,7 +484,6 @@ impl TaggedHeap {
                 bc_claimed: self.concurrent_bc_claimed.clone(),
             },
             satb: self.satb_shared.clone(),
-            deferred: self.deferred_veclikes.clone(),
             done: self.gc_done.clone(),
             stop: self.gc_stop.clone(),
             wake: self.gc_wake.clone(),
@@ -652,20 +651,16 @@ impl TaggedHeap {
             .take()
             .ok_or(MarkFinishError::MissingCompletion)?;
         let result = rx.recv().map_err(MarkFinishError::Disconnected)?;
-        // Poison in either correctness-critical queue invalidates its GC
-        // invariants. Prove both queues before changing active state or
-        // removing logs; only the payload-free wake latch can be recovered.
-        let (satb, deferred) = {
+        // Poison in the SATB queue invalidates collector invariants. The
+        // deferred log is owned by the worker until the completion handoff.
+        let satb = {
             let mut satb = self
                 .satb_shared
                 .lock()
                 .map_err(|_| MarkFinishError::PoisonedCollectorState)?;
-            let mut deferred = self
-                .deferred_veclikes
-                .lock()
-                .map_err(|_| MarkFinishError::PoisonedCollectorState)?;
-            (std::mem::take(&mut *satb), std::mem::take(&mut *deferred))
+            std::mem::take(&mut *satb)
         };
+        let deferred = result.deferred;
         // Tier-H's mutation protocol and dirty-owner logs are correctness
         // state too: prove them before changing active state. Poison means a
         // mutation escaped mid-protocol; do not terminate or sweep it.
@@ -683,8 +678,6 @@ impl TaggedHeap {
             TAGGED_HEAP_CONCURRENT_HASH_ACTIVE.with(|active| active.set(false));
         }
         self.publish_barrier_window();
-        #[cfg(feature = "gc-memory-telemetry")]
-        memory_telemetry::observe(self, memory_telemetry::Phase::ConcurrentJoined);
         // New snapshot kinds hand bare symbols back in legacy full cycles
         // too: weak-symbol liveness still consults mutator-side mark_symbol.
         // Existing knob-off legacy scans produce no symbol result.
@@ -823,6 +816,11 @@ impl TaggedHeap {
         // Whole join cost (stop signal + GC-thread exit wait + the fold above);
         // the fold alone stays separately visible as `last_termination_fold_us`.
         self.handshake.last_term_join_us = join_t0.elapsed().as_micros() as u64;
+        // Inventory the owned work after handoff: the marker's result buffers
+        // have now moved into heap-visible gray storage, and retired snapshot
+        // backing has been released. No shared capacity counter is needed.
+        #[cfg(feature = "gc-memory-telemetry")]
+        memory_telemetry::observe(self, memory_telemetry::Phase::ConcurrentJoined);
         Ok(())
     }
 

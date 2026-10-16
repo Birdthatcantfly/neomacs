@@ -207,37 +207,28 @@ fn failed_marker_finish_preserves_active_state_and_storage() {
 
 #[test]
 fn poisoned_collector_queues_fail_finish_before_reclamation() {
-    enum Queue {
-        Satb,
-        Deferred,
-    }
-    for queue in [Queue::Satb, Queue::Deferred] {
-        let before = LIVE_FLOAT_PAGES.load(Ordering::Relaxed);
-        let mut heap = TaggedHeap::new();
-        heap.alloc_float(11.5);
-        let tx = stalled_mark(&mut heap);
-        tx.send(ConcurrentMarkResult::default()).unwrap();
-        let buffer = match queue {
-            Queue::Satb => Arc::clone(&heap.satb_shared),
-            Queue::Deferred => Arc::clone(&heap.deferred_veclikes),
-        };
-        let poison = std::panic::catch_unwind(|| {
-            let _held = buffer.lock().unwrap();
-            panic!("poison collector queue for failed-finish test");
-        });
-        assert!(poison.is_err());
-        assert!(matches!(
-            heap.finish_concurrent_mark(),
-            Err(MarkFinishError::PoisonedCollectorState)
-        ));
-        assert!(heap.concurrent_mark_running());
-        let sweep = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            heap.collect_exact(std::iter::empty());
-        }));
-        assert!(sweep.is_err());
-        drop(heap);
-        assert_eq!(LIVE_FLOAT_PAGES.load(Ordering::Relaxed), before + 1);
-    }
+    let before = LIVE_FLOAT_PAGES.load(Ordering::Relaxed);
+    let mut heap = TaggedHeap::new();
+    heap.alloc_float(11.5);
+    let tx = stalled_mark(&mut heap);
+    tx.send(ConcurrentMarkResult::default()).unwrap();
+    let buffer = Arc::clone(&heap.satb_shared);
+    let poison = std::panic::catch_unwind(|| {
+        let _held = buffer.lock().unwrap();
+        panic!("poison collector queue for failed-finish test");
+    });
+    assert!(poison.is_err());
+    assert!(matches!(
+        heap.finish_concurrent_mark(),
+        Err(MarkFinishError::PoisonedCollectorState)
+    ));
+    assert!(heap.concurrent_mark_running());
+    let sweep = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        heap.collect_exact(std::iter::empty());
+    }));
+    assert!(sweep.is_err());
+    drop(heap);
+    assert_eq!(LIVE_FLOAT_PAGES.load(Ordering::Relaxed), before + 1);
 }
 
 #[test]

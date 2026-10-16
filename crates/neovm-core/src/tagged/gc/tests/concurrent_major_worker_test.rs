@@ -128,20 +128,17 @@ fn claim_job(heap: &TaggedHeap, major: bool) -> ConcurrentClaimJob {
 struct WorkerHarness {
     job: ConcurrentMarkJob,
     result: std::sync::mpsc::Receiver<ConcurrentMarkResult>,
-    deferred: SharedMarkQueue,
     satb: SharedMarkQueue,
 }
 impl WorkerHarness {
     fn new(heap: &TaggedHeap, major: bool) -> Self {
         let (exited, result) = std::sync::mpsc::channel();
-        let deferred = Arc::new(Mutex::new(Vec::new()));
         let satb = Arc::new(Mutex::new(Vec::new()));
         Self {
             job: ConcurrentMarkJob {
                 gray: MarkStack::default(),
                 claims: claim_job(heap, major),
                 satb: satb.clone(),
-                deferred: deferred.clone(),
                 done: Arc::new(AtomicBool::new(false)),
                 // Deterministic stop exercises the actual loop and epilogue.
                 stop: Arc::new(AtomicBool::new(true)),
@@ -153,7 +150,6 @@ impl WorkerHarness {
                 mapped_veclikes: None,
             },
             result,
-            deferred,
             satb,
         }
     }
@@ -165,8 +161,13 @@ impl WorkerHarness {
             self.result.try_recv().is_err(),
             "worker must send only once"
         );
-        let deferred = std::mem::take(&mut *self.deferred.lock().unwrap());
-        (result, deferred.into_iter().map(MarkWord::value).collect())
+        let deferred = result
+            .deferred
+            .iter()
+            .copied()
+            .map(MarkWord::value)
+            .collect();
+        (result, deferred)
     }
 }
 
@@ -610,12 +611,12 @@ fn generational_worker_outer_stop_preserves_unprocessed_gray_and_owned_logs() {
 #[test]
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 fn concurrent_worker_legacy_payload_sizes_match_base() {
-    // b40 base: ts7's VectorScanSnapshot carries its heap identity.
+    // The job drops one Arc; worker-local result logs gain one Vec.
     assert_eq!(size_of::<PageSnapshot>(), 160);
     assert_eq!(size_of::<ConcurrentClaimJob>(), 224);
-    assert_eq!(size_of::<ConcurrentMarkJob>(), 424);
-    assert_eq!(size_of::<GcRequest>(), 424);
-    assert_eq!(size_of::<WorkerMarkLogs>(), 80);
+    assert_eq!(size_of::<ConcurrentMarkJob>(), 416);
+    assert_eq!(size_of::<GcRequest>(), 416);
+    assert_eq!(size_of::<WorkerMarkLogs>(), 104);
 }
 
 #[test]
@@ -715,7 +716,7 @@ fn concurrent_worker_channel_dispatch_preserves_legacy_and_enabled_symbol_polici
                         usize::from(enabled)
                     );
                 }
-                let deferred = harness.deferred.lock().unwrap();
+                let deferred = &result.deferred;
                 if enabled {
                     assert!(deferred.is_empty());
                     assert!(unsafe { (*header(owner)).is_marked_at(parity) });

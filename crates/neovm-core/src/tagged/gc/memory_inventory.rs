@@ -752,10 +752,8 @@ fn buffer_inventory(heap: &TaggedHeap) -> Vec<BufferInventory> {
         "shared-satb",
         &heap.satb_shared.lock().unwrap(),
     ));
-    out.push(vector_buffer(
-        "shared-deferred",
-        &heap.deferred_veclikes.lock().unwrap(),
-    ));
+    // Deferred work is worker-owned, then channel-owned, until finish folds
+    // the owned result. It has no heap-owned shared backing to inventory here.
     for mutator in heap.mutators() {
         out.extend([
             vector_buffer("mutator-remset", &mutator.remset),

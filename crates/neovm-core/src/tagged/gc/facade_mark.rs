@@ -438,21 +438,15 @@ impl TaggedHeap {
             // A worker finish already folded these queues. An unpublished
             // start can also hold owner-fed SATB work; fold it under the same
             // stopped-owner proof instead of leaving a queue behind.
-            let (satb, deferred) = {
+            let satb = {
                 let mut satb = self
                     .satb_shared
                     .lock()
                     .map_err(|_| CollectorQuiescenceError::PoisonedCollectorState)?;
-                let mut deferred = self
-                    .deferred_veclikes
-                    .lock()
-                    .map_err(|_| CollectorQuiescenceError::PoisonedCollectorState)?;
-                (std::mem::take(&mut *satb), std::mem::take(&mut *deferred))
+                std::mem::take(&mut *satb)
             };
             self.gray_queue
                 .extend(satb.into_iter().map(MarkWord::value));
-            self.gray_queue
-                .extend(deferred.into_iter().map(MarkWord::value));
             // A full obarray reseed in the owner's callback covers this range;
             // no old start boundary is allowed to escape into the next cycle.
             self.take_concurrent_obarray_start_slots();
@@ -494,11 +488,6 @@ impl TaggedHeap {
             .lock()
             .map_err(|_| CollectorQuiescenceError::PoisonedCollectorState)?
             .is_empty()
-            || !self
-                .deferred_veclikes
-                .lock()
-                .map_err(|_| CollectorQuiescenceError::PoisonedCollectorState)?
-                .is_empty()
         {
             return Err(CollectorQuiescenceError::ResidualMark);
         }

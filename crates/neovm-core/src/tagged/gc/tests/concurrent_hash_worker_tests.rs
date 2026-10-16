@@ -29,6 +29,22 @@ fn finish_cycle(heap: &mut TaggedHeap, roots: &[TaggedValue]) {
     heap.finish_incremental_sweep_now();
 }
 
+/// Inspect only the joined worker's owned handoff, then relay the entire
+/// result through the normal finish seam so promotion and symbol logs survive.
+fn inspect_completed_deferred(heap: &mut TaggedHeap, inspect: impl FnOnce(&[MarkWord])) {
+    let result = heap
+        .gc_exited
+        .take()
+        .expect("stopped worker completion receiver missing")
+        .recv()
+        .expect("stopped worker result missing");
+    inspect(&result.deferred);
+    let (send, receive) = std::sync::mpsc::channel();
+    send.send(result)
+        .expect("retain the complete worker result");
+    heap.gc_exited = Some(receive);
+}
+
 fn ordinary_cycle(heap: &mut TaggedHeap, roots: &[TaggedValue]) {
     heap.concurrent_begin();
     for &root in roots {
@@ -268,7 +284,6 @@ fn paused_worker_with_policy(
             subr_dropped: heap.concurrent_subr_dropped.clone(),
         },
         satb: heap.satb_shared.clone(),
-        deferred: heap.deferred_veclikes.clone(),
         done: heap.gc_done.clone(),
         stop: heap.gc_stop.clone(),
         wake: heap.gc_wake.clone(),
@@ -366,17 +381,17 @@ fn tier_h_actual_worker_stop_mid_scan_hands_off_every_child_before_termination()
                 .load(Ordering::Relaxed),
             1,
         );
-        let deferred = heap.deferred_veclikes.lock().unwrap();
-        let mut remaining: FxHashSet<_> = records.iter().map(|record| record.bits()).collect();
-        for word in deferred.iter() {
-            remaining.remove(&word.value().bits());
-        }
-        assert!(
-            remaining.is_empty(),
-            "a claimed snapshot lost children after stop"
-        );
-        assert_eq!(deferred.len(), CHILDREN + 1, "records plus weak owner");
-        drop(deferred);
+        inspect_completed_deferred(&mut heap, |deferred| {
+            let mut remaining: FxHashSet<_> = records.iter().map(|record| record.bits()).collect();
+            for word in deferred {
+                remaining.remove(&word.value().bits());
+            }
+            assert!(
+                remaining.is_empty(),
+                "a claimed snapshot lost children after stop"
+            );
+            assert_eq!(deferred.len(), CHILDREN + 1, "records plus weak owner");
+        });
         for &record in &records {
             assert!(
                 !heap.is_value_marked(record),
@@ -384,8 +399,8 @@ fn tier_h_actual_worker_stop_mid_scan_hands_off_every_child_before_termination()
             );
         }
 
-        // The actual receiver and shared deferred buffer are folded by the
-        // normal join. Reseeding the already-marked owner cannot repair an
+        // The relayed complete worker result is folded by the normal join.
+        // Reseeding the already-marked owner cannot repair an
         // incomplete hash scan, so survival proves its complete child handoff.
         finish_cycle(&mut heap, &[owner, weak]);
         assert!(
@@ -670,12 +685,9 @@ fn tier_h_actual_worker_deferred_first_write_keeps_header_white_and_both_child_s
                 .load(Ordering::Relaxed),
             0,
         );
-        assert!(
-            heap.deferred_veclikes
-                .lock()
-                .unwrap()
-                .contains(&MarkWord::of(owner))
-        );
+        inspect_completed_deferred(&mut heap, |deferred| {
+            assert!(deferred.contains(&MarkWord::of(owner)));
+        });
 
         // No reader ever touches the changed backing. SATB retains removed
         // words, while the deferred owner/current-child retrace retains writes.

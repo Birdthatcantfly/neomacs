@@ -166,7 +166,6 @@ fn concurrent_mapped_chartable_scan_and_builtin_range_writes_are_atomic() {
             subr_dropped: Arc::new(AtomicUsize::new(0)),
         },
         satb: heap.satb_shared.clone(),
-        deferred: heap.deferred_veclikes.clone(),
         done: Arc::new(AtomicBool::new(false)),
         // The flat first-partition scan always completes before the loop
         // honors stop, so the job terminates without an idle wait.

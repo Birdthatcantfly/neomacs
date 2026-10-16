@@ -57,8 +57,6 @@ pub(super) struct ConcurrentMarkJob {
     pub(super) claims: ConcurrentClaimJob,
     /// Overwritten children appended by the mutator's SATB barrier; drained here.
     pub(super) satb: SharedMarkQueue,
-    /// Non-cons / non-owned-cons values to trace at the STW termination.
-    pub(super) deferred: SharedMarkQueue,
     /// Set when gray + SATB are drained (tentatively done); polled by the mutator.
     pub(super) done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Set by the mutator to ask this loop to exit.
@@ -194,8 +192,11 @@ impl ConcurrentClaimJob {
 /// Owned worker result, sent only after the last heap/snapshot read.
 /// Headers remain live and non-moving until the coordinator joins the worker;
 /// addresses are never dereferenced after the old/young sweep starts.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(super) struct ConcurrentMarkResult {
+    /// Marker-owned work that the stopped mutators trace after receiving this result.
+    /// Only this worker appends; the completion channel transfers ownership.
+    pub(super) deferred: Vec<MarkWord>,
     pub(super) promo: Vec<usize>,
     pub(super) symbols: Vec<SymId>,
 }
@@ -342,16 +343,16 @@ pub(super) enum GcRequest {
     ConcurrentMarkEnabled(Box<EnabledConcurrentMarkJob>),
 }
 
-// The base's ordinary-build sizes (b40: ts7's VectorScanSnapshot carries its
-// heap identity, 8 bytes more than the original 416-byte job). The ON box must
-// preserve these layouts, including the actual channel enum's niche choice.
+// Ordinary-build worker sizes after moving the shared deferred Arc out of
+// the job and adding its owned Vec to the result. The enabled extension stays
+// boxed, so it cannot widen the legacy channel payload or its niche choice.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const _: () = {
     assert!(size_of::<PageSnapshot>() == 160);
     assert!(size_of::<ConcurrentClaimJob>() == 224);
-    assert!(size_of::<ConcurrentMarkJob>() == 424);
-    assert!(size_of::<GcRequest>() == 424);
-    assert!(size_of::<WorkerMarkLogs>() == 80);
+    assert!(size_of::<ConcurrentMarkJob>() == 416);
+    assert!(size_of::<GcRequest>() == 416);
+    assert!(size_of::<WorkerMarkLogs>() == 104);
 };
 
 /// The name of every collector thread. Thread names need not be unique: a
@@ -1142,7 +1143,7 @@ fn concurrent_trace_mapped_veclike<const MAJOR: bool, const SYMBOLS: bool, E: Cl
             if SYMBOLS {
                 logs.note_symbol(child);
             } else if seen_symbols.insert(child.bits()) {
-                job.deferred.lock().unwrap().push(MarkWord::of(child));
+                logs.result.deferred.push(MarkWord::of(child));
             }
         } else if child.is_heap_object()
             && !concurrent_try_mark_owned_with_symbols::<MAJOR, SYMBOLS, E>(
@@ -1153,7 +1154,7 @@ fn concurrent_trace_mapped_veclike<const MAJOR: bool, const SYMBOLS: bool, E: Cl
                 logs,
             )
         {
-            job.deferred.lock().unwrap().push(MarkWord::of(child));
+            logs.result.deferred.push(MarkWord::of(child));
         }
     };
     // SAFETY: stopped-start capture admitted these same-heap initialized
@@ -1167,7 +1168,7 @@ fn concurrent_trace_mapped_veclike<const MAJOR: bool, const SYMBOLS: bool, E: Cl
             MappedVeclikeScanItem::Deferred(owner) => {
                 // Direct push bypasses the dispatcher, so its first-cycle
                 // dump-child shortcut cannot discard termination-only owners.
-                job.deferred.lock().unwrap().push(owner);
+                logs.result.deferred.push(owner);
             }
         })
     };
@@ -1209,7 +1210,7 @@ fn route_snapshot_child<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExtensio
                 &mut job.gray,
                 logs,
             ) {
-                job.deferred.lock().unwrap().push(MarkWord::of(child));
+                logs.result.deferred.push(MarkWord::of(child));
             }
         } else if SYMBOLS {
             logs.note_symbol(child);
@@ -1228,7 +1229,7 @@ fn route_snapshot_child<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExtensio
             &mut job.gray,
             logs,
         ) {
-            job.deferred.lock().unwrap().push(MarkWord::of(child));
+            logs.result.deferred.push(MarkWord::of(child));
         }
     }
 }
@@ -1355,7 +1356,7 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
                         if SYMBOLS {
                             logs.note_symbol(child);
                         } else if seen_symbols.insert(child.bits()) {
-                            job.deferred.lock().unwrap().push(MarkWord::of(child));
+                            logs.result.deferred.push(MarkWord::of(child));
                         }
                     } else if child.is_heap_object() {
                         // Same filter as `mark_or_push_child`: immediates
@@ -1369,7 +1370,7 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
                             &mut job.gray,
                             &mut logs,
                         ) {
-                            job.deferred.lock().unwrap().push(MarkWord::of(child));
+                            logs.result.deferred.push(MarkWord::of(child));
                         }
                     }
                 }
@@ -1412,7 +1413,7 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
                 if !job.claims.pages.contains(ChunkClass::Cons, addr) {
                     // Mapped (non-dump) or new-block cons — let the mutator's
                     // termination mark it through the full `mark_value` path.
-                    job.deferred.lock().unwrap().push(MarkWord::of(val));
+                    logs.result.deferred.push(MarkWord::of(val));
                     continue;
                 }
                 if unsafe { atomic_mark_owned_cons_ptr(ptr) } {
@@ -1441,7 +1442,7 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
                             break; // dump cons: permanent black
                         }
                         if !job.claims.pages.contains(ChunkClass::Cons, caddr) {
-                            job.deferred.lock().unwrap().push(MarkWord::of(cdr));
+                            logs.result.deferred.push(MarkWord::of(cdr));
                             break;
                         }
                         if !unsafe { atomic_mark_owned_cons_ptr(cptr) } {
@@ -1468,7 +1469,7 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
                 ) {
                     continue;
                 }
-                job.deferred.lock().unwrap().push(MarkWord::of(val));
+                logs.result.deferred.push(MarkWord::of(val));
             } else if <E::Symbols as WorkerSymbolMarks>::ENABLED && SYMBOLS {
                 logs.note_symbol(val);
             }
@@ -1505,7 +1506,7 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
     // handoff; the termination fold routes both through the STW `mark_value`
     // drain. Empty on the normal (idle-stop) path.
     if !job.gray.is_empty() {
-        job.deferred.lock().unwrap().extend(job.gray.drain_words());
+        logs.result.deferred.extend(job.gray.drain_words());
     }
     // Every exit, including either stop quantum, retains the owned logs.
     // No heap/snapshot access follows this handoff.

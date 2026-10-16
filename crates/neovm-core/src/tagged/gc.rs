@@ -744,11 +744,9 @@ pub struct TaggedHeap {
     /// owners (page vectors; interval-free strings that gained a table) are
     /// no longer re-traced by the termination's `mark_value`.
     satb_snapshotted_owners: FxHashSet<usize>,
-    /// Veclikes/strings the GC thread reached but did NOT trace (their backing
-    /// can be reallocated by the mutator, so reading it concurrently would be a
-    /// UAF). They are marked black and parked here, then traced at the
-    /// termination handshake while the mutator is stopped.
-    deferred_veclikes: SharedMarkQueue,
+    /// Preserve the hot heap layout while marker-only deferred work moves into
+    /// ConcurrentMarkResult. This slot owns no allocation or shared cache line.
+    _satb_layout_reserve: std::ptr::NonNull<()>,
     /// GC thread sets this (Release) when gray + SATB are drained; the mutator
     /// polls it (Acquire) at safe points to decide when to terminate.
     gc_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1096,7 +1094,7 @@ impl TaggedHeap {
             concurrent_mark_running: false,
             satb_shared: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             satb_snapshotted_owners: FxHashSet::default(),
-            deferred_veclikes: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            _satb_layout_reserve: std::ptr::NonNull::dangling(),
             gc_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             concurrent_str_claimed: std::sync::Arc::new(AtomicUsize::new(0)),
             last_concurrent_str_claimed: 0,

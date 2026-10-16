@@ -223,7 +223,6 @@ impl TaggedHeap {
     /// coherence nothing can verify and erase the only evidence.
     pub(crate) fn gc_locks_poisoned(&self) -> bool {
         self.satb_shared.is_poisoned()
-            || self.deferred_veclikes.is_poisoned()
             || self.gc_wake.0.is_poisoned()
             || self
                 .concurrent_hash_snapshot()
