@@ -41,7 +41,9 @@ fn green_thread_identity_name_liveness_and_self_join() {
         (thread-join worker) (thread-live-p worker)
         (length (all-threads)) (eq (car (all-threads)) main-thread)))
 "##,
-        expect_test::expect![[r#""OK (t \"g3d-reflection\" (t t \"g3d-reflection\" self-join-error) nil 1 t)""#]],
+        expect_test::expect![[
+            r#""OK (t \"g3d-reflection\" (t t \"g3d-reflection\" self-join-error) nil 1 t)""#
+        ]],
     );
 }
 
@@ -76,7 +78,9 @@ fn green_ping_pong_dynamic_bindings() {
       (list (nreverse trace) (thread-join worker)
             neovm-g3d-special (default-value 'neovm-g3d-special)))))
 "##,
-        expect_test::expect![[r#""OK (((main 0 main) (worker 0 worker) (main 1 main) (worker 1 worker) (main 2 main) (worker 2 worker) (main 3 main) (worker 3 worker)) worker main main)""#]],
+        expect_test::expect![[
+            r#""OK (((main 0 main) (worker 0 worker) (main 1 main) (worker 1 worker) (main 2 main) (worker 2 worker) (main 3 main) (worker 3 worker)) worker main main)""#
+        ]],
     );
 }
 
@@ -179,7 +183,9 @@ fn green_recursive_mutex_across_yields() {
     (list after-first-unlock (thread-join worker) entered
           (condition-case err (mutex-unlock mutex) (error err)))))
 "##,
-        expect_test::expect![[r#""OK (nil acquired t (error \"Cannot unlock mutex owned by another thread\"))""#]],
+        expect_test::expect![[
+            r#""OK (nil acquired t (error \"Cannot unlock mutex owned by another thread\"))""#
+        ]],
     );
 }
 
@@ -196,7 +202,9 @@ fn green_mutex_unlock_by_another_thread_is_an_error() {
                           (error err)))))
         (mutex-unlock mutex)))
 "##,
-        expect_test::expect![[r#""OK ((error \"Cannot unlock mutex owned by another thread\") nil)""#]],
+        expect_test::expect![[
+            r#""OK ((error \"Cannot unlock mutex owned by another thread\") nil)""#
+        ]],
     );
 }
 
@@ -271,7 +279,9 @@ fn green_condition_wait_keeps_the_recursive_count_and_notify_all() {
   (mutex-unlock mutex)
   (mapcar #'thread-join workers))
 "##,
-        expect_test::expect![[r#""OK ((1 nil nil released) (2 nil nil released) (3 nil nil released))""#]],
+        expect_test::expect![[
+            r#""OK ((1 nil nil released) (2 nil nil released) (3 nil nil released))""#
+        ]],
     );
 }
 
@@ -302,7 +312,9 @@ fn green_signal_parked_thread() {
     (while (thread-live-p worker) (thread-yield))
     (list first-join caught cleanup (thread-live-p worker))))
 "##,
-        expect_test::expect![[r#""OK ((join-signal (error g3d-injected)) (error g3d-injected) t nil)""#]],
+        expect_test::expect![[
+            r#""OK ((join-signal (error g3d-injected)) (error g3d-injected) t nil)""#
+        ]],
     );
 }
 
@@ -367,7 +379,9 @@ fn green_signal_before_a_thread_runs_waits_for_its_first_switch() {
           (condition-case err (thread-join yielder) (error (list 'join err)))
           (sort (copy-sequence log) #'string<))))
 "##,
-        expect_test::expect![[r#""OK ((join (error \"q\")) (at-yield (error \"y\")) (quiet-ran yielder-ran))""#]],
+        expect_test::expect![[
+            r#""OK ((join (error \"q\")) (at-yield (error \"y\")) (quiet-ran yielder-ran))""#
+        ]],
     );
 }
 
@@ -435,7 +449,9 @@ fn green_killed_current_buffer_moves_and_signals_the_thread() {
           (condition-case err (thread-join worker) (error (list 'join err)))
           (thread-join worker))))
 "##,
-        expect_test::expect![[r#""OK (t nil (join (thread-buffer-killed)) ((thread-buffer-killed) nil t nil))""#]],
+        expect_test::expect![[
+            r#""OK (t nil (join (thread-buffer-killed)) ((thread-buffer-killed) nil t nil))""#
+        ]],
     );
 }
 
@@ -505,7 +521,9 @@ fn green_eight_threads_yield_gc() {
     (list (mapcar #'thread-join (nreverse threads)) neovm-g3d-special
           (thread-last-error t))))
 "##,
-        expect_test::expect![[r#""OK (((0 32 0) (1 32 1) (2 32 2) (3 32 3) (4 32 4) (5 32 5) (6 32 6) (7 32 7)) canonical nil)""#]],
+        expect_test::expect![[
+            r#""OK (((0 32 0) (1 32 1) (2 32 2) (3 32 3) (4 32 4) (5 32 5) (6 32 6) (7 32 7)) canonical nil)""#
+        ]],
     );
 }
 
@@ -535,6 +553,8 @@ fn green_byte_compiled_parked_frames_survive_other_threads_gc() {
     (setq neovm-g3d-go t)
     (mapcar #'thread-join workers)))
 "##,
-        expect_test::expect![[r#""OK ((600 550 500 450 400 350 300 250 200 150 100 50) (600 550 500 450 400 350 300 250 200 150 100 50) (600 550 500 450 400 350 300 250 200 150 100 50))""#]],
+        expect_test::expect![[
+            r#""OK ((600 550 500 450 400 350 300 250 200 150 100 50) (600 550 500 450 400 350 300 250 200 150 100 50) (600 550 500 450 400 350 300 250 200 150 100 50))""#
+        ]],
     );
 }
