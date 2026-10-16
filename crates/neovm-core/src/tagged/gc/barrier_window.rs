@@ -18,8 +18,10 @@
 //! not yet remembered (see `barrier_gate`). With generations disabled,
 //! a cons outside the window is stored inline. Rust cons stores use a
 //! separate protocol mirror, equal to this window with generations disabled
-//! and ALL otherwise; the outlined filter then checks generation eligibility.
-//! GEN1 compiled stores keep the ordinary window and test the cons bitmap
+//! and ALL otherwise. Immediate slot stores use the ordinary window instead;
+//! other slot stores check block ownership and the age byte inline before
+//! marking an old owner's card. Bulk writes retain the outlined filter.
+//! GEN1 compiled stores keep the ordinary window and test the age byte
 //! inline. GEN0 observed mode widens only the compiled window with the
 //! mutator's collection-read envelope; exact object marks filter those hits.
 //!

@@ -544,15 +544,14 @@ pub(crate) fn builtin_setcar_2(
 
 #[inline(never)]
 pub(crate) fn builtin_setcar_values(cons: Value, new_car: Value) -> EvalResult {
-    match cons.kind() {
-        ValueKind::Cons => {
-            cons.set_car(new_car);
-            Ok(new_car)
-        }
-        _ => Err(signal(
+    if cons.is_cons() {
+        cons.set_car(new_car);
+        Ok(new_car)
+    } else {
+        Err(signal(
             LispCondition::WrongTypeArgument,
             vec![Value::symbol("consp"), cons],
-        )),
+        ))
     }
 }
 
@@ -567,15 +566,14 @@ pub(crate) fn builtin_setcdr_2(
 
 #[inline(never)]
 pub(crate) fn builtin_setcdr_values(cons: Value, new_cdr: Value) -> EvalResult {
-    match cons.kind() {
-        ValueKind::Cons => {
-            cons.set_cdr(new_cdr);
-            Ok(new_cdr)
-        }
-        _ => Err(signal(
+    if cons.is_cons() {
+        cons.set_cdr(new_cdr);
+        Ok(new_cdr)
+    } else {
+        Err(signal(
             LispCondition::WrongTypeArgument,
             vec![Value::symbol("consp"), cons],
-        )),
+        ))
     }
 }
 

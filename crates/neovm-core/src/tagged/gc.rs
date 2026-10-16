@@ -2865,6 +2865,9 @@ mod generation_tests;
 #[path = "gc/tests/generational_verifier_test.rs"]
 mod generational_verifier_tests;
 #[cfg(test)]
+#[path = "gc/tests/inline_slot_barrier_test.rs"]
+mod inline_slot_barrier_tests;
+#[cfg(test)]
 #[path = "gc/tests/marker_arena_test.rs"]
 mod marker_arena_tests;
 /// Record and closure slot stores are atomic: race-free against an atomic

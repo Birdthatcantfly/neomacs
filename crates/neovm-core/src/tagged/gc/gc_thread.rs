@@ -1695,7 +1695,7 @@ pub fn with_tagged_heap<R>(f: impl FnOnce(&mut TaggedHeap) -> R) -> R {
 /// gate.
 #[inline(always)]
 pub fn note_heap_write(owner: TaggedValue, kind: HeapWriteKind) {
-    if barrier_gate(owner) {
+    if barrier_gate(owner, None) {
         if owner.is_cons() {
             note_cons_write_slow(owner, kind, None, None);
         } else {
@@ -1712,29 +1712,55 @@ pub fn note_heap_slot_write(
     slot: usize,
     value: TaggedValue,
 ) {
-    if barrier_gate(owner) {
+    if barrier_gate(owner, Some(value)) {
         if owner.is_cons() {
-            note_cons_write_slow(owner, kind, Some(slot), Some(value));
+            let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
+            if TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr)) {
+                note_heap_write_slow(owner, kind, Some(slot), Some(value));
+            } else {
+                // Only generation-only, non-immediate stores can reach here:
+                // immediate cons stores selected the real window in the gate.
+                with_tagged_heap(|heap| {
+                    if generation_only_cons_is_old(heap, owner) {
+                        heap.mark_owner_card(addr);
+                    }
+                });
+            }
         } else {
+            let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
+            // The header admitted an old, unlogged owner. Preserve GEN0's
+            // persistent owner bookkeeping; only GEN1 can reject its immediate
+            // store. A real-window hit must still capture the old children.
+            if value.is_fixnum()
+                && TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get().covers(addr))
+                && !TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr))
+            {
+                return;
+            }
             note_heap_write_slow(owner, kind, Some(slot), Some(value));
         }
     }
 }
 
 /// The protocol window handles marking, tracking and mapped owners. Rust
-/// cons stores select their precomputed mirror; with generations disabled it
-/// is identical to the ordinary window. Thus a missed cons window is the
-/// legacy plain store, without a heap or mode read. Non-cons stores retain
-/// the legacy logged-header test. Concurrent preimage capture precedes any
-/// immediate rejection in the outlined filter; symbols remain eligible.
+/// cons stores select the ordinary window for immediate slot values and the
+/// precomputed mirror otherwise. The windows coincide under GEN0; under GEN1
+/// an immediate cannot create an old-to-young edge. The ordinary window still
+/// admits SATB, tracking, census and mapped writes, even of immediates. Bulk
+/// writes retain the conservative mirror. Non-cons stores retain the legacy
+/// logged-header test. No heap or mode read is needed for a missed window.
 #[inline(always)]
-fn barrier_gate(owner: TaggedValue) -> bool {
+fn barrier_gate(owner: TaggedValue, value: Option<TaggedValue>) -> bool {
     if !owner.is_heap_object() {
         return false;
     }
     let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
     let window = if owner.is_cons() {
-        TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get())
+        if value.is_some_and(TaggedValue::is_fixnum) {
+            TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get())
+        } else {
+            TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get())
+        }
     } else {
         TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get())
     };
@@ -1745,6 +1771,29 @@ fn barrier_gate(owner: TaggedValue) -> bool {
     // object. Promotion is stop-the-world; remember_owner claims the logged
     // byte atomically. Cons owners never read a header.
     !owner.is_cons() && unsafe { GcHeader::needs_remembering(addr as *const GcHeader) }
+}
+
+/// The slot barrier's age-byte test, after the ordinary window refused the
+/// owner. Unlike a compiled leaf, a Rust setter also accepts foreign conses:
+/// prove block ownership before deriving a trailer address. The map-off arm
+/// retains the existing registry oracle. Neither arm allocates or safepoints.
+#[inline(always)]
+fn generation_only_cons_is_old(heap: &TaggedHeap, owner: TaggedValue) -> bool {
+    let Some(map) = heap.chunk_map.as_ref() else {
+        return heap
+            .old_cons_trailer(owner)
+            .is_some_and(|(trailer, index)| trailer.age_is_old(index));
+    };
+    let ptr = owner.xcons_ptr();
+    if !ConsBlock::ptr_is_cell_aligned(ptr) || !map.get(ptr as usize).is(ChunkClass::Cons) {
+        return false;
+    }
+    // SAFETY: the map proves a live owned cons block; the alignment check
+    // proves a cell index inside its payload. The executing mutator cannot
+    // release this block or promote cells before this leaf finishes. Ages
+    // are atomic bytes and change only with every mutator stopped.
+    let trailer = unsafe { ConsBlockTrailer::from_block_base(ConsBlock::block_base_for_ptr(ptr)) };
+    trailer.age_is_old(ConsBlock::index_of_ptr(ptr))
 }
 
 /// Dispatch cons writes admitted by the protocol mirror. A real-window hit
