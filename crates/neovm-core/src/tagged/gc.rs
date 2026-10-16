@@ -43,19 +43,8 @@ use std::cell::Cell;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Only a scan whose roots will be seeded can certify cache coverage of the
-/// running collection. Diagnostic snapshots must not advance that stamp.
-#[derive(Clone, Copy)]
-pub(crate) enum CacheRootScan {
-    Collection,
-    /// Copy the current owner's cache roots without certifying coverage of a
-    /// future collection. Green's held facade epoch keeps the collector idle.
-    Parked,
-    #[cfg(test)]
-    Snapshot {
-        collection_in_progress: bool,
-    },
-}
+mod cache_root_scan;
+pub(crate) use cache_root_scan::CacheRootScan;
 
 /// Optional heap-write observation, used by tests/introspection to inspect which
 /// owners (and optionally which individual writes) were mutated since the last
