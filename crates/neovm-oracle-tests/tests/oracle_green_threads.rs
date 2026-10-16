@@ -706,3 +706,401 @@ fn green_after_change_calls_a_thread_deferred_run_from_main() {
         expect_test::expect![[r#""OK (nil ((3 11 4)) \"01ab2345cd6789\")""#]],
     );
 }
+
+#[test]
+fn green_alias_of_another_owners_binding_follows_the_new_base() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(progn
+  (defvar g3e-source 'source-global)
+  (defvar g3e-target 'target-global)
+  (let* ((mutex (make-mutex))
+         (condition (make-condition-variable mutex))
+         (ready nil) (go nil) (worker nil))
+    (mutex-lock mutex)
+    (setq worker
+          (make-thread
+           (lambda ()
+             (let ((g3e-source 'source-bound))
+               (mutex-lock mutex)
+               (setq ready t)
+               (condition-notify condition)
+               (while (not go) (condition-wait condition))
+               (mutex-unlock mutex)
+               (list g3e-source g3e-target (default-toplevel-value 'g3e-source) (default-toplevel-value 'g3e-target))))))
+    (while (not ready) (condition-wait condition))
+    (let ((aliased (defvaralias 'g3e-source 'g3e-target)))
+      (setq go t)
+      (condition-notify condition)
+      (mutex-unlock mutex)
+      (list aliased (thread-join worker) g3e-source g3e-target))))
+"##,
+        expect_test::expect![[
+            r#""OK (g3e-target (source-bound source-bound target-global source-bound) target-global target-global)""#
+        ]],
+    );
+}
+
+#[test]
+fn green_nested_alias_bindings_merge_with_the_targets_bindings() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(progn
+(defvar g3e-source 'source-global)
+(defvar g3e-target 'target-global)
+(defvaralias 'g3e-link 'g3e-target)
+(let* ((mutex (make-mutex)) (cv (make-condition-variable mutex))
+       (ready nil) (go nil)
+       (worker nil))
+  (mutex-lock mutex)
+  (setq worker
+        (make-thread
+         (lambda ()
+           (list
+            (let ((g3e-target 'target-outer))
+              (list
+               (let ((g3e-source 'source-outer))
+                 (list
+                  (let ((g3e-target 'target-inner))
+                    (list
+                     (let ((g3e-source 'source-inner))
+                       (mutex-lock mutex)
+                       (setq ready t)
+                       (condition-notify cv)
+                       (while (not go) (condition-wait cv))
+                       (mutex-unlock mutex)
+                       (list g3e-source g3e-target))
+                     (list g3e-source g3e-target)))
+                  (list g3e-source g3e-target)))
+               (list g3e-source g3e-target)))
+            (list g3e-source g3e-target)))))
+  (while (not ready) (condition-wait cv))
+  (defvaralias 'g3e-source 'g3e-link)
+  (setq go t)
+  (condition-notify cv)
+  (mutex-unlock mutex)
+  (list (thread-join worker) g3e-source g3e-target (indirect-variable 'g3e-source)))
+)
+"##,
+        expect_test::expect![[
+            r#""OK ((((((source-inner source-inner) (target-inner target-inner)) (source-outer source-outer)) (target-outer target-outer)) (target-global target-global)) target-global target-global g3e-target)""#
+        ]],
+    );
+}
+
+#[test]
+fn green_alias_to_a_void_base_materializes_its_owner_slot() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(progn
+  (defvar g3e-source)
+  (defvar g3e-target)
+  (let* ((mutex (make-mutex))
+         (condition (make-condition-variable mutex))
+         (ready nil) (go nil) (worker nil))
+    (mutex-lock mutex)
+    (setq worker
+          (make-thread
+           (lambda ()
+             (let ((g3e-source 'source-bound))
+               (mutex-lock mutex)
+               (setq ready t)
+               (condition-notify condition)
+               (while (not go) (condition-wait condition))
+               (mutex-unlock mutex)
+               (list g3e-source g3e-target)))))
+    (while (not ready) (condition-wait condition))
+    (defvaralias 'g3e-source 'g3e-target)
+    (let ((before (boundp 'g3e-target)))
+      (setq go t)
+      (condition-notify condition)
+      (mutex-unlock mutex)
+      (list before (thread-join worker) (boundp 'g3e-source) (boundp 'g3e-target)))))
+"##,
+        expect_test::expect![[r#""OK (nil (source-bound source-bound) nil nil)""#]],
+    );
+}
+
+#[test]
+fn green_alias_binding_follows_the_default_of_a_localized_target() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(progn
+  (defvar g3e-source 'source-global)
+  (defvar g3e-target 'target-global)
+  (with-temp-buffer
+    (setq-local g3e-target 'target-local)
+  (let* ((mutex (make-mutex))
+         (condition (make-condition-variable mutex))
+         (ready nil) (go nil) (worker nil))
+    (mutex-lock mutex)
+    (setq worker
+          (make-thread
+           (lambda ()
+             (let ((g3e-source 'source-bound))
+               (mutex-lock mutex)
+               (setq ready t)
+               (condition-notify condition)
+               (while (not go) (condition-wait condition))
+               (mutex-unlock mutex)
+               (list g3e-source g3e-target (default-toplevel-value 'g3e-source) (default-toplevel-value 'g3e-target))))))
+    (while (not ready) (condition-wait condition))
+    (let ((aliased (defvaralias 'g3e-source 'g3e-target)))
+      (setq go t)
+      (condition-notify condition)
+      (mutex-unlock mutex)
+      (list aliased (thread-join worker) g3e-source g3e-target)))))
+"##,
+        expect_test::expect![[
+            r#""OK (g3e-target (target-local target-local target-global source-bound) target-local target-local)""#
+        ]],
+    );
+}
+
+#[test]
+fn green_kill_and_remake_local_during_backtrace_exchange() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(progn
+  (thread-join (make-thread (lambda () nil)))
+  (defvar g3e-local 'default)
+  (fset 'g3e-local-probe
+        (lambda ()
+          (let ((g3e-local 'bound))
+            (list g3e-local
+                  (backtrace-eval
+                   '(list g3e-local
+                          (progn (kill-local-variable 'g3e-local) g3e-local)
+                          (progn (make-local-variable 'g3e-local)
+                                 (setq g3e-local 'remade) g3e-local))
+                   0 'g3e-local-probe)
+                  g3e-local))))
+  (with-temp-buffer
+    (setq-local g3e-local 'local)
+    (list (g3e-local-probe) g3e-local (local-variable-p 'g3e-local))))
+"##,
+        expect_test::expect![[r#""OK ((bound (local default remade) bound) remade t)""#]],
+    );
+}
+
+/// An admitted worker joins a peer while its backtrace-eval is active.
+/// GNU swaps its live specpdl even while backtrace-eval has exchanged it:
+/// the joined peer therefore sees `bound`. Green suspends bindings inside
+/// the owner and the peer sees `canonical`. This owner-local behaviour is
+/// the documented parallel-Lisp deviation (design-r3 section 9).
+#[test]
+fn green_backtrace_exchange_keeps_the_suspended_binding_owner_local() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    common::assert_oracle_deviation_with_env_expect(
+        r##"
+(progn
+  (defvar g3e-suspended 'canonical)
+  (fset 'g3e-backtrace-yield
+        (lambda ()
+          (let ((g3e-suspended 'bound))
+            (list g3e-suspended
+                  (backtrace-eval
+                   '(list g3e-suspended
+                          (thread-join (make-thread (lambda () g3e-suspended)))
+                          g3e-suspended)
+                   0 'g3e-backtrace-yield)
+                  g3e-suspended))))
+  (thread-join
+   (make-thread (lambda () (list (g3e-backtrace-yield) g3e-suspended)))))
+"##,
+        GREEN_THREADS,
+        expect_test::expect![[r#""OK ((bound (canonical bound canonical) bound) canonical)""#]],
+        r#""OK ((bound (canonical canonical canonical) bound) canonical)""#,
+    );
+}
+
+#[test]
+fn green_cleanup_switches_publish_every_carried_flow_to_peer_gc() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(progn
+(defun g3e-collect-peer ()
+  (thread-join
+   (make-thread (lambda ()
+                  (dotimes (i 300) (make-list 20 i))
+                  (garbage-collect)
+                  'collected))))
+(let ((cleaned nil))
+  (list
+    (unwind-protect (list 'normal (make-string 40 ?n))
+      (push (g3e-collect-peer) cleaned))
+    (catch 'tag
+      (unwind-protect (throw 'tag (list 'thrown (make-string 40 ?t)))
+        (push (g3e-collect-peer) cleaned)))
+    (condition-case err
+        (unwind-protect (signal 'error (list (make-string 40 ?e)))
+          (push (g3e-collect-peer) cleaned))
+      (error err))
+    (let ((only-here (list 'closure (make-string 40 ?c))))
+      (unwind-protect 'body
+        (g3e-collect-peer)
+        (push only-here cleaned)))
+    (catch 'outer
+      (unwind-protect
+          (unwind-protect (throw 'outer 'original)
+            (throw 'outer (list 'replacement (make-string 40 ?r))))
+        (g3e-collect-peer)))
+    (nreverse cleaned)))
+)
+"##,
+        expect_test::expect![[
+            r#""OK ((normal \"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\") (thrown \"tttttttttttttttttttttttttttttttttttttttt\") (error \"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\") body (replacement \"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr\") (collected collected collected (closure \"cccccccccccccccccccccccccccccccccccccccc\")))""#
+        ]],
+    );
+}
+
+#[test]
+fn green_alias_to_a_constant_signals_in_the_resuming_owner() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(progn
+(progn
+  (defvar g3e-source 'source-global)
+
+  (let* ((mutex (make-mutex))
+         (condition (make-condition-variable mutex))
+         (ready nil) (go nil) (worker nil))
+    (mutex-lock mutex)
+    (setq worker
+          (make-thread
+           (lambda ()
+             (let ((g3e-source 'source-bound))
+               (mutex-lock mutex)
+               (setq ready t)
+               (condition-notify condition)
+               (while (not go) (condition-wait condition))
+               (mutex-unlock mutex)
+               (list g3e-source t (default-toplevel-value 'g3e-source) (default-toplevel-value 't))))))
+    (while (not ready) (condition-wait condition))
+    (let ((aliased (defvaralias 'g3e-source 't)))
+      (setq go t)
+      (condition-notify condition)
+      (mutex-unlock mutex)
+      (list aliased (thread-join worker) (thread-last-error t) g3e-source t))))
+
+)
+"##,
+        expect_test::expect![[r#""OK (t nil (setting-constant g3e-source) t t)""#]],
+    );
+}
+
+#[test]
+fn green_alias_to_a_constant_signals_again_when_its_binding_pops() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(progn
+(defvar g3e-source 'source-global)
+(let* ((mutex (make-mutex)) (cv (make-condition-variable mutex))
+       (ready nil) (go nil) (worker nil))
+  (mutex-lock mutex)
+  (setq worker
+        (make-thread
+         (lambda ()
+           (let ((g3e-source 'source-bound))
+             (mutex-lock mutex)
+             (setq ready t)
+             (condition-notify cv)
+             (condition-case e
+                 (progn
+                   (while (not go) (condition-wait cv))
+                   (list 'no-error (mutex-unlock mutex)))
+               (error
+                (list 'caught e
+                      (condition-case e2 (mutex-unlock mutex) (error e2))
+                      g3e-source)))))))
+  (while (not ready) (condition-wait cv))
+  (defvaralias 'g3e-source 't)
+  (setq go t)
+  (condition-notify cv)
+  (mutex-unlock mutex)
+  (list (thread-join worker) (thread-last-error t) g3e-source))
+)
+"##,
+        expect_test::expect![[r#""OK (nil (setting-constant g3e-source) t)""#]],
+    );
+}
+
+#[test]
+fn green_alias_to_a_constant_retakes_the_condition_mutex_before_signalling() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    assert_green_oracle(
+        r##"
+(progn
+(defvar g3e-source 'source-global)
+(let* ((mutex (make-mutex)) (cv (make-condition-variable mutex))
+       (ready nil) (go nil) (caught nil) (worker nil))
+  (mutex-lock mutex)
+  (setq worker
+        (make-thread
+         (lambda ()
+           (condition-case e
+               (let ((g3e-source 'source-bound))
+                 (mutex-lock mutex)
+                 (setq ready t)
+                 (condition-notify cv)
+                 (while (not go) (condition-wait cv))
+                 (mutex-unlock mutex)
+                 'no-error)
+             (error (setq caught e)
+                    (list 'caught e (condition-case e2 (mutex-unlock mutex) (error e2))))))))
+  (while (not ready) (condition-wait cv))
+  (defvaralias 'g3e-source 't)
+  (setq go t)
+  (condition-notify cv)
+  (mutex-unlock mutex)
+  (list (thread-join worker) caught (thread-last-error t) g3e-source))
+)
+"##,
+        expect_test::expect![[
+            r#""OK ((caught (setting-constant g3e-source) nil) (setting-constant g3e-source) nil t)""#
+        ]],
+    );
+}
+
+/// A new local binding made while an older binding is exchanged saves GNU's
+/// original local value. Killing and remaking the local reattaches that saved
+/// restore in GNU; Green keeps the suspended owner's older storage separate.
+/// The exact outputs pin the 3c randomized-admission exclusion as a deliberate
+/// deviation until local binding restoration tracks this exchange history.
+#[test]
+fn green_kill_and_remake_a_local_rebound_inside_backtrace_exchange() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    common::assert_oracle_deviation_with_env_expect(
+        r##"
+(progn
+  (thread-join (make-thread (lambda () nil)))
+  (defvar g3e-local 'default)
+  (fset 'g3e-local-probe
+        (lambda ()
+          (let ((g3e-local 'bound))
+            (list g3e-local
+                  (backtrace-eval
+                   '(let ((g3e-local 'exchange-bound))
+                      (list g3e-local
+                          (progn (kill-local-variable 'g3e-local) g3e-local)
+                          (progn (make-local-variable 'g3e-local)
+                                 (setq g3e-local 'remade) g3e-local)))
+                   0 'g3e-local-probe)
+                  g3e-local))))
+  (with-temp-buffer
+    (setq-local g3e-local 'local)
+    (list (g3e-local-probe) g3e-local (local-variable-p 'g3e-local))))
+"##,
+        GREEN_THREADS,
+        expect_test::expect![[r#""OK ((bound (exchange-bound default remade) bound) local t)""#]],
+        r#""OK ((bound (exchange-bound default remade) bound) remade t)""#,
+    );
+}

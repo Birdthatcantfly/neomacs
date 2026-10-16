@@ -1054,5 +1054,8 @@ fn a_worker_panic_aborts_the_process_and_never_hangs_main() {
     assert_eq!(status.signal(), Some(libc::SIGABRT), "{status:?}");
 }
 
+#[path = "green_two_owner_test.rs"]
+mod two_owner_tests;
+
 #[path = "green_alias_test.rs"]
 mod alias_tests;

@@ -1060,6 +1060,51 @@ pub(crate) fn assert_oracle_divergence_expect(form: &str, expected: expect_test:
     }
 }
 
+/// Pin both sides of a deliberate deviation. GNU's expectation is refreshed
+/// only from the pinned oracle; Neomacs must keep its documented exact answer
+/// under EXTRA_ENV, so an unrelated regression cannot satisfy a divergence pin.
+pub(crate) fn assert_oracle_deviation_with_env_expect(
+    form: &str,
+    extra_env: &[(&str, &str)],
+    gnu_expected: expect_test::Expect,
+    neomacs_expected: &str,
+) {
+    ensure_nonempty_form(form).expect("form should not be empty");
+    let sandbox = oracle_sandbox(form, &[], &project_lisp_dir());
+    let mode = OracleMode::from_env();
+    let oracle = match mode {
+        OracleMode::Snapshot => None,
+        _ => Some(
+            run_oracle_eval_with_sandbox(&sandbox, EvalProgram::Normalized)
+                .expect("oracle eval should run"),
+        ),
+    };
+    if let (OracleMode::Verify | OracleMode::Refresh, Some(oracle)) = (mode, &oracle) {
+        gnu_expected.assert_eq(&inline_expect_payload(oracle));
+    }
+    if mode == OracleMode::Refresh {
+        return;
+    }
+    let neomacs = run_neomacs_binary_eval_with_sandbox(
+        &sandbox.with_extra_env(extra_env),
+        EvalProgram::Normalized,
+    )
+    .expect("neomacs binary eval should run");
+    let neomacs = inline_expect_payload(&neomacs);
+    assert_eq!(
+        neomacs, neomacs_expected,
+        "documented Neomacs behaviour changed"
+    );
+    let gnu = oracle
+        .as_ref()
+        .map(inline_expect_payload)
+        .unwrap_or_else(|| gnu_expected.data().trim().to_owned());
+    assert_ne!(
+        neomacs, gnu,
+        "the pinned deviation now agrees with GNU; replace it with an oracle parity test"
+    );
+}
+
 /// Assert an Org-style workflow result while ignoring only jit-lock's
 /// volatile `fontified' string property.  Other text properties remain exact.
 pub(crate) fn assert_oracle_parity_ignoring_volatile_fontification_expect(
