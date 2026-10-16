@@ -1788,13 +1788,11 @@ fn barrier_gate(owner: TaggedValue) -> bool {
 fn generation_only_cons_is_old(heap: &TaggedHeap, owner: TaggedValue) -> bool {
     let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
     let cur = heap.jit.cons_cur.get();
-    let first = (cur & !(CONS_BLOCK_ALIGN - 1)) | heap.region_book.cons_first_offset as usize;
-    // All handed-out cells of this region are young. Regions close before
-    // every collection/promotion; a reused free-list cell has its old age
-    // cleared before the allocator can reserve it. The zeroed closed range
+    // All cells in this contiguous handed-out prefix are young. Regions
+    // close before every collection/promotion; a reused free-list cell has
+    // its old age cleared before the allocator can reserve it. The closed range
     // is empty. This range proof needs no foreign-pointer metadata access.
-    debug_assert!(first <= cur);
-    if addr.wrapping_sub(first) < cur.wrapping_sub(first) {
+    if handed_young_cons_range_contains(cur, heap.region_book.cons_first_offset, addr) {
         return false;
     }
     let ptr = addr as *const ConsCell;
@@ -1820,6 +1818,18 @@ fn generation_only_cons_is_old(heap: &TaggedHeap, owner: TaggedValue) -> bool {
     // require mutator exclusion, and this leaf has no safe point.
     let trailer = unsafe { ConsBlockTrailer::from_block_base(base) };
     trailer.age_is_old(ConsBlock::index_of_ptr(ptr))
+}
+
+/// Membership in the handed-young half-open interval, without touching the
+/// candidate address. Reversing the distance preserves both endpoints and
+/// foreign-address rejection while avoiding reconstruction of the block base.
+#[inline(always)]
+fn handed_young_cons_range_contains(cur: usize, first_offset: u16, addr: usize) -> bool {
+    let low = cur & (CONS_BLOCK_ALIGN - 1);
+    let first_offset = first_offset as usize;
+    debug_assert!(first_offset <= low);
+    let used = low.wrapping_sub(first_offset);
+    cur.wrapping_sub(addr).wrapping_sub(1) < used
 }
 
 /// Keep registry lookup temporaries inside the map-off fallback. Carrying
@@ -2086,6 +2096,10 @@ pub(crate) fn note_string_interval_preimage(
 #[cfg(test)]
 #[path = "tests/cons_region_young_test.rs"]
 mod cons_region_young_tests;
+
+#[cfg(test)]
+#[path = "tests/handed_young_cons_range_test.rs"]
+mod handed_young_cons_range_tests;
 
 #[cfg(test)]
 #[path = "tests/inline_cons_owner_test.rs"]

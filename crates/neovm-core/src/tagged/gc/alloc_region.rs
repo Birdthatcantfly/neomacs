@@ -38,6 +38,10 @@
 
 use super::*;
 
+#[cfg(test)]
+#[path = "tests/coalesced_cons_young_test.rs"]
+mod coalesced_cons_young_tests;
+
 /// The most cells one cons region takes (2 KiB).
 pub(super) const CONS_REGION_MAX_CELLS: usize = 128;
 /// The most slots one float region takes (2 KiB of slots, 1.5 KiB charged:
@@ -87,9 +91,10 @@ pub(super) struct RegionBook {
     /// region cannot outlive (it closes before every parity flip).
     pub(super) float: FloatRegionSource,
     pub(super) cons_color: RegionColor,
-    /// Low 16 bits of the first handed-out cons in the current region.
-    /// Every cell in `[first, cons_cur)` is young until the region closes
-    /// before collection/promotion. Closed regions have offset and cursor 0.
+    /// Low 16 bits of the first cons in the contiguous handed-young prefix.
+    /// Adjacent grants may extend this prefix; every cell in
+    /// `[first, cons_cur)` stays young until an external close before
+    /// collection/promotion. Closed regions have offset and cursor 0.
     pub(super) cons_first_offset: u16,
 }
 
@@ -155,6 +160,8 @@ impl TaggedHeap {
     #[cold]
     #[inline(never)]
     fn refill_cons_region(&mut self) -> *mut ConsCell {
+        let previous_cur = self.jit.cons_cur.get();
+        let previous_first_offset = self.region_book.cons_first_offset;
         self.close_cons_region();
         let want = self.region_budget(size_of::<ConsCell>(), CONS_REGION_MAX_CELLS);
         let (first, n, source) = self.reserve_cons_run(want);
@@ -197,7 +204,16 @@ impl TaggedHeap {
         stats.cons_cells_granted += n as u64;
         stats.cons_short_runs += u64::from(n < 8);
         let first_addr = first as usize;
-        self.region_book.cons_first_offset = (first_addr & (CONS_BLOCK_ALIGN - 1)) as u16;
+        // No collection or callback occurs between closing and granting.
+        // An adjacent run extends the already handed-young prefix; a gap,
+        // block rollover or external close starts a new one. Only this
+        // barrier offset coalesces: black births and charges stay per grant.
+        // A payload ends below its block boundary, so equality cannot bridge blocks.
+        self.region_book.cons_first_offset = if previous_cur != 0 && first_addr == previous_cur {
+            previous_first_offset
+        } else {
+            (first_addr & (CONS_BLOCK_ALIGN - 1)) as u16
+        };
         self.jit.cons_cur.set(first_addr + size_of::<ConsCell>());
         self.jit
             .cons_lim
