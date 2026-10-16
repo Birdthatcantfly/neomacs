@@ -94,8 +94,8 @@ const _: () = assert!(CONS_CDR_OFFSET >= TAG_CONS);
 // ---------------------------------------------------------------------------
 
 /// The compile's obarray and runtime projection mask, borrowed for its scope.
-/// Keep the original field pointers: publishing a whole Context pointer in TLS
-/// would widen interprocedural alias analysis in unrelated Sim call paths.
+/// Keep the original field-pointer domains; Green mode uses the existing
+/// discriminant space without retaining an additional Context pointer.
 #[derive(Clone, Copy)]
 struct CompileEnv {
     obarray: *const Obarray,

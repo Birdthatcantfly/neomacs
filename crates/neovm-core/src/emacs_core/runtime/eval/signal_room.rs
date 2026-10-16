@@ -126,7 +126,7 @@ impl Context {
     #[inline(never)]
     fn set_signal_depth_integer(&mut self, id: SymId, value: i64) {
         if self.obarray.thread_projection_of(id).is_some() {
-            self.store_owner_signal_depth_integer(id, LispInteger::from_i64(value).value());
+            self.store_owner_signal_depth_integer(id, LispInteger::from_i64(value));
             return;
         }
         let cell = self.signal_depth_localized_cell(id);

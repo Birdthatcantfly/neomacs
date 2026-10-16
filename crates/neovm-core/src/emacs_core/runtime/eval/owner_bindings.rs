@@ -27,7 +27,7 @@ use super::{Context, NativeUnwindAction, SpecBinding};
 use crate::buffer::{BufferId, BufferManager};
 use crate::emacs_core::error::Flow;
 use crate::emacs_core::forward::{
-    CanonicalArm, LispBoolFwd, LispBufferObjFwd, ThreadProjectionDescriptor, TlsIndex,
+    CanonicalArm, LispBoolFwd, LispBufferObjFwd, LispInteger, ThreadProjectionDescriptor, TlsIndex,
 };
 use crate::emacs_core::intern::SymId;
 use crate::emacs_core::symbol::{CanonicalAccess, SetInternalBind};
@@ -2083,13 +2083,16 @@ impl Context {
         Some((base, self.obarray.thread_projection_of(base)?))
     }
 
-    /// Signal-time evaluator room writes the active native integer binding
-    /// directly, without watchers or creation of an automatic local. After
-    /// admission that binding can belong to this owner's current channel;
-    /// the canonical integer forwarder is hidden behind its projection.
+    /// Signal-time native integer storage only: no watchers, automatic locals,
+    /// generic forwarder dispatch, or host mirror callbacks. The caller updates
+    /// max_depth after completing the paired depth/reserve stores.
     #[cold]
     #[inline(never)]
-    pub(super) fn store_owner_signal_depth_integer(&mut self, id: SymId, value: Value) {
+    pub(super) fn store_owner_signal_depth_integer(&mut self, id: SymId, value: LispInteger) {
+        debug_assert!(
+            id == super::max_lisp_eval_depth_symbol()
+                || id == super::lisp_eval_depth_reserve_symbol()
+        );
         let projection = self
             .obarray
             .thread_projection_of(id)
@@ -2104,11 +2107,38 @@ impl Context {
             self.owner
                 .slab_mut()
                 .expect("the active owner binding")
-                .set_slot(index, channel, SlotState::Bound(SlotValue::new(value)));
-        } else {
-            self.owner_canonical_store(id, channel, value);
+                .set_slot(
+                    index,
+                    channel,
+                    SlotState::Bound(SlotValue::new(value.value())),
+                );
+            return;
         }
-        self.publish_owner_binding(id);
+        let (forwarder, cell) = match projection.arm() {
+            CanonicalArm::Forwarded(builtin) => (builtin.descriptor(), None),
+            CanonicalArm::Localized(blv) => {
+                // SAFETY: the projection names its obarray's live pooled BLV;
+                // only the retained forwarder and default cons are copied.
+                let blv = unsafe { &*blv.blv().as_ptr() };
+                let cell = match channel {
+                    Channel::Default => blv.defcell,
+                    Channel::BufferLocal(buffer) => self
+                        .buffers
+                        .get(buffer)
+                        .and_then(|buffer| buffer.local_variable_binding_cell(id))
+                        .expect("the selected local depth binding"),
+                };
+                (blv.fwd.expect("native depth forwarder"), Some(cell))
+            }
+            CanonicalArm::Plain => unreachable!("native depth variable retains its forwarder"),
+        };
+        forwarder
+            .as_int_fwd()
+            .expect("native depth variable has integer storage")
+            .set(value);
+        if let Some(cell) = cell {
+            cell.set_cdr(value.value());
+        }
     }
 
     /// [`Context::store_variable`] of a projected cell.
