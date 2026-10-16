@@ -1414,18 +1414,22 @@ impl Context {
         &mut self,
         run: impl FnOnce(&mut Self) -> EvalResult,
     ) -> EvalResult {
+        // Copy the local fields: another whole-enum Clone caller would change
+        // LTO's inlining of the existing unwind path.
         let preserved: Vec<_> = self
             .specpdl
             .iter()
             .enumerate()
             .filter_map(|(position, binding)| match binding {
                 SpecBinding::LetLocal {
-                    sym_id, buffer_id, ..
+                    sym_id,
+                    old_value,
+                    buffer_id,
                 } if self
                     .local_binding_value_for_thread_switch(*sym_id, *buffer_id)
                     .is_none() =>
                 {
-                    Some((position, binding.clone()))
+                    Some((position, *sym_id, *old_value, *buffer_id))
                 }
                 _ => None,
             })
@@ -1435,26 +1439,25 @@ impl Context {
         }
 
         let mut roots = UnwindVmRootsScope::enter(self);
-        for (_, binding) in &preserved {
-            if let SpecBinding::LetLocal {
-                sym_id, old_value, ..
-            } = binding
-            {
-                roots
-                    .context()
-                    .push_vm_frame_root(Value::from_sym_id(*sym_id));
-                roots.context().push_vm_frame_root(*old_value);
-            }
+        for &(_, sym_id, old_value, _) in &preserved {
+            roots
+                .context()
+                .push_vm_frame_root(Value::from_sym_id(sym_id));
+            roots.context().push_vm_frame_root(old_value);
         }
         let result = run(roots.context());
         // Entry can fail after earlier local entries were zapped. Restore
         // those copies on the error path too, without replacing any live
         // entry the simulated worker's own execution may have left behind.
-        for (position, saved) in preserved {
+        for (position, sym_id, old_value, buffer_id) in preserved {
             if let Some(binding) = roots.context().specpdl.get_mut(position)
                 && matches!(binding, SpecBinding::Nop)
             {
-                *binding = saved;
+                *binding = SpecBinding::LetLocal {
+                    sym_id,
+                    old_value,
+                    buffer_id,
+                };
             }
         }
         roots.finish();
