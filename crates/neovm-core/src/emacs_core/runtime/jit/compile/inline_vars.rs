@@ -93,23 +93,29 @@ const _: () = assert!(CONS_CDR_OFFSET >= TAG_CONS);
 // The compile environment
 // ---------------------------------------------------------------------------
 
-/// The dormant compile's Context and its runtime projection mask. The Context
-/// owns the obarray and the stable World mode; borrowing those through this
-/// pointer needs no extra TLS word. Both pointers last only for their
-/// [`CompileEnvScope`], while the Context is live and unmoved.
+/// The compile's obarray and runtime projection mask, borrowed for its scope.
+/// Keep the original field pointers: publishing a whole Context pointer in TLS
+/// would widen interprocedural alias analysis in unrelated Sim call paths.
 #[derive(Clone, Copy)]
 struct CompileEnv {
-    context: *const Context,
+    obarray: *const Obarray,
     projection: *const [u64],
 }
-// Keep the original obarray-pointer + projection-slice layout, including its
-// Option discriminant. Growing this TLS cell would move unrelated Sim hot
-// state at FS offsets even though only cold compilation uses this environment.
+
+/// The existing Option discriminant also carries the stable World mode. This
+/// avoids both an extra TLS word and a whole-Context pointer escaping to TLS.
+#[derive(Clone, Copy)]
+enum CompileEnvState {
+    Absent,
+    Sim(CompileEnv),
+    Green(CompileEnv),
+}
 static_assertions::assert_eq_size!(CompileEnv, (*const Obarray, *const [u64]));
-static_assertions::assert_eq_size!(Option<CompileEnv>, Option<(*const Obarray, *const [u64])>);
+static_assertions::assert_eq_size!(CompileEnvState, Option<(*const Obarray, *const [u64])>);
+static_assertions::assert_eq_align!(CompileEnvState, Option<(*const Obarray, *const [u64])>);
 
 thread_local! {
-    static ENV: Cell<Option<CompileEnv>> = const { Cell::new(None) };
+    static ENV: Cell<CompileEnvState> = const { Cell::new(CompileEnvState::Absent) };
     /// The function being lowered: for each `unbind` pc, the symbols its
     /// bindings bound, top first (`None`: not a `varbind`, or not the same
     /// symbol on every path). Set by [`begin_function`].
@@ -123,7 +129,7 @@ thread_local! {
 #[must_use = "the environment lasts as long as the scope"]
 #[derive(Debug)]
 pub(crate) struct CompileEnvScope {
-    _scope: crate::tls_scope::TlsScope<Option<CompileEnv>, Cell<Option<CompileEnv>>>,
+    _scope: crate::tls_scope::TlsScope<CompileEnvState, Cell<CompileEnvState>>,
 }
 static_assertions::assert_not_impl_any!(CompileEnvScope: Send, Sync);
 
@@ -132,19 +138,28 @@ impl CompileEnvScope {
     /// CTX must stay alive and its obarray and mask unmoved while the scope
     /// lives: the dormant seam-provided context of a compile.
     pub(crate) fn enter(ctx: *const Context) -> Self {
-        let env = (!ctx.is_null())
-            .then(|| {
-                // SAFETY: the caller's contract above.
-                let ctx = unsafe { &*ctx };
-                let green = ctx.threading_mode() == crate::emacs_core::eval::ThreadingMode::Green;
-                (jit_inline_vars().any() || green).then(|| CompileEnv {
-                    context: std::ptr::from_ref(ctx),
+        let state = if ctx.is_null() {
+            CompileEnvState::Absent
+        } else {
+            // SAFETY: the caller's contract above.
+            let ctx = unsafe { &*ctx };
+            let green = ctx.threading_mode() == crate::emacs_core::eval::ThreadingMode::Green;
+            if jit_inline_vars().any() || green {
+                let env = CompileEnv {
+                    obarray: std::ptr::from_ref(&ctx.obarray),
                     projection: std::ptr::from_ref(ctx.runtime_projection_mask()),
-                })
-            })
-            .flatten();
+                };
+                if green {
+                    CompileEnvState::Green(env)
+                } else {
+                    CompileEnvState::Sim(env)
+                }
+            } else {
+                CompileEnvState::Absent
+            }
+        };
         Self {
-            _scope: crate::tls_scope::TlsScope::new(&ENV, env),
+            _scope: crate::tls_scope::TlsScope::new(&ENV, state),
         }
     }
 }
@@ -153,22 +168,23 @@ impl CompileEnvScope {
 /// retier and OSR compiles lend this scope; the backend worker only sees CLIF.
 /// Frontend classification and lowering run without Lisp, a callback, GC or a
 /// Baton handoff, so the current epoch cannot change between the arithmetic
-/// binding proof and this guard emission. No epoch or mode is cached in TLS.
-/// Sim and context-free/AOT compiles retain the original arithmetic emission.
+/// binding proof and this guard emission. Sim and context-free/AOT compiles
+/// retain the original arithmetic emission.
 pub(super) fn green_function_epoch() -> Option<u64> {
-    let env = ENV.with(Cell::get)?;
-    // SAFETY: the scope retains its original dormant, unmoved Context.
-    let context = unsafe { &*env.context };
-    (context.threading_mode() == crate::emacs_core::eval::ThreadingMode::Green)
-        .then(|| context.obarray.function_epoch())
+    let CompileEnvState::Green(env) = ENV.with(Cell::get) else {
+        return None;
+    };
+    // SAFETY: the scope retains the original dormant, unmoved obarray.
+    Some(unsafe { &*env.obarray }.function_epoch())
 }
 
 fn with_env<R>(f: impl FnOnce(&Obarray, &[u64]) -> Option<R>) -> Option<R> {
-    let env = ENV.with(Cell::get)?;
-    // SAFETY: `CompileEnvScope::enter`'s contract retains the Context, its
-    // obarray and the projection slice through this noncalling read.
-    let context = unsafe { &*env.context };
-    f(&context.obarray, unsafe { &*env.projection })
+    let env = match ENV.with(Cell::get) {
+        CompileEnvState::Absent => return None,
+        CompileEnvState::Sim(env) | CompileEnvState::Green(env) => env,
+    };
+    // SAFETY: `CompileEnvScope::enter`'s contract.
+    f(unsafe { &*env.obarray }, unsafe { &*env.projection })
 }
 
 // ---------------------------------------------------------------------------
@@ -428,7 +444,7 @@ pub(crate) fn begin_function(ops: &[Op], constants: &[Value], cfg: &Cfg, aot: bo
         sites.clear();
         if !aot
             && jit_inline_vars().bind
-            && ENV.with(Cell::get).is_some()
+            && !matches!(ENV.with(Cell::get), CompileEnvState::Absent)
             && ops.iter().any(|op| matches!(op, Op::Unbind(_)))
         {
             *sites = unbind_sites(ops, constants, cfg);
