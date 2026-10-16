@@ -1294,3 +1294,240 @@ fn green_yield_jit_enabled_switch_micro() {
     );
     context.green_teardown();
 }
+
+std::thread_local! {
+    /// Each Lisp owner measures only its own completed ticks. Scalar test
+    /// metadata stays on that owner's OS thread and never enters the World.
+    static TGT_TICKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn throughput_tick(context: &mut Context) -> EvalResult {
+    require_native()?;
+    if context.threading_mode() == ThreadingMode::Green {
+        context.apply(Value::symbol("thread-yield"), Vec::new())?;
+        require_native()?;
+    }
+    TGT_TICKS.with(|ticks| ticks.set(ticks.get() + 1));
+    Ok(Value::NIL)
+}
+
+fn throughput_helper_witness(_context: &mut Context) -> EvalResult {
+    require_native()?;
+    Ok(Value::fixnum(7))
+}
+
+/// This owner builds and warms both leaves in its own TLS. The tiny helper
+/// contains a call so the loop cannot inline it; every measured tick calls
+/// its independently compiled leaf after returning from thread-yield.
+fn throughput_worker(context: &mut Context) -> EvalResult {
+    let _jit = JitFixtureScope::enter();
+    let _profit = ProfitFixtureScope::enter();
+    let _background =
+        crate::emacs_core::jit::bg::TestModeScope::enter(crate::emacs_core::jit::bg::BgMode::Sync);
+    let function = context.obarray.symbol_function("tgt-loop").unwrap();
+    let helper = context.obarray.symbol_function("tgt-helper").unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            context.apply(function, vec![Value::fixnum(0)])?,
+            Value::fixnum(0)
+        );
+        assert_eq!(context.apply(helper, Vec::new())?, Value::fixnum(7));
+    }
+    let loop_id = function
+        .get_bytecode_data()
+        .unwrap()
+        .jit_runtime()
+        .compiled_id()
+        .unwrap();
+    let helper_id = helper
+        .get_bytecode_data()
+        .unwrap()
+        .jit_runtime()
+        .compiled_id()
+        .unwrap();
+    let loop_before =
+        cache::compiled_leaf_ptr_for_test(loop_id).expect("loop warmed on this owner");
+    let helper_before =
+        cache::compiled_leaf_ptr_for_test(helper_id).expect("helper warmed on this owner");
+    let before = crate::emacs_core::jit::stats::compile_stats_snapshot();
+    TGT_TICKS.with(|ticks| ticks.set(0));
+    let n = context.visible_variable_value_or_nil("tgt-iterations");
+    let stride = context
+        .visible_variable_value_or_nil("tgt-stride")
+        .as_fixnum()
+        .unwrap();
+    let answer = context.apply(function, vec![n])?;
+    let after = crate::emacs_core::jit::stats::compile_stats_snapshot();
+    let same_leaf = cache::compiled_leaf_ptr_for_test(loop_id) == Some(loop_before)
+        && cache::compiled_leaf_ptr_for_test(helper_id) == Some(helper_before);
+    let ticks = TGT_TICKS.with(std::cell::Cell::get);
+    let green = context.threading_mode() == ThreadingMode::Green;
+    let iterations = n.as_fixnum().unwrap();
+    eprintln!(
+        concat!(
+            "TGT_WITNESS {{\"owner\":{},\"mode\":\"{}\",",
+            "\"compile_before\":{},\"compile_after\":{},",
+            "\"retiers_before\":{},\"retiers_after\":{},",
+            "\"deopts_before\":{},\"deopts_after\":{},",
+            "\"same_leaf\":{},\"successful_iterations\":{},",
+            "\"yield_count\":{},\"tick_count\":{},\"stride\":{}}}"
+        ),
+        context.context_instance_id,
+        if green { "green" } else { "sim" },
+        before.total_compiles,
+        after.total_compiles,
+        before.retiers,
+        after.retiers,
+        before.deopts(),
+        after.deopts(),
+        same_leaf,
+        answer.as_fixnum().unwrap(),
+        if green { ticks } else { 0 },
+        ticks,
+        stride,
+    );
+    assert_eq!(answer, n, "all loop iterations completed in compiled code");
+    assert_eq!(ticks, (iterations / stride) as u64);
+    assert!(
+        same_leaf,
+        "Baton switches retain each owner's loop/helper leaves"
+    );
+    assert_eq!(
+        after.total_compiles, before.total_compiles,
+        "steady execution never recompiles"
+    );
+    assert_eq!(
+        after.retiers, before.retiers,
+        "steady execution never retiers"
+    );
+    assert_eq!(
+        after.deopts(),
+        before.deopts(),
+        "steady execution never tiers down"
+    );
+    Ok(answer)
+}
+
+fn throughput_loop(stride: usize) -> ByteCodeFunction {
+    bytecode(
+        vec![
+            Op::Constant(0),
+            Op::Constant(1),
+            // [limit, index, next_tick]. Both paths return to this header.
+            Op::StackRef(1),
+            Op::StackRef(3),
+            Op::Lss,
+            Op::GotoIfNil(22),
+            Op::StackRef(1),
+            Op::Add1,
+            Op::StackSet(2),
+            Op::StackRef(1),
+            Op::StackRef(1),
+            Op::Eqlsign,
+            Op::GotoIfNil(2),
+            Op::Constant(2),
+            Op::Call(0),
+            Op::Pop,
+            Op::Constant(3),
+            Op::Call(0),
+            Op::Pop,
+            Op::Constant(1),
+            Op::Add,
+            Op::Goto(2),
+            Op::Pop,
+            Op::Return,
+        ],
+        vec![
+            Value::fixnum(0),
+            Value::fixnum(stride as i64),
+            Value::symbol("tgt-tick"),
+            Value::symbol("tgt-helper"),
+        ],
+        FixtureArity::Unary,
+    )
+}
+
+fn run_throughput(mode: ThreadingMode, n: usize, stride: usize) {
+    crate::test_utils::init_test_tracing();
+    assert!(stride > 0);
+    assert!(n <= Value::MOST_POSITIVE_FIXNUM as usize);
+    assert!(stride <= Value::MOST_POSITIVE_FIXNUM as usize);
+    let _jit = JitFixtureScope::enter();
+    let _profit = ProfitFixtureScope::enter();
+    let mut context = Context::new_with_threading(mode);
+    context.set_lexical_binding(true);
+    context.register_subr(SubrSpec::fixed0("tgt-worker", throughput_worker));
+    context.register_subr(SubrSpec::fixed0("tgt-tick", throughput_tick));
+    context.register_subr(SubrSpec::fixed0(
+        "tgt-helper-witness",
+        throughput_helper_witness,
+    ));
+    install(&mut context, "tgt-loop", throughput_loop(stride));
+    install(
+        &mut context,
+        "tgt-helper",
+        bytecode(
+            vec![Op::Constant(0), Op::Call(0), Op::Return],
+            vec![Value::symbol("tgt-helper-witness")],
+            FixtureArity::Nullary,
+        ),
+    );
+    context.set_variable("tgt-iterations", Value::fixnum(n as i64));
+    context.set_variable("tgt-stride", Value::fixnum(stride as i64));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if mode == ThreadingMode::Green {
+            assert_value(
+                &mut context,
+                "(let ((first (make-thread #'tgt-worker))
+                       (second (make-thread #'tgt-worker)))
+                   (list (thread-join first) (thread-join second)))",
+                &format!("({n} {n})"),
+            );
+        } else {
+            assert_value(
+                &mut context,
+                "(list (tgt-worker) (tgt-worker))",
+                &format!("({n} {n})"),
+            );
+        }
+    }));
+    context.green_teardown();
+    assert!(context.specpdl.is_empty());
+    assert_eq!(context.jit_root_stack_top, 0);
+    assert_eq!(cache::native_depth(), 0);
+    if let Err(payload) = result {
+        resume_unwind(payload);
+    }
+}
+
+fn throughput_parameters() -> (usize, usize) {
+    let parameter = |name, fallback| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(fallback)
+    };
+    (
+        parameter("TGT_MICRO_N", 100_000),
+        parameter("TGT_MICRO_YIELD_EVERY", 1000),
+    )
+}
+
+#[test]
+#[ignore = "callgrind throughput micro; run explicitly"]
+fn green_jit_two_thread_throughput_micro() {
+    let (n, stride) = throughput_parameters();
+    run_throughput(ThreadingMode::Green, n, stride);
+}
+
+#[test]
+#[ignore = "callgrind throughput micro; run explicitly"]
+fn sim_jit_two_loop_throughput_micro() {
+    let (n, stride) = throughput_parameters();
+    run_throughput(ThreadingMode::Sim, n, stride);
+}
+
+#[test]
+fn green_jit_two_compiled_loops_keep_leaves_without_recompile_or_deopt() {
+    run_throughput(ThreadingMode::Green, 2000, 1000);
+}
