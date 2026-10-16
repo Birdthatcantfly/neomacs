@@ -555,6 +555,29 @@ fn recycling_refuses_old_control_and_payload_observers_without_unrooting() {
     assert_eq!(roots(&heap), vec![value]);
     let (lease, _) = failure.into_parts();
     drop(old_payload);
+    let weak_control = Arc::downgrade(&lease.ownership.as_ref().unwrap().control);
+    let failure = lease.try_recycle().unwrap_err();
+    assert!(matches!(failure.error(), RootBatchError::NonUniquePayload));
+    assert_eq!(roots(&heap), vec![value]);
+    let (lease, _) = failure.into_parts();
+    assert!(weak_control.upgrade().is_some());
+    drop(weak_control);
+    let weak_payload = Arc::downgrade(
+        lease
+            .ownership
+            .as_ref()
+            .unwrap()
+            .control
+            .payload
+            .get()
+            .unwrap(),
+    );
+    let failure = lease.try_recycle().unwrap_err();
+    assert!(matches!(failure.error(), RootBatchError::NonUniquePayload));
+    assert_eq!(roots(&heap), vec![value]);
+    let (lease, _) = failure.into_parts();
+    assert!(weak_payload.upgrade().is_some());
+    drop(weak_payload);
     let prepared = lease.try_recycle().unwrap();
     assert!(roots(&heap).is_empty());
     drop(prepared);
