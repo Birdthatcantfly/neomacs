@@ -951,9 +951,9 @@ impl Context {
                 SlotState::Bound(outer) => UndoTarget::Previous(outer),
                 SlotState::NoBinding => UndoTarget::Inherited { suspended: None },
             };
-            // Rust Vec growth cannot collect Lisp values or run Lisp. The
-            // old slot value remains in OLD until its record owns it, and
-            // the slab already roots VALUE before either stack can grow.
+            // Native page/Vec growth cannot execute Lisp, reach a GC
+            // safepoint, or hand off the Baton. Once pushed, the record
+            // roots the new slot and any prior binding it must restore.
             let record =
                 slab.push_record(resolved, index, BindingKind::Let, Channel::Default, undo);
             self.push_specpdl_with(|| SpecBinding::NativeUnwind {
@@ -1169,21 +1169,8 @@ impl Context {
             return Ok(());
         };
         let watched = self.watchers.has_watchers(record.sym);
-        // The common case: an unwatched default binding is one slot store.
-        if !watched && record.channel == Channel::Default {
-            let state = match record.undo {
-                UndoTarget::Previous(outer) => Some(SlotState::Bound(outer)),
-                UndoTarget::Inherited { .. } => Some(SlotState::NoBinding),
-                UndoTarget::Captured(_) | UndoTarget::Retired => None,
-            };
-            if let Some(state) = state
-                && let Some(slab) = self.owner.slab_mut()
-            {
-                slab.replace_default_slot(record.index, state);
-                self.publish_owner_binding(record.sym);
-                return Ok(());
-            }
-        }
+        // The entry wrapper already consumed every unwatched default
+        // Previous/Inherited binding. Only full-record cases reach here.
         let Some(projection) = self.obarray.thread_projection_of(record.sym) else {
             // `defvaralias` retired the projection; the alias resolves to its
             // base, which holds no binding of this owner.
