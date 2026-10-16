@@ -8,6 +8,101 @@ use crate::tagged::transport::{collect_shared_root_gc_roots, root_table_is_alive
 const OWNERS: usize = 4;
 
 #[test]
+fn a_synchronous_collector_extent_cannot_yield_its_green_owner() {
+    let mut owner = green();
+    eval(
+        &mut owner,
+        "(progn
+           (setq p3b-driver-peer-ran nil)
+           (setq p3b-driver-peer
+             (make-thread (lambda () (setq p3b-driver-peer-ran t)))))",
+    );
+    assert_eq!(owner.gc_inhibit_depth, 0);
+    owner.gc_driver_active = true;
+    let refused = owner.green_thread_yield(&[]);
+    owner.gc_driver_active = false;
+    assert!(refused.is_err());
+    assert!(
+        owner
+            .visible_variable_value_or_nil("p3b-driver-peer-ran")
+            .is_nil()
+    );
+    assert!(owner.with_green_runtime(|runtime| runtime.parked.borrow().is_empty()));
+    assert_eq!(eval(&mut owner, "(thread-join p3b-driver-peer)"), "t");
+    assert!(
+        owner
+            .visible_variable_value_or_nil("p3b-driver-peer-ran")
+            .is_truthy()
+    );
+}
+
+#[test]
+fn restored_owner_retirement_leaves_cooperative_sweep_pending() {
+    let mut owner = green();
+    let baton = owner.start_green_runtime().expect("start Green era");
+    let root = Value::string("restored owner during deferred sweep");
+    owner.push_vm_root_frame();
+    owner.push_vm_frame_root(root);
+    let prepared = baton.prepare_parked_batch(&owner.tagged_heap, 1).unwrap();
+    // SAFETY: the sole admitted owner retains this same-heap value in its VM
+    // frame; filling and publication cannot collect or hand the Baton off.
+    let publication = unsafe { prepared.finalize(&[root]) }
+        .unwrap()
+        .publish()
+        .unwrap();
+    if owner.tagged_heap.generational_enabled() {
+        assert!(!owner.tagged_heap.value_is_old_for_test(root));
+        owner.tagged_heap.begin_minor_collection();
+    } else {
+        owner.tagged_heap.begin_stw_collection();
+    }
+    let heap: *mut crate::tagged::gc::TaggedHeap = &mut *owner.tagged_heap;
+    // SAFETY: this fixture owns the Baton without any other owner, callback,
+    // collector or handoff. Enumerate the complete current Context, symbol
+    // cells and publication table before finishing this stopped mark extent.
+    unsafe { owner.seed_registered_mutator_roots_world_stopped(heap) };
+    owner.tagged_heap.incremental_drain_all();
+    let bytes = owner.tagged_heap.live_bytes();
+    owner
+        .tagged_heap
+        .incremental_finish(bytes, std::time::Instant::now());
+    assert!(!owner.tagged_heap.mark_in_progress());
+    assert!(owner.tagged_heap.sweep_in_progress());
+
+    // Even an otherwise safe pending sweep cannot authorize retirement from
+    // inside a synchronous driver extent. Refusal leaves publication intact.
+    owner.gc_driver_active = true;
+    let refused = owner.prepare_parked_root_retirement();
+    owner.gc_driver_active = false;
+    assert!(refused.is_err());
+    let mut roots = Vec::new();
+    collect_shared_root_gc_roots(&owner.tagged_heap, &mut roots);
+    assert_eq!(roots, vec![root]);
+    assert!(owner.tagged_heap.sweep_in_progress());
+
+    owner.prepare_parked_root_retirement().unwrap();
+    let prepared = publication.try_recycle().unwrap();
+    assert!(owner.tagged_heap.sweep_in_progress());
+    roots.clear();
+    collect_shared_root_gc_roots(&owner.tagged_heap, &mut roots);
+    assert!(roots.is_empty());
+    owner.tagged_heap.finish_incremental_sweep_now();
+    assert_eq!(
+        print_value(&root),
+        "\"restored owner during deferred sweep\""
+    );
+    eval(&mut owner, "(garbage-collect)");
+    assert_eq!(
+        print_value(&root),
+        "\"restored owner during deferred sweep\""
+    );
+    drop(prepared);
+    owner.pop_vm_root_frame();
+    drop(baton);
+    assert!(!owner.tagged_heap.facade_mark_is_excluded());
+}
+
+#[test]
 fn a_busy_recycle_failure_is_explicitly_finished_without_abandoning_its_lease() {
     use crate::tagged::transport::{RootBatchError, with_root_table_lock_for_test};
     use std::sync::{Arc, Condvar, Mutex};

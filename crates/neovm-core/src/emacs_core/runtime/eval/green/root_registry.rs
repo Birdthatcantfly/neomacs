@@ -3,7 +3,9 @@
 use crate::tagged::gc::QuiescentCollector;
 use crate::tagged::transport::{RootBatchError, RootBatchFinishFailure, RootBatchLease};
 
-/// The caller has restored or terminated the owner and drained its collector.
+/// The caller has restored the owner with no active mark, concurrent marker or
+/// synchronous collection extent; a completed mark's cooperative sweep may
+/// remain. Terminated-owner callers instead hold full collector quiescence.
 /// SharedRoot retirement/registration on another host thread can briefly own
 /// the same table lock. Retry that contention without dropping the lease.
 pub(super) fn finish(mut publication: RootBatchLease) -> Result<(), RootBatchFinishFailure> {

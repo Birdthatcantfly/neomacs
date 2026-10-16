@@ -529,6 +529,67 @@ fn restored_batch_reuses_control_payload_and_words_with_a_new_generation() {
 }
 
 #[test]
+fn restored_batch_retirement_preserves_deferred_sweep_and_owner_roots() {
+    for recycle in [false, true] {
+        let mut heap = TaggedHeap::new();
+        let exclusion = exclude_fresh(&mut heap);
+        let child = heap.alloc_float(19.5);
+        let parent = heap.alloc_cons(child, TaggedValue::NIL);
+        let garbage = heap.alloc_float(20.5);
+        let lease = publish(&heap, &exclusion, &[parent]);
+
+        // This sole owner executes the whole mark extent, including every
+        // explicit table reader. GEN1 exercises a young minor survivor;
+        // GEN0 uses the same deferred sweep after a full stopped-world mark.
+        if heap.generational_enabled() {
+            assert!(!heap.value_is_old_for_test(parent));
+            heap.begin_minor_collection();
+        } else {
+            heap.begin_stw_collection();
+        }
+        for root in roots(&heap) {
+            heap.seed_root(root);
+        }
+        heap.incremental_drain_all();
+        heap.incremental_finish(heap.live_bytes(), std::time::Instant::now());
+        assert!(!heap.mark_in_progress());
+        assert!(heap.sweep_in_progress());
+
+        // Returning the owner's continuation restores this ordinary root.
+        // No synchronous collection extent or reader remains. The held epoch
+        // excludes a concurrent marker; the pending sweep uses final marks,
+        // never the now-restored owner's publication.
+        let restored = [parent];
+        let prepared = if recycle {
+            Some(lease.try_recycle().unwrap())
+        } else {
+            lease.try_finish().unwrap();
+            None
+        };
+        assert!(roots(&heap).is_empty());
+        assert!(heap.sweep_in_progress(), "retirement must not drain sweep");
+        heap.finish_incremental_sweep_now();
+        assert!(heap.owns_heap_value_for_test(parent));
+        assert!(heap.owns_heap_value_for_test(child));
+        assert!(!heap.owns_heap_value_for_test(garbage));
+        assert_eq!(parent.cons_car().xfloat(), 19.5);
+
+        // The next root census reads the restored owner, without the retired
+        // table entry. Both its direct root and transitive child survive.
+        heap.collect_exact(restored.into_iter());
+        assert!(heap.owns_heap_value_for_test(parent));
+        assert!(heap.owns_heap_value_for_test(child));
+        assert_eq!(parent.cons_car().xfloat(), 19.5);
+        drop(prepared);
+        drop(exclusion);
+        assert!(!heap.facade_mark_is_excluded());
+        heap.collect_exact(std::iter::empty());
+        assert!(!heap.owns_heap_value_for_test(parent));
+        assert!(!heap.owns_heap_value_for_test(child));
+    }
+}
+
+#[test]
 fn recycling_refuses_old_control_and_payload_observers_without_unrooting() {
     let mut heap = TaggedHeap::new();
     let exclusion = exclude_fresh(&mut heap);

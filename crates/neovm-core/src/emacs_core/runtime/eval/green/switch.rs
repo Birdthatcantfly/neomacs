@@ -75,6 +75,8 @@ impl std::fmt::Debug for GreenSeat {
 fn switch_refusal(ctx: &Context) -> Option<&'static str> {
     if ctx.gc_inhibit_depth != 0 {
         Some("Cannot switch threads while garbage collection is inhibited")
+    } else if ctx.gc_driver_active {
+        Some("Cannot switch threads while a collection driver is active")
     } else if super::super::super::dynamic_module::module_call_active() {
         Some("Cannot switch threads inside a module call")
     } else {
@@ -553,7 +555,7 @@ impl Context {
 
     /// KEY runs again: its roots are its own Context's once more.
     fn retire_parked_roots(&mut self, key: ThreadKey) -> Result<(), Flow> {
-        self.quiesce_parked_collector()?;
+        self.prepare_parked_root_retirement()?;
         let publication = self
             .with_green_runtime(|runtime| runtime.parked.borrow_mut().remove(&key))
             .expect("each returning owner has a parked batch");
@@ -579,7 +581,7 @@ impl Context {
         if !self.with_green_runtime(|runtime| runtime.parked.borrow().contains_key(&key)) {
             return Ok(());
         }
-        self.quiesce_parked_collector()?;
+        self.prepare_parked_root_retirement()?;
         let retained = self.with_green_runtime(|runtime| runtime.parked.borrow_mut().remove(&key));
         match retained {
             Some(publication) => self.finish_restored_publication(key, publication),
@@ -604,9 +606,31 @@ impl Context {
         }
     }
 
-    /// Mint quiescence only after the restored owner has completed both mark
-    /// and sweep. Keep publications rooted throughout the complete drain.
-    fn quiesce_parked_collector(&mut self) -> Result<(), Flow> {
+    /// A restored owner may retire its duplicate publication during a pending
+    /// sweep: marking has finished, and sweep never reads root tables. Keep
+    /// every other collector state on the complete drain and validation path.
+    pub(super) fn prepare_parked_root_retirement(&mut self) -> Result<(), Flow> {
+        // switch_refusal prevents any owner from parking a synchronous driver
+        // extent. Defend that proof here too, before retirement or a drain.
+        if self.gc_driver_active {
+            return Err(signal(
+                "error",
+                vec![Value::string(
+                    "Cannot retire parked roots while a collection driver is active",
+                )],
+            ));
+        }
+        if self.tagged_heap.sweep_in_progress()
+            && !self.tagged_heap.mark_in_progress()
+            && !self.tagged_heap.concurrent_mark_running()
+            && !self.tagged_heap.gc_locks_poisoned()
+        {
+            // The Baton still excludes concurrent launch; no callback,
+            // safepoint or handoff runs before the transport table closes the
+            // publication and checks its explicit readers. The restored owner
+            // supplies its roots to every later collection in the usual way.
+            return Ok(());
+        }
         let heap: *mut crate::tagged::gc::TaggedHeap = &mut *self.tagged_heap;
         // SAFETY: the Baton holder has restored its owner; no Lisp, callback
         // or handoff runs until retirement. Reseeding uses the full registered

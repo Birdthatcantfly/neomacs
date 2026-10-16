@@ -562,7 +562,7 @@ impl RootBatchLease {
 
     /// Retire a restored owner's publication and reserve the next generation,
     /// reusing its control and initialized storage. The caller needs the same
-    /// restored-owner and quiescent-collector proofs as `try_finish`.
+    /// restored-owner and serialized-collector proofs as `try_finish`.
     ///
     /// Unlike ordinary slot reuse, this requires that no old control or payload
     /// observer exists at all. The table lock excludes synchronous scans and
@@ -647,9 +647,13 @@ impl RootBatchLease {
 
     /// Nonblocking close and retirement after explicit reader completion.
     /// Contention or an unfinished reader retains registration for retry.
-    /// The facade registry must
-    /// additionally require restored/terminated-owner and quiescent-collector
-    /// proofs before invoking this transport primitive; it mints neither.
+    /// The facade registry must additionally prove owner restoration or
+    /// termination and serialized collector admission; this primitive mints
+    /// neither proof. A restored owner requires no active mark, concurrent
+    /// marker or synchronous collection extent. A cooperative sweep after
+    /// completed marking may remain: it never reads root tables, and later
+    /// collections read the restored owner's roots. Terminated-owner cleanup
+    /// instead requires full collector quiescence before retiring its roots.
     pub(crate) fn try_finish(mut self) -> Result<RetiredRootBatch, RootBatchFinishFailure> {
         let result = (|| {
             let ownership = self.ownership.as_ref().ok_or(RootBatchError::Retired)?;
