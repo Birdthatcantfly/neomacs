@@ -1,0 +1,1 @@
+((read-event batch nil 0) (read-char batch nil 0) (read-char-exclusive batch nil 0) (read-event nil nil 1) (read-char nil nil 1) (read-char-exclusive nil nil 1) (read-event t nil 0) (read-char t nil 0) (read-char-exclusive t nil 0) (read-event queued 120 nil) (read-char queued 120 nil) (read-char-exclusive queued 120 nil) (due-timer nil 1) (batch-due-timer nil 1 0))

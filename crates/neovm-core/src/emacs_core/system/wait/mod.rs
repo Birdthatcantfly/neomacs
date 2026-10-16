@@ -1021,7 +1021,9 @@ impl super::eval::Context {
         &mut self,
         idle_policy: crate::keyboard::IdleTransitionPolicy,
     ) -> Result<(), Flow> {
-        let mut request = WaitRequest::service_once(true);
+        // Initial batch frames suppress display, including redisplay caused
+        // by a ripe timer, while retaining the ordinary timer/service pass.
+        let mut request = WaitRequest::service_once(self.input_wait_redisplay_allowed());
         request.idle_policy = idle_policy;
         self.service_wait_request_once(&request)
     }

@@ -5895,11 +5895,6 @@ impl crate::emacs_core::eval::Context {
                 ));
             }
 
-            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-                idle_policy.stop_idle(self);
-                return Ok(None);
-            }
-
             self.redisplay_for_input_wait()?;
             self.service_input_wait_with_redisplay(idle_policy)?;
 
@@ -5911,6 +5906,16 @@ impl crate::emacs_core::eval::Context {
                 QueuedReadCharEvent::Event(event) => return Ok(Some(event)),
                 QueuedReadCharEvent::HandledInternally => continue,
                 QueuedReadCharEvent::None => {}
+            }
+
+            // GNU read_char performs preliminary redisplay and timer/input
+            // service, then rechecks unread events, before the main queue's
+            // deadline check (keyboard.c:2693-2721, 2992-3010, 2336-2337).
+            // Even a deadline consumed by the initial drain must reach that
+            // service pass; the deadline still prevents any further wait.
+            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                idle_policy.stop_idle(self);
+                return Ok(None);
             }
 
             tracing::debug!(

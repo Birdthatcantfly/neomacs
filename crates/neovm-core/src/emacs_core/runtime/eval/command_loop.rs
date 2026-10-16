@@ -1390,7 +1390,24 @@ impl Context {
     }
 
     pub(crate) fn redisplay_for_input_wait(&mut self) -> Result<(), Flow> {
-        self.redisplay_with_force(false)
+        if self.input_wait_redisplay_allowed() {
+            self.redisplay_with_force(false)?;
+        }
+        Ok(())
+    }
+
+    /// GNU's initial batch frame skips redisplay unless Lisp explicitly
+    /// enables it for testing (xdisp.c:17372-17387, 39295-39301). Keep this
+    /// decision local to the Context's frame and current variable binding;
+    /// independent mutators share no display state here.
+    pub(crate) fn input_wait_redisplay_allowed(&self) -> bool {
+        !(self
+            .frames
+            .selected_frame()
+            .is_some_and(|frame| frame.initial)
+            && self
+                .variable_value_by_name("redisplay-skip-initial-frame")
+                .is_some_and(|value| value.is_truthy()))
     }
 
     /// Preserve the first mode-line non-local exit across a frontend callback.

@@ -2566,6 +2566,88 @@ fn timed_read_preserves_idle_epoch_while_servicing_async_special_input() {
 }
 
 #[test]
+fn timed_read_expired_deadline_still_runs_preliminary_redisplay() {
+    let _policy = crate::emacs_core::eval::RedisplayHookPolicyGuard::legacy();
+    let mut eval = crate::emacs_core::Context::new();
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let observed = std::rc::Rc::clone(&calls);
+    eval.redisplay_fn = Some(Box::new(move |_| observed.set(observed.get() + 1)));
+
+    // A zero timeout expires before the initial drain, without relying on
+    // scheduling or adding a test hook to the production wait path.
+    assert_eq!(
+        eval.read_char_with_timeout(Some(std::time::Duration::ZERO))
+            .unwrap(),
+        None
+    );
+    assert_eq!(calls.get(), 1, "preliminary redisplay precedes timeout");
+}
+
+#[test]
+fn timed_read_expired_deadline_services_preliminary_redisplay_input() {
+    let _policy = crate::emacs_core::eval::RedisplayHookPolicyGuard::legacy();
+    let mut eval = crate::emacs_core::Context::new();
+    eval.eval_str(
+        r#"(setq vm-test-surface-error nil
+                neomacs-surface-error-functions
+                (list (lambda (id error)
+                        (setq vm-test-surface-error (list id error)))))"#,
+    )
+    .unwrap();
+    eval.redisplay_fn = Some(Box::new(move |eval| {
+        eval.command_loop.keyboard.pending_input_events.push_back(
+            InputEvent::SurfaceCreateFailed {
+                id: 7,
+                error: "expired read".into(),
+            },
+        );
+    }));
+    eval.timer_start_idle();
+    let epoch = eval.command_loop.idle_start_time;
+    assert_eq!(
+        eval.read_char_with_timeout(Some(std::time::Duration::ZERO))
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        eval.eval_str(r#"(equal vm-test-surface-error '(7 "expired read"))"#)
+            .unwrap(),
+        Value::T,
+        "input-wait service must handle the redisplay event before timeout"
+    );
+    assert_eq!(eval.command_loop.idle_start_time, epoch);
+}
+
+#[test]
+fn timed_read_expired_deadline_pending_input_skips_preliminary_redisplay() {
+    let _policy = crate::emacs_core::eval::RedisplayHookPolicyGuard::legacy();
+    let mut eval = crate::emacs_core::Context::new();
+    eval.redisplay_fn = Some(Box::new(|_| panic!("pending input must preempt redisplay")));
+    eval.command_loop
+        .keyboard
+        .pending_input_events
+        .push_back(InputEvent::key_press(KeyEvent::char('x')));
+    assert_eq!(
+        eval.read_char_with_timeout(Some(std::time::Duration::ZERO))
+            .unwrap(),
+        Some(Value::fixnum('x' as i64))
+    );
+}
+
+#[test]
+fn timed_read_expired_deadline_respects_inhibit_redisplay() {
+    let _policy = crate::emacs_core::eval::RedisplayHookPolicyGuard::legacy();
+    let mut eval = crate::emacs_core::Context::new();
+    eval.eval_str("(setq inhibit-redisplay t)").unwrap();
+    eval.redisplay_fn = Some(Box::new(|_| panic!("redisplay must remain inhibited")));
+    assert_eq!(
+        eval.read_char_with_timeout(Some(std::time::Duration::ZERO))
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn timed_read_preserves_idle_epoch_during_preliminary_redisplay_service() {
     let _policy = crate::emacs_core::eval::RedisplayHookPolicyGuard::legacy();
     let mut eval = crate::emacs_core::Context::new();
@@ -2601,3 +2683,7 @@ mod help_echo_substitution;
 #[cfg(test)]
 #[path = "gnu_help_echo_direct_oracle.rs"]
 mod gnu_help_echo_direct_oracle;
+
+#[cfg(test)]
+#[path = "gnu_timed_read_redisplay_oracle.rs"]
+mod gnu_timed_read_redisplay_oracle;
