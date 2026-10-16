@@ -6893,7 +6893,6 @@ fn vm_case_table_builtins_use_shared_buffer_state() {
         vm_eval_str(
             r#"(let* ((buf (current-buffer))
                       (other (get-buffer-create "*case-other*"))
-                      (third (get-buffer-create "*case-third*"))
                       (standard (standard-case-table))
                       (custom (copy-sequence standard)))
                  (list
@@ -6903,7 +6902,7 @@ fn vm_case_table_builtins_use_shared_buffer_state() {
                   (progn (set-buffer other) (eq (current-case-table) standard))
                   (progn (set-buffer buf) (eq (current-case-table) custom))
                   (progn (set-standard-case-table custom) (eq (standard-case-table) custom))
-                  (progn (set-buffer third) (eq (current-case-table) custom))))"#
+                  (progn (set-buffer (get-buffer-create "*case-third*")) (eq (current-case-table) custom))))"#
         ),
         "OK (t t t t t t t)"
     );
