@@ -433,17 +433,29 @@ impl OwnerSlab {
         channel: Channel,
         value: Value,
     ) -> Option<SlotValue> {
-        let outermost = self.record_ids_of(sym).into_iter().find(|record| {
-            self.record(*record).is_some_and(|record| {
-                record.channel == channel && !matches!(record.undo, UndoTarget::Retired)
-            })
-        })?;
+        let outermost = self.canonical_root_record(sym, channel)?;
         let UndoTarget::Captured(hidden) = self.record(outermost)?.undo else {
             return None;
         };
         self.replace_undo(outermost, UndoTarget::Inherited { suspended: None });
         self.set_slot(index, channel, SlotState::Bound(SlotValue::new(value)));
         Some(hidden)
+    }
+
+    /// The active chain's link to canonical storage. An older chain can be
+    /// suspended by `backtrace-eval` while a new binding starts another one.
+    /// Killing/remaking the local must preserve this newer link's restore,
+    /// rather than selecting the older suspended entry.
+    fn canonical_root_record(&self, sym: SymId, channel: Channel) -> Option<OwnerRecordId> {
+        self.record_ids_of(sym).into_iter().find(|id| {
+            self.record(*id).is_some_and(|record| {
+                record.channel == channel
+                    && matches!(
+                        record.undo,
+                        UndoTarget::Inherited { suspended: None } | UndoTarget::Captured(_)
+                    )
+            })
+        })
     }
 
     /// This owner's Green seat, if it runs in a Green runtime.
@@ -1710,18 +1722,14 @@ impl Context {
         let Some(slab) = self.owner.slab() else {
             return;
         };
-        let ids = slab.record_ids_of(id);
-        let Some(outermost) = ids.iter().copied().find(|record| {
-            slab.record(*record)
-                .is_some_and(|record| record.channel == channel)
-        }) else {
+        let Some(outermost) = slab.canonical_root_record(id, channel) else {
             return;
         };
         let Some(record) = slab.record(outermost).copied() else {
             return;
         };
-        // A binding `backtrace-eval` has set aside keeps its value, as GNU's
-        // exchanged entry does; the local it hid is lost with the kill.
+        // Save the active chain's restore. Older exchanged entries already
+        // carry their own values and must remain untouched.
         if let UndoTarget::Inherited { suspended: None } = record.undo
             && let Some(slab) = self.owner.slab_mut()
         {
@@ -1844,9 +1852,11 @@ impl Context {
         };
         let default = slab.slot(projection.index(), Channel::Default).value();
         // A retired binding is GNU's `SPECPDL_NOP`: it binds nothing.
-        let outermost = slab.record_ids_of(id).into_iter().find(|record| {
-            slab.record(*record).is_some_and(|record| {
-                record.channel == channel && !matches!(record.undo, UndoTarget::Retired)
+        let outermost = slab.canonical_root_record(id, channel).or_else(|| {
+            slab.record_ids_of(id).into_iter().find(|record| {
+                slab.record(*record).is_some_and(|record| {
+                    record.channel == channel && !matches!(record.undo, UndoTarget::Retired)
+                })
             })
         });
         let start = match default {

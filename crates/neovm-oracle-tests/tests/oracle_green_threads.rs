@@ -1070,15 +1070,13 @@ fn green_alias_to_a_constant_retakes_the_condition_mutex_before_signalling() {
     );
 }
 
-/// A new local binding made while an older binding is exchanged saves GNU's
-/// original local value. Killing and remaking the local reattaches that saved
-/// restore in GNU; Green keeps the suspended owner's older storage separate.
-/// The exact outputs pin the 3c randomized-admission exclusion as a deliberate
-/// deviation until local binding restoration tracks this exchange history.
+/// A new local binding made while an older binding is exchanged saves the
+/// original local value. Killing and remaking the local reattaches that
+/// active binding's saved restore, preserving the older suspended binding.
 #[test]
 fn green_kill_and_remake_a_local_rebound_inside_backtrace_exchange() {
     return_if_neovm_enable_oracle_proptest_not_set!();
-    common::assert_oracle_deviation_with_env_expect(
+    assert_green_oracle(
         r##"
 (progn
   (thread-join (make-thread (lambda () nil)))
@@ -1099,8 +1097,6 @@ fn green_kill_and_remake_a_local_rebound_inside_backtrace_exchange() {
     (setq-local g3e-local 'local)
     (list (g3e-local-probe) g3e-local (local-variable-p 'g3e-local))))
 "##,
-        GREEN_THREADS,
         expect_test::expect![[r#""OK ((bound (exchange-bound default remade) bound) local t)""#]],
-        r#""OK ((bound (exchange-bound default remade) bound) remade t)""#,
     );
 }

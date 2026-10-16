@@ -24,6 +24,35 @@ fn green() -> Context {
 }
 
 #[test]
+fn a_local_rebound_during_backtrace_exchange_reattaches_its_restore() {
+    let mut ev = green();
+    assert_eq!(
+        eval(
+            &mut ev,
+            r#"(progn
+      (thread-join (make-thread (lambda () nil)))
+      (defvar g3e-local 'default)
+      (fset 'g3e-local-probe
+        (lambda ()
+          (let ((g3e-local 'bound))
+            (list g3e-local
+              (backtrace-eval
+                '(let ((g3e-local 'exchange-bound))
+                   (list g3e-local
+                     (progn (kill-local-variable 'g3e-local) g3e-local)
+                     (progn (make-local-variable 'g3e-local)
+                            (setq g3e-local 'remade) g3e-local)))
+                0 'g3e-local-probe)
+              g3e-local))))
+      (set-buffer (get-buffer-create "g3e-exchanged-local"))
+      (set (make-local-variable 'g3e-local) 'local)
+      (list (g3e-local-probe) g3e-local (local-variable-p 'g3e-local)))"#
+        ),
+        "((bound (exchange-bound default remade) bound) local t)"
+    );
+}
+
+#[test]
 fn a_thread_runs_and_join_returns_its_value() {
     let mut ev = green();
     assert_eq!(

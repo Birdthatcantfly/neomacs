@@ -120,13 +120,6 @@ impl Arm {
             Op::MakeLocal(var) => {
                 eval(ev, &format!("(make-local-variable '{})", VARS[var]));
             }
-            // A new binding inside a live `backtrace-eval`, followed by
-            // killing and remaking its local, reattaches GNU's saved local
-            // restore. The owner model keeps it separate. The exact delta
-            // is pinned by oracle_green_threads::
-            // green_kill_and_remake_a_local_rebound_inside_backtrace_exchange;
-            // arbitrary exchanged-local schedules stay excluded here.
-            Op::KillLocal(_) if self.frames.iter().any(|&(_, exchange)| exchange) => {}
             Op::KillLocal(var) => {
                 eval(ev, &format!("(kill-local-variable '{})", VARS[var]));
             }

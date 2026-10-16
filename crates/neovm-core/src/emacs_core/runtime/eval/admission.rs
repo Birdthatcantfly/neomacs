@@ -552,9 +552,10 @@ enum HistoryPoint {
 /// outer ones therefore hides canonical storage, as it would have.
 ///
 /// A buffer-local channel whose local is gone has no live value to walk:
-/// its outermost binding keeps the value it saved as `Captured`, the rest
-/// as `Previous`, and an exchanged one, whose value was lost with the
-/// local, is retired, as its rewind would retire it.
+/// its first active binding keeps the value it saved as `Captured`, the
+/// remaining active entries as `Previous`. Exchanged entries keep their
+/// saved binding suspended: GNU only retires them if a later exchange
+/// actually encounters the absent local, which may be remade first.
 fn reconstruct_owner(
     bindings: &mut [PlannedBinding],
     chains: &mut [PlannedChain],
@@ -608,13 +609,16 @@ fn reconstruct_owner(
             HistoryPoint::Binding(index) => {
                 let binding = &mut bindings[index];
                 let chain = &mut chains[binding.chain];
-                let outermost = !std::mem::replace(&mut seen[binding.chain], true);
                 if chain.live.is_none() {
                     let saved = SlotValue::new(binding.saved);
-                    binding.undo = match (binding.exchanged, outermost) {
-                        (true, _) => UndoTarget::Retired,
-                        (false, true) => UndoTarget::Captured(saved),
-                        (false, false) => UndoTarget::Previous(saved),
+                    binding.undo = if binding.exchanged {
+                        UndoTarget::Inherited {
+                            suspended: Some(saved),
+                        }
+                    } else if !std::mem::replace(&mut seen[binding.chain], true) {
+                        UndoTarget::Captured(saved)
+                    } else {
+                        UndoTarget::Previous(saved)
                     };
                     continue;
                 }
