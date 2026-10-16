@@ -336,3 +336,45 @@ fn generational_memory_full_waits_for_due_then_selects_major_at_real_safe_point(
     assert_one_completion(&context, before);
     assert_eq!(weak_entries(&context), 0);
 }
+
+#[test]
+fn generational_done_poll_terminates_immediately_and_folds_resident_satb_partial() {
+    let mut context = context(usize::MAX, 8);
+    context.with_gc_inhibited(|context| {
+        context.eval_str("(setq memory-full t)").unwrap();
+    });
+    // This preexisting orphan is absent from the Context root set and the
+    // seeded root closure. Its overwritten root-cell preimage is its only mark edge.
+    let orphan = context
+        .tagged_heap
+        .alloc_cons(Value::fixnum(317), Value::NIL);
+    context.gc_collect_from_current_roots_impl(false);
+    assert!(context.tagged_heap.concurrent_mark_running());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !context.tagged_heap.concurrent_mark_done() {
+        assert!(std::time::Instant::now() < deadline, "worker did not drain");
+        std::thread::yield_now();
+    }
+    assert!(
+        context.tagged_heap.bytes_since_gc()
+            <= context.tagged_heap.gc_threshold().saturating_mul(4)
+    );
+    assert!(!context.tagged_heap.value_is_marked_for_test(orphan));
+    crate::tagged::gc::note_root_overwrite(orphan);
+    assert!(context.tagged_heap.concurrent_mark_done());
+    // A single real safe point must stop and fold now; the previous defer-once
+    // path would publish this word and leave the concurrent mark running.
+    context.gc_safe_point_exact();
+    assert!(!context.tagged_heap.concurrent_mark_running());
+    assert!(context.tagged_heap.sweep_in_progress());
+    assert_eq!(
+        context
+            .tagged_heap
+            .sweep_stats()
+            .last_termination_partial_words,
+        1
+    );
+    assert!(context.tagged_heap.value_is_marked_for_test(orphan));
+    context.tagged_heap.finish_incremental_sweep_now();
+    assert!(context.tagged_heap.owns_heap_value_for_test(orphan));
+}

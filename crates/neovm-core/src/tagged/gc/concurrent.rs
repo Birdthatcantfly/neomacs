@@ -726,7 +726,7 @@ impl TaggedHeap {
         // TLS admission is disabled above, and this fold executes no Lisp.
         let mut world = unsafe { scan_contract::SingleMutatorWorld::from_heap(self) };
         let satb_words = world
-            .fold_satb()
+            .fold_satb_for_termination()
             .map_err(|_| MarkFinishError::PoisonedCollectorState)?;
         drop(world);
         self.last_termination_satb = satb_words;
@@ -994,20 +994,6 @@ impl TaggedHeap {
             let (mutator, handoff) = self.satb_parts();
             mutator.satb.push(MarkWord::of(pre_image), handoff);
         }
-    }
-
-    /// The active-mark branch alone reads the cold owner's termination debt.
-    pub(crate) fn satb_termination_obligation(&self) -> SatbTerminationObligation {
-        self.current_mutator_satb().termination_obligation()
-    }
-
-    /// At a tentative done-poll, publish at most one partial per epoch before
-    /// allowing termination. Allocation-cap termination never calls this hook.
-    pub(crate) fn satb_done_poll(&mut self) -> SatbDoneDecision {
-        let (mutator, handoff) = self.satb_parts();
-        mutator
-            .publish_at_done(handoff)
-            .expect("cannot continue done polling after SATB poison")
     }
 
     /// Stage 2 Tier B CONCURRENT VECTOR SCAN clone-on-write hook. Called from

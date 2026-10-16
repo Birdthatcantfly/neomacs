@@ -1,6 +1,5 @@
 //! Integration fixtures for actual K hot/cold MutatorGcState registrations.
 
-use super::mutator_gc::{SatbDoneDecision, SatbTerminationObligation};
 use super::*;
 
 #[test]
@@ -91,46 +90,57 @@ fn satb_begin_rejects_residual_in_any_registration_without_clearing_it() {
 }
 
 #[test]
-fn satb_done_poll_flushes_at_most_once_and_resets_on_next_epoch() {
+fn satb_termination_counts_partials_separately_from_published_and_retired_chunks() {
     let mut heap = TaggedHeap::new();
     let handoff = heap.satb_handoff.clone();
-    let current = heap.current_mutator_satb_mut();
-    current
-        .satb
-        .push(MarkWord::of(TaggedValue::fixnum(1)), &handoff);
-    assert_eq!(
-        current.publish_at_done(&handoff).unwrap(),
-        SatbDoneDecision::DeferOnce
-    );
-    current
-        .satb
-        .push(MarkWord::of(TaggedValue::fixnum(2)), &handoff);
-    assert_eq!(
-        current.publish_at_done(&handoff).unwrap(),
-        SatbDoneDecision::Finish
-    );
-    assert_eq!(
-        current.termination_obligation(),
-        SatbTerminationObligation::FinishAtNextSafepoint
-    );
-
-    // SAFETY: no worker or other writer exists; this is the stopped fold.
-    let mut world = unsafe { scan_contract::SingleMutatorWorld::from_heap(&mut heap) };
-    assert_eq!(world.fold_satb().unwrap(), 2);
-    world.begin_satb_cycle().unwrap();
-    drop(world);
-    let current = heap.current_mutator_satb_mut();
-    current
-        .satb
-        .push(MarkWord::of(TaggedValue::fixnum(3)), &handoff);
-    assert_eq!(
-        current.publish_at_done(&handoff).unwrap(),
-        SatbDoneDecision::DeferOnce
-    );
-    // Clean the handoff without requiring or changing collector mark flags.
-    for chunk in handoff.take_all().unwrap() {
-        drop(chunk.into_words());
+    for ordinal in 0..satb::SATB_CHUNK_WORDS + 1 {
+        heap.current_mutator_satb_mut()
+            .satb
+            .push(MarkWord::of(TaggedValue::fixnum(ordinal as i64)), &handoff);
     }
+    // SAFETY: this fixture owns every paired registration, with no worker,
+    // TLS alias, callback or Lisp allocation while the world is admitted.
+    let mut world = unsafe { scan_contract::SingleMutatorWorld::from_heap(&mut heap) };
+    let active = world.register_mutator_gc_for_test();
+    let retired = world.register_mutator_gc_for_test();
+    for ordinal in 0..satb::SATB_CHUNK_WORDS {
+        world.mutator_gc_for_test(active).satb.satb.push(
+            MarkWord::of(TaggedValue::fixnum((100 + ordinal) as i64)),
+            &handoff,
+        );
+    }
+    world
+        .mutator_gc_for_test(retired)
+        .satb
+        .satb
+        .push(MarkWord::of(TaggedValue::fixnum(200)), &handoff);
+    world
+        .retire_mutator_gc_for_test(retired)
+        .unwrap()
+        .acknowledge();
+    // The retired owner's partial has already become a published chunk.
+    // Only the current owner's one word and the active owner's full resident
+    // buffer count toward the stopped-world partial work.
+    assert_eq!(
+        world.fold_satb_for_termination().unwrap(),
+        satb::SATB_CHUNK_WORDS * 2 + 2
+    );
+    assert_eq!(
+        world.heap().sweep_stats().last_termination_partial_words,
+        satb::SATB_CHUNK_WORDS + 1
+    );
+    world.ensure_satb_empty().unwrap();
+    // Facade quiescence can perform a second generic fold after a join. It
+    // must preserve the diagnostic of the actual termination it just drained.
+    assert_eq!(world.fold_satb().unwrap(), 0);
+    assert_eq!(
+        world.heap().sweep_stats().last_termination_partial_words,
+        satb::SATB_CHUNK_WORDS + 1
+    );
+    // A later successful termination with no partials resets the last count.
+    world.begin_satb_cycle().unwrap();
+    assert_eq!(world.fold_satb_for_termination().unwrap(), 0);
+    assert_eq!(world.heap().sweep_stats().last_termination_partial_words, 0);
 }
 
 #[cfg(feature = "gc-memory-telemetry")]

@@ -2198,21 +2198,10 @@ impl Context {
                 let cap = (*heap_ptr).gc_threshold().saturating_mul(4);
                 let must_finish = (*heap_ptr).bytes_since_gc() > cap;
                 let mark_done = (*heap_ptr).concurrent_mark_done();
-                let satb_obligation = (*heap_ptr).satb_termination_obligation();
-                if mark_done
-                    && !must_finish
-                    && satb_obligation
-                        == crate::tagged::gc::SatbTerminationObligation::WaitForMarker
-                    && (*heap_ptr).satb_done_poll()
-                        == crate::tagged::gc::SatbDoneDecision::DeferOnce
-                {
-                    return;
-                }
-                if mark_done
-                    || must_finish
-                    || satb_obligation
-                        == crate::tagged::gc::SatbTerminationObligation::FinishAtNextSafepoint
-                {
+                // A tentative done flag is sufficient to stop now. The
+                // stopped-world admission folds every owner's bounded partial;
+                // publishing it and waiting another poll only grows the window.
+                if mark_done || must_finish {
                     if must_finish && !mark_done {
                         // Cap-forced: the GC thread had NOT drained — the
                         // residual mark now runs synchronously in the
@@ -2692,7 +2681,7 @@ impl Context {
             let hs = self.tagged_heap.handshake_stats();
             eprintln!(
                 "NEOVM_GC concurrent_termination {}us [roots={roots_us}us drain={drain_us}us \
-                 fold={}us deferred={} satb={} str_claimed={} f_claimed={} sub_dropped={} \
+                 fold={}us deferred={} satb={} partial_words={} str_claimed={} f_claimed={} sub_dropped={} \
                  v_claimed={} bc_claimed={} leaf_claimed={} ht_claimed={} kinds[{}] join={}us \
                  runtime={}us({}) remembered={}us({}) ctxroots={}us newsyms={newsyms_us}us({}) \
                  finalizer={}us weak={}us unchain={}us groups[{}] probes[{}]]",
@@ -2700,6 +2689,7 @@ impl Context {
                 stats.last_termination_fold_us,
                 stats.last_termination_deferred,
                 stats.last_termination_satb,
+                stats.last_termination_partial_words,
                 stats.last_concurrent_str_claimed,
                 stats.last_concurrent_float_claimed,
                 stats.last_concurrent_subr_dropped,
@@ -2876,11 +2866,6 @@ impl Context {
     /// cons -- every sweep runs inside that body, past this point.
     fn concurrent_mark_is_still_the_gc_thread_s(&self) -> bool {
         if !self.tagged_heap.concurrent_mark_running() || self.tagged_heap.concurrent_mark_done() {
-            return false;
-        }
-        if self.tagged_heap.satb_termination_obligation()
-            == crate::tagged::gc::SatbTerminationObligation::FinishAtNextSafepoint
-        {
             return false;
         }
         let cap = self.tagged_heap.gc_threshold().saturating_mul(4);

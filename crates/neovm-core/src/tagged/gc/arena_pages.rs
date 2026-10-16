@@ -1766,6 +1766,9 @@ pub(crate) struct SweepStats {
     #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
     pub max_termination_deferred: usize,
     pub last_termination_satb: usize,
+    /// Owner-resident words folded at the last successful concurrent termination,
+    /// excluding already published handoff chunks. A subset of SATB above.
+    pub last_termination_partial_words: usize,
     /// Per-kind breakdown of `last_termination_deferred`, plus the lifetime
     /// per-kind maximum (each bucket's own max across cycles). Populated in
     /// crate tests and under `NEOVM_GC_TRACE=1`; zero otherwise — the

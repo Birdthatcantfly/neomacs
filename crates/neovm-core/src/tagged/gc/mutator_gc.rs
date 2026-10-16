@@ -182,28 +182,6 @@ impl TaggedHeap {
 use super::satb::{SatbBuffer, SatbHandoff, SatbPoisoned, SatbRetired};
 use super::scan_contract::{SatbDrainError, StoppedMutatorsProof};
 
-/// One postponement is allowed at a tentative-done poll in each epoch.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SatbDoneFlush {
-    #[default]
-    Available,
-    Used,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SatbDoneDecision {
-    Finish,
-    DeferOnce,
-}
-
-/// A published tentative-done partial grants the marker one safepoint of
-/// grace. Its done flag cannot revoke the next safepoint's termination debt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SatbTerminationObligation {
-    WaitForMarker,
-    FinishAtNextSafepoint,
-}
-
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum SatbMutatorLifecycle {
     #[default]
@@ -220,7 +198,6 @@ pub(super) struct SatbMutatorState {
     pub(super) satb: SatbBuffer,
     pub(super) satb_snapshotted_owners: FxHashSet<usize>,
     pub(super) satb_string_preimage_addrs: FxHashSet<usize>,
-    done_flush: SatbDoneFlush,
     lifecycle: SatbMutatorLifecycle,
 }
 
@@ -233,33 +210,7 @@ impl SatbMutatorState {
             satb: SatbBuffer::new(),
             satb_snapshotted_owners: FxHashSet::default(),
             satb_string_preimage_addrs: FxHashSet::default(),
-            done_flush: SatbDoneFlush::Available,
             lifecycle: SatbMutatorLifecycle::Active,
-        }
-    }
-
-    pub(super) fn termination_obligation(&self) -> SatbTerminationObligation {
-        match self.done_flush {
-            SatbDoneFlush::Available => SatbTerminationObligation::WaitForMarker,
-            SatbDoneFlush::Used => SatbTerminationObligation::FinishAtNextSafepoint,
-        }
-    }
-
-    /// Called only on a normal done-poll, never on the allocation hard cap.
-    pub(super) fn publish_at_done(
-        &mut self,
-        handoff: &SatbHandoff,
-    ) -> Result<SatbDoneDecision, SatbPoisoned> {
-        match self.done_flush {
-            SatbDoneFlush::Used => Ok(SatbDoneDecision::Finish),
-            SatbDoneFlush::Available => {
-                if self.satb.is_empty() {
-                    return Ok(SatbDoneDecision::Finish);
-                }
-                self.satb.publish_partial(handoff)?;
-                self.done_flush = SatbDoneFlush::Used;
-                Ok(SatbDoneDecision::DeferOnce)
-            }
         }
     }
 
@@ -277,7 +228,6 @@ impl SatbMutatorState {
         }
         self.satb_snapshotted_owners.clear();
         self.satb_string_preimage_addrs.clear();
-        self.done_flush = SatbDoneFlush::Available;
         Ok(())
     }
 }
@@ -296,6 +246,9 @@ struct RegisteredMutatorGc {
 /// a real future registry must own each hot/cold pair as one registration.
 struct MutatorSatbRegistry {
     current: SatbMutatorState,
+    /// Owner-resident SATB words folded by the last successful termination.
+    /// Keep diagnostics in this cold allocation so heap/JIT offsets do not move.
+    last_termination_partial_words: usize,
     #[cfg(test)]
     registered: Vec<RegisteredMutatorGc>,
 }
@@ -327,6 +280,7 @@ impl MutatorSatbSlot {
     pub(super) fn new() -> Self {
         Self(Box::new(MutatorSatbRegistry {
             current: SatbMutatorState::new(),
+            last_termination_partial_words: 0,
             #[cfg(test)]
             registered: Vec::new(),
         }))
@@ -376,6 +330,19 @@ static_assertions::assert_not_impl_any!(StoppedMutatorGc<'static>: Send, Sync, C
 static_assertions::assert_impl_all!(StoppedMutatorGc<'static>: std::fmt::Debug);
 
 impl TaggedHeap {
+    pub(super) fn last_termination_partial_words(&self) -> usize {
+        self._satb_layout_reserve.0.last_termination_partial_words
+    }
+
+    /// Only the stopped-world termination fold records this diagnostic.
+    pub(super) fn record_termination_partial_words(
+        &mut self,
+        words: usize,
+        _: &StoppedMutatorsProof,
+    ) {
+        self._satb_layout_reserve.0.last_termination_partial_words = words;
+    }
+
     #[inline]
     pub(super) fn current_mutator_satb(&self) -> &SatbMutatorState {
         &self._satb_layout_reserve.0.current

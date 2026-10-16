@@ -151,10 +151,36 @@ pub(super) enum SatbDrainError {
     Residual,
 }
 
+/// Separate owner-resident words from batches already published to the marker.
+#[derive(Debug)]
+#[must_use]
+struct SatbFoldCounts {
+    total_words: usize,
+    partial_words: usize,
+}
+
 impl SingleMutatorWorld<'_> {
     /// Fold only after the marker's last read has been joined. The caller
     /// excludes all registered mutators under the existing admission contract.
     pub(super) fn fold_satb(&mut self) -> Result<usize, super::satb::SatbPoisoned> {
+        Ok(self.fold_satb_counts()?.total_words)
+    }
+
+    /// Record diagnostics only for an actual termination. A later facade
+    /// quiescence fold must not overwrite this with an incidental empty fold.
+    pub(super) fn fold_satb_for_termination(&mut self) -> Result<usize, super::satb::SatbPoisoned> {
+        let counts = self.fold_satb_counts()?;
+        // The successful fold checked the marker join; this capability has
+        // retained exclusive stopped-world admission without running Lisp.
+        let proof = StoppedMutatorsProof {
+            _owner: PhantomData,
+        };
+        self.heap
+            .record_termination_partial_words(counts.partial_words, &proof);
+        Ok(counts.total_words)
+    }
+
+    fn fold_satb_counts(&mut self) -> Result<SatbFoldCounts, super::satb::SatbPoisoned> {
         assert!(
             !self.heap.concurrent_mark_running(),
             "SATB fold requires an explicit successful marker join"
@@ -173,12 +199,14 @@ impl SingleMutatorWorld<'_> {
         // Split through the heap-wide iterator so a future K-mutator registry
         // cannot accidentally leave an exited registration's partial behind.
         let mut partials = Vec::new();
+        let mut partial_words = 0;
         for mutator in self.heap.mutator_gc_entries_world_stopped(&proof) {
             // Carry the paired hot-state loan through enumeration; future
             // registries must not enumerate SATB state independently.
             let _hot_owner = mutator.gc;
             if let Some(chunk) = mutator.satb.satb.take_partial(&proof) {
                 words += chunk.len();
+                partial_words += chunk.len();
                 partials.push(chunk);
             }
         }
@@ -187,7 +215,10 @@ impl SingleMutatorWorld<'_> {
                 .gray_queue
                 .extend(chunk.into_words().into_iter().map(super::MarkWord::value));
         }
-        Ok(words)
+        Ok(SatbFoldCounts {
+            total_words: words,
+            partial_words,
+        })
     }
 
     /// Production may choose a debug assertion at begin/launch while facade
@@ -201,7 +232,7 @@ impl SingleMutatorWorld<'_> {
         Ok(())
     }
 
-    /// Begin/launch calls validate before resetting only dedup and pacing.
+    /// Begin/launch calls validate before resetting only owner dedup sets.
     pub(super) fn begin_satb_cycle(&mut self) -> Result<(), SatbDrainError> {
         assert!(
             !self.heap.concurrent_mark_running(),

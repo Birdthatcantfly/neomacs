@@ -1331,6 +1331,13 @@ impl TaggedHeap {
     }
 
     /// Deferred-sweep cost + termination-drain instrumentation snapshot.
+    /// Read the collector's mark bit without exposing collector internals to
+    /// evaluator regression fixtures. Call only while the fixture excludes writes.
+    #[cfg(test)]
+    pub(crate) fn value_is_marked_for_test(&self, value: TaggedValue) -> bool {
+        self.is_value_marked(value)
+    }
+
     pub(crate) fn sweep_stats(&self) -> SweepStats {
         SweepStats {
             sweep_us: self.sweep_slice_us_total,
@@ -1344,6 +1351,7 @@ impl TaggedHeap {
             last_termination_deferred: self.last_termination_deferred,
             max_termination_deferred: self.max_termination_deferred,
             last_termination_satb: self.last_termination_satb,
+            last_termination_partial_words: self.last_termination_partial_words(),
             last_termination_kinds: self.last_termination_kinds,
             max_termination_kinds: self.max_termination_kinds,
             last_concurrent_str_claimed: self.last_concurrent_str_claimed,
@@ -2751,7 +2759,6 @@ pub use heap_identity::HeapIdentity;
 mod mark_word;
 use mark_word::{MarkStack, MarkWord};
 mod satb;
-pub(crate) use mutator_gc::{SatbDoneDecision, SatbTerminationObligation};
 use satb::SatbHandoff;
 pub(crate) mod mapped_veclike_scan;
 #[cfg(test)]
