@@ -453,22 +453,21 @@ pub(crate) fn retire_green_inline_dependents() {
     });
 }
 
-/// Cold source classification; raw executable pointers never escape this phase.
+/// Conservative cold check for a possible cached native activation. Production
+/// dispatch retains every executable leaf in this owner's live/retired or OSR
+/// stores. A cache containing only rejected/deferred entries has no activation;
+/// pending jobs are included conservatively. No hot native-depth counter is
+/// needed, and cached relocation tracing is never skipped on this basis.
 #[cold]
-pub(crate) fn green_source_has_native_state(func: &ByteCodeFunction) -> bool {
-    let Some(id) = func.jit_runtime().compiled_id() else {
-        return false;
-    };
+pub(crate) fn green_has_native_state() -> bool {
     COMPILED.with(|cache| {
         let cache = cache.borrow();
-        cache.get(id).and_then(CacheEntry::live_leaf).is_some()
-            || cache.retired.iter().any(|leaf| leaf.obs.id == id)
-    }) || OSR_CACHE.with(|cache| {
-        cache
-            .borrow()
-            .iter()
-            .any(|((fid, _), leaf)| *fid == id && leaf.is_some())
-    })
+        !cache.retired.is_empty()
+            || cache
+                .iter()
+                .any(|(_, entry)| entry.live_leaf().is_some() || entry.pending_job().is_some())
+    }) || OSR_CACHE.with(|cache| cache.borrow().values().any(Option::is_some))
+        || OSR_PENDING.with(|pending| !pending.borrow().is_empty())
 }
 
 #[derive(Clone)]
@@ -1533,8 +1532,8 @@ fn compile_cache_entry(
 /// briefly. Idempotent: an absent/already-evicted id is a no-op. Compiled-id never
 /// reuses, so a stale id in a dep set just removes nothing.
 /// Evict `id`'s compiled state (its leaf is RETIRED, not dropped — see
-/// `DenseCache::remove` — and its OSR entries are dropped, which is sound: an OSR
-/// leaf is only ever entered from the interpreter, never cached in a spec slot).
+/// `DenseCache::remove` — and its OSR leaves join the same traced retirement
+/// store, preserving their relocations while an active transfer can still run).
 /// Used when a `make-closure` widened the source's patched prefix after a leaf
 /// was compiled under the narrower one (`RuntimeState::note_patched_prefix`).
 /// The symbol naming the function whose leaf `id` is about to be compiled,
@@ -1572,14 +1571,25 @@ fn callee_name_hint(ctx: *const Context, id: u64) -> Option<SymId> {
 pub(crate) fn evict_compiled(id: u64) {
     COMPILED.with(|c| c.borrow_mut().remove(id));
     drop_osr_pending(id);
-    OSR_CACHE.with(|c| {
+    let retired_osr = OSR_CACHE.with(|c| {
+        let mut retired = Vec::new();
         c.borrow_mut().retain(|(fid, _), entry| {
             let keep = *fid != id;
-            if !keep && let Some(entry) = entry {
-                fold_dropped_leaf(&entry.leaf);
+            if !keep && let Some(entry) = entry.take() {
+                retired.push(entry.leaf);
             }
             keep
-        })
+        });
+        retired
+    });
+    COMPILED.with(|c| {
+        let mut cache = c.borrow_mut();
+        for leaf in retired_osr {
+            // An active OSR transfer owns its Rc, but only the cache's traced
+            // retirement store keeps its relocation roots visible across a GC
+            // or a subsequent Green park. Fold statistics only at final drop.
+            cache.retire(leaf);
+        }
     });
     if super::compile::jit_inline2_mode().enabled() {
         forget_inline_deps(id);
@@ -1851,8 +1861,9 @@ pub(crate) fn invalidate_for_reopt(
             Err(_) => false,
         });
         if !retired {
-            // Dropped instead, as `evict_compiled` drops OSR leaves (only
-            // the interpreter enters them; a running one holds its own Rc).
+            // Defensive cache-borrow failure: native dispatch normally releases
+            // the cache before running Lisp. This deopting transfer still owns
+            // its Rc through resume; no cache entry is published here.
             for leaf in &osr {
                 fold_dropped_leaf(leaf);
             }

@@ -133,9 +133,6 @@ impl GreenRuntime {
 pub(crate) enum GreenStartError {
     #[error("the World does not run green Lisp threads")]
     NotGreen,
-    #[cfg(feature = "jit")]
-    #[error(transparent)]
-    JitAdmission(#[from] crate::emacs_core::jit::green_owner::AdmissionError),
     #[error("green Lisp threads are unavailable while a display or input host is attached")]
     ThreadAffineHost,
     #[error("green Lisp threads cannot start while garbage collection is inhibited")]
@@ -152,7 +149,7 @@ impl Context {
     /// Start this World's Green runtime from its first owner: admit
     /// threads, capture the bootstrap further owners are built from, and
     /// issue the World's Baton to this thread. Refused unless the World is
-    /// Green, the JIT mode supports parked frames, no display or input host is attached and
+    /// Green, no display or input host is attached and
     /// collection is not inhibited.
     #[cold]
     #[inline(never)]
@@ -160,8 +157,6 @@ impl Context {
         if self.threading_mode() != ThreadingMode::Green {
             return Err(GreenStartError::NotGreen);
         }
-        #[cfg(feature = "jit")]
-        crate::emacs_core::jit::green_owner::certify_admission()?;
         if self.display_host.is_some() || self.input_rx.is_some() {
             return Err(GreenStartError::ThreadAffineHost);
         }
@@ -245,3 +240,11 @@ mod switch_tests;
 #[cfg(all(test, feature = "jit"))]
 #[path = "../tests/green_jit_switch_test.rs"]
 mod jit_switch_tests;
+
+#[cfg(all(test, feature = "jit"))]
+#[path = "../tests/green_jit_inline2_test.rs"]
+mod jit_inline2_tests;
+
+#[cfg(test)]
+#[path = "../tests/green_signal_depth_test.rs"]
+mod signal_depth_tests;

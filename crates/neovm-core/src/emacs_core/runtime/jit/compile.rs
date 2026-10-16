@@ -658,7 +658,7 @@ fn arith_intrinsic_call_sites(
 /// sites — the redefinition-eviction dep set for a Level-B leaf (an inlined op
 /// bakes the native instruction with no per-call arming, so `fset`ing the callee
 /// must evict the leaf). `ash` is excluded (it stays on the self-arming shim).
-pub(super) fn inline_arith_callee_syms(
+fn inline_arith_callee_syms(
     ops: &[Op],
     constants: &[Value],
 ) -> Vec<crate::emacs_core::intern::SymId> {

@@ -25,34 +25,12 @@ static_assertions::assert_impl_all!(HeapIdentity: Send, Sync);
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 pub(crate) enum AdmissionError {
-    #[error("green JIT admission does not certify inline2 virtual frames")]
-    InlineFrames,
-    #[error("green JIT yield does not certify active unguarded inline arithmetic")]
-    UnguardedInlineArithmetic,
     #[error("green JIT preparation requires a valid owner and heap identity")]
     InvalidIdentity,
     #[error("green JIT restoration requires the original owner and heap")]
     ReturningOwner,
 }
 static_assertions::assert_impl_all!(AdmissionError: Send, Sync);
-
-#[cold]
-pub(crate) fn certify_admission() -> Result<(), AdmissionError> {
-    use super::compile::Inline2Mode;
-    if !super::jit_runtime_enabled() {
-        return Ok(());
-    }
-    match super::compile::jit_inline2_mode() {
-        Inline2Mode::Off => {}
-        Inline2Mode::Named | Inline2Mode::Closure | Inline2Mode::Hof | Inline2Mode::All => {
-            return Err(AdmissionError::InlineFrames);
-        }
-    }
-    // All current backends share the physical native-frame/root-stack ABI.
-    // Background workers publish only code results; install stays on the
-    // original Lisp owner, under its Baton (see bg::install).
-    Ok(())
-}
 
 /// Captured sources stay on the original continuation, never in a message.
 #[derive(Clone, Copy)]
@@ -110,6 +88,25 @@ impl ParkedJit {
             NonZeroUsize::new(context.tagged_heap.identity())
                 .ok_or(AdmissionError::InvalidIdentity)?,
         );
+        // A VM-only owner cannot have an executing cached native leaf. Avoid
+        // enumerating/pinning source frames in that case. Keep the ordinary
+        // parked census, including cached relocation roots, independent of
+        // this shortcut: code cached for a future call must remain rooted too.
+        // The window/test-depth checks also cover directly invoked test leaves
+        // which bypass the production cache dispatch contract.
+        if context.jit_root_stack_top == 0
+            && super::cache::native_depth() == 0
+            && !super::cache::green_has_native_state()
+        {
+            return Ok(Self {
+                owner,
+                heap,
+                function_epoch: FunctionEpoch(context.obarray.function_epoch()),
+                sources: Vec::new(),
+                roots: Vec::new(),
+                _confined: PhantomData,
+            });
+        }
         let frames: Vec<_> = context
             .specpdl
             .iter()
@@ -159,24 +156,6 @@ impl ParkedJit {
             &|symbol| called.binary_search_by_key(&symbol.0, |s| s.0).is_ok(),
             &mut |function| roots.push(function),
         );
-        // Baseline bit-op inlining has no post-switch epoch guard, including
-        // legacy OSR variants with no dependency registration. Reject that
-        // active shape before publication or binding exchange. Guarded MIR
-        // InlineEntry and physical calls retain their existing epoch checks.
-        if super::compile::jit_inline_arith_on() {
-            for function in &roots {
-                if let Some(func) = function.bytecode_data_if_materialized()
-                    && super::cache::green_source_has_native_state(func)
-                    && !super::compile::inline_arith_callee_syms(
-                        func.executable_ops(),
-                        &func.constants,
-                    )
-                    .is_empty()
-                {
-                    return Err(AdmissionError::UnguardedInlineArithmetic);
-                }
-            }
-        }
         Ok(Self {
             owner,
             heap,

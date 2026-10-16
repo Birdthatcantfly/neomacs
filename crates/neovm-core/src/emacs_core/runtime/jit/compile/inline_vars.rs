@@ -100,6 +100,9 @@ const _: () = assert!(CONS_CDR_OFFSET >= TAG_CONS);
 struct CompileEnv {
     obarray: *const Obarray,
     projection: *const [u64],
+    /// The stable World mode is known before admission. Green arithmetic
+    /// leaves guard call semantics even when compiled before the first thread.
+    green_function_epoch: Option<u64>,
 }
 
 thread_local! {
@@ -122,22 +125,33 @@ pub(crate) struct CompileEnvScope {
 static_assertions::assert_not_impl_any!(CompileEnvScope: Send, Sync);
 
 impl CompileEnvScope {
-    /// Enter CTX's environment (nothing when CTX is null or the knob is off).
+    /// Enter CTX's environment (nothing when CTX is null).
     /// CTX must stay alive and its obarray and mask unmoved while the scope
     /// lives: the dormant seam-provided context of a compile.
     pub(crate) fn enter(ctx: *const Context) -> Self {
-        let env = (!ctx.is_null() && jit_inline_vars().any()).then(|| {
-            // SAFETY: the caller's contract above.
-            let ctx = unsafe { &*ctx };
-            CompileEnv {
-                obarray: std::ptr::from_ref(&ctx.obarray),
-                projection: std::ptr::from_ref(ctx.runtime_projection_mask()),
-            }
-        });
+        let env = (!ctx.is_null())
+            .then(|| {
+                // SAFETY: the caller's contract above.
+                let ctx = unsafe { &*ctx };
+                let green = ctx.threading_mode() == crate::emacs_core::eval::ThreadingMode::Green;
+                (jit_inline_vars().any() || green).then(|| CompileEnv {
+                    obarray: std::ptr::from_ref(&ctx.obarray),
+                    projection: std::ptr::from_ref(ctx.runtime_projection_mask()),
+                    green_function_epoch: green.then(|| ctx.obarray.function_epoch()),
+                })
+            })
+            .flatten();
         Self {
             _scope: crate::tls_scope::TlsScope::new(&ENV, env),
         }
     }
+}
+
+/// Green's stable World choice predates the first make-thread. All cache entry,
+/// retier and OSR compiles lend this scope; the backend worker only sees CLIF.
+/// Sim and context-free/AOT compiles retain the original arithmetic emission.
+pub(super) fn green_function_epoch() -> Option<u64> {
+    ENV.with(Cell::get).and_then(|env| env.green_function_epoch)
 }
 
 fn with_env<R>(f: impl FnOnce(&Obarray, &[u64]) -> Option<R>) -> Option<R> {

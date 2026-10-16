@@ -7367,8 +7367,9 @@ fn lower_simple_op_arms(
             // a tagged fixnum yields `lognot` exactly (-a == retag(~n)). A non-fixnum
             // arg deopts to the precise-deopt block, where the interpreter re-runs
             // the REAL call from `pc` (graceful for the odd bignum; a fully mixed
-            // loop stays interpreted). Redefinition is caught by the leaf's
-            // inline_epoch eviction (set in compile_bytecode_function_inner). AOT
+            // loop stays interpreted). Green leaves validate the function epoch
+            // at every original call boundary, including after a yield or first
+            // thread admission. Sim retains dependency eviction alone. AOT
             // (`aot`) keeps the shim — its loader owns arm/disarm.
             if jit_inline_arith_on()
                 && !aot
@@ -7377,6 +7378,9 @@ fn lower_simple_op_arms(
                 && super::call_site_inlinable_at(pc)
             {
                 let dsite = deopt_site(fb, pc, handlers.len(), stack, reps, deopt_sites);
+                if let Some(epoch) = super::inline_vars::green_function_epoch() {
+                    emit_mir_inline_entry_guard(fb, rt, epoch, dsite)?;
+                }
                 let sp = stack.len();
                 let is_lognot = op == ARITH_KIND_LOGNOT as u8;
                 let a = stack[sp - if is_lognot { 1 } else { 2 }];

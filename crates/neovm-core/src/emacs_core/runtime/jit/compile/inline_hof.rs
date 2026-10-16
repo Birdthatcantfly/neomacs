@@ -2,6 +2,13 @@
 //! Threading: this is one compilation's SSA state. The emitted activation
 //! owns its Context-local roots and backtrace entry; no mutator state is
 //! cached or published by this module.
+//!
+//! Green switches are possible only at the physical mapping protocol: Start
+//! publishes its eager frame and complete parent roots before entering Lisp,
+//! and the service poll runs between callbacks after clearing active_region.
+//! Cursor publishes the next list tail before that poll. A virtual callback
+//! itself never runs Lisp; its slow guard reconstructs the callback through
+//! resumed_chain before an operation can admit threads, park, or collect.
 
 use super::inline_frames::{Frames, HofChainState};
 use super::lowering::{self, RegionDeopt};

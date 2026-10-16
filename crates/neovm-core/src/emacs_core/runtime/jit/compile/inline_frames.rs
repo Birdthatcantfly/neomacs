@@ -3,6 +3,12 @@
 //! Admission is restricted to forward, observation-free bytecode. A virtual
 //! activation cannot run Lisp or collect: guards leave through a chain, and
 //! cons writes leave through that same chain when a barrier is required.
+//! This is also the Green handoff boundary: a virtual frame cannot reach
+//! make-thread, thread-yield, a Lisp hook or a collection. Its failing guard
+//! spills the complete ancestry and returns STATUS_DEOPT_AT; resumed_chain
+//! installs every reconstructed stack/backtrace frame before Tier-0 executes
+//! the observing operation. Physical callers may park around inline regions
+//! using their ordinary compiled root window. No mode-wide refusal is needed.
 //! Threading: all SSA snapshots and the mutable table builder belong to one
 //! compilation. Published metadata is immutable; no running Lisp state is
 //! cached here or shared between mutators.

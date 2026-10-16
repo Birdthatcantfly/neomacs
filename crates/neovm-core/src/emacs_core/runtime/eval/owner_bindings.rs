@@ -2083,6 +2083,34 @@ impl Context {
         Some((base, self.obarray.thread_projection_of(base)?))
     }
 
+    /// Signal-time evaluator room writes the active native integer binding
+    /// directly, without watchers or creation of an automatic local. After
+    /// admission that binding can belong to this owner's current channel;
+    /// the canonical integer forwarder is hidden behind its projection.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn store_owner_signal_depth_integer(&mut self, id: SymId, value: Value) {
+        let projection = self
+            .obarray
+            .thread_projection_of(id)
+            .expect("projected depth variable");
+        let index = projection.index();
+        let channel = access_channel(&self.buffers, id, projection);
+        let bound = self
+            .owner
+            .slab()
+            .is_some_and(|slab| slab.slot(index, channel).value().is_some());
+        if bound {
+            self.owner
+                .slab_mut()
+                .expect("the active owner binding")
+                .set_slot(index, channel, SlotState::Bound(SlotValue::new(value)));
+        } else {
+            self.owner_canonical_store(id, channel, value);
+        }
+        self.publish_owner_binding(id);
+    }
+
     /// [`Context::store_variable`] of a projected cell.
     #[cold]
     #[inline(never)]

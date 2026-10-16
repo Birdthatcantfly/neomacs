@@ -235,17 +235,23 @@ fn green_inline_retirement_keeps_native_leaf_allocation_alive() {
 }
 
 #[test]
-fn green_admission_exhaustively_certifies_physical_frames() {
+fn green_admission_accepts_all_inline_and_backend_configurations() {
     crate::test_utils::init_test_tracing();
     let _admission = AdmissionScope::enter(Inline2Mode::Off, BgMode::Legacy);
     if !crate::emacs_core::jit::jit_runtime_enabled() {
         return; // A deliberate VM-only gate has no compiled admission shape.
     }
+    // Build every startup Context before any Green runtime freezes the native
+    // subr tables. Admission itself may not register another subr afterward.
+    let mut cases = Vec::new();
     for mode in [OptMode::Legacy, OptMode::Off, OptMode::Opt] {
-        let _backend = compile::opt_mode_scope_for_test(mode);
         for background in [BgMode::Legacy, BgMode::Sync, BgMode::Threaded] {
-            let _configuration = AdmissionScope::enter(Inline2Mode::Off, background);
-            assert!(green_owner::certify_admission().is_ok());
+            cases.push((
+                mode,
+                Inline2Mode::Off,
+                background,
+                Context::new_with_threading(crate::emacs_core::eval::ThreadingMode::Green),
+            ));
         }
         for inline in [
             Inline2Mode::Named,
@@ -253,12 +259,22 @@ fn green_admission_exhaustively_certifies_physical_frames() {
             Inline2Mode::Hof,
             Inline2Mode::All,
         ] {
-            let _configuration = AdmissionScope::enter(inline, BgMode::Sync);
-            assert!(matches!(
-                green_owner::certify_admission(),
-                Err(AdmissionError::InlineFrames)
+            cases.push((
+                mode,
+                inline,
+                BgMode::Sync,
+                Context::new_with_threading(crate::emacs_core::eval::ThreadingMode::Green),
             ));
         }
+    }
+    for (mode, inline, background, mut context) in cases {
+        let _backend = compile::opt_mode_scope_for_test(mode);
+        let _configuration = AdmissionScope::enter(inline, background);
+        context.setup_thread_locals();
+        context
+            .start_green_threads()
+            .expect("JIT configuration admission");
+        context.green_teardown();
     }
 }
 
@@ -355,7 +371,7 @@ fn arithmetic_loop() -> ByteCodeFunction {
 }
 
 #[test]
-fn green_park_rejects_unguarded_entry_and_unregistered_osr_arithmetic() {
+fn green_park_accepts_entry_and_unregistered_osr_arithmetic() {
     crate::test_utils::init_test_tracing();
     let _admission = AdmissionScope::enter(Inline2Mode::Off, BgMode::Sync);
     let _backend = compile::opt_mode_scope_for_test(OptMode::Legacy);
@@ -372,10 +388,7 @@ fn green_park_rejects_unguarded_entry_and_unregistered_osr_arithmetic() {
         );
         let function = source.get_bytecode_data().expect("bytecode fixture");
         cache::resolve_compiled_leaf_ptr(frame.context, function).expect("native entry");
-        assert!(matches!(
-            green_owner::ParkedJit::prepare(frame.context),
-            Err(AdmissionError::UnguardedInlineArithmetic)
-        ));
+        assert!(green_owner::ParkedJit::prepare(frame.context).is_ok());
     }
     {
         let mut context = Context::new();
@@ -408,10 +421,7 @@ fn green_park_rejects_unguarded_entry_and_unregistered_osr_arithmetic() {
             unsafe { &*pointer }.inline_deps().is_empty(),
             "legacy OSR has no registered arithmetic deps"
         );
-        assert!(matches!(
-            green_owner::ParkedJit::prepare(frame.context),
-            Err(AdmissionError::UnguardedInlineArithmetic)
-        ));
+        assert!(green_owner::ParkedJit::prepare(frame.context).is_ok());
         cache::retire_green_inline_dependents();
         assert_eq!(
             cache::osr_leaf_ptr_for_test(function, 1),
@@ -615,4 +625,141 @@ fn green_osr_retirement_preserves_relocation_roots_after_publication_retires() {
         relocations.contains(&literal),
         "evicted OSR relocations remain roots after the parked RootBatch retires"
     );
+}
+
+fn evicted_osr_native_witness(_context: &mut Context) -> crate::emacs_core::error::EvalResult {
+    if cache::native_depth() == 0 {
+        return Err(crate::emacs_core::error::signal(
+            "error",
+            vec![Value::string(
+                "evicted OSR continuation lost its native frame",
+            )],
+        ));
+    }
+    Ok(Value::T)
+}
+
+fn evict_running_osr_then_collect_and_park(
+    context: &mut Context,
+) -> crate::emacs_core::error::EvalResult {
+    evicted_osr_native_witness(context)?;
+    let source = context
+        .obarray
+        .symbol_function("green-evicted-osr-source")
+        .unwrap();
+    let function = source.get_bytecode_data().unwrap();
+    let literal = function.constants[3];
+    let id = function.jit_runtime().compiled_id().unwrap();
+    assert_eq!(
+        cache::cache_entry_kind_for_test(id),
+        "none",
+        "OSR-only source"
+    );
+    cache::evict_compiled(id);
+    assert!(cache::osr_leaf_ptr_for_test(function, 1).is_none());
+    assert!(
+        cache::green_has_native_state(),
+        "an evicted active OSR leaf must still prevent the empty-cache source shortcut"
+    );
+    let mut relocations = Vec::new();
+    cache::collect_jit_reloc_gc_roots(&mut relocations);
+    assert!(
+        relocations.contains(&literal),
+        "eviction retains exact relocation roots"
+    );
+    context.apply(Value::symbol("garbage-collect"), Vec::new())?;
+    context.apply(Value::symbol("thread-yield"), Vec::new())?;
+    evicted_osr_native_witness(context)?;
+    // The peer replaced the function cell while this original frame was parked.
+    // Its restored exact-source pin must now carry the old object into this GC.
+    context.apply(Value::symbol("garbage-collect"), Vec::new())?;
+    assert!(context.tagged_heap.owns_heap_value_for_test(source));
+    assert!(context.tagged_heap.owns_heap_value_for_test(literal));
+    Ok(Value::T)
+}
+
+#[test]
+fn green_evicted_active_osr_retains_code_relocations_and_exact_source_through_park() {
+    use crate::emacs_core::eval::ThreadingMode;
+    use crate::emacs_core::subr::SubrSpec;
+    let _admission = AdmissionScope::enter(Inline2Mode::Off, BgMode::Sync);
+    let _backend = compile::opt_mode_scope_for_test(OptMode::Off);
+    let _profit = ProfitScope::enter(ProfitGateTestPolicy::Bypass);
+    let mut context = Context::new_with_threading(ThreadingMode::Green);
+    context.set_lexical_binding(true);
+    context.register_subr(SubrSpec::fixed0(
+        "green-evicted-osr-park",
+        evict_running_osr_then_collect_and_park,
+    ));
+    context.register_subr(SubrSpec::fixed0(
+        "green-evicted-osr-witness",
+        evicted_osr_native_witness,
+    ));
+    context
+        .eval_str("(thread-join (make-thread (lambda () nil)))")
+        .unwrap();
+    let literal = Value::cons(Value::fixnum(1991), Value::string("evicted-osr-relocation"));
+    let source = Value::make_bytecode(function(
+        vec![
+            Op::Constant(0),
+            Op::StackRef(0),
+            Op::StackRef(2),
+            Op::Lss,
+            Op::GotoIfNil(13),
+            Op::Constant(1),
+            Op::Call(0),
+            Op::Pop,
+            Op::Constant(2),
+            Op::Call(0),
+            Op::Pop,
+            Op::Add1,
+            Op::Goto(1),
+            Op::Pop,
+            Op::Constant(3),
+            Op::Return,
+        ],
+        vec![
+            Value::fixnum(0),
+            Value::symbol("green-evicted-osr-park"),
+            Value::symbol("green-evicted-osr-witness"),
+            literal,
+        ],
+    ));
+    context.with_obarray_mut(|mut obarray| {
+        obarray.set_symbol_function("green-evicted-osr-source", source);
+    });
+    context
+        .eval_str(
+            "(setq green-evicted-osr-peer (make-thread (lambda ()
+          (fset 'green-evicted-osr-source (lambda (x) 'replacement))
+          (garbage-collect) 'peer-finished)))",
+        )
+        .unwrap();
+    let source_data = source.get_bytecode_data().unwrap();
+    cache::prepare_osr_for_test(&mut context, source_data, 1);
+    let leaf = cache::osr_leaf_ptr_for_test(source_data, 1).unwrap();
+    let frame = FrameScope::enter(&mut context, Value::symbol("green-evicted-osr-source"));
+    let result = cache::try_run_osr(
+        frame.context,
+        source_data,
+        1,
+        &[Value::fixnum(1), Value::fixnum(0)],
+        &[],
+    );
+    assert_eq!(result, Some(NativeRun::Ok(literal.bits())));
+    // SAFETY: the original owner's retirement store retains this exact leaf.
+    assert!(unsafe { &*leaf }.retired.get());
+    assert!(frame.context.tagged_heap.owns_heap_value_for_test(source));
+    assert!(frame.context.tagged_heap.owns_heap_value_for_test(literal));
+    let peer = frame.context.eval_str(
+        "(list (thread-join green-evicted-osr-peer) (thread-last-error green-evicted-osr-peer))",
+    ).unwrap();
+    assert_eq!(
+        crate::emacs_core::print::print_value(&peer),
+        "(peer-finished nil)"
+    );
+    drop(frame);
+    context.green_teardown();
+    assert_eq!(cache::native_depth(), 0);
+    assert_eq!(context.jit_root_stack_top, 0);
 }

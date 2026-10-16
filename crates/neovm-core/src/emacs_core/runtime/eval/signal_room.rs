@@ -98,6 +98,14 @@ impl Context {
     #[cold]
     #[inline(never)]
     fn signal_depth_integer_value(&self, id: SymId) -> i64 {
+        if self.obarray.thread_projection_of(id).is_some() {
+            return LispInteger::check(
+                self.variable_value_in_current_buffer(id)
+                    .expect("projected native depth variable has a value"),
+            )
+            .expect("native depth variables hold integers")
+            .as_i64();
+        }
         match self.signal_depth_localized_cell(id) {
             Some(cell) => LispInteger::check(cell.cons_cdr())
                 .expect("native depth variables hold integers")
@@ -117,6 +125,10 @@ impl Context {
     #[cold]
     #[inline(never)]
     fn set_signal_depth_integer(&mut self, id: SymId, value: i64) {
+        if self.obarray.thread_projection_of(id).is_some() {
+            self.store_owner_signal_depth_integer(id, LispInteger::from_i64(value).value());
+            return;
+        }
         let cell = self.signal_depth_localized_cell(id);
         let value = LispInteger::from_i64(value);
         self.obarray

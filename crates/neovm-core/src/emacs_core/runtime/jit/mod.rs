@@ -1741,3 +1741,7 @@ mod tests;
 #[cfg(all(test, feature = "jit"))]
 #[path = "tests/green_owner.rs"]
 mod green_owner_tests;
+
+#[cfg(all(test, feature = "jit"))]
+#[path = "tests/green_arith.rs"]
+mod green_arith_tests;
