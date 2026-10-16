@@ -477,17 +477,37 @@ impl<P: Protocol> Drop for Reader<P> {
 }
 
 fn check(model: impl Fn() + Send + Sync + 'static) {
+    check_threads(2, model);
+}
+
+fn check_threads(threads: usize, model: impl Fn() + Send + Sync + 'static) {
     let mut builder = loom::model::Builder::new();
-    builder.max_threads = 2;
+    builder.max_threads = threads;
     builder.max_branches = 256;
     builder.max_permutations = None;
     builder.max_duration = None;
-    builder.preemption_bound = None;
+    // Keep Builder::new()'s LOOM_MAX_PREEMPTIONS setting; do not silently
+    // replace the requested bound with an unbounded exploration.
     builder.checkpoint_file = None;
     builder.expect_explicit_explore = false;
     builder.location = true;
     builder.log = false;
-    builder.check(model);
+    struct Iterations(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for Iterations {
+        fn drop(&mut self) {
+            eprintln!(
+                "LOOM_ITERATIONS {} {}",
+                std::thread::current().name().unwrap_or("unnamed"),
+                self.0.load(std::sync::atomic::Ordering::Relaxed)
+            );
+        }
+    }
+    let iterations = Iterations(std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+    let count = std::sync::Arc::clone(&iterations.0);
+    builder.check(move || {
+        count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        model();
+    });
 }
 
 fn live<P: Protocol>() -> (Arc<Epoch>, Arc<Slot<P>>, Lease<P>) {
@@ -765,4 +785,459 @@ fn negative_control_drop_must_not_count_as_explicit_finish() {
 #[should_panic(expected = "retired a batch without explicit reader finish")]
 fn negative_control_abandonment_first_can_accept_two_unrelated_zeroes() {
     abandonment_race::<WrongCounterOrder>();
+}
+
+/// Part B's in-place reuse model. Unlike the Part A state-word experiments,
+/// this models the actual table/control/payload Arc ownership checks. Plain
+/// payload memory is immutable outside a unique Prepared endpoint; the table
+/// mutex serializes scans, admissions, retirement and generation replacement.
+mod reuse {
+    use super::*;
+
+    #[derive(Debug)]
+    struct Control {
+        generation: usize,
+        phase: AtomicU8,
+        readers: AtomicUsize,
+        abandoned: AtomicUsize,
+    }
+
+    impl Control {
+        fn phase(&self) -> Phase {
+            Phase::try_from(self.phase.load(Ordering::Acquire)).unwrap()
+        }
+
+        fn set_phase(&self, phase: Phase) {
+            self.phase.store(phase.into(), Ordering::Release);
+        }
+    }
+
+    #[derive(Debug)]
+    struct Payload {
+        words: Vec<usize>,
+        used: usize,
+    }
+
+    #[derive(Debug)]
+    struct Table {
+        control: Arc<Control>,
+        payload: Option<Arc<Payload>>,
+        next_generation: usize,
+    }
+
+    impl Table {
+        fn trace(table: &Arc<Mutex<Self>>) -> (usize, Vec<usize>) {
+            let table = table.lock().unwrap();
+            let roots = match table.control.phase() {
+                Phase::Live | Phase::Closing => {
+                    let payload = table.payload.as_ref().unwrap();
+                    payload.words[..payload.used].to_vec()
+                }
+                Phase::Reserved | Phase::Retired | Phase::Cancelled => Vec::new(),
+            };
+            (table.control.generation, roots)
+        }
+
+        fn reader(table: &Arc<Mutex<Self>>, generation: usize) -> Option<ScopedReader> {
+            let table = table.lock().unwrap();
+            // This is the table key validation, before any counter increment
+            // or payload clone. A copied generation is metadata, not a reader.
+            if table.control.generation != generation || table.control.phase() != Phase::Live {
+                return None;
+            }
+            table.control.readers.fetch_add(1, Ordering::AcqRel);
+            Some(ScopedReader {
+                control: Arc::clone(&table.control),
+                payload: Arc::clone(table.payload.as_ref().unwrap()),
+                active: true,
+                _thread: PhantomData,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct Ownership {
+        table: Arc<Mutex<Table>>,
+        control: Option<Arc<Control>>,
+        epoch: Arc<Epoch>,
+    }
+
+    impl Drop for Ownership {
+        fn drop(&mut self) {
+            match self.control.as_ref().unwrap().phase() {
+                Phase::Cancelled | Phase::Retired => {
+                    self.epoch.held.fetch_sub(1, Ordering::Release);
+                }
+                // Model the logical obligation retained by unfinished Drop.
+                Phase::Reserved | Phase::Live | Phase::Closing => {}
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct ReusablePrepared {
+        ownership: Option<Ownership>,
+        payload: Arc<Payload>,
+        _thread: PhantomData<Rc<()>>,
+    }
+
+    assert_not_impl_any!(ReusablePrepared: Send, Sync, Clone, Copy);
+
+    impl ReusablePrepared {
+        fn ensure_capacity(
+            &mut self,
+            capacity: usize,
+            allocation_succeeds: bool,
+        ) -> Result<(), ()> {
+            let payload = Arc::get_mut(&mut self.payload).ok_or(())?;
+            assert_eq!(payload.used, 0);
+            if capacity > payload.words.len() {
+                // Inject host allocation failure before replacing any storage.
+                if !allocation_succeeds {
+                    return Err(());
+                }
+                payload.words = vec![0; capacity];
+            }
+            Ok(())
+        }
+
+        fn publish(mut self, roots: &[usize]) -> ReusableLease {
+            let payload = Arc::get_mut(&mut self.payload).unwrap();
+            assert!(roots.len() <= payload.words.len());
+            payload.words[..roots.len()].copy_from_slice(roots);
+            payload.used = roots.len();
+            let ownership = self.ownership.take().unwrap();
+            {
+                let mut table = ownership.table.lock().unwrap();
+                assert!(Arc::ptr_eq(
+                    &table.control,
+                    ownership.control.as_ref().unwrap()
+                ));
+                assert_eq!(table.control.phase(), Phase::Reserved);
+                assert!(table.payload.is_none());
+                table.payload = Some(Arc::clone(&self.payload));
+                table.control.set_phase(Phase::Live);
+            }
+            ReusableLease {
+                ownership: Some(ownership),
+            }
+        }
+    }
+
+    impl Drop for ReusablePrepared {
+        fn drop(&mut self) {
+            if let Some(ownership) = &self.ownership {
+                ownership
+                    .control
+                    .as_ref()
+                    .unwrap()
+                    .set_phase(Phase::Cancelled);
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum RecycleError {
+        Busy,
+        Readers,
+        NonUnique,
+        GenerationExhausted,
+    }
+
+    #[derive(Debug)]
+    struct RecycleFailure {
+        lease: ReusableLease,
+        error: RecycleError,
+    }
+
+    #[derive(Debug)]
+    struct ReusableLease {
+        ownership: Option<Ownership>,
+    }
+
+    assert_impl_all!(ReusableLease: Send, Sync);
+    assert_not_impl_any!(ReusableLease: Clone, Copy);
+
+    impl ReusableLease {
+        fn try_recycle(mut self) -> Result<ReusablePrepared, RecycleFailure> {
+            let result = (|| {
+                let ownership = self.ownership.as_mut().unwrap();
+                let table_arc = Arc::clone(&ownership.table);
+                let mut table = table_arc.try_lock().map_err(|_| RecycleError::Busy)?;
+                let control = ownership.control.as_ref().unwrap();
+                assert!(Arc::ptr_eq(&table.control, control));
+                assert_eq!(table.control.generation, control.generation);
+                assert!(matches!(control.phase(), Phase::Live | Phase::Closing));
+                control.set_phase(Phase::Closing);
+                let readers = control.readers.load(Ordering::Acquire);
+                let abandoned = control.abandoned.load(Ordering::Acquire);
+                if readers != 0 || abandoned != 0 {
+                    return Err(RecycleError::Readers);
+                }
+                // Loom Arc has no weak references. Its strong-count check
+                // models both ownership counts; weak observers remain covered
+                // by production's explicit weak_count checks and tests.
+                if Arc::strong_count(control) != 2
+                    || Arc::strong_count(table.payload.as_ref().unwrap()) != 1
+                {
+                    return Err(RecycleError::NonUnique);
+                }
+                let generation = table
+                    .next_generation
+                    .checked_add(1)
+                    .ok_or(RecycleError::GenerationExhausted)?;
+                control.set_phase(Phase::Retired);
+                drop(ownership.control.take());
+                // No table observer can appear while this guard is held.
+                let mut payload = table.payload.take().unwrap();
+                let control = Arc::get_mut(&mut table.control).unwrap();
+                let words = Arc::get_mut(&mut payload).unwrap();
+                words.words[..words.used].fill(0);
+                words.used = 0;
+                control.generation = generation;
+                control.set_phase(Phase::Reserved);
+                table.next_generation = generation;
+                ownership.control = Some(Arc::clone(&table.control));
+                Ok(payload)
+            })();
+            match result {
+                Ok(payload) => Ok(ReusablePrepared {
+                    ownership: self.ownership.take(),
+                    payload,
+                    _thread: PhantomData,
+                }),
+                Err(error) => Err(RecycleFailure { lease: self, error }),
+            }
+        }
+
+        fn finish(mut self) {
+            let ownership = self.ownership.as_ref().unwrap();
+            let table = ownership.table.lock().unwrap();
+            assert!(Arc::ptr_eq(
+                &table.control,
+                ownership.control.as_ref().unwrap()
+            ));
+            assert_eq!(table.control.readers.load(Ordering::Acquire), 0);
+            assert_eq!(table.control.abandoned.load(Ordering::Acquire), 0);
+            table.control.set_phase(Phase::Retired);
+            drop(table);
+            drop(self.ownership.take());
+        }
+    }
+
+    #[derive(Debug)]
+    struct ScopedReader {
+        control: Arc<Control>,
+        payload: Arc<Payload>,
+        active: bool,
+        _thread: PhantomData<Rc<()>>,
+    }
+
+    assert_not_impl_any!(ScopedReader: Send, Sync, Clone, Copy);
+
+    impl ScopedReader {
+        fn read(&self) {
+            assert!(matches!(self.control.phase(), Phase::Live | Phase::Closing));
+            assert_eq!(self.payload.words[..self.payload.used], [11, 23]);
+        }
+
+        fn finish(mut self) {
+            self.control.readers.fetch_sub(1, Ordering::Release);
+            self.active = false;
+        }
+    }
+
+    impl Drop for ScopedReader {
+        fn drop(&mut self) {
+            if self.active {
+                self.control.abandoned.fetch_add(1, Ordering::Release);
+                self.control.readers.fetch_sub(1, Ordering::Release);
+            }
+        }
+    }
+
+    fn initial() -> (Arc<Epoch>, Arc<Mutex<Table>>, ReusableLease) {
+        let epoch = Epoch::new();
+        let exclusion = Exclusion::acquire(&epoch);
+        epoch.held.fetch_add(1, Ordering::Relaxed);
+        let control = Arc::new(Control {
+            generation: 1,
+            phase: AtomicU8::new(Phase::Reserved.into()),
+            readers: AtomicUsize::new(0),
+            abandoned: AtomicUsize::new(0),
+        });
+        let table = Arc::new(Mutex::new(Table {
+            control: Arc::clone(&control),
+            payload: None,
+            next_generation: 1,
+        }));
+        let prepared = ReusablePrepared {
+            ownership: Some(Ownership {
+                table: Arc::clone(&table),
+                control: Some(control),
+                epoch: Arc::clone(&epoch),
+            }),
+            payload: Arc::new(Payload {
+                words: vec![0; 2],
+                used: 0,
+            }),
+            _thread: PhantomData,
+        };
+        let lease = prepared.publish(&[11, 23]);
+        drop(exclusion);
+        (epoch, table, lease)
+    }
+
+    #[test]
+    fn recycle_races_reader_admission_finish_and_table_scan() {
+        check_threads(3, || {
+            let (epoch, table, lease) = initial();
+            let read_table = Arc::clone(&table);
+            let reader = thread::spawn(move || {
+                if let Some(reader) = Table::reader(&read_table, 1) {
+                    reader.read();
+                    reader.finish();
+                }
+            });
+            let scan_table = Arc::clone(&table);
+            let scanner = thread::spawn(move || {
+                let (generation, roots) = Table::trace(&scan_table);
+                match generation {
+                    1 => assert_eq!(roots, [11, 23]),
+                    2 => assert!(roots.is_empty()),
+                    _ => panic!("unexpected generation"),
+                }
+            });
+            let recycled = lease.try_recycle();
+            reader.join().unwrap();
+            scanner.join().unwrap();
+            let prepared = match recycled {
+                Ok(prepared) => prepared,
+                Err(failure) => {
+                    assert!(matches!(
+                        failure.error,
+                        RecycleError::Busy | RecycleError::Readers | RecycleError::NonUnique
+                    ));
+                    assert_eq!(Table::trace(&table), (1, vec![11, 23]));
+                    assert!(!epoch.may_launch());
+                    failure.lease.try_recycle().unwrap()
+                }
+            };
+            assert_eq!(Table::trace(&table), (2, vec![]));
+            assert!(Table::reader(&table, 1).is_none());
+            assert!(!epoch.may_launch());
+            let lease = prepared.publish(&[11, 23]);
+            assert!(Table::reader(&table, 1).is_none());
+            let reader = Table::reader(&table, 2).unwrap();
+            reader.read();
+            reader.finish();
+            lease.finish();
+            assert!(epoch.may_launch());
+        });
+    }
+
+    #[test]
+    fn recycle_generation_growth_and_allocation_failure_preserve_storage() {
+        check(|| {
+            let (epoch, table, lease) = initial();
+            let old_generation = table.lock().unwrap().control.generation;
+            let mut prepared = lease.try_recycle().unwrap();
+            assert_eq!(prepared.payload.words, [0, 0]);
+            assert_eq!(prepared.ensure_capacity(5, false), Err(()));
+            assert_eq!(prepared.payload.words, [0, 0]);
+            assert!(!epoch.may_launch());
+            prepared.ensure_capacity(5, true).unwrap();
+            assert_eq!(prepared.payload.words, [0; 5]);
+            prepared.ensure_capacity(1, false).unwrap();
+            assert_eq!(prepared.payload.words.len(), 5);
+            let lease = prepared.publish(&[11, 23, 37, 41, 43]);
+            assert!(Table::reader(&table, old_generation).is_none());
+            assert_eq!(Table::trace(&table), (2, vec![11, 23, 37, 41, 43]));
+            lease.finish();
+            assert!(epoch.may_launch());
+        });
+    }
+
+    #[test]
+    fn recycle_active_reader_and_nonunique_observers_retain_the_lease_for_retry() {
+        check(|| {
+            let (epoch, table, lease) = initial();
+            let reader = Table::reader(&table, 1).unwrap();
+            let failure = lease.try_recycle().unwrap_err();
+            assert_eq!(failure.error, RecycleError::Readers);
+            assert_eq!(Table::trace(&table), (1, vec![11, 23]));
+            assert!(Table::reader(&table, 1).is_none());
+            reader.read();
+            reader.finish();
+            let control_observer = Arc::clone(&table.lock().unwrap().control);
+            let failure = failure.lease.try_recycle().unwrap_err();
+            assert_eq!(failure.error, RecycleError::NonUnique);
+            drop(control_observer);
+            let payload_observer = Arc::clone(table.lock().unwrap().payload.as_ref().unwrap());
+            let failure = failure.lease.try_recycle().unwrap_err();
+            assert_eq!(failure.error, RecycleError::NonUnique);
+            assert_eq!(Table::trace(&table), (1, vec![11, 23]));
+            assert!(!epoch.may_launch());
+            drop(payload_observer);
+            let prepared = failure.lease.try_recycle().unwrap();
+            assert_eq!(Table::trace(&table), (2, vec![]));
+            drop(prepared);
+            assert!(epoch.may_launch());
+        });
+    }
+
+    #[test]
+    fn recycle_abandoned_reader_retains_roots_and_exclusion() {
+        check(|| {
+            let (epoch, table, lease) = initial();
+            drop(Table::reader(&table, 1).unwrap());
+            let failure = lease.try_recycle().unwrap_err();
+            assert_eq!(failure.error, RecycleError::Readers);
+            assert_eq!(Table::trace(&table), (1, vec![11, 23]));
+            drop(failure.lease);
+            assert_eq!(Table::trace(&table), (1, vec![11, 23]));
+            assert!(!epoch.may_launch());
+        });
+    }
+
+    #[test]
+    fn recycle_busy_table_retains_live_lease_for_retry() {
+        check(|| {
+            let (epoch, table, lease) = initial();
+            let scanned = Arc::clone(&table);
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let scanner = thread::spawn(move || {
+                let table = scanned.lock().unwrap();
+                ready_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                assert_eq!(table.control.phase(), Phase::Live);
+                assert_eq!(table.payload.as_ref().unwrap().used, 2);
+            });
+            ready_rx.recv().unwrap();
+            let failure = lease.try_recycle().unwrap_err();
+            assert_eq!(failure.error, RecycleError::Busy);
+            assert!(!epoch.may_launch());
+            release_tx.send(()).unwrap();
+            scanner.join().unwrap();
+            assert_eq!(Table::trace(&table), (1, vec![11, 23]));
+            drop(failure.lease.try_recycle().unwrap());
+            assert!(epoch.may_launch());
+        });
+    }
+
+    #[test]
+    fn recycle_exhausted_generation_retains_roots_until_explicit_finish() {
+        check(|| {
+            let (epoch, table, lease) = initial();
+            table.lock().unwrap().next_generation = usize::MAX;
+            let failure = lease.try_recycle().unwrap_err();
+            assert_eq!(failure.error, RecycleError::GenerationExhausted);
+            assert_eq!(Table::trace(&table), (1, vec![11, 23]));
+            assert!(!epoch.may_launch());
+            failure.lease.finish();
+            assert_eq!(Table::trace(&table), (1, vec![]));
+            assert!(epoch.may_launch());
+        });
+    }
 }
