@@ -1093,19 +1093,25 @@ fn a_green_select_has_no_periodic_slices() {
 
 /// Joining main is blocked, so the newborn's first yield reacquires its
 /// own turn. The deferred signal must still reach its newly installed handler.
+/// The first join snapshots and re-raises the pending signal even though the
+/// worker catches it; a second join reads the worker's successful result.
 #[test]
 fn a_newborn_signal_is_delivered_even_when_its_yield_has_no_ready_peer() {
     let mut ev = green();
     assert_eq!(
         eval(
             &mut ev,
-            "(let ((th (make-thread (lambda ()
-                     (condition-case nil (thread-yield)
-                       (error 'caught))))))
-           (thread-signal th 'error '(wake))
-           (thread-join th))"
+            "(progn
+           (setq g3f-newborn-handled nil)
+           (let ((th (make-thread (lambda ()
+                       (condition-case nil (thread-yield)
+                         (error (setq g3f-newborn-handled t) 'caught))))))
+             (thread-signal th 'error '(wake))
+             (let ((join-error (condition-case e (thread-join th) (error e))))
+               (list join-error g3f-newborn-handled
+                     (thread-join th) (thread-last-error th)))))"
         ),
-        "caught"
+        "((error wake) t caught nil)"
     );
 }
 
@@ -1120,7 +1126,8 @@ fn a_yield_without_ready_peers_still_refuses_gc_inhibition() {
 }
 
 /// A scheduler event interrupts a parked select without waiting for its
-/// timeout; the resumed owner raises the pending thread signal.
+/// timeout; the resumed owner raises the pending thread signal. Let the
+/// worker consume it before join, which otherwise re-raises a pending signal.
 #[test]
 fn a_signal_wakes_a_thread_waiting_in_select() {
     let mut ev = green();
@@ -1133,9 +1140,10 @@ fn a_signal_wakes_a_thread_waiting_in_select() {
                        (error 'interrupted))))))
            (thread-yield)
            (thread-signal th 'error '(wake))
-           (thread-join th))"
+           (thread-yield)
+           (list (thread-join th) (thread-last-error th)))"
         ),
-        "interrupted"
+        "(interrupted nil)"
     );
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
