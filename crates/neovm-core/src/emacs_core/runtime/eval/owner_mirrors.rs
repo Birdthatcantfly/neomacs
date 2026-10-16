@@ -127,8 +127,15 @@ impl Context {
             "an owner resumes in its own World"
         );
         self.obarray.refresh_admission();
-        self.setup_thread_locals();
+        self.setup_owner_thread_locals();
         self.refresh_owner_mirrors();
+    }
+
+    /// Admitted owners keep the ordinary heap, epoch, cache and table
+    /// activation, using borrowed terminal IDs instead of a fresh snapshot.
+    #[inline(always)]
+    fn setup_owner_thread_locals(&mut self) {
+        self.setup_thread_locals_inner::<false>();
     }
 
     /// Swap each live in-place buffer binding (`LetLocal` entries: a

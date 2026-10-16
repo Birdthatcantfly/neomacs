@@ -44,6 +44,14 @@ pub(crate) struct GreenSeat {
     /// condition-wait retakes its mutex. The owner slab traces a forwarded
     /// error's offending Lisp value, including while this owner is running.
     binding_resume_error: Option<BindingResumeError>,
+    /// Empty census scratch retained on this owner. Publication copies its
+    /// words into the typed root batch before this buffer is cleared.
+    pub(super) parked_roots_buffer: Vec<Value>,
+    /// Reusable empty typed storage while running. Its live lease belongs to
+    /// the World's parked map until this owner has completely resumed.
+    pub(super) parked_root_batch: Option<crate::tagged::transport::PreparedRootBatch>,
+    #[cfg(feature = "jit")]
+    pub(super) parked_jit_scratch: crate::emacs_core::jit::green_owner::ParkedJitScratch,
 }
 
 impl GreenSeat {
@@ -100,28 +108,59 @@ impl Context {
                 receiver: Some(receiver),
                 baton: Some(baton),
                 binding_resume_error: None,
+                parked_roots_buffer: Vec::new(),
+                parked_root_batch: None,
+                #[cfg(feature = "jit")]
+                parked_jit_scratch: Default::default(),
             }));
     }
 
     /// Copy every root only this owner holds: its private execution state
     /// and its thread-local roots, without the World's storage.
     fn collect_parked_roots(&mut self) -> Vec<Value> {
-        let mut roots = Vec::new();
+        let mut roots = std::mem::take(
+            &mut self
+                .green_seat()
+                .expect("a parked owner is seated")
+                .parked_roots_buffer,
+        );
+        debug_assert!(roots.is_empty(), "retirement clears the reusable buffer");
         // The vm_frames group includes drain_unwind_to's carried result or
         // Flow and PoppedBindingScope's popped entry and restoration lexenv.
         // These copies are published before a cleanup runs Lisp, so parking
         // inside that cleanup never exposes native-stack state to a peer.
-        self.trace_private_roots(&mut |value| roots.push(value));
-        let mut thread_local = Vec::new();
-        let mut stats = Vec::new();
-        super::super::collect_thread_local_gc_roots(
-            &mut thread_local,
-            self.tagged_heap.identity(),
-            self.tagged_heap.gc_collections(),
-            crate::tagged::gc::CacheRootScan::Parked,
-            &mut stats,
+        #[cfg(feature = "jit")]
+        {
+            let mut scratch =
+                std::mem::take(&mut self.green_seat().expect("seated above").parked_jit_scratch);
+            self.trace_private_roots_reusing(&mut roots, &mut scratch.called);
+            self.green_seat().expect("seated above").parked_jit_scratch = scratch;
+        }
+        #[cfg(not(feature = "jit"))]
+        self.trace_private_roots(&mut roots);
+        // Parking needs values only, without the collection helper's group
+        // timing, tagged copies, or temporary allocation for every group.
+        let heap = self.tagged_heap.identity();
+        let epoch = self.tagged_heap.gc_collections();
+        let scan = crate::tagged::gc::CacheRootScan::Parked;
+        #[cfg(feature = "jit")]
+        crate::emacs_core::jit::cache::collect_jit_reloc_gc_roots_for_heap(&mut roots, heap);
+        crate::emacs_core::syntax::collect_syntax_gc_roots(&mut roots, heap);
+        crate::emacs_core::casetab::collect_casetab_gc_roots(&mut roots, heap);
+        crate::emacs_core::string_pos_cache::collect_string_pos_cache_gc_roots(
+            &mut roots, heap, epoch, scan,
         );
-        roots.extend(thread_local.into_iter().map(|(value, _)| value));
+        crate::emacs_core::category::collect_category_gc_roots(&mut roots, heap);
+        crate::emacs_core::dynamic_module::collect_dynamic_module_gc_roots(&mut roots, heap);
+        crate::emacs_core::regex::collect_regex_gc_roots(&mut roots, heap, epoch, scan);
+        crate::emacs_core::intern::collect_symbol_name_gc_roots(&mut roots, heap);
+        super::super::SCRATCH_GC_ROOTS.with(|scratch| {
+            roots.extend(scratch.borrow().iter().filter_map(|root| {
+                (root.heap_identity == heap
+                    || (root.heap_identity == 0 && !root.value.is_heap_object()))
+                .then_some(root.value)
+            }));
+        });
         roots
     }
 
@@ -144,23 +183,48 @@ impl Context {
         // Capture exact sources before any binding exchange. Operand roots
         // are copied below from trace_roots' jit_window on this owner only.
         #[cfg(feature = "jit")]
-        let parked_jit = crate::emacs_core::jit::green_owner::ParkedJit::prepare(self)
-            .map_err(|error| signal("error", vec![Value::string(error.to_string())]))?;
+        let parked_jit = {
+            let mut scratch =
+                std::mem::take(&mut self.green_seat().expect("seated above").parked_jit_scratch);
+            let prepared =
+                crate::emacs_core::jit::green_owner::ParkedJit::prepare_reusing(self, &mut scratch);
+            self.green_seat().expect("seated above").parked_jit_scratch = scratch;
+            prepared.map_err(|error| signal("error", vec![Value::string(error.to_string())]))?
+        };
         let parked = self.park_owner();
         #[allow(unused_mut)]
         let mut roots = self.collect_parked_roots();
         #[cfg(feature = "jit")]
         roots.extend_from_slice(parked_jit.roots());
         let prepared = self
-            .owner
-            .slab_mut()
-            .and_then(|slab| slab.green_seat_mut())
-            .and_then(|seat| seat.baton.as_ref())
-            .expect("the running thread holds the Baton")
-            .prepare_parked_batch(&self.tagged_heap, roots.len());
+            .green_seat()
+            .expect("seated above")
+            .parked_root_batch
+            .take();
+        let prepared = match prepared {
+            Some(mut prepared) => match prepared.ensure_capacity(roots.len()) {
+                Ok(()) => Ok(prepared),
+                Err(error) => {
+                    self.green_seat().expect("seated above").parked_root_batch = Some(prepared);
+                    Err(error)
+                }
+            },
+            None => self
+                .owner
+                .slab_mut()
+                .and_then(|slab| slab.green_seat_mut())
+                .and_then(|seat| seat.baton.as_ref())
+                .expect("the running thread holds the Baton")
+                .prepare_parked_batch(&self.tagged_heap, roots.len()),
+        };
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
+                self.return_parked_root_buffer(roots);
+                #[cfg(feature = "jit")]
+                parked_jit.return_scratch(
+                    &mut self.green_seat().expect("seated above").parked_jit_scratch,
+                );
                 self.resume_owner(parked);
                 return Err(signal("error", vec![Value::string(error.to_string())]));
             }
@@ -173,6 +237,9 @@ impl Context {
             .expect("the prepared capacity fits the exact owner census")
             .publish()
             .expect("a unique reserved batch publishes exactly once");
+        // The immutable typed publication now owns the census. Native scratch
+        // can be cleared and retained before another owner receives the Baton.
+        self.return_parked_root_buffer(roots);
         let seat = self.green_seat().expect("seated above");
         let baton = seat
             .baton
@@ -205,9 +272,13 @@ impl Context {
         // Invalidate shared leaf slots before dispatch or owner mirror work,
         // and restore old-source pins while the immutable batch still roots them.
         #[cfg(feature = "jit")]
-        parked_jit
-            .resume(self)
-            .expect("the original owner resumes in its own heap");
+        {
+            let mut scratch =
+                std::mem::take(&mut self.green_seat().expect("seated above").parked_jit_scratch);
+            let resumed = parked_jit.resume_reusing(self, &mut scratch);
+            self.green_seat().expect("seated above").parked_jit_scratch = scratch;
+            resumed.expect("the original owner resumes in its own heap");
+        }
         unstow_carried_state(&baton);
         unstow_owner_state(self, &baton);
         let changed_owner = self.threads.current_thread_id() != key.id();
@@ -254,12 +325,7 @@ impl Context {
             case_table.map(Value::bits) != self.cached_standard_case_table.map(Value::bits);
         self.cached_standard_case_table = case_table;
         self.resume_owner(parked);
-        let publication = self
-            .with_green_runtime(|runtime| runtime.parked.borrow_mut().remove(&key))
-            .expect("each returning owner has a parked batch");
-        publication
-            .try_finish()
-            .expect("restored owner and synchronous collector have no readers");
+        self.retire_parked_roots(key);
         if case_table_changed {
             crate::emacs_core::casetab::activate_casetab_thread_locals(case_table);
         }
@@ -464,6 +530,30 @@ impl Context {
                 .is_none(),
             "an owner parks exactly once before resuming"
         );
+    }
+
+    /// KEY runs again: its roots are its own Context's once more.
+    fn retire_parked_roots(&mut self, key: ThreadKey) {
+        let publication = self
+            .with_green_runtime(|runtime| runtime.parked.borrow_mut().remove(&key))
+            .expect("each returning owner has a parked batch");
+        // Called only after ParkedJit::resume and resume_owner have restored
+        // the original continuation. The retained Green epoch excludes a
+        // concurrent marker, and no synchronous collection is active here.
+        let prepared = publication
+            .try_recycle()
+            .expect("restored owner and synchronous collector have no readers");
+        let seat = self.green_seat().expect("a returning owner is seated");
+        assert!(seat.parked_root_batch.is_none(), "one batch per owner");
+        seat.parked_root_batch = Some(prepared);
+    }
+
+    /// Retain census scratch without retaining any of its raw Lisp words.
+    fn return_parked_root_buffer(&mut self, mut roots: Vec<Value>) {
+        roots.clear();
+        let seat = self.green_seat().expect("a publishing owner is seated");
+        debug_assert!(seat.parked_roots_buffer.is_empty());
+        seat.parked_roots_buffer = roots;
     }
 
     /// GNU `make-thread` (ARGS: FUNCTION, NAME, BUFFER-DISPOSITION) in a

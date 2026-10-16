@@ -64,8 +64,66 @@ impl Context {
     /// Only this owner's execution roots. World cells are traced by the
     /// collecting owner; parking must not walk them merely to discard them.
     #[inline(always)]
-    pub(super) fn trace_private_roots(&self, visit: &mut dyn FnMut(Value)) {
-        self.trace_root_groups::<false>(&mut |_| {}, visit);
+    pub(super) fn trace_private_roots(&self, roots: &mut Vec<Value>) {
+        self.trace_root_groups::<false>(&mut |_| {}, &mut |value| roots.push(value));
+        #[cfg(feature = "jit")]
+        self.trace_jit_redefined_functions(&mut |value| roots.push(value));
+        // The registry is owner-private, but its collector takes a Vec.
+        // Append directly to the parking buffer instead of allocating a
+        // scratch Vec on every park while a Rust-held Flow is live.
+        super::super::error::collect_in_flight_registry_gc_roots(
+            roots,
+            &self.in_flight_registry,
+            self.tagged_heap.identity(),
+        );
+    }
+
+    /// Green's private census reuses the called-symbol buffer after JIT source
+    /// capture has cleared it. The ordinary collection helper is unchanged.
+    #[cfg(feature = "jit")]
+    #[inline(always)]
+    pub(super) fn trace_private_roots_reusing(
+        &self,
+        roots: &mut Vec<Value>,
+        called: &mut Vec<SymId>,
+    ) {
+        self.trace_root_groups::<false>(&mut |_| {}, &mut |value| roots.push(value));
+        debug_assert!(called.is_empty());
+        use crate::emacs_core::jit::cache;
+        if cache::has_redefined_pins() {
+            let symbol_mode = self.symbol_mode();
+            called.extend(
+                self.specpdl
+                    .iter()
+                    .chain(
+                        self.suspended_thread_bindings
+                            .iter()
+                            .flat_map(|state| state.specpdl.iter()),
+                    )
+                    .filter_map(|entry| match entry {
+                        SpecBinding::Backtrace { function, .. }
+                        | SpecBinding::Backtrace1 { function, .. }
+                        | SpecBinding::Backtrace2 { function, .. }
+                        | SpecBinding::BacktraceNative { function, .. } => {
+                            function.as_symbol_id(symbol_mode)
+                        }
+                        _ => None,
+                    }),
+            );
+            called.sort_unstable_by_key(|symbol| symbol.0);
+            called.dedup();
+            cache::trace_redefined_pins(
+                self.tagged_heap.identity(),
+                &|symbol| called.binary_search_by_key(&symbol.0, |s| s.0).is_ok(),
+                &mut |value| roots.push(value),
+            );
+            called.clear();
+        }
+        super::super::error::collect_in_flight_registry_gc_roots(
+            roots,
+            &self.in_flight_registry,
+            self.tagged_heap.identity(),
+        );
     }
 
     /// Compile separate walks: the collection walk has no runtime mode
@@ -237,7 +295,9 @@ impl Context {
         #[cfg(feature = "jit")]
         {
             group("jit_redefined");
-            self.trace_jit_redefined_functions(visit);
+            if WORLD {
+                self.trace_jit_redefined_functions(visit);
+            }
         }
         group("profiler");
         self.trace_profiler_roots(visit);
@@ -310,18 +370,18 @@ impl Context {
         if let Some(table) = self.cached_standard_case_table {
             visit(table);
         }
-        let mut registry_roots = Vec::new();
-        // Rust-held signals, throws and yields stay rooted when this Context moves.
-        group("in_flight_registry");
-        super::super::error::collect_in_flight_registry_gc_roots(
-            &mut registry_roots,
-            &self.in_flight_registry,
-            self.tagged_heap.identity(),
-        );
-        for root in registry_roots.drain(..) {
-            visit(root);
-        }
         if WORLD {
+            let mut registry_roots = Vec::new();
+            // Rust-held signals, throws and yields stay rooted when this Context moves.
+            group("in_flight_registry");
+            super::super::error::collect_in_flight_registry_gc_roots(
+                &mut registry_roots,
+                &self.in_flight_registry,
+                self.tagged_heap.identity(),
+            );
+            for root in registry_roots.drain(..) {
+                visit(root);
+            }
             // Values that any thread holds through this heap's `SharedRoot`s.
             group("shared_roots");
             crate::tagged::transport::collect_shared_root_gc_roots(
@@ -389,8 +449,8 @@ impl Context {
             }
             // Registry values are already seeded. Release their scratch storage
             // before the larger root walks so it does not stay live across them.
+            drop(registry_roots);
         }
-        drop(registry_roots);
         if WORLD {
             // Full ~all-interned-symbols walk on STW collections; only the
             // BLV-pool residual under `ObarraySymbolCellSkipGuard` (both
@@ -686,11 +746,25 @@ impl Context {
     /// Context is thread-confined; worker threads construct their own Context.
     #[inline(never)]
     pub fn setup_thread_locals(&mut self) {
+        self.setup_thread_locals_inner::<true>();
+    }
+
+    /// Separate the ordinary activation from admitted-owner activation at
+    /// compile time. The ordinary specialization keeps its terminal snapshot;
+    /// no runtime owner predicate enters its callers.
+    #[inline(always)]
+    pub(super) fn setup_thread_locals_inner<const SNAPSHOT_TERMINAL_IDS: bool>(&mut self) {
         crate::tagged::gc::set_tagged_heap(&mut self.tagged_heap);
         super::super::ccl::install_ccl_registry_handle(&self.ccl_registry);
         super::super::charset::install_charset_registry_handle(&self.charset_registry);
         super::super::xfaces::install_font_registry_handle(&self.font_registry);
-        super::super::terminal::pure::install_terminal_registry_handle(&self.terminal_registry);
+        if SNAPSHOT_TERMINAL_IDS {
+            super::super::terminal::pure::install_terminal_registry_handle(&self.terminal_registry);
+        } else {
+            super::super::terminal::pure::install_owner_terminal_registry_handle(
+                &self.terminal_registry,
+            );
+        }
         super::super::builtins::install_hash_table_test_registry_handle(
             &self.hash_table_test_registry,
         );

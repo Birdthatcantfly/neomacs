@@ -1651,3 +1651,208 @@ fn sim_jit_two_loop_throughput_micro() {
 fn green_jit_two_compiled_loops_keep_leaves_without_recompile_or_deopt() {
     run_throughput(ThreadingMode::Green, 2000, 1000);
 }
+
+fn native_scratch_reuse_park(context: &mut Context) -> EvalResult {
+    // Warm source pins and all four buffers before capturing their identities.
+    for _ in 0..4 {
+        native_witness(context)?;
+        context.green_wait(crate::emacs_core::eval::green::Wait::Runnable)?;
+    }
+    let expected = context
+        .green_seat()
+        .expect("compiled Green owner")
+        .parked_jit_scratch
+        .storage_for_test();
+    if expected.iter().any(|(_, capacity)| *capacity == 0) {
+        return Err(signal(
+            LispCondition::Error,
+            vec![Value::string("compiled scratch buffers were not exercised")],
+        ));
+    }
+    for _ in 0..32 {
+        native_witness(context)?;
+        let collections = context.tagged_heap.gc_collections();
+        context.green_wait(crate::emacs_core::eval::green::Wait::Runnable)?;
+        require_native()?;
+        let scratch = &context
+            .green_seat()
+            .expect("returning compiled owner")
+            .parked_jit_scratch;
+        if scratch.storage_for_test() != expected || !scratch.empty_for_test() {
+            return Err(signal(
+                LispCondition::Error,
+                vec![Value::string(
+                    "compiled park changed warmed scratch storage or retained raw words",
+                )],
+            ));
+        }
+        if context.tagged_heap.gc_collections() <= collections {
+            return Err(signal(
+                LispCondition::Error,
+                vec![Value::string(
+                    "the peer did not collect behind the compiled frame",
+                )],
+            ));
+        }
+    }
+    Ok(Value::fixnum(32))
+}
+
+#[test]
+fn green_jit_switch_reuses_scratch_behind_a_native_frame_while_peer_collects() {
+    with_compiled_green(|context| {
+        context.register_subr(SubrSpec::fixed0(
+            "f5-scratch-reuse-park",
+            native_scratch_reuse_park,
+        ));
+        let function = install(
+            context,
+            "f5-scratch-reuse-leaf",
+            bytecode(
+                vec![Op::Constant(0), Op::Call(0), Op::Return],
+                vec![Value::symbol("f5-scratch-reuse-park")],
+                FixtureArity::Nullary,
+            ),
+        );
+        context
+            .eval_str(
+                "(progn
+            (setq f5-scratch-stop nil)
+            (setq f5-scratch-peer (make-thread (lambda ()
+                (while (null f5-scratch-stop) (garbage-collect) (thread-yield)))))
+            (thread-yield))",
+            )
+            .unwrap();
+        let result = context.apply(Value::symbol("f5-scratch-reuse-leaf"), Vec::new());
+        // Join before asserting results: a failed native witness must not
+        // silently turn into a nil-valued worker result or strand a peer.
+        let health = print_value(
+            &context
+                .eval_str(
+                    "(list (thread-live-p f5-scratch-peer) (thread-last-error f5-scratch-peer))",
+                )
+                .unwrap(),
+        );
+        let joined = context
+            .eval_str(
+                "(progn (setq f5-scratch-stop t)
+            (thread-join f5-scratch-peer))",
+            )
+            .unwrap();
+        assert_eq!(health, "(t nil)");
+        assert!(joined.is_nil());
+        assert_value(
+            context,
+            "(list (thread-live-p f5-scratch-peer) (thread-last-error f5-scratch-peer))",
+            "(nil nil)",
+        );
+        assert_eq!(result.unwrap().as_int(), Some(32));
+        assert_value(context, "f5-jit-witness-count", "36");
+        assert_value(context, "(thread-last-error)", "nil");
+        assert_compiled(context, function);
+    });
+}
+
+fn native_select_fine_timeout(context: &mut Context) -> EvalResult {
+    native_witness(context)?;
+    // Exclude compilation and the first witness from the floor measurement.
+    // Switched is this continuation's proof that a real Select park occurred,
+    // even if a notification legitimately made it Runnable before main ran.
+    let duration = std::time::Duration::from_millis(50);
+    let started = std::time::Instant::now();
+    let deadline = started + duration;
+    if !matches!(
+        context.green_select_switch(duration)?,
+        super::switch::SelectTurn::Switched
+    ) {
+        return Err(signal(
+            LispCondition::Error,
+            vec![Value::string(
+                "compiled worker did not traverse the Select park",
+            )],
+        ));
+    }
+    // Readiness may return Select early. Retry the original fine deadline;
+    // never restart its duration or mistake activity for timeout completion.
+    context.wait_until(deadline)?;
+    let elapsed = started.elapsed();
+    native_witness(context)?;
+    if elapsed < std::time::Duration::from_millis(50) {
+        return Err(signal(
+            LispCondition::Error,
+            vec![Value::string(
+                "compiled Green select returned before its fine timeout",
+            )],
+        ));
+    }
+    Ok(Value::fixnum(
+        elapsed.as_nanos().min(i64::MAX as u128) as i64
+    ))
+}
+
+fn worker_native_select_timeout(context: &mut Context) -> EvalResult {
+    let _profit = ProfitFixtureScope::enter();
+    context.apply(Value::symbol("f5-native-select-leaf"), Vec::new())
+}
+
+#[test]
+fn green_jit_switch_native_select_keeps_its_fine_timeout_while_idle() {
+    with_compiled_green(|context| {
+        // This test targets the normal owned poller, not its degraded fallback.
+        assert!(context.processes.green_select_handle().is_some());
+        context.register_subr(SubrSpec::fixed0(
+            "f5-native-select-wait",
+            native_select_fine_timeout,
+        ));
+        context.register_subr(SubrSpec::fixed0(
+            "f5-native-select-worker",
+            worker_native_select_timeout,
+        ));
+        install(
+            context,
+            "f5-native-select-leaf",
+            bytecode(
+                vec![Op::Constant(0), Op::Call(0), Op::Return],
+                vec![Value::symbol("f5-native-select-wait")],
+                FixtureArity::Nullary,
+            ),
+        );
+        context
+            .eval_str("(setq noninteractive t timer-list nil timer-idle-list nil)")
+            .unwrap();
+        context
+            .eval_str("(setq f5-native-select-thread (make-thread #'f5-native-select-worker))")
+            .unwrap();
+        // Main remains Runnable during this handoff, so the worker must
+        // traverse Select. In the quiet case main's subsequent join leaves
+        // only its deadline ready, and pick_next uses the owned idle poller.
+        // Notifications may legitimately make the worker Runnable sooner;
+        // its own Switched result is the authoritative traversal proof.
+        let first_turn = context.eval_str("(thread-yield)");
+        let health_before_join = context
+            .eval_str(
+                "(list (thread-live-p f5-native-select-thread)
+                   (thread-last-error f5-native-select-thread) f5-jit-witness-count)",
+            )
+            .map(|value| print_value(&value));
+        let joined = context.eval_str("(thread-join f5-native-select-thread)");
+        let health_after_join = context
+            .eval_str(
+                "(list (thread-live-p f5-native-select-thread)
+                   (thread-last-error f5-native-select-thread) f5-jit-witness-count)",
+            )
+            .map(|value| print_value(&value));
+        // Assert only after joining: a self-signalled worker must fail via its
+        // last-error, not look like a successful nil-valued sleep. No upper
+        // timing bound is imposed; scheduling delays may make the wait late.
+        assert!(first_turn.unwrap().is_nil());
+        assert_eq!(health_before_join.unwrap(), "(t nil 1)");
+        assert!(
+            joined
+                .unwrap()
+                .as_int()
+                .is_some_and(|nanoseconds| nanoseconds >= 50_000_000)
+        );
+        assert_eq!(health_after_join.unwrap(), "(nil nil 2)");
+    });
+}

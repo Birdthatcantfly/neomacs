@@ -100,6 +100,35 @@ pub(crate) fn install_terminal_registry_handle(handle: &TerminalRegistryHandle) 
     });
 }
 
+/// Admitted-owner activation needs the same native record reconciliation,
+/// with no allocation for a snapshot of the registry's creation order.
+/// Native record construction does not run Lisp. Current terminal host
+/// destructors release only native resources; they must not reborrow this
+/// registry while record reconciliation holds its shared borrow.
+#[inline(always)]
+pub(crate) fn install_owner_terminal_registry_handle(handle: &TerminalRegistryHandle) {
+    TERMINAL_LISP_STATE.with(|slot| slot.install(handle));
+    let registry = handle.borrow();
+    let ids = &registry.creation_order;
+    TERMINAL_MANAGER.with(|state| {
+        let slot = state.get_or_init(|| RefCell::new(TerminalManager::new()));
+        let mut manager = slot.borrow_mut();
+        for terminal in &mut manager.terminals {
+            if !ids.contains(&terminal.id) {
+                terminal.mark_deleted();
+            }
+        }
+        for id in ids {
+            manager.ensure_lisp_terminal_record(*id);
+        }
+        manager.terminals.sort_by_key(|terminal| {
+            ids.iter()
+                .position(|id| *id == terminal.id)
+                .unwrap_or(ids.len())
+        });
+    });
+}
+
 pub(crate) fn collect_terminal_registry_gc_roots(
     handle: &TerminalRegistryHandle,
     roots: &mut Vec<Value>,

@@ -50,6 +50,48 @@ impl std::fmt::Debug for NamedSource {
     }
 }
 
+/// Reusable native scratch, kept only in this owner's boxed Green seat.
+/// Every raw-value length is zero outside its original prepare/resume extent.
+#[derive(Default)]
+pub(crate) struct ParkedJitScratch {
+    frames: Vec<Value>,
+    pub(crate) called: Vec<SymId>,
+    sources: Vec<NamedSource>,
+    roots: Vec<Value>,
+}
+static_assertions::assert_not_impl_any!(ParkedJitScratch: Send, Sync, Clone, Copy);
+impl std::fmt::Debug for ParkedJitScratch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Metadata only; never format or decode copied Lisp words.
+        formatter
+            .debug_struct("ParkedJitScratch")
+            .field("frame_capacity", &self.frames.capacity())
+            .field("called_capacity", &self.called.capacity())
+            .field("source_capacity", &self.sources.capacity())
+            .field("root_capacity", &self.roots.capacity())
+            .finish()
+    }
+}
+impl ParkedJitScratch {
+    #[cfg(test)]
+    pub(crate) fn storage_for_test(&self) -> [(usize, usize); 4] {
+        // Allocation identities only: no method reconstructs native/Lisp pointers.
+        [
+            (self.frames.as_ptr() as usize, self.frames.capacity()),
+            (self.called.as_ptr() as usize, self.called.capacity()),
+            (self.sources.as_ptr() as usize, self.sources.capacity()),
+            (self.roots.as_ptr() as usize, self.roots.capacity()),
+        ]
+    }
+    #[cfg(test)]
+    pub(crate) fn empty_for_test(&self) -> bool {
+        self.frames.is_empty()
+            && self.called.is_empty()
+            && self.sources.is_empty()
+            && self.roots.is_empty()
+    }
+}
+
 /// CURRENT-owner preparation copied into the immutable owner/heap publication.
 /// On return, captured sources pass to this owner's existing named-function
 /// pins BEFORE publication retirement. Repeated parks therefore keep an old
@@ -79,7 +121,22 @@ impl std::fmt::Debug for ParkedJit {
 
 impl ParkedJit {
     #[cold]
+    #[allow(dead_code, reason = "standalone preparation retains the original API")]
     pub(crate) fn prepare(context: &Context) -> Result<Self, AdmissionError> {
+        Self::prepare_reusing(context, &mut ParkedJitScratch::default())
+    }
+
+    #[cold]
+    pub(crate) fn prepare_reusing(
+        context: &Context,
+        scratch: &mut ParkedJitScratch,
+    ) -> Result<Self, AdmissionError> {
+        debug_assert!(
+            scratch.frames.is_empty()
+                && scratch.called.is_empty()
+                && scratch.sources.is_empty()
+                && scratch.roots.is_empty()
+        );
         let owner = JitOwnerId(
             NonZeroU64::new(context.context_instance_id())
                 .ok_or(AdmissionError::InvalidIdentity)?,
@@ -102,15 +159,14 @@ impl ParkedJit {
                 owner,
                 heap,
                 function_epoch: FunctionEpoch(context.obarray.function_epoch()),
-                sources: Vec::new(),
-                roots: Vec::new(),
+                sources: std::mem::take(&mut scratch.sources),
+                roots: std::mem::take(&mut scratch.roots),
                 _confined: PhantomData,
             });
         }
-        let frames: Vec<_> = context
-            .specpdl
-            .iter()
-            .filter_map(|entry| match entry {
+        scratch
+            .frames
+            .extend(context.specpdl.iter().filter_map(|entry| match entry {
                 SpecBinding::Backtrace { function, .. }
                 | SpecBinding::Backtrace1 { function, .. }
                 | SpecBinding::Backtrace2 { function, .. }
@@ -128,17 +184,18 @@ impl ParkedJit {
                 | SpecBinding::RequireStack { .. }
                 | SpecBinding::NativeUnwind { .. }
                 | SpecBinding::Nop => None,
-            })
-            .collect();
-        let mut called: Vec<_> = frames
-            .iter()
-            .filter_map(|function| function.as_symbol_id(context.symbol_mode()))
-            .collect();
-        called.sort_unstable_by_key(|symbol| symbol.0);
-        called.dedup();
-        let sources: Vec<_> = called
-            .iter()
-            .filter_map(|&symbol| {
+            }));
+        scratch.called.extend(
+            scratch
+                .frames
+                .iter()
+                .filter_map(|function| function.as_symbol_id(context.symbol_mode())),
+        );
+        scratch.called.sort_unstable_by_key(|symbol| symbol.0);
+        scratch.called.dedup();
+        scratch
+            .sources
+            .extend(scratch.called.iter().filter_map(|&symbol| {
                 context
                     .obarray
                     .indirect_function_id(symbol)
@@ -147,21 +204,35 @@ impl ParkedJit {
                         function,
                         _confined: PhantomData,
                     })
-            })
-            .collect();
-        let mut roots: Vec<_> = sources.iter().map(|source| source.function).collect();
-        roots.extend(frames.into_iter().filter(|function| function.is_bytecode()));
+            }));
+        scratch
+            .roots
+            .extend(scratch.sources.iter().map(|source| source.function));
+        scratch.roots.extend(
+            scratch
+                .frames
+                .iter()
+                .copied()
+                .filter(|function| function.is_bytecode()),
+        );
+        // The original frames.into_iter() ended immediately after this copy.
+        scratch.frames.clear();
+        let called = &scratch.called;
+        let roots = &mut scratch.roots;
         super::cache::trace_redefined_pins(
             context.tagged_heap.identity(),
             &|symbol| called.binary_search_by_key(&symbol.0, |s| s.0).is_ok(),
             &mut |function| roots.push(function),
         );
+        // The called-symbol temporary ended at prepare's return originally.
+        // Retain allocations only; no stale frame word or symbol list survives.
+        scratch.called.clear();
         Ok(Self {
             owner,
             heap,
             function_epoch: FunctionEpoch(context.obarray.function_epoch()),
-            sources,
-            roots,
+            sources: std::mem::take(&mut scratch.sources),
+            roots: std::mem::take(&mut scratch.roots),
             _confined: PhantomData,
         })
     }
@@ -171,20 +242,41 @@ impl ParkedJit {
     /// Only the ORIGINAL returning owner invokes this while publication lives.
     /// Retire dependents; never clear executable storage under a native frame.
     #[cold]
+    #[allow(dead_code, reason = "standalone restoration retains the original API")]
     pub(crate) fn resume(self, context: &Context) -> Result<(), AdmissionError> {
+        self.resume_reusing(context, &mut ParkedJitScratch::default())
+    }
+
+    #[cold]
+    pub(crate) fn resume_reusing(
+        mut self,
+        context: &Context,
+        scratch: &mut ParkedJitScratch,
+    ) -> Result<(), AdmissionError> {
         if self.owner.0.get() != context.context_instance_id()
             || self.heap.0.get() != context.tagged_heap.identity()
         {
             return Err(AdmissionError::ReturningOwner);
         }
         begin_owner_turn();
-        for source in self.sources {
+        for source in self.sources.drain(..) {
             super::cache::pin_redefined_function(source.symbol, source.function);
         }
         if self.function_epoch != FunctionEpoch(context.obarray.function_epoch()) {
             super::cache::retire_green_inline_dependents();
         }
+        self.return_scratch(scratch);
         Ok(())
+    }
+
+    /// Preparation failed before publication or handoff: retain host capacity
+    /// at the original drop point without running resume-side cache effects.
+    pub(crate) fn return_scratch(mut self, scratch: &mut ParkedJitScratch) {
+        self.sources.clear();
+        self.roots.clear();
+        debug_assert!(scratch.sources.is_empty() && scratch.roots.is_empty());
+        std::mem::swap(&mut self.sources, &mut scratch.sources);
+        std::mem::swap(&mut self.roots, &mut scratch.roots);
     }
 }
 

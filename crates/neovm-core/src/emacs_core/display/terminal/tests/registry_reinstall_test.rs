@@ -156,3 +156,56 @@ fn terminal_creation_order_survives_native_manager_rebuild_and_reactivation() {
     crate::tagged::gc::clear_tagged_heap_if_installed(&ctx.tagged_heap);
     ctx.setup_thread_locals();
 }
+
+#[test]
+fn owner_reactivation_reconciles_peer_registry_changes() {
+    crate::test_utils::init_test_tracing();
+    reset_terminal_thread_locals();
+    let mut ctx = Context::new();
+    let handle = current_terminal_registry_handle();
+    // Simulate changes made to the shared registry while this owner's native
+    // manager is parked: an added terminal, then a deletion and another add.
+    // Nonmonotonic IDs ensure reconciliation preserves creation order.
+    handle.borrow_mut().ensure_terminal(9);
+    handle.borrow_mut().ensure_terminal(3);
+    install_owner_terminal_registry_handle(&handle);
+    assert_eq!(terminal_list_ids(), vec![TERMINAL_ID, 9, 3]);
+    let deleted = terminal_handle_value_for_id(9).expect("new terminal handle");
+    {
+        let mut registry = handle.borrow_mut();
+        registry.terminals.remove(&9);
+        registry.creation_order.retain(|id| *id != 9);
+        registry.ensure_terminal(2);
+    }
+    for _ in 0..3 {
+        install_owner_terminal_registry_handle(&handle);
+        assert_eq!(terminal_list_ids(), vec![TERMINAL_ID, 3, 2]);
+        assert_eq!(
+            live_terminal_ids_in_keyboard_poll_order(),
+            vec![2, 3, TERMINAL_ID]
+        );
+        assert!(
+            builtin_terminal_live_p(&mut ctx, vec![deleted])
+                .expect("deleted terminal-live-p")
+                .is_nil()
+        );
+        let owner_ids = terminal_list_ids();
+        let owner_poll_order = live_terminal_ids_in_keyboard_poll_order();
+        rebuild_native_terminal_manager();
+        install_terminal_registry_handle(&handle);
+        assert_eq!(terminal_list_ids(), owner_ids);
+        assert_eq!(live_terminal_ids_in_keyboard_poll_order(), owner_poll_order);
+        assert!(
+            builtin_terminal_live_p(&mut ctx, vec![deleted])
+                .expect("deleted terminal-live-p after ordinary activation")
+                .is_nil()
+        );
+        rebuild_native_terminal_manager();
+    }
+    install_owner_terminal_registry_handle(&handle);
+    assert_eq!(terminal_list_ids(), vec![TERMINAL_ID, 3, 2]);
+    // Native reconciliation must release its shared registry borrow.
+    handle.borrow_mut().ensure_terminal(7);
+    install_owner_terminal_registry_handle(&handle);
+    assert_eq!(terminal_list_ids(), vec![TERMINAL_ID, 3, 2, 7]);
+}

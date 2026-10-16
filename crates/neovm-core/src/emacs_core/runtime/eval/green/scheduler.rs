@@ -86,7 +86,10 @@ pub(crate) enum Handoff {
 
 #[derive(Default)]
 struct ControlState {
-    senders: BTreeMap<ThreadKey, mpsc::Sender<Baton>>,
+    // There is only one Baton in the World, so a sender holding it proves
+    // every recipient queue empty. A single reusable slot also allows a
+    // newborn or parked recipient to receive after the sender has finished.
+    senders: BTreeMap<ThreadKey, mpsc::SyncSender<Baton>>,
     waits: BTreeMap<ThreadKey, Wait>,
     ready: VecDeque<ThreadKey>,
     joins: BTreeMap<ThreadKey, std::thread::JoinHandle<()>>,
@@ -129,7 +132,7 @@ impl Control {
 
     /// Register the main thread, which holds the Baton: its channel.
     pub(crate) fn register_main(&self) -> mpsc::Receiver<Baton> {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(1);
         let mut state = self.state();
         state.senders.insert(ThreadKey::Main, sender);
         state.waits.insert(ThreadKey::Main, Wait::Runnable);
@@ -138,7 +141,7 @@ impl Control {
 
     /// Register the new thread KEY, ready to run in its turn: its channel.
     pub(crate) fn register_worker(&self, key: ThreadKey) -> mpsc::Receiver<Baton> {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(1);
         let mut state = self.state();
         state.senders.insert(key, sender);
         state.waits.insert(key, Wait::Runnable);
@@ -404,9 +407,10 @@ impl Control {
             .get(&next)
             .cloned()
             .expect("every registered thread has a channel");
-        if sender.send(baton).is_err() {
-            // NEXT's OS thread is gone with its receiver: nothing can hand
-            // the Baton back, and the World's Lisp would stop.
+        if sender.try_send(baton).is_err() {
+            // Disconnection loses the next holder. A full slot would mean
+            // the sole-Baton invariant was broken. Neither can recover, and
+            // try_send keeps an invariant failure from parking this sender.
             std::process::abort();
         }
         match receiver.recv() {
@@ -453,7 +457,7 @@ impl Control {
         let sender = next.and_then(|next| self.state().senders.get(&next).cloned());
         match sender {
             Some(sender) => {
-                if sender.send(baton).is_err() {
+                if sender.try_send(baton).is_err() {
                     std::process::abort();
                 }
             }

@@ -682,6 +682,71 @@ fn every_thread_shares_the_standard_case_table() {
     );
 }
 
+#[test]
+fn parked_root_buffer_reuses_its_allocation_across_peer_collections() {
+    let mut ev = green();
+    let kept = Value::string("only the parked main owner's VM frame keeps this alive");
+    ev.push_vm_root_frame();
+    ev.push_vm_frame_root(kept);
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn
+               (setq tgr-stop nil)
+               (setq tgr-peer
+                 (make-thread (lambda ()
+                   (while (null tgr-stop) (garbage-collect) (thread-yield)))))
+               (thread-yield))",
+        ),
+        "nil"
+    );
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(list (thread-live-p tgr-peer) (thread-last-error))"
+        ),
+        "(t nil)",
+        "the peer must remain live after its first collection and yield"
+    );
+    let buffer = &mut ev.green_seat().expect("seated").parked_roots_buffer;
+    buffer.reserve(8192);
+    let allocation = (buffer.as_ptr(), buffer.capacity());
+    assert!(allocation.1 > 0);
+    for turn in 0..32 {
+        let collections = ev.tagged_heap.gc_collections();
+        ev.green_wait(super::Wait::Runnable)
+            .expect("peer collects and yields");
+        assert!(
+            ev.tagged_heap.gc_collections() > collections,
+            "the peer must actually collect while main is parked on turn {turn}"
+        );
+        assert!(
+            ev.green_seat().expect("seated").parked_root_batch.is_some(),
+            "the returning owner retains its empty typed batch storage"
+        );
+        let buffer = &ev.green_seat().expect("seated").parked_roots_buffer;
+        assert!(
+            buffer.is_empty(),
+            "running owners retain capacity, not roots"
+        );
+        assert_eq!((buffer.as_ptr(), buffer.capacity()), allocation);
+        assert_eq!(
+            print_value(&kept),
+            "\"only the parked main owner's VM frame keeps this alive\""
+        );
+    }
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn (setq tgr-stop t)
+               (list (thread-join tgr-peer) (thread-live-p tgr-peer) (thread-last-error)))"
+        ),
+        "(nil nil nil)",
+        "the peer must exit normally without a recorded error"
+    );
+    ev.pop_vm_root_frame();
+}
+
 /// Callgrind micro for the 3f baseline: `(Ir(N) - Ir(0)) / N` is one yield
 /// round trip, main to a worker and back: two Baton hand-offs (park, root
 /// publication, channel transfer, resume) plus one iteration of the
@@ -1241,7 +1306,7 @@ fn parking_traces_private_roots_without_world_cells() {
     ev.trace_roots(&mut |_| {}, &mut |v| full.push(v));
     assert!(full.contains(&world));
     let mut parked = Vec::new();
-    ev.trace_private_roots(&mut |v| parked.push(v));
+    ev.trace_private_roots(&mut parked);
     assert!(parked.contains(&private));
     assert!(!parked.contains(&world));
     let is_world = std::cell::Cell::new(false);
@@ -1283,6 +1348,8 @@ fn parking_traces_private_roots_without_world_cells() {
             }
         },
     );
+    parked.sort_unstable_by_key(|value| value.bits());
+    expected.sort_unstable_by_key(|value| value.bits());
     assert_eq!(parked, expected);
     ev.eval_temp_roots.pop();
 }
