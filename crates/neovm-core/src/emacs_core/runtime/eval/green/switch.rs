@@ -88,9 +88,7 @@ const WORLD_ROOT_GROUPS: &[&str] = &[
 
 /// Why a thread may not give the Baton up here.
 fn switch_refusal(ctx: &Context) -> Option<&'static str> {
-    if ctx.unwind_cleanup_depth != 0 {
-        Some("Cannot switch threads inside an unwind cleanup")
-    } else if ctx.gc_inhibit_depth != 0 {
+    if ctx.gc_inhibit_depth != 0 {
         Some("Cannot switch threads while garbage collection is inhibited")
     } else if super::super::super::dynamic_module::module_call_active() {
         Some("Cannot switch threads inside a module call")
@@ -133,6 +131,10 @@ impl Context {
     fn collect_parked_roots(&mut self) -> Vec<Value> {
         let mut roots = Vec::new();
         let world_group = std::cell::Cell::new(false);
+        // The vm_frames group includes drain_unwind_to's carried result or
+        // Flow and PoppedBindingScope's popped entry and restoration lexenv.
+        // These copies are published before a cleanup runs Lisp, so parking
+        // inside that cleanup never exposes native-stack state to a peer.
         self.trace_roots(
             &mut |name| world_group.set(WORLD_ROOT_GROUPS.contains(&name)),
             &mut |value| {

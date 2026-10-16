@@ -732,22 +732,105 @@ fn a_thread_starts_in_its_creators_buffer_and_keeps_its_own() {
     );
 }
 
-/// A documented neomacs deviation (design-r3.md section 13): GNU switches
-/// threads from an `unwind-protect` cleanup; neomacs refuses there, because
-/// a cleanup's restoration state lives on the native stack, which parking
-/// does not publish.
+/// GNU switches from unwind-protect cleanups. A join forces the cleanup
+/// continuation to park until its worker has completed.
 #[test]
-fn a_switch_inside_an_unwind_cleanup_is_refused() {
+fn a_switch_inside_an_unwind_cleanup_runs_the_peer() {
     let mut ev = green();
     assert_eq!(
         eval(
             &mut ev,
-            "(progn
-               (thread-join (make-thread (lambda () nil)))
-               (condition-case e (unwind-protect 'body (thread-yield))
-                 (error (car (cdr e)))))"
+            "(unwind-protect 'body
+               (thread-join (make-thread (lambda () (garbage-collect) 'peer))))"
         ),
-        "\"Cannot switch threads inside an unwind cleanup\""
+        "body"
+    );
+}
+
+/// The pending return/Flow is in drain_unwind_to's VM root scope; the
+/// popped cleanup and its restoration environment are in PoppedBindingScope.
+/// Each cleanup creates and joins a fresh collector, forcing those roots
+/// through Green parking before another owner collects. GNU31.1's outputs
+/// were captured under the PID sandbox (round3e).
+#[test]
+fn cleanup_switches_publish_results_flows_and_lexical_environments() {
+    let mut ev = green();
+    eval(
+        &mut ev,
+        "(fset 'g3e-collect-peer
+           (lambda ()
+             (thread-join
+               (make-thread (lambda ()
+                              (dotimes (i 300) (make-list 20 i))
+                              (garbage-collect)
+                              'collected)))))",
+    );
+    let cases = [
+        (
+            "(unwind-protect (list 'normal (make-string 40 ?n)) (g3e-collect-peer))",
+            "(normal \"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\")",
+        ),
+        (
+            "(catch 'tag
+               (unwind-protect (throw 'tag (list 'thrown (make-string 40 ?t)))
+                 (g3e-collect-peer)))",
+            "(thrown \"tttttttttttttttttttttttttttttttttttttttt\")",
+        ),
+        (
+            "(condition-case err
+               (unwind-protect (signal 'error (list (make-string 40 ?e)))
+                 (g3e-collect-peer))
+               (error err))",
+            "(error \"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\")",
+        ),
+        (
+            "(progn
+               (eval '(let ((only-here (list 'closure (make-string 40 ?c))))
+                        (unwind-protect 'body
+                          (g3e-collect-peer)
+                          (setq g3e-capture only-here))) t)
+               g3e-capture)",
+            "(closure \"cccccccccccccccccccccccccccccccccccccccc\")",
+        ),
+        (
+            "(catch 'outer
+               (unwind-protect
+                   (unwind-protect (throw 'outer 'original)
+                     (throw 'outer (list 'replacement (make-string 40 ?r))))
+                 (g3e-collect-peer)))",
+            "(replacement \"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr\")",
+        ),
+        // GNU byte-compile generated these byte strings for an unwind-protect
+        // body and its cleanup callback. This exercises the VM's carried
+        // result and the callable form of SpecBinding::UnwindProtect.
+        (
+            "(funcall
+               (make-byte-code nil
+                 (unibyte-string 192 142 193 194 195 196 34 41 68 135)
+                 (vector
+                   (make-byte-code nil (unibyte-string 192 32 135) [g3e-collect-peer] 1)
+                   'vm 'make-string 40 118)
+                 4))",
+            "(vm \"vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv\")",
+        ),
+    ];
+    for (form, expected) in cases {
+        assert_eq!(eval(&mut ev, form), expected, "{form}");
+    }
+}
+
+#[test]
+fn native_gc_inhibit_still_refuses_a_cleanup_switch() {
+    let mut ev = green();
+    eval(&mut ev, "(thread-join (make-thread (lambda () nil)))");
+    let mut inhibited = super::super::GcInhibitGuard::enter(&mut ev);
+    assert_eq!(
+        eval(
+            inhibited.context(),
+            "(condition-case e (unwind-protect 'body (thread-yield))
+               (error (car (cdr e))))",
+        ),
+        "\"Cannot switch threads while garbage collection is inhibited\"",
     );
 }
 
