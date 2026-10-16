@@ -1244,7 +1244,20 @@ fn green_yield_jit_switch_micro() {
         );
         // Keep the normal worker wrapper's owner-local profitability policy.
         context.register_subr(SubrSpec::fixed0("f5-worker-micro", worker_micro));
-        context.eval_str("(setq f5-jit-micro-stop nil f5-jit-micro-thread (make-thread #'f5-worker-micro)) (thread-yield)").unwrap();
+        assert_value(
+            context,
+            "(progn (setq f5-jit-micro-stop nil
+                           f5-jit-micro-thread (make-thread #'f5-worker-micro))
+                    (thread-yield))",
+            "nil",
+        );
+        assert_value(
+            context,
+            "(list (thread-live-p f5-jit-micro-thread)
+                   (thread-last-error f5-jit-micro-thread)
+                   f5-jit-witness-count)",
+            "(t nil 0)",
+        );
         for _ in 0..n {
             context
                 .green_wait(crate::emacs_core::eval::green::Wait::Runnable)
@@ -1252,8 +1265,33 @@ fn green_yield_jit_switch_micro() {
         }
         assert_value(
             context,
+            "(list (thread-live-p f5-jit-micro-thread)
+                   (thread-last-error f5-jit-micro-thread))",
+            "(t nil)",
+        );
+        // The worker calls native_witness once after each measured return
+        // from its yield. Its ordinary Lisp counter is World-shared, unlike
+        // the JIT's private native TLS counters. Check even N=0 so the health
+        // checks remain fixed overhead in the Callgrind subtraction.
+        let witnessed = context
+            .visible_variable_value_or_nil("f5-jit-witness-count")
+            .as_int()
+            .expect("the worker's native witness counter is an integer");
+        assert_eq!(
+            usize::try_from(witnessed).expect("a native witness count is nonnegative"),
+            n,
+            "each measured worker turn executes its existing native witness"
+        );
+        assert_value(
+            context,
             "(progn (setq f5-jit-micro-stop t) (thread-join f5-jit-micro-thread))",
             "nil",
+        );
+        assert_value(
+            context,
+            "(list (thread-live-p f5-jit-micro-thread)
+                   (thread-last-error f5-jit-micro-thread))",
+            "(nil nil)",
         );
     });
 }
