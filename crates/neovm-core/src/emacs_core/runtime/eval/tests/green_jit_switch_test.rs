@@ -1299,13 +1299,35 @@ std::thread_local! {
     /// Each Lisp owner measures only its own completed ticks. Scalar test
     /// metadata stays on that owner's OS thread and never enters the World.
     static TGT_TICKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TGT_SOURCE_MISSES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TGT_SOURCE_RECOVERIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TGT_PENDING_RECOVERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static TGT_HELPER_RAN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn throughput_tick(context: &mut Context) -> EvalResult {
     require_native()?;
+    finish_throughput_source_recovery(context);
     if context.threading_mode() == ThreadingMode::Green {
         context.apply(Value::symbol("thread-yield"), Vec::new())?;
         require_native()?;
+    }
+    // This is immediately before the loop's constant-bytecode helper call.
+    // A resumed owner's shared source slot must be empty under the new
+    // epoch, and that very call must restore its own cached executable.
+    let helper = context.obarray.symbol_function("tgt-helper").unwrap();
+    let missing = helper
+        .get_bytecode_data()
+        .unwrap()
+        .jit_runtime()
+        .armed_leaf_slot(cache::leaf_slot_epoch())
+        .is_none();
+    assert!(
+        !TGT_PENDING_RECOVERY.with(|pending| pending.replace(missing)),
+        "the preceding helper call completed its source recovery"
+    );
+    if missing {
+        TGT_SOURCE_MISSES.with(|misses| misses.set(misses.get() + 1));
     }
     TGT_TICKS.with(|ticks| ticks.set(ticks.get() + 1));
     Ok(Value::NIL)
@@ -1313,7 +1335,32 @@ fn throughput_tick(context: &mut Context) -> EvalResult {
 
 fn throughput_helper_witness(_context: &mut Context) -> EvalResult {
     require_native()?;
+    if TGT_PENDING_RECOVERY.with(std::cell::Cell::get) {
+        assert!(
+            !TGT_HELPER_RAN.with(|ran| ran.replace(true)),
+            "exactly one helper call follows each tick"
+        );
+    }
     Ok(Value::fixnum(7))
+}
+
+/// The strict seam arms the source only AFTER its compiled invocation returns.
+/// Check before the following yield (or immediately after the loop's final
+/// return), while no intervening handoff can invalidate the recovered slot.
+fn finish_throughput_source_recovery(context: &Context) {
+    if TGT_PENDING_RECOVERY.with(|pending| pending.replace(false)) {
+        assert!(TGT_HELPER_RAN.with(|ran| ran.replace(false)));
+        let helper = context.obarray.symbol_function("tgt-helper").unwrap();
+        let runtime = helper.get_bytecode_data().unwrap().jit_runtime();
+        let own_leaf = cache::compiled_leaf_ptr_for_test(runtime.compiled_id().unwrap())
+            .expect("the helper was compiled on this owner before measurement");
+        assert_eq!(
+            runtime.armed_leaf_slot(cache::leaf_slot_epoch()),
+            Some(own_leaf),
+            "postyield helper call recovered this owner's cached leaf"
+        );
+        TGT_SOURCE_RECOVERIES.with(|recoveries| recoveries.set(recoveries.get() + 1));
+    }
 }
 
 /// This owner builds and warms both leaves in its own TLS. The tiny helper
@@ -1326,6 +1373,13 @@ fn throughput_worker(context: &mut Context) -> EvalResult {
         crate::emacs_core::jit::bg::TestModeScope::enter(crate::emacs_core::jit::bg::BgMode::Sync);
     let function = context.obarray.symbol_function("tgt-loop").unwrap();
     let helper = context.obarray.symbol_function("tgt-helper").unwrap();
+    assert_eq!(
+        function.get_bytecode_data().unwrap().constants[3],
+        helper,
+        "the call names the bytecode object, bypassing named-function spec slots"
+    );
+    TGT_PENDING_RECOVERY.with(|pending| pending.set(false));
+    TGT_HELPER_RAN.with(|ran| ran.set(false));
     for _ in 0..3 {
         assert_eq!(
             context.apply(function, vec![Value::fixnum(0)])?,
@@ -1349,18 +1403,32 @@ fn throughput_worker(context: &mut Context) -> EvalResult {
         cache::compiled_leaf_ptr_for_test(loop_id).expect("loop warmed on this owner");
     let helper_before =
         cache::compiled_leaf_ptr_for_test(helper_id).expect("helper warmed on this owner");
+    // SAFETY: the pointer belongs to this running owner's live cache; this
+    // bounded inspection neither calls Lisp nor reaches a collection.
+    let loop_leaf = unsafe { &*loop_before };
+    assert!(
+        !loop_leaf
+            .spec_slot_kinds
+            .contains(&crate::emacs_core::jit::compile::spec_slot::SpecSlotKind::Bytecode),
+        "helper calls cannot use the named bytecode slot that ignores the leaf epoch"
+    );
     let before = crate::emacs_core::jit::stats::compile_stats_snapshot();
     TGT_TICKS.with(|ticks| ticks.set(0));
+    TGT_SOURCE_MISSES.with(|misses| misses.set(0));
+    TGT_SOURCE_RECOVERIES.with(|recoveries| recoveries.set(0));
     let n = context.visible_variable_value_or_nil("tgt-iterations");
     let stride = context
         .visible_variable_value_or_nil("tgt-stride")
         .as_fixnum()
         .unwrap();
     let answer = context.apply(function, vec![n])?;
+    finish_throughput_source_recovery(context);
     let after = crate::emacs_core::jit::stats::compile_stats_snapshot();
     let same_leaf = cache::compiled_leaf_ptr_for_test(loop_id) == Some(loop_before)
         && cache::compiled_leaf_ptr_for_test(helper_id) == Some(helper_before);
     let ticks = TGT_TICKS.with(std::cell::Cell::get);
+    let source_misses = TGT_SOURCE_MISSES.with(std::cell::Cell::get);
+    let source_recoveries = TGT_SOURCE_RECOVERIES.with(std::cell::Cell::get);
     let green = context.threading_mode() == ThreadingMode::Green;
     let iterations = n.as_fixnum().unwrap();
     eprintln!(
@@ -1370,7 +1438,8 @@ fn throughput_worker(context: &mut Context) -> EvalResult {
             "\"retiers_before\":{},\"retiers_after\":{},",
             "\"deopts_before\":{},\"deopts_after\":{},",
             "\"same_leaf\":{},\"successful_iterations\":{},",
-            "\"yield_count\":{},\"tick_count\":{},\"stride\":{}}}"
+            "\"yield_count\":{},\"tick_count\":{},\"stride\":{},",
+            "\"source_misses\":{},\"source_recoveries\":{}}}"
         ),
         context.context_instance_id,
         if green { "green" } else { "sim" },
@@ -1385,7 +1454,20 @@ fn throughput_worker(context: &mut Context) -> EvalResult {
         if green { ticks } else { 0 },
         ticks,
         stride,
+        source_misses,
+        source_recoveries,
     );
+    assert_eq!(source_recoveries, source_misses);
+    assert!(!TGT_PENDING_RECOVERY.with(std::cell::Cell::get));
+    if green && ticks > 0 {
+        assert!(
+            source_misses > 0,
+            "real handoffs invalidated the shared helper source slot"
+        );
+    }
+    if !green {
+        assert_eq!(source_misses, 0, "Sim retains the shared source slot");
+    }
     assert_eq!(answer, n, "all loop iterations completed in compiled code");
     assert_eq!(ticks, (iterations / stride) as u64);
     assert!(
@@ -1408,7 +1490,7 @@ fn throughput_worker(context: &mut Context) -> EvalResult {
     Ok(answer)
 }
 
-fn throughput_loop(stride: usize) -> ByteCodeFunction {
+fn throughput_loop(stride: usize, helper: Value) -> ByteCodeFunction {
     bytecode(
         vec![
             Op::Constant(0),
@@ -1441,7 +1523,7 @@ fn throughput_loop(stride: usize) -> ByteCodeFunction {
             Value::fixnum(0),
             Value::fixnum(stride as i64),
             Value::symbol("tgt-tick"),
-            Value::symbol("tgt-helper"),
+            helper,
         ],
         FixtureArity::Unary,
     )
@@ -1462,8 +1544,7 @@ fn run_throughput(mode: ThreadingMode, n: usize, stride: usize) {
         "tgt-helper-witness",
         throughput_helper_witness,
     ));
-    install(&mut context, "tgt-loop", throughput_loop(stride));
-    install(
+    let helper = install(
         &mut context,
         "tgt-helper",
         bytecode(
@@ -1472,6 +1553,7 @@ fn run_throughput(mode: ThreadingMode, n: usize, stride: usize) {
             FixtureArity::Nullary,
         ),
     );
+    install(&mut context, "tgt-loop", throughput_loop(stride, helper));
     context.set_variable("tgt-iterations", Value::fixnum(n as i64));
     context.set_variable("tgt-stride", Value::fixnum(stride as i64));
     let result = catch_unwind(AssertUnwindSafe(|| {

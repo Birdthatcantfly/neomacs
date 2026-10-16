@@ -610,21 +610,27 @@ fn jit_obs_clear_folds_counts_into_dropped_totals() {
     );
 }
 
-/// Evicting a function drops its OSR leaves; their counts are folded too.
+/// Eviction retains an OSR leaf and its observations for a live activation;
+/// only a later whole-cache clear folds those counters into dropped totals.
 #[test]
-fn jit_obs_evict_compiled_folds_osr_counts() {
-    let leaf = super::super::compile::lower_nullary_leaf(
+fn jit_obs_evict_compiled_retires_osr_counts_until_clear() {
+    clear();
+    let mut leaf = super::super::compile::lower_nullary_leaf(
         &[Op::Constant(0), Op::Nil, Op::Add, Op::Return],
         &[Value::make_int(5)],
     )
     .expect("compiles");
-    assert_eq!(leaf.call_for_test(&[]), None);
     let id = 4_241;
+    leaf.obs.id = id;
+    leaf.obs.osr_pc = Some(3);
+    assert_eq!(leaf.call_for_test(&[]), None);
+    let leaf = Rc::new(leaf);
+    let original_pointer = Rc::as_ptr(&leaf);
     OSR_CACHE.with(|c| {
         c.borrow_mut().insert(
             (id, 3),
             Some(OsrEntry {
-                leaf: Rc::new(leaf),
+                leaf,
                 stack_depth: 0,
                 bind_depth: 0,
             }),
@@ -635,12 +641,44 @@ fn jit_obs_evict_compiled_folds_osr_counts() {
         .iter()
         .find(|r| r.id == id && r.state == LeafState::Osr)
         .expect("the OSR leaf is reported");
-    assert_eq!(deopts(&osr.obs), 1);
+    let observations = osr.obs.clone();
+    assert_eq!(observations.id, id);
+    assert_eq!(observations.osr_pc, Some(3));
+    assert_eq!(deopts(&observations), 1);
     evict_compiled(id);
     let (rows, dropped) = leaf_report_rows();
+    let retired = rows
+        .iter()
+        .find(|r| r.id == id && r.state == LeafState::Retired)
+        .expect("the exact OSR leaf remains reported after retirement");
+    assert_eq!(retired.obs, observations);
+    assert!(!rows.iter().any(|r| r.id == id && r.state == LeafState::Osr));
+    assert!(COMPILED.with(|c| {
+        c.borrow()
+            .retired
+            .iter()
+            .any(|leaf| Rc::as_ptr(leaf) == original_pointer && leaf.retired.get())
+    }));
+    assert_eq!(
+        dropped, dropped0,
+        "retirement does not fold live observations"
+    );
+
+    let mut expected = dropped0;
+    expected.add(&observations);
+    clear();
+    let (rows, dropped) = leaf_report_rows();
     assert!(!rows.iter().any(|r| r.id == id));
-    assert_eq!(dropped.leaves, dropped0.leaves + 1);
-    assert_eq!(dropped.deopt_at, dropped0.deopt_at + 1);
+    assert_eq!(
+        dropped, expected,
+        "clear folds the retained leaf exactly once"
+    );
+    clear();
+    assert_eq!(
+        leaf_report_rows().1,
+        expected,
+        "a second clear cannot fold it again"
+    );
 }
 
 /// A leaf the AOT prewarm inserts carries the id it was inserted under.
