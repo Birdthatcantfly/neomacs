@@ -9,10 +9,11 @@
 //! deadline is not ready until another thread makes it so.
 
 use super::super::world::Baton;
+use crate::emacs_core::process::GreenSelectHandle;
 use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroU64;
 use std::sync::mpsc;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Instant;
 
 /// A Lisp thread's identity in the scheduler.
@@ -49,13 +50,9 @@ pub(crate) enum Wait {
     Mutex(u64),
     /// A condition variable's notification (`condition-wait`).
     Condition(u64),
-    /// A `thread_select` wait that gave the Baton up for a slice: runnable
-    /// again at `slice_end`, to watch its own input; its wait itself ends
-    /// at `wait_end`, which is all a waiting peer blocks for.
-    Select {
-        slice_end: Instant,
-        wait_end: Instant,
-    },
+    /// A `thread_select` wait, ready on input, a scheduler event, or its
+    /// absolute deadline. The scheduler watches I/O while no owner runs.
+    Select { wait_end: Instant },
     /// It ended.
     Exited,
 }
@@ -100,6 +97,8 @@ struct ControlState {
 #[derive(Default)]
 pub(crate) struct Control {
     state: Mutex<ControlState>,
+    /// An owned I/O handle: the idle scheduler never reads World storage.
+    select: OnceLock<Option<GreenSelectHandle>>,
 }
 
 impl std::fmt::Debug for Control {
@@ -109,6 +108,19 @@ impl std::fmt::Debug for Control {
 }
 
 impl Control {
+    pub(crate) fn install_select(&self, select: Option<GreenSelectHandle>) {
+        assert!(
+            self.select.set(select).is_ok(),
+            "select handle installed twice"
+        );
+    }
+
+    fn notify_select(&self) {
+        if let Some(Some(select)) = self.select.get() {
+            select.notify();
+        }
+    }
+
     fn state(&self) -> MutexGuard<'_, ControlState> {
         // Every update is a few map/queue operations that leave the state
         // consistent; a panic while holding the lock cannot tear it.
@@ -175,6 +187,36 @@ impl Control {
         earliest.map_or(Peers::Blocked, Peers::Sleeping)
     }
 
+    /// Poll the selectors at a yield safepoint without taking an owner
+    /// off the CPU. Preserve FIFO order: only readiness changes queue state.
+    pub(crate) fn yield_peer_ready(&self, me: ThreadKey) -> bool {
+        let mut state = self.state();
+        if state.closing
+            || state
+                .ready
+                .iter()
+                .any(|key| *key != me && state.waits.get(key) == Some(&Wait::Runnable))
+        {
+            // The ensuing transfer handles I/O/deadline readiness. Avoid
+            // scanning sleeping owners twice on an actual handoff.
+            return true;
+        }
+        Self::expire_deadlines(&mut state, Instant::now());
+        if state
+            .waits
+            .values()
+            .any(|wait| matches!(wait, Wait::Select { .. }))
+            && let Some(Some(select)) = self.select.get()
+            && select.wait_until(Instant::now())
+        {
+            Self::wake_selects(&mut state);
+        }
+        state
+            .ready
+            .iter()
+            .any(|key| *key != me && state.waits.get(key) == Some(&Wait::Runnable))
+    }
+
     /// Make KEY the next thread to run, whatever it waits for.
     pub(crate) fn prioritize(&self, key: ThreadKey) {
         let mut state = self.state();
@@ -204,6 +246,8 @@ impl Control {
     pub(crate) fn wake(&self, key: ThreadKey) {
         let mut state = self.state();
         Self::wake_locked(&mut state, key);
+        drop(state);
+        self.notify_select();
     }
 
     /// Make every thread waiting for WAIT runnable (a mutex release, a
@@ -254,11 +298,59 @@ impl Control {
         let expired: Vec<ThreadKey> = state
             .waits
             .iter()
-            .filter(|(_, wait)| matches!(wait, Wait::Select { slice_end, .. } if *slice_end <= now))
+            .filter(|(_, wait)| matches!(wait, Wait::Select { wait_end } if *wait_end <= now))
             .map(|(key, _)| *key)
             .collect();
         for key in expired {
             Self::wake_locked(state, key);
+        }
+    }
+
+    /// Readiness wakes all selecting owners. They inspect their own wait
+    /// policy and poll live descriptors only after reacquiring the Baton.
+    fn wake_selects(state: &mut ControlState) {
+        let selecting: Vec<_> = state
+            .waits
+            .iter()
+            .filter_map(|(key, wait)| matches!(wait, Wait::Select { .. }).then_some(*key))
+            .collect();
+        for key in selecting {
+            Self::wake_locked(state, key);
+        }
+    }
+
+    /// Choose an owner, blocking only while every owner is parked. The
+    /// Baton stays local and no World cell is read during this OS wait.
+    fn pick_next(&self) -> Option<ThreadKey> {
+        loop {
+            let deadline = {
+                let mut state = self.state();
+                if state
+                    .waits
+                    .values()
+                    .any(|wait| matches!(wait, Wait::Select { .. }))
+                    && let Some(Some(select)) = self.select.get()
+                    && select.wait_until(Instant::now())
+                {
+                    Self::wake_selects(&mut state);
+                }
+                match Self::pick(&mut state) {
+                    Some((key, None)) => return Some(key),
+                    Some((_, Some(deadline))) => deadline,
+                    None => return None,
+                }
+            };
+            let activity = if let Some(Some(select)) = self.select.get() {
+                select.wait_until(deadline)
+            } else {
+                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+                false
+            };
+            if activity {
+                Self::wake_selects(&mut self.state());
+            }
+            // An eventless/spurious return never expires a deadline early.
+            // pick's monotonic check is the sole clock-based wake.
         }
     }
 
@@ -275,7 +367,7 @@ impl Control {
             .waits
             .iter()
             .filter_map(|(key, wait)| match wait {
-                Wait::Select { slice_end, .. } => Some((*key, *slice_end)),
+                Wait::Select { wait_end } => Some((*key, *wait_end)),
                 _ => None,
             })
             .min_by_key(|(_, deadline)| *deadline)
@@ -291,37 +383,27 @@ impl Control {
         baton: Baton,
         receiver: &mpsc::Receiver<Baton>,
     ) -> Result<Baton, Handoff> {
-        let (next, deadline, sender) = {
+        {
             let mut state = self.state();
             state.waits.insert(me, wait);
             if wait == Wait::Runnable {
                 state.ready.push_back(me);
             }
-            let Some((next, deadline)) = Self::pick(&mut state) else {
-                state.waits.insert(me, Wait::Runnable);
-                return Err(Handoff::NoRunnable(baton));
-            };
-            if next == me {
-                state.waits.insert(me, Wait::Runnable);
-                drop(state);
-                if let Some(deadline) = deadline {
-                    std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
-                }
-                return Ok(baton);
-            }
-            let sender = state
-                .senders
-                .get(&next)
-                .cloned()
-                .expect("every registered thread has a channel");
-            (next, deadline, sender)
-        };
-        if let Some(deadline) = deadline {
-            // Nothing can run before NEXT's deadline: wait it out here,
-            // holding the Baton, then let NEXT run.
-            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
-            self.state().waits.insert(next, Wait::Runnable);
         }
+        let Some(next) = self.pick_next() else {
+            self.state().waits.insert(me, Wait::Runnable);
+            return Err(Handoff::NoRunnable(baton));
+        };
+        if next == me {
+            self.state().waits.insert(me, Wait::Runnable);
+            return Ok(baton);
+        }
+        let sender = self
+            .state()
+            .senders
+            .get(&next)
+            .cloned()
+            .expect("every registered thread has a channel");
         if sender.send(baton).is_err() {
             // NEXT's OS thread is gone with its receiver: nothing can hand
             // the Baton back, and the World's Lisp would stop.
@@ -341,7 +423,7 @@ impl Control {
     /// closing: every waiting thread is woken (it signals) and gets the
     /// Baton in turn.
     pub(crate) fn finish(&self, me: ThreadKey, baton: Baton) {
-        let sender = {
+        {
             let mut state = self.state();
             state.waits.insert(me, Wait::Exited);
             let joiners: Vec<ThreadKey> = state
@@ -353,24 +435,22 @@ impl Control {
             for key in joiners {
                 Self::wake_locked(&mut state, key);
             }
-            let next = match Self::pick(&mut state) {
-                Some((next, _)) => Some(next),
-                None => {
-                    state.closing = true;
-                    let blocked: Vec<ThreadKey> = state
-                        .waits
-                        .iter()
-                        .filter(|(_, wait)| !matches!(wait, Wait::Exited))
-                        .map(|(key, _)| *key)
-                        .collect();
-                    for key in blocked {
-                        Self::wake_locked(&mut state, key);
-                    }
-                    Self::pick(&mut state).map(|(next, _)| next)
-                }
-            };
-            next.and_then(|next| state.senders.get(&next).cloned())
-        };
+        }
+        let next = self.pick_next().or_else(|| {
+            let mut state = self.state();
+            state.closing = true;
+            let blocked: Vec<ThreadKey> = state
+                .waits
+                .iter()
+                .filter(|(_, wait)| !matches!(wait, Wait::Exited))
+                .map(|(key, _)| *key)
+                .collect();
+            for key in blocked {
+                Self::wake_locked(&mut state, key);
+            }
+            Self::pick(&mut state).map(|(next, _)| next)
+        });
+        let sender = next.and_then(|next| self.state().senders.get(&next).cloned());
         match sender {
             Some(sender) => {
                 if sender.send(baton).is_err() {
@@ -412,5 +492,29 @@ impl Control {
         std::mem::take(&mut self.state().joins)
             .into_iter()
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_deadline_becomes_ready_at_its_exact_fine_instant() {
+        let now = Instant::now();
+        let deadline = now + std::time::Duration::from_millis(50);
+        let mut state = ControlState::default();
+        state
+            .waits
+            .insert(ThreadKey::Main, Wait::Select { wait_end: deadline });
+        Control::expire_deadlines(&mut state, deadline - std::time::Duration::from_nanos(1));
+        assert_eq!(
+            state.waits.get(&ThreadKey::Main),
+            Some(&Wait::Select { wait_end: deadline })
+        );
+        assert!(state.ready.is_empty());
+        Control::expire_deadlines(&mut state, deadline);
+        assert_eq!(state.waits.get(&ThreadKey::Main), Some(&Wait::Runnable));
+        assert_eq!(state.ready.pop_front(), Some(ThreadKey::Main));
     }
 }

@@ -1483,7 +1483,9 @@ impl super::eval::Context {
     ) -> Result<WaitBlockActivity, Flow> {
         // GNU `thread_select`: other Lisp threads run during the wait.
         let wait_time = match self.green_select_switch(wait_time)? {
-            crate::emacs_core::eval::SelectTurn::Switched => return Ok(WaitBlockActivity::poll()),
+            crate::emacs_core::eval::SelectTurn::Switched => {
+                return Ok(self.green_resumed_select_activity());
+            }
             crate::emacs_core::eval::SelectTurn::Block(wait_time) => wait_time,
         };
         match self.wait_block(request, wait_time) {
@@ -1517,6 +1519,24 @@ impl super::eval::Context {
                 Ok(WaitBlockActivity::ready_processes(Vec::new()))
             }
         }
+    }
+
+    /// Decode readiness only after the Green owner reacquired the Baton.
+    /// The idle scheduler observes raw OS events without borrowing the World.
+    /// Process registrations are level-triggered, so a zero-time decode
+    /// recovers writable connect/TLS interest as well as readable output.
+    #[cold]
+    #[inline(never)]
+    fn green_resumed_select_activity(&self) -> WaitBlockActivity {
+        self.processes
+            .wait_for_backend_events(
+                Duration::ZERO,
+                ProcessWaitBackendInterest::NotificationsAndProcesses,
+            )
+            .map_or_else(
+                WaitBlockActivity::poll,
+                WaitBlockActivity::from_source_events,
+            )
     }
 
     /// Set `waiting_for_user_input` for the duration of a poller block when the

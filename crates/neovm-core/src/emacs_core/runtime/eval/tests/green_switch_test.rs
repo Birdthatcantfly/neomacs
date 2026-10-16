@@ -418,6 +418,10 @@ fn sleeping_threads_sleep_at_the_same_time() {
     );
     let elapsed = started.elapsed();
     assert!(
+        elapsed >= std::time::Duration::from_millis(200),
+        "a 0.2 s sleep returned early after {elapsed:?}"
+    );
+    assert!(
         elapsed < std::time::Duration::from_millis(600),
         "five 0.2 s sleeps took {elapsed:?}"
     );
@@ -681,7 +685,7 @@ fn every_thread_shares_the_standard_case_table() {
 /// Callgrind micro for the 3f baseline: `(Ir(N) - Ir(0)) / N` is one yield
 /// round trip, main to a worker and back: two Baton hand-offs (park, root
 /// publication, channel transfer, resume) plus one iteration of the
-/// worker's interpreted `(while (not stop) (thread-yield))`.
+/// worker's interpreted `(while (null stop) (thread-yield))`.
 #[test]
 #[ignore = "callgrind micro; run explicitly"]
 fn green_yield_switch_micro() {
@@ -690,12 +694,24 @@ fn green_yield_switch_micro() {
         .and_then(|n| n.parse().ok())
         .unwrap_or(1000);
     let mut ev = green();
-    eval(
-        &mut ev,
-        "(progn
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn
            (setq tgy-stop nil)
-           (setq tgy-th (make-thread (lambda () (while (not tgy-stop) (thread-yield)))))
+           (setq tgy-th (make-thread (lambda () (while (null tgy-stop) (thread-yield)))))
            (thread-yield))",
+        ),
+        "nil",
+        "yield micro setup must succeed"
+    );
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(list (thread-live-p tgy-th) (thread-last-error tgy-th))"
+        ),
+        "(t nil)",
+        "yield micro needs a live peer"
     );
     for _ in 0..n {
         ev.green_wait(super::Wait::Runnable).expect("yield");
@@ -703,6 +719,14 @@ fn green_yield_switch_micro() {
     assert_eq!(
         eval(&mut ev, "(progn (setq tgy-stop t) (thread-join tgy-th))"),
         "nil"
+    );
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(list (thread-live-p tgy-th) (thread-last-error tgy-th))"
+        ),
+        "(nil nil)",
+        "joined yield peer must have completed without error"
     );
 }
 
@@ -989,19 +1013,18 @@ fn d1_a_thread_uses_a_sqlite_handle_opened_by_another() {
     );
 }
 
-fn select_slices() -> usize {
-    super::switch::SELECT_SLICES.load(std::sync::atomic::Ordering::Relaxed)
+fn select_parks() -> usize {
+    super::switch::SELECT_PARKS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A Sim World's waits are today's: no Green runtime, no slice. Only the
-/// slice count is asserted: how long a timed wait lasts is the wait loop's
-/// own contract (it may end one coarse-clock tick early today, a GNU
-/// divergence fixed and pinned separately), not this test's.
+/// park count is asserted here; the waitclk tests separately require the
+/// full fine-clock timeout in both Sim and Green.
 #[test]
 fn a_sim_worlds_waits_never_slice() {
     crate::test_utils::init_test_tracing();
     let mut ev = Context::new_with_threading(ThreadingMode::Sim);
-    let before = select_slices();
+    let before = select_parks();
     assert_eq!(
         eval(
             &mut ev,
@@ -1009,18 +1032,18 @@ fn a_sim_worlds_waits_never_slice() {
         ),
         "done"
     );
-    assert_eq!(select_slices(), before);
+    assert_eq!(select_parks(), before);
 }
 
 /// With no other thread wanting the Baton, a Green wait blocks itself:
 /// a peer that only sleeps never makes it poll in slices.
 #[test]
-fn a_green_wait_slices_only_while_a_peer_is_ready() {
+fn a_green_wait_parks_only_while_a_peer_is_ready() {
     let mut ev = green();
     eval(&mut ev, "(thread-join (make-thread (lambda () nil)))");
-    let before = select_slices();
+    let before = select_parks();
     assert_eq!(eval(&mut ev, "(progn (sleep-for 0.05) 'alone)"), "alone");
-    assert_eq!(select_slices(), before, "a wait alone sliced");
+    assert_eq!(select_parks(), before, "a wait alone sliced");
     let started = std::time::Instant::now();
     assert_eq!(
         eval(
@@ -1032,14 +1055,121 @@ fn a_green_wait_slices_only_while_a_peer_is_ready() {
         "peer"
     );
     let elapsed = started.elapsed();
-    // One slice to let the new thread start, one when its wait ends:
+    // One park to let the new thread start, one when its wait ends:
     // never one per 10 ms of the 0.3 s both spend waiting.
-    let slices = select_slices() - before;
-    assert!(slices <= 4, "{slices} slices while both threads slept");
+    let parks = select_parks() - before;
+    assert!(parks <= 4, "{parks} parks while both threads slept");
     assert!(
         elapsed < std::time::Duration::from_millis(500),
         "the two waits took {elapsed:?}"
     );
+}
+
+/// A peer stays runnable for the whole timeout. None of its safepoints
+/// makes the waiting owner run a periodic 10 ms select slice.
+#[test]
+fn a_green_select_has_no_periodic_slices() {
+    let mut ev = green();
+    let before = select_parks();
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn
+           (setq g3f-wait-done nil)
+           (let ((th (make-thread (lambda ()
+                       (while (null g3f-wait-done) (thread-yield)) 'done))))
+             (sleep-for 0.08)
+             (setq g3f-wait-done t)
+             (thread-join th)))"
+        ),
+        "done"
+    );
+    assert_eq!(
+        select_parks() - before,
+        1,
+        "a waiting owner was periodically resumed"
+    );
+}
+
+/// Joining main is blocked, so the newborn's first yield reacquires its
+/// own turn. The deferred signal must still reach its newly installed handler.
+#[test]
+fn a_newborn_signal_is_delivered_even_when_its_yield_has_no_ready_peer() {
+    let mut ev = green();
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(let ((th (make-thread (lambda ()
+                     (condition-case nil (thread-yield)
+                       (error 'caught))))))
+           (thread-signal th 'error '(wake))
+           (thread-join th))"
+        ),
+        "caught"
+    );
+}
+
+#[test]
+fn a_yield_without_ready_peers_still_refuses_gc_inhibition() {
+    let mut ev = green();
+    eval(&mut ev, "(thread-join (make-thread (lambda () nil)))");
+    ev.gc_inhibit_depth += 1;
+    let result = ev.green_thread_yield(&[]);
+    ev.gc_inhibit_depth -= 1;
+    assert!(result.is_err(), "yield still validates the switch point");
+}
+
+/// A scheduler event interrupts a parked select without waiting for its
+/// timeout; the resumed owner raises the pending thread signal.
+#[test]
+fn a_signal_wakes_a_thread_waiting_in_select() {
+    let mut ev = green();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(let ((th (make-thread (lambda ()
+                     (condition-case nil (sleep-for 5)
+                       (error 'interrupted))))))
+           (thread-yield)
+           (thread-signal th 'error '(wake))
+           (thread-join th))"
+        ),
+        "interrupted"
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
+/// Readiness reaches an owner parked in accept-process-output while its
+/// peer keeps yielding, before the accept timeout or any periodic slice.
+#[test]
+fn fd_readiness_wakes_a_green_select_while_a_peer_yields() {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        stream.write_all(b"ready").unwrap();
+    });
+    let mut ev = green();
+    let started = std::time::Instant::now();
+    let source = format!(
+        r#"(progn
+      (setq g3f-received nil)
+      (let* ((p (make-network-process :name "g3f-ready" :host "127.0.0.1"
+                    :service {port} :noquery t
+                    :filter (lambda (_p text) (setq g3f-received text))))
+             (th (make-thread (lambda ()
+                   (while (null g3f-received) (thread-yield)) 'peer))))
+        (accept-process-output p 2)
+        (thread-join th)
+        (delete-process p)
+        g3f-received))"#
+    );
+    assert_eq!(eval(&mut ev, &source), "\"ready\"");
+    server.join().unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
 
 /// The child of `a_worker_panic_aborts_the_process_and_never_hangs_main`.
@@ -1158,32 +1288,90 @@ fn green_select_wait_micro() {
         .and_then(|n| n.parse().ok())
         .unwrap_or(150);
     let mut ev = green();
-    eval(
-        &mut ev,
-        "(progn
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn
            (setq g3f-micro-done nil g3f-micro-turns 0)
            (setq g3f-micro-thread
              (make-thread (lambda ()
-               (while (not g3f-micro-done)
+               (while (null g3f-micro-done)
                  (setq g3f-micro-turns (1+ g3f-micro-turns))
                  (thread-yield)))))
            (thread-yield))",
+        ),
+        "nil",
+        "wait micro setup must succeed"
+    );
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(list (thread-live-p g3f-micro-thread) (thread-last-error g3f-micro-thread))"
+        ),
+        "(t nil)",
+        "wait micro needs a live peer"
     );
     let wait = ev
         .eval_str(&format!("'(sleep-for {})", millis as f64 / 1000.0))
         .expect("read wait micro");
-    let parks = select_slices();
+    let parks = select_parks();
     let start = std::time::Instant::now();
     ev.eval_form(wait).expect("wait micro");
     let elapsed = start.elapsed();
-    let parks = select_slices() - parks;
+    let parks = select_parks() - parks;
     let turns = eval(
         &mut ev,
         "(progn (setq g3f-micro-done t)
            (thread-join g3f-micro-thread) g3f-micro-turns)",
     );
+    assert!(
+        turns.parse::<u64>().expect("numeric peer turns") > 0,
+        "the timed wait must run its peer"
+    );
+    assert_eq!(eval(&mut ev, "(thread-last-error g3f-micro-thread)"), "nil");
     eprintln!(
         "green_select_wait_micro requested_ms={millis} elapsed_ns={} parks={parks} peer_turns={turns}",
         elapsed.as_nanos()
     );
+}
+/// Writable :nowait completion must be decoded after an idle scheduler
+/// wake. A readable-only broad poll skips a process still in `connect`.
+#[test]
+fn writable_connect_readiness_survives_a_green_select_with_a_yielding_peer() {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (release, until_finished) = std::sync::mpsc::channel::<()>();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        stream.write_all(b"ready").unwrap();
+        let _ = until_finished.recv();
+    });
+    let mut ev = green();
+    let source = format!(
+        r#"(progn
+      (setq g3f-connect-stop nil g3f-connect-open nil g3f-connect-output nil)
+      (let* ((p (make-network-process :name "g3f-connect" :host "127.0.0.1"
+                    :service {port} :family 'ipv4 :nowait t :noquery t
+                    :sentinel (lambda (process event)
+                                (if (string-equal event "open\n")
+                                    (setq g3f-connect-open (process-status process))))
+                    :filter (lambda (_process text) (setq g3f-connect-output text))))
+             (initial (process-status p))
+             (th (make-thread (lambda ()
+                   (while (null g3f-connect-stop) (thread-yield))))))
+        (let ((tries 0))
+          (while (and (null g3f-connect-output) (< tries 20))
+            (setq tries (1+ tries))
+            (accept-process-output p 0.05)))
+        (setq g3f-connect-stop t)
+        (thread-join th)
+        (prog1 (list initial g3f-connect-open g3f-connect-output)
+          (delete-process p))))"#
+    );
+    let result = eval(&mut ev, &source);
+    drop(release);
+    server.join().unwrap();
+    assert_eq!(result, "(connect open \"ready\")");
 }

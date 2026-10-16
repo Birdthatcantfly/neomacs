@@ -13,23 +13,17 @@ use crate::emacs_core::intern::SymId;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-/// The longest a thread waiting in `thread_select` leaves its own input
-/// unwatched while other threads run. Only a peer ready to run makes a wait
-/// slice; round 3f replaces the slice with a select that releases the
-/// Baton and is woken by readiness or a scheduler event, as GNU's.
-const SELECT_QUANTUM: Duration = Duration::from_millis(10);
-
 /// How a `thread_select` wait went ([`Context::green_select_switch`]).
 pub(crate) enum SelectTurn {
-    /// This thread gave the Baton up for a slice of the wait.
+    /// This thread gave the Baton up until input, a scheduler event, or its deadline.
     Switched,
     /// This thread blocks itself for this long.
     Block(Duration),
 }
 
-/// Waits that gave the Baton up for a slice (tests read it).
+/// Waits that gave the Baton up (tests read it).
 #[cfg(test)]
-pub(crate) static SELECT_SLICES: std::sync::atomic::AtomicUsize =
+pub(crate) static SELECT_PARKS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 /// A failed GNU binding exchange, kept as allocation-free metadata until delivery.
@@ -351,15 +345,11 @@ impl Context {
 
     /// GNU `thread_select`: how a wait of WAIT_TIME for input or a
     /// deadline shares the Baton.
-    /// - With another thread ready to run, this one gives the Baton up for
-    ///   at most [`SELECT_QUANTUM`] of the wait (it watches its own input
-    ///   only while it runs): [`SelectTurn::Switched`].
-    /// - Otherwise it blocks itself, watching its input and timers, for the
-    ///   wait or until the earliest deadline another thread sleeps to,
-    ///   whichever comes first: [`SelectTurn::Block`]. A sleeping peer
-    ///   never makes it poll.
-    /// - Outside a Green runtime, for a zero wait, or where switching is
-    ///   refused: `Block(WAIT_TIME)`, today's wait unchanged.
+    /// With a ready peer this owner parks until input, a scheduler event,
+    /// or WAIT_TIME, with no slices. With no ready peer it uses the existing
+    /// wait backend, clipped to the earliest peer's absolute deadline.
+    /// Outside Green, at zero timeout, or where switching is refused, the
+    /// existing wait backend remains responsible for the block.
     pub(crate) fn green_select_switch(&mut self, wait_time: Duration) -> Result<SelectTurn, Flow> {
         if self.green_seat().is_none() {
             return Ok(SelectTurn::Block(wait_time));
@@ -380,9 +370,8 @@ impl Context {
         match control.peers(key, now) {
             Peers::Ready => {
                 #[cfg(test)]
-                SELECT_SLICES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                SELECT_PARKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 self.green_wait(Wait::Select {
-                    slice_end: now + wait_time.min(SELECT_QUANTUM),
                     wait_end: now + wait_time,
                 })?;
                 Ok(SelectTurn::Switched)
@@ -392,6 +381,34 @@ impl Context {
             )),
             Peers::Blocked => Ok(SelectTurn::Block(wait_time)),
         }
+    }
+
+    /// Yield only when another owner can run. A sleeping selector remains
+    /// watched at this safepoint, but an owner that reacquires its own turn
+    /// needs no binding exchange or parked-root publication (GNU's
+    /// post_acquire_global_lock also skips exchange for the same owner).
+    pub(crate) fn green_yield(&mut self) -> Result<(), Flow> {
+        let Some(seat) = self.green_seat() else {
+            return Ok(());
+        };
+        let key = seat.key;
+        let control = Arc::clone(&seat.control);
+        if let Some(refusal) = switch_refusal(self) {
+            return Err(signal("error", vec![Value::string(refusal)]));
+        }
+        if self.with_green_runtime(|runtime| runtime.exit.get().is_some())
+            || control.yield_peer_ready(key)
+        {
+            return self.green_wait(Wait::Runnable);
+        }
+        // A newborn's signal was deferred until it installed handlers.
+        // Its first yield delivers it even when every peer is blocked.
+        let deferred =
+            self.with_green_runtime(|runtime| runtime.deferred_errors.borrow_mut().remove(&key));
+        if let Some((symbol, data)) = deferred {
+            self.threads.restore_thread_error(key.id(), symbol, data);
+        }
+        self.green_raise_pending_signal(key)
     }
 
     /// Main is ending (its Context drops): every other thread ends without
@@ -487,6 +504,7 @@ impl Context {
     pub(crate) fn start_green_threads(&mut self) -> Result<(), super::GreenStartError> {
         let baton = self.start_green_runtime()?;
         let control = self.with_green_runtime(|runtime| Arc::clone(&runtime.control));
+        control.install_select(self.processes.green_select_handle());
         let receiver = control.register_main();
         self.take_green_seat(ThreadKey::Main, control, receiver, baton);
         Ok(())

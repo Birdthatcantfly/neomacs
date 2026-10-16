@@ -23,7 +23,7 @@ impl Context {
     /// `(thread-yield)`: let every other ready thread run first.
     pub(crate) fn green_thread_yield(&mut self, args: &[Value]) -> EvalResult {
         expect_args("thread-yield", args, 0)?;
-        self.green_wait(Wait::Runnable)?;
+        self.green_yield()?;
         Ok(Value::NIL)
     }
 
@@ -84,7 +84,7 @@ impl Context {
         let control = self.green_control();
         if matches!(
             control.wait_of(key),
-            Some(Wait::Join(_) | Wait::Mutex(_) | Wait::Condition(_))
+            Some(Wait::Join(_) | Wait::Mutex(_) | Wait::Condition(_) | Wait::Select { .. })
         ) {
             control.wake(key);
         }

@@ -76,6 +76,9 @@ pub enum NetworkSocket {
 pub(crate) mod sys;
 use sys::ChildStatusSource;
 
+mod green_select;
+pub(crate) use green_select::GreenSelectHandle;
+
 mod executable;
 pub(super) use executable::{ExecutableLookupMode, ExecutableSearch};
 

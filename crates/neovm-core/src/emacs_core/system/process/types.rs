@@ -1032,7 +1032,7 @@ pub(super) struct ProcessWaitBackend {
     #[cfg(test)]
     before_next_wait: std::sync::Mutex<Option<Box<dyn FnOnce(Duration) + Send>>>,
     #[cfg(unix)]
-    signal_fd: Option<std::os::fd::RawFd>,
+    pub(super) signal_fd: Option<std::os::fd::RawFd>,
     /// I/O multiplexer for process descriptors and cross-thread notifications.
     ///
     /// Shared (`Arc`) so any cross-thread producer can wake a blocked
