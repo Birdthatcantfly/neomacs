@@ -1695,7 +1695,7 @@ pub fn with_tagged_heap<R>(f: impl FnOnce(&mut TaggedHeap) -> R) -> R {
 /// gate.
 #[inline(always)]
 pub fn note_heap_write(owner: TaggedValue, kind: HeapWriteKind) {
-    if barrier_gate(owner, None) {
+    if barrier_gate(owner) {
         if owner.is_cons() {
             note_cons_write_slow(owner, kind, None, None);
         } else {
@@ -1712,55 +1712,62 @@ pub fn note_heap_slot_write(
     slot: usize,
     value: TaggedValue,
 ) {
-    if barrier_gate(owner, Some(value)) {
-        if owner.is_cons() {
-            let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
+    if owner.is_cons() {
+        let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
+        // Keep the immediate arm separate so the missed-window path reads
+        // its TLS window directly, without selecting between TLS addresses.
+        // An immediate overwrite still needs its preimage during SATB.
+        if value.is_fixnum() {
             if TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr)) {
                 note_heap_write_slow(owner, kind, Some(slot), Some(value));
-            } else {
-                // Only generation-only, non-immediate stores can reach here:
-                // immediate cons stores selected the real window in the gate.
-                with_tagged_heap(|heap| {
-                    if generation_only_cons_is_old(heap, owner) {
-                        heap.mark_owner_card(addr);
-                    }
-                });
             }
-        } else {
-            let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
-            // The header admitted an old, unlogged owner. Preserve GEN0's
-            // persistent owner bookkeeping; only GEN1 can reject its immediate
-            // store. A real-window hit must still capture the old children.
-            if value.is_fixnum()
-                && TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get().covers(addr))
-                && !TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr))
-            {
-                return;
-            }
-            note_heap_write_slow(owner, kind, Some(slot), Some(value));
+            return;
         }
+        if !TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get().covers(addr)) {
+            return;
+        }
+        if TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr)) {
+            note_heap_write_slow(owner, kind, Some(slot), Some(value));
+            return;
+        }
+        // A mirror hit outside the real window proves an installed GEN1
+        // heap: GEN0 mirrors the real window, and uninstall clears both.
+        // No allocation, callback or safe point can change the installation.
+        let ptr = TAGGED_HEAP.with(Cell::get);
+        debug_assert!(!ptr.is_null());
+        // SAFETY: the protocol proof above establishes a live installed
+        // heap, borrowed only for non-allocating atomic metadata accesses.
+        let heap = unsafe { &*ptr };
+        if generation_only_cons_is_old(heap, owner) {
+            heap.mark_owner_card(addr);
+        }
+        return;
+    }
+    if barrier_gate(owner) {
+        let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
+        // Preserve GEN0's persistent owner bookkeeping. A mirror hit
+        // outside the real window proves GEN1, where an immediate creates
+        // no old-to-young edge. Real-window writes retain full bookkeeping.
+        if value.is_fixnum()
+            && TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get().covers(addr))
+            && !TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr))
+        {
+            return;
+        }
+        note_heap_write_slow(owner, kind, Some(slot), Some(value));
     }
 }
 
-/// The protocol window handles marking, tracking and mapped owners. Rust
-/// cons stores select the ordinary window for immediate slot values and the
-/// precomputed mirror otherwise. The windows coincide under GEN0; under GEN1
-/// an immediate cannot create an old-to-young edge. The ordinary window still
-/// admits SATB, tracking, census and mapped writes, even of immediates. Bulk
-/// writes retain the conservative mirror. Non-cons stores retain the legacy
-/// logged-header test. No heap or mode read is needed for a missed window.
+/// Bulk stores and non-cons slot stores retain the legacy window/header
+/// gate. Cons slot stores select their immediate arm before reaching it.
 #[inline(always)]
-fn barrier_gate(owner: TaggedValue, value: Option<TaggedValue>) -> bool {
+fn barrier_gate(owner: TaggedValue) -> bool {
     if !owner.is_heap_object() {
         return false;
     }
     let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
     let window = if owner.is_cons() {
-        if value.is_some_and(TaggedValue::is_fixnum) {
-            TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get())
-        } else {
-            TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get())
-        }
+        TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get())
     } else {
         TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get())
     };
@@ -1773,26 +1780,35 @@ fn barrier_gate(owner: TaggedValue, value: Option<TaggedValue>) -> bool {
     !owner.is_cons() && unsafe { GcHeader::needs_remembering(addr as *const GcHeader) }
 }
 
-/// The slot barrier's age-byte test, after the ordinary window refused the
-/// owner. Unlike a compiled leaf, a Rust setter also accepts foreign conses:
-/// prove block ownership before deriving a trailer address. The map-off arm
-/// retains the existing registry oracle. Neither arm allocates or safepoints.
+/// Test an owned cons's atomic age byte after the real window refused it.
+/// Foreign conses are valid setter inputs, so ownership precedes every
+/// trailer access. This metadata query must not record a Lisp read: setters
+/// already own their journal/observation policy. No arm safepoints.
 #[inline(always)]
 fn generation_only_cons_is_old(heap: &TaggedHeap, owner: TaggedValue) -> bool {
-    let Some(map) = heap.chunk_map.as_ref() else {
-        return heap
-            .old_cons_trailer(owner)
-            .is_some_and(|(trailer, index)| trailer.age_is_old(index));
-    };
-    let ptr = owner.xcons_ptr();
-    if !ConsBlock::ptr_is_cell_aligned(ptr) || !map.get(ptr as usize).is(ChunkClass::Cons) {
+    let ptr = (owner.bits() & !crate::tagged::value::TAG_MASK) as *const ConsCell;
+    if !ConsBlock::ptr_is_cell_aligned(ptr) {
         return false;
     }
-    // SAFETY: the map proves a live owned cons block; the alignment check
-    // proves a cell index inside its payload. The executing mutator cannot
-    // release this block or promote cells before this leaf finishes. Ages
-    // are atomic bytes and change only with every mutator stopped.
-    let trailer = unsafe { ConsBlockTrailer::from_block_base(ConsBlock::block_base_for_ptr(ptr)) };
+    let base = ConsBlock::block_base_for_ptr(ptr);
+    let cur = heap.jit.cons_cur.get();
+    // An open region's cursor belongs to a live owned block, even when it
+    // equals its limit (the payload ends before the block boundary). Every
+    // collector entry closes regions before releasing storage. This proves
+    // ownership, not youth: old cells can share the region's block.
+    if cur == 0 || ConsBlock::block_base_for_ptr(cur as *const ConsCell) != base {
+        let owned = match heap.chunk_map.as_ref() {
+            Some(map) => map.get(ptr as usize).is(ChunkClass::Cons),
+            None => heap.cons_block_index_by_base.contains_key(&base),
+        };
+        if !owned {
+            return false;
+        }
+    }
+    // SAFETY: cursor, map or registry proves a live owned block; the first
+    // check proves a cell index inside its payload. Release and promotion
+    // require mutator exclusion, and this leaf has no safe point.
+    let trailer = unsafe { ConsBlockTrailer::from_block_base(base) };
     trailer.age_is_old(ConsBlock::index_of_ptr(ptr))
 }
 

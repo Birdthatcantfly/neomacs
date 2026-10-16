@@ -2865,6 +2865,9 @@ mod generation_tests;
 #[path = "gc/tests/generational_verifier_test.rs"]
 mod generational_verifier_tests;
 #[cfg(test)]
+#[path = "gc/tests/inline_cons_owner_test.rs"]
+mod inline_cons_owner_tests;
+#[cfg(test)]
 #[path = "gc/tests/inline_slot_barrier_test.rs"]
 mod inline_slot_barrier_tests;
 #[cfg(test)]

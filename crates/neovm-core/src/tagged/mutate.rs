@@ -109,7 +109,9 @@ pub(crate) fn debug_assert_no_heap_mut_closure() {
     });
 }
 
-#[inline]
+// Keep the recorder and barrier rejects in the caller as the generation-only
+// arm grows: a rejected store must not gain a setter call under either mode.
+#[inline(always)]
 pub fn set_cons_car(cell: TaggedValue, value: TaggedValue) -> bool {
     if !record_projected_write(cell, WriteProjection::Cons) {
         return false;
@@ -124,7 +126,7 @@ pub fn set_cons_car(cell: TaggedValue, value: TaggedValue) -> bool {
     true
 }
 
-#[inline]
+#[inline(always)]
 pub fn set_cons_cdr(cell: TaggedValue, value: TaggedValue) -> bool {
     if !record_projected_write(cell, WriteProjection::Cons) {
         return false;
