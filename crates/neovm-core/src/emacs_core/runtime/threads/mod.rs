@@ -980,18 +980,20 @@ pub(crate) fn builtin_make_thread(eval: &mut super::eval::Context, args: Vec<Val
     let (thread_id, function) = prepare_make_thread(&mut eval.threads, &args)?;
     eval.threads
         .set_thread_current_buffer(thread_id, eval.buffers.current_buffer_id());
-    let runtime_state = match enter_thread_runtime(eval, thread_id) {
-        Ok(state) => state,
-        Err(flow) => {
-            eval.threads.discard_unstarted_thread(thread_id);
-            return Err(flow);
-        }
-    };
-    let result = eval.apply(function, vec![]);
-    let exit_result = exit_thread_runtime(eval, thread_id, runtime_state);
-    let thread_result = finish_make_thread_result(&mut eval.threads, thread_id, result);
-    exit_result?;
-    thread_result
+    eval.with_sim_creation_local_bindings(|eval| {
+        let runtime_state = match enter_thread_runtime(eval, thread_id) {
+            Ok(state) => state,
+            Err(flow) => {
+                eval.threads.discard_unstarted_thread(thread_id);
+                return Err(flow);
+            }
+        };
+        let result = eval.apply(function, vec![]);
+        let exit_result = exit_thread_runtime(eval, thread_id, runtime_state);
+        let thread_result = finish_make_thread_result(&mut eval.threads, thread_id, result);
+        exit_result?;
+        thread_result
+    })
 }
 
 pub(crate) fn prepare_make_thread(

@@ -1404,6 +1404,63 @@ impl Context {
         Ok(())
     }
 
+    /// Sim executes a new worker eagerly, although GNU's `make-thread`
+    /// does not switch. Preserve absent local entries across that artificial
+    /// switch: their later rewind must still see a local remade by the caller.
+    /// Real exchanges keep their normal missing-local retirement semantics.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn with_sim_creation_local_bindings(
+        &mut self,
+        run: impl FnOnce(&mut Self) -> EvalResult,
+    ) -> EvalResult {
+        let preserved: Vec<_> = self
+            .specpdl
+            .iter()
+            .enumerate()
+            .filter_map(|(position, binding)| match binding {
+                SpecBinding::LetLocal {
+                    sym_id, buffer_id, ..
+                } if self
+                    .local_binding_value_for_thread_switch(*sym_id, *buffer_id)
+                    .is_none() =>
+                {
+                    Some((position, binding.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        if preserved.is_empty() {
+            return run(self);
+        }
+
+        let mut roots = UnwindVmRootsScope::enter(self);
+        for (_, binding) in &preserved {
+            if let SpecBinding::LetLocal {
+                sym_id, old_value, ..
+            } = binding
+            {
+                roots
+                    .context()
+                    .push_vm_frame_root(Value::from_sym_id(*sym_id));
+                roots.context().push_vm_frame_root(*old_value);
+            }
+        }
+        let result = run(roots.context());
+        // Entry can fail after earlier local entries were zapped. Restore
+        // those copies on the error path too, without replacing any live
+        // entry the simulated worker's own execution may have left behind.
+        for (position, saved) in preserved {
+            if let Some(binding) = roots.context().specpdl.get_mut(position)
+                && matches!(binding, SpecBinding::Nop)
+            {
+                *binding = saved;
+            }
+        }
+        roots.finish();
+        result
+    }
+
     pub(crate) fn suspend_dynamic_bindings_for_thread_switch(
         &mut self,
     ) -> Result<ThreadDynamicBindingToken, Flow> {

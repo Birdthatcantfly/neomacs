@@ -1429,3 +1429,124 @@ fn threads_mutexes_and_condition_variables_are_opaque_objects_not_conses() {
 #[cfg(test)]
 #[path = "numeric_boundaries.rs"]
 mod numeric_boundaries;
+
+// GNU creation does not itself switch; Sim's eager worker must leave absent
+// local entries available for the caller's later make-local-variable/rewind.
+#[test]
+fn sim_thread_creation_preserves_exchanged_locals_until_remake() {
+    crate::test_utils::init_test_tracing();
+    for (form, expected) in [
+        (
+            r##"(progn
+  (defvar g3e-local 'default)
+  (fset 'g3e-local-probe
+        (lambda ()
+          (let ((g3e-local 'bound))
+            (list g3e-local
+                  (backtrace-eval
+                   '(list g3e-local (progn (kill-local-variable 'g3e-local) (setq g3e-late-worker (make-thread (lambda () nil))) g3e-local) (progn (make-local-variable 'g3e-local) (setq g3e-local 'remade) g3e-local))
+                   0 'g3e-local-probe)
+                  g3e-local))))
+  (progn
+    (set-buffer (get-buffer-create "g3e-sim-local"))
+    (set (make-local-variable 'g3e-local) 'local)
+    (prog1 (list (g3e-local-probe) g3e-local (local-variable-p 'g3e-local)) (thread-join g3e-late-worker))))"##,
+            r##"((bound (local default remade) bound) remade t)"##,
+        ),
+        (
+            r##"(progn
+  (defvar g3e-local 'default)
+  (fset 'g3e-local-probe
+        (lambda ()
+          (let ((g3e-local 'bound))
+            (list g3e-local
+                  (backtrace-eval
+                   '(let ((g3e-local 'exchange-bound)) (list g3e-local (progn (kill-local-variable 'g3e-local) (setq g3e-late-worker (make-thread (lambda () nil))) g3e-local) (progn (make-local-variable 'g3e-local) (setq g3e-local 'remade) g3e-local)))
+                   0 'g3e-local-probe)
+                  g3e-local))))
+  (progn
+    (set-buffer (get-buffer-create "g3e-sim-local"))
+    (set (make-local-variable 'g3e-local) 'local)
+    (prog1 (list (g3e-local-probe) g3e-local (local-variable-p 'g3e-local)) (thread-join g3e-late-worker))))"##,
+            r##"((bound (exchange-bound default remade) bound) local t)"##,
+        ),
+    ] {
+        let mut eval = Context::new_with_threading(super::super::eval::ThreadingMode::Sim);
+        let result = eval
+            .eval_str(form)
+            .expect("caller remakes its local after creation");
+        assert_eq!(crate::emacs_core::print::print_value(&result), expected);
+    }
+}
+
+#[test]
+fn sim_thread_creation_roots_the_preserved_local_values() {
+    crate::test_utils::init_test_tracing();
+    let mut eval = Context::new_with_threading(super::super::eval::ThreadingMode::Sim);
+    let result = eval.eval_str(r##"(progn
+  (defvar g3e-local 'default)
+  (fset 'g3e-local-probe
+        (lambda ()
+          (let ((g3e-local (list 'bound)))
+            (list g3e-local
+                  (backtrace-eval
+                   '(let ((g3e-local 'exchange-bound)) (list g3e-local (progn (kill-local-variable 'g3e-local) (setq g3e-late-worker (make-thread (lambda () (garbage-collect) nil))) g3e-local) (progn (make-local-variable 'g3e-local) (setq g3e-local 'remade) g3e-local)))
+                   0 'g3e-local-probe)
+                  g3e-local))))
+  (progn
+    (set-buffer (get-buffer-create "g3e-sim-gc-local"))
+    (set (make-local-variable 'g3e-local) (list 'local))
+    (prog1 (list (g3e-local-probe) g3e-local (local-variable-p 'g3e-local)) (thread-join g3e-late-worker))))"##).expect("saved cons values survive worker collection");
+    assert_eq!(
+        crate::emacs_core::print::print_value(&result),
+        "(((bound) (exchange-bound default remade) (bound)) (local) t)"
+    );
+}
+
+#[test]
+fn failed_sim_thread_creation_preserves_an_absent_local_entry() {
+    crate::test_utils::init_test_tracing();
+    let mut eval = Context::new_with_threading(super::super::eval::ThreadingMode::Sim);
+    let depth = eval.specpdl.len();
+    let forwarded = super::super::intern::intern("undo-limit");
+    let outer_default = super::super::data::default_value_by_id(&eval, forwarded)
+        .expect("undo-limit has a forwarded default");
+    eval.try_specbind(forwarded, Value::fixnum(5))
+        .expect("valid binding");
+    super::super::eval::set_default_toplevel_value(
+        &mut eval,
+        vec![Value::from_sym_id(forwarded), Value::string("rejected")],
+    )
+    .expect("save a rejected forwarded restore");
+    let local_depth = eval.specpdl.len();
+    eval.eval_str("(progn (defvar sim-creation-local 'default) (set (make-local-variable 'sim-creation-local) (list 'kept)))")
+        .expect("make a local with a heap value");
+    eval.try_specbind(
+        super::super::intern::intern("sim-creation-local"),
+        Value::symbol("bound"),
+    )
+    .expect("local binding lies above the forwarded binding");
+    eval.eval_str("(kill-local-variable 'sim-creation-local)")
+        .expect("remove local");
+    let before = eval.threads.all_thread_ids();
+    assert!(matches!(
+        builtin_make_thread(&mut eval, vec![Value::NIL]).kinded_ref(),
+        Err(FlowRef::Signal(_))
+    ));
+    assert_eq!(eval.threads.all_thread_ids(), before);
+    eval.eval_str("(set (make-local-variable 'sim-creation-local) 'replacement)")
+        .expect("remake local");
+    eval.unbind_to_with_result(local_depth, Ok(Value::NIL))
+        .expect("restore saved local");
+    let restored = eval
+        .eval_str("sim-creation-local")
+        .expect("local remains bound");
+    assert_eq!(crate::emacs_core::print::print_value(&restored), "(kept)");
+    super::super::eval::set_default_toplevel_value(
+        &mut eval,
+        vec![Value::from_sym_id(forwarded), outer_default],
+    )
+    .expect("repair forwarded saved value");
+    eval.unbind_to_with_result(depth, Ok(Value::NIL))
+        .expect("clean up forwarded binding");
+}
