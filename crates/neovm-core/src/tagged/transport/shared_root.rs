@@ -227,6 +227,29 @@ impl SharedRoot {
         self.heap
     }
 
+    /// Copy an opaque, already-rooted word for a sealed owner publication.
+    /// This neither dereferences Lisp storage nor materializes a LocalRoot.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn parallel_word(&self) -> usize {
+        self.word()
+    }
+
+    /// Encode the traceable subset without borrowing the owning heap. A batch
+    /// child's temporary tagged word is used only for tag classification; no
+    /// local value escapes and no Lisp object is dereferenced.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn parallel_traced_word(&self) -> Option<TracedWord> {
+        match &self.transport {
+            Transport::Untraced(_) => None,
+            Transport::Rooted(lease) => Some(lease.word()),
+            Transport::BatchElement { child, .. } => {
+                TracedWord::of(TaggedValue::from_bits(child.0))
+            }
+        }
+    }
+
     /// The local value, on `heap`'s mutator.
     ///
     /// # Errors

@@ -80,10 +80,7 @@ impl<'era> MutatorPermit<'era> {
             let local = Box::new(local);
             let gate = self.registry.lock()?;
             let entry = self.registry.validate(&gate, self.entry.key)?;
-            let mut state = entry
-                .state
-                .lock()
-                .map_err(|_| RegistrationError::Poisoned)?;
+            let mut state = entry.state.try_lock().map_err(entry_lock_error)?;
             if state.phase != EntryPhase::Starting || entry.cancelled_start.load(Ordering::Acquire)
             {
                 return Err(RegistrationError::StaleRegistration);
@@ -91,6 +88,11 @@ impl<'era> MutatorPermit<'era> {
             let thread = std::thread::current().id();
             state.owner_thread = Some(thread);
             state.phase = EntryPhase::Running;
+            state.rendezvous.mode = if gate.rendezvous.phase == super::rendezvous::Phase::Idle {
+                super::rendezvous::Mode::Running
+            } else {
+                super::rendezvous::Mode::StartingStopped
+            };
             Ok((local, thread))
         })();
         match result {
@@ -103,6 +105,7 @@ impl<'era> MutatorPermit<'era> {
                     thread,
                     published: None,
                     finished: false,
+                    protocol: super::rendezvous::OwnerLocal::default(),
                     _thread: PhantomData,
                 })
             }
@@ -113,6 +116,16 @@ impl<'era> MutatorPermit<'era> {
         }
     }
 }
+impl Drop for RunAccess<'_, '_> {
+    fn drop(&mut self) {
+        self.owner
+            .entry
+            .live_run_loan
+            .store(false, Ordering::Release);
+        self.owner.registry.wake.notify_all();
+    }
+}
+
 impl Drop for MutatorPermit<'_> {
     fn drop(&mut self) {
         if self.armed {
@@ -131,12 +144,13 @@ struct PublicationBinding {
 
 #[must_use = "finish on the original owner; abandonment poisons and retains"]
 pub struct Mutator<'era> {
-    registry: &'era Registry,
+    pub(super) registry: &'era Registry,
     pub(super) entry: Arc<MutatorEntry>,
     pub(super) local: Option<Box<OwnerGcState>>,
     pub(super) thread: ThreadId,
     published: Option<PublicationBinding>,
-    finished: bool,
+    pub(super) finished: bool,
+    pub(super) protocol: super::rendezvous::OwnerLocal,
     _thread: PhantomData<Rc<()>>,
 }
 impl std::fmt::Debug for Mutator<'_> {
@@ -184,7 +198,7 @@ impl<'owner, 'era> OwnerPublication<'owner, 'era> {
 }
 
 impl<'era> Mutator<'era> {
-    fn check_thread(&self) -> Result<(), RegistrationError> {
+    pub(super) fn check_thread(&self) -> Result<(), RegistrationError> {
         if self.thread != std::thread::current().id() {
             return Err(RegistrationError::WrongThread);
         }
@@ -205,14 +219,20 @@ impl<'era> Mutator<'era> {
         self.check_thread()?;
         let gate = self.registry.lock()?;
         let entry = self.registry.validate(&gate, self.entry.key)?;
-        let state = entry
-            .state
-            .lock()
-            .map_err(|_| RegistrationError::Poisoned)?;
-        if state.phase != EntryPhase::Running {
+        let state = entry.state.try_lock().map_err(entry_lock_error)?;
+        if state.phase != EntryPhase::Running
+            || state.rendezvous.mode != super::rendezvous::Mode::Running
+            || matches!(
+                gate.rendezvous.phase,
+                super::rendezvous::Phase::Stopping(_) | super::rendezvous::Phase::Tracing(_)
+            )
+        {
             return Err(RegistrationError::Busy);
         }
         if state.worker_loan {
+            return Err(RegistrationError::OutstandingLoan);
+        }
+        if self.entry.live_run_loan.swap(true, Ordering::AcqRel) {
             return Err(RegistrationError::OutstandingLoan);
         }
         Ok(RunAccess { owner: self })
@@ -233,10 +253,17 @@ impl<'era> Mutator<'era> {
         self.check_thread()?;
         let gate = self.registry.lock()?;
         let entry = self.registry.validate(&gate, self.entry.key)?;
-        let mut state = entry
-            .state
-            .lock()
-            .map_err(|_| RegistrationError::Poisoned)?;
+        let mut state = entry.state.try_lock().map_err(entry_lock_error)?;
+        if self.protocol.participating
+            || gate.rendezvous.phase != super::rendezvous::Phase::Idle
+            || state.rendezvous.mode != super::rendezvous::Mode::Running
+        {
+            return Err(RegistrationError::Busy);
+        }
+        if self.entry.live_run_loan.load(Ordering::Acquire) {
+            return Err(RegistrationError::OutstandingLoan);
+        }
+
         if state.phase != EntryPhase::Running || self.published.is_some() {
             return Err(RegistrationError::Busy);
         }
@@ -278,10 +305,11 @@ impl<'era> Mutator<'era> {
         }
         let gate = self.registry.lock()?;
         let entry = self.registry.validate(&gate, self.entry.key)?;
-        let mut state = entry
-            .state
-            .lock()
-            .map_err(|_| RegistrationError::Poisoned)?;
+        let mut state = entry.state.try_lock().map_err(entry_lock_error)?;
+        if self.protocol.participating || gate.rendezvous.phase != super::rendezvous::Phase::Idle {
+            return Err(RegistrationError::Busy);
+        }
+
         if state.phase != EntryPhase::Published
             || state.epoch != epoch.get()
             || state.publication_generation != binding.generation.get()
@@ -314,10 +342,7 @@ impl<'era> Mutator<'era> {
             }
             let gate = self.registry.lock()?;
             let entry = self.registry.validate(&gate, self.entry.key)?;
-            let mut state = entry
-                .state
-                .lock()
-                .map_err(|_| RegistrationError::Poisoned)?;
+            let mut state = entry.state.try_lock().map_err(entry_lock_error)?;
             if state.phase != EntryPhase::Published || state.worker_loan || state.run_loan {
                 return Err(RegistrationError::OutstandingLoan);
             }
@@ -340,12 +365,21 @@ impl<'era> Mutator<'era> {
         self.check_thread()?;
         let gate = self.registry.lock()?;
         let entry = self.registry.validate(&gate, self.entry.key)?;
-        let mut state = entry
-            .state
-            .lock()
-            .map_err(|_| RegistrationError::Poisoned)?;
-        if state.phase != EntryPhase::Running || state.worker_loan || state.run_loan {
+        let mut state = entry.state.try_lock().map_err(entry_lock_error)?;
+        if state.phase != EntryPhase::Running
+            || state.worker_loan
+            || state.run_loan
+            || self.entry.live_run_loan.load(Ordering::Acquire)
+        {
             return Err(RegistrationError::OutstandingLoan);
+        }
+        if state.rendezvous.mode != super::rendezvous::Mode::Running
+            || matches!(
+                gate.rendezvous.phase,
+                super::rendezvous::Phase::Stopping(_) | super::rendezvous::Phase::Tracing(_)
+            )
+        {
+            return Err(RegistrationError::Busy);
         }
         let log = self
             .local
@@ -380,10 +414,7 @@ impl<'era> Mutator<'era> {
             }
             let gate = self.registry.lock()?;
             let entry = self.registry.validate(&gate, self.entry.key)?;
-            let mut state = entry
-                .state
-                .lock()
-                .map_err(|_| RegistrationError::Poisoned)?;
+            let mut state = entry.state.try_lock().map_err(entry_lock_error)?;
             if !state.worker_loan || state.phase != EntryPhase::Running {
                 return Err(RegistrationError::OutstandingLoan);
             }

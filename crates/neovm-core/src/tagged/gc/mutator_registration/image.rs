@@ -257,6 +257,10 @@ impl OwnerGcState {
         })
     }
 
+    pub(in crate::tagged::gc) fn validate_publication(&self) -> Result<(), ImageError> {
+        validate_closed(&self.hot, &self.cold, &self.jit, &self.regions)
+    }
+
     pub(in crate::tagged::gc) fn publish(&mut self) -> Result<PublishedGcImage, ImageError> {
         validate_closed(&self.hot, &self.cold, &self.jit, &self.regions)?;
         let young = self.cold.young.take_owner_payload()?;
@@ -296,6 +300,21 @@ impl OwnerGcState {
 }
 
 impl PublishedGcImage {
+    /// A4's stopped fixture consumes only its known immediate work marker.
+    /// It cannot discard another payload or act as a production collector.
+    #[cfg(test)]
+    pub(in crate::tagged::gc) fn consume_synthetic_remembered_for_test(
+        &mut self,
+        expected: MarkWord,
+    ) -> Result<usize, ()> {
+        if self.facts.remset.iter().any(|word| *word != expected) {
+            return Err(());
+        }
+        let count = self.facts.remset.len();
+        self.facts.remset.clear();
+        Ok(count)
+    }
+
     pub(in crate::tagged::gc) fn young_id(&self) -> YoungRegistrationId {
         self.young.id()
     }

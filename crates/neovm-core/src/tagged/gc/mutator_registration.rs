@@ -8,8 +8,14 @@
 #![allow(dead_code)] // Consumers are admitted in subsequent proof batches.
 
 mod image;
+mod rendezvous;
 mod summaries;
 mod token;
+pub use rendezvous::{
+    AllStopped, AllStoppedFailure, Mode, Phase, Rendezvous, RendezvousError, Request,
+    ResumeGcImage, ResumeGcImageFailure, RootedRetireFailure, Snapshot,
+};
+pub(crate) use rendezvous::{OwnerRootAdmission, StoppedRootAdmission};
 
 pub use summaries::{RegistrationCensus, StoppedSummaries};
 pub use token::{
@@ -123,6 +129,9 @@ struct EntryState {
     run_loan: bool,
     worker_loan: bool,
     readers: usize,
+    rendezvous: rendezvous::control::OwnerState,
+    roots: Option<crate::tagged::transport::ParallelRootBatchLease>,
+    retained_roots: Vec<crate::tagged::transport::ParallelRootBatchLease>,
 }
 
 /// Stable Send + Sync metadata. It never contains a Context, heap reference,
@@ -131,6 +140,7 @@ pub struct MutatorEntry {
     key: MutatorKey,
     young: YoungRegistrationId,
     cancelled_start: AtomicBool,
+    live_run_loan: AtomicBool,
     state: Mutex<EntryState>,
 }
 
@@ -139,6 +149,13 @@ impl std::fmt::Debug for MutatorEntry {
         f.debug_struct("MutatorEntry")
             .field("key", &self.key)
             .finish_non_exhaustive()
+    }
+}
+
+fn entry_lock_error<T>(error: std::sync::TryLockError<T>) -> RegistrationError {
+    match error {
+        std::sync::TryLockError::WouldBlock => RegistrationError::Busy,
+        std::sync::TryLockError::Poisoned(_) => RegistrationError::Poisoned,
     }
 }
 
@@ -154,6 +171,7 @@ struct RegistryState {
     young_index: FxHashMap<YoungRegistrationId, usize>,
     next_registration: u64,
     generation_limit: u64,
+    rendezvous: rendezvous::control::State,
 }
 
 struct Registry {
@@ -161,6 +179,11 @@ struct Registry {
     world: HeapIdentity,
     state: Mutex<RegistryState>,
     poisoned: AtomicBool,
+    wake: std::sync::Condvar,
+    request_epoch: AtomicU64,
+    completed_epoch: AtomicU64,
+    keeper_thread: ThreadId,
+    root_epoch: super::FacadeEpochRetention,
 }
 
 impl Registry {
@@ -186,6 +209,7 @@ impl Registry {
 
     fn poison(&self) {
         self.poisoned.store(true, Ordering::Release);
+        self.wake.notify_all();
     }
 
     fn validate(
@@ -289,6 +313,16 @@ impl<'heap> ParallelHeapEra<'heap> {
                 });
             }
         };
+        let root_epoch = match keeper.parallel_epoch_retention() {
+            Ok(epoch) => epoch,
+            Err(_) => {
+                return Err(EraAdmissionFailure {
+                    reason: RegistrationError::Exhausted,
+                    collector,
+                    keeper,
+                });
+            }
+        };
         let image = match PublishedGcImage::from_legacy(collector.registration_heap_mut()) {
             Ok(image) => image,
             Err(error) => {
@@ -311,6 +345,7 @@ impl<'heap> ParallelHeapEra<'heap> {
             key,
             young,
             cancelled_start: AtomicBool::new(false),
+            live_run_loan: AtomicBool::new(false),
             state: Mutex::new(EntryState {
                 phase: EntryPhase::Frozen,
                 owner_thread: Some(std::thread::current().id()),
@@ -320,6 +355,9 @@ impl<'heap> ParallelHeapEra<'heap> {
                 run_loan: false,
                 worker_loan: false,
                 readers: 0,
+                rendezvous: rendezvous::control::OwnerState::new(rendezvous::Mode::StartingStopped),
+                roots: None,
+                retained_roots: Vec::new(),
             }),
         });
         let mut young_index = FxHashMap::default();
@@ -331,11 +369,17 @@ impl<'heap> ParallelHeapEra<'heap> {
                 heap,
                 world: heap,
                 poisoned: AtomicBool::new(false),
+                wake: std::sync::Condvar::new(),
+                request_epoch: AtomicU64::new(0),
+                completed_epoch: AtomicU64::new(0),
+                keeper_thread: std::thread::current().id(),
+                root_epoch,
                 state: Mutex::new(RegistryState {
                     entries: vec![entry],
                     young_index,
                     next_registration: 2,
                     generation_limit: u64::MAX,
+                    rendezvous: rendezvous::control::State::new(),
                 }),
             })),
             _thread: PhantomData,
@@ -364,10 +408,7 @@ impl<'heap> ParallelHeapEra<'heap> {
         let mut state = registry.lock()?;
         for entry in &state.entries {
             if entry.key.owner == owner && !entry.cancelled_start.load(Ordering::Acquire) {
-                let current = entry
-                    .state
-                    .lock()
-                    .map_err(|_| RegistrationError::Poisoned)?;
+                let current = entry.state.try_lock().map_err(entry_lock_error)?;
                 if current.phase != EntryPhase::Retired {
                     return Err(RegistrationError::DuplicateOwner);
                 }
@@ -401,6 +442,7 @@ impl<'heap> ParallelHeapEra<'heap> {
             key,
             young,
             cancelled_start: AtomicBool::new(false),
+            live_run_loan: AtomicBool::new(false),
             state: Mutex::new(EntryState {
                 phase: EntryPhase::Starting,
                 owner_thread: None,
@@ -410,6 +452,9 @@ impl<'heap> ParallelHeapEra<'heap> {
                 run_loan: false,
                 worker_loan: false,
                 readers: 0,
+                rendezvous: rendezvous::control::OwnerState::new(rendezvous::Mode::StartingStopped),
+                roots: None,
+                retained_roots: Vec::new(),
             }),
         });
         let index = state.entries.len();
@@ -445,20 +490,61 @@ impl<'heap> ParallelHeapEra<'heap> {
     }
 
     fn prepare_finish(&mut self) -> Result<(), RegistrationError> {
-        let registry = self.registry.as_ref().expect("live era");
-        let state = registry.lock()?;
-        // Preflight EVERY entry before moving any image, including retired
-        // retained entries. Cancelled starts never became runnable.
-        for (index, entry) in state.entries.iter().enumerate() {
-            if entry.cancelled_start.load(Ordering::Acquire) {
-                continue;
+        use crate::tagged::transport::{ParallelRootBatchError, RootBatchError};
+
+        fn entry_guard<'a>(
+            registry: &Registry,
+            entry: &'a MutatorEntry,
+        ) -> Result<MutexGuard<'a, EntryState>, RegistrationError> {
+            match entry.state.try_lock() {
+                Ok(current) => Ok(current),
+                Err(std::sync::TryLockError::WouldBlock) => Err(RegistrationError::Busy),
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    registry.poison();
+                    Err(RegistrationError::Poisoned)
+                }
             }
-            let current = entry
-                .state
-                .lock()
-                .map_err(|_| RegistrationError::Poisoned)?;
-            if current.run_loan || current.worker_loan || current.readers != 0 {
+        }
+
+        fn control_ready(state: &RegistryState) -> Result<(), RegistrationError> {
+            if state.rendezvous.phase == rendezvous::Phase::Poisoned {
+                return Err(RegistrationError::Poisoned);
+            }
+            if state.rendezvous.phase != rendezvous::Phase::Idle
+                || !state.rendezvous.debt.is_empty()
+                || state.rendezvous.queued
+            {
+                return Err(RegistrationError::Busy);
+            }
+            if state.rendezvous.active_readers != 0 {
                 return Err(RegistrationError::OutstandingLoan);
+            }
+            Ok(())
+        }
+
+        fn entry_ready(
+            entry: &MutatorEntry,
+            index: usize,
+            current: &EntryState,
+        ) -> Result<(), RegistrationError> {
+            if entry.live_run_loan.load(Ordering::Acquire)
+                || current.run_loan
+                || current.worker_loan
+                || current.readers != 0
+            {
+                return Err(RegistrationError::OutstandingLoan);
+            }
+            if entry.cancelled_start.load(Ordering::Acquire) {
+                // A cancelled permit never acquired an image or root lease.
+                return if current.phase == EntryPhase::Starting
+                    && current.image.is_none()
+                    && current.roots.is_none()
+                    && current.retained_roots.is_empty()
+                {
+                    Ok(())
+                } else {
+                    Err(RegistrationError::Publication)
+                };
             }
             if (index == 0 && current.phase != EntryPhase::Frozen)
                 || (index != 0 && current.phase != EntryPhase::Retiring)
@@ -475,20 +561,131 @@ impl<'heap> ParallelHeapEra<'heap> {
             if index != 0 && !image.young_empty() {
                 return Err(RegistrationError::PendingYoung);
             }
+            // Validate every nonempty publication before retiring ANY lease.
+            // Retained generations are ordered by replacement; a previous
+            // successful cleanup attempt may already have removed any suffix.
+            let mut previous = 0;
+            for roots in &current.retained_roots {
+                let identity = roots.identity();
+                let generation = identity.publication_generation().get();
+                if identity.key() != entry.key
+                    || generation <= previous
+                    || generation > current.publication_generation
+                    || identity.publication_epoch() > current.epoch
+                {
+                    return Err(RegistrationError::Publication);
+                }
+                previous = generation;
+            }
+            if let Some(roots) = &current.roots {
+                let identity = roots.identity();
+                if identity.key() != entry.key
+                    || identity.publication_generation().get() != current.publication_generation
+                    || identity.publication_generation().get() <= previous
+                    || identity.publication_epoch() != current.epoch
+                {
+                    return Err(RegistrationError::Publication);
+                }
+            }
+            Ok(())
         }
-        let mut legacy = state.entries[0]
-            .state
-            .lock()
-            .map_err(|_| RegistrationError::Poisoned)?;
+
+        fn root_error(error: ParallelRootBatchError) -> RegistrationError {
+            match error {
+                ParallelRootBatchError::Transport(RootBatchError::Busy) => RegistrationError::Busy,
+                ParallelRootBatchError::Transport(RootBatchError::ReadersOutstanding {
+                    ..
+                }) => RegistrationError::OutstandingLoan,
+                ParallelRootBatchError::Transport(RootBatchError::ForeignHeap { .. }) => {
+                    RegistrationError::WrongHeap
+                }
+                _ => RegistrationError::Publication,
+            }
+        }
+
+        let registry = self.registry.as_ref().expect("live era");
+        let entries = {
+            let state = registry.lock()?;
+            control_ready(&state)?;
+            for (index, entry) in state.entries.iter().enumerate() {
+                registry.validate(&state, entry.key)?;
+                entry_ready(entry, index, &*entry_guard(registry, entry)?)?;
+            }
+            // Only Arc snapshots of the canonical set: no second owner or
+            // payload registry. All image/root preflight precedes any removal.
+            let mut entries = Vec::new();
+            entries
+                .try_reserve_exact(state.entries.len())
+                .map_err(|_| RegistrationError::Capacity)?;
+            entries.extend(state.entries.iter().cloned());
+            entries
+        };
+
+        // Root-table operations never overlap the canonical control gate.
+        // Preflight every reader obligation before the first root retirement.
+        for (index, entry) in entries.iter().enumerate() {
+            let current = entry_guard(registry, entry)?;
+            entry_ready(entry, index, &current)?;
+            if let Some(roots) = &current.roots {
+                roots.validate_no_readers().map_err(root_error)?;
+            }
+            for roots in &current.retained_roots {
+                roots.validate_no_readers().map_err(root_error)?;
+            }
+        }
+        for entry in &entries {
+            let mut current = entry_guard(registry, entry)?;
+            if let Some(roots) = current.roots.take() {
+                if let Err(failure) = roots.try_finish() {
+                    let (roots, error) = failure.into_parts();
+                    current.roots = Some(roots);
+                    return Err(root_error(error));
+                }
+            }
+            while let Some(roots) = current.retained_roots.pop() {
+                if let Err(failure) = roots.try_finish() {
+                    let (roots, error) = failure.into_parts();
+                    // Pop retained its capacity, so restoring cannot allocate.
+                    current.retained_roots.push(roots);
+                    return Err(root_error(error));
+                }
+            }
+        }
+
+        let state = registry.lock()?;
+        control_ready(&state)?;
+        if state.entries.len() != entries.len()
+            || state
+                .entries
+                .iter()
+                .zip(&entries)
+                .any(|(current, snapshot)| !Arc::ptr_eq(current, snapshot))
+        {
+            return Err(RegistrationError::Publication);
+        }
+        // Acquire every entry guard before taking the first GC image. A
+        // contended later entry must return Busy without partially merging or
+        // retiring any canonical owner image.
+        let mut entry_guards = Vec::new();
+        entry_guards
+            .try_reserve_exact(state.entries.len())
+            .map_err(|_| RegistrationError::Capacity)?;
+        for (index, entry) in state.entries.iter().enumerate() {
+            let current = entry_guard(registry, entry)?;
+            entry_ready(entry, index, &current)?;
+            if current.roots.is_some() || !current.retained_roots.is_empty() {
+                return Err(RegistrationError::Busy);
+            }
+            entry_guards.push(current);
+        }
+        let (legacy, owners) = entry_guards
+            .split_first_mut()
+            .ok_or(RegistrationError::Publication)?;
         let mut image = legacy.image.take().expect("preflighted frozen image");
-        for entry in state.entries.iter().skip(1) {
+        for (entry, current) in state.entries.iter().skip(1).zip(owners.iter_mut()) {
             if entry.cancelled_start.load(Ordering::Acquire) {
                 continue;
             }
-            let mut current = entry
-                .state
-                .lock()
-                .map_err(|_| RegistrationError::Poisoned)?;
             let other = current.image.take().expect("preflighted retiring image");
             if let Err(failure) = image.merge_non_young(other) {
                 current.image = Some(failure.image);

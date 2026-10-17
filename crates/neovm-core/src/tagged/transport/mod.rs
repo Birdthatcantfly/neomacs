@@ -20,6 +20,10 @@ pub use root_batch::{
     RootBatchFinalizeFailure, RootBatchFinishFailure, RootBatchLease, RootBatchPublishFailure,
     RootBatchReader,
 };
+pub(crate) use root_batch::{
+    ParallelRootBatchError, ParallelRootBatchLease, ParallelRootBatchReader, ParallelRootIdentity,
+    PreparedParallelRootBatch,
+};
 pub(crate) use root_table::collect_shared_root_gc_roots;
 #[cfg(test)]
 pub(crate) use root_table::{root_table_is_alive_for_test, with_root_table_lock_for_test};

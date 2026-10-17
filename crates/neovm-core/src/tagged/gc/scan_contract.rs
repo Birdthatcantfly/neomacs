@@ -143,6 +143,28 @@ pub(super) struct StoppedMutatorsProof {
 
 static_assertions::assert_not_impl_any!(StoppedMutatorsProof: Send, Sync, Copy, Clone);
 
+/// Parallel drain authority is scoped to the unique AllStopped guard. It owns
+/// no heap loan; A5 must additionally supply disjoint stopped-storage access.
+#[derive(Debug)]
+pub(in crate::tagged::gc) struct ParallelStoppedMutatorsProof<'epoch> {
+    legacy: StoppedMutatorsProof,
+    _epoch: PhantomData<&'epoch ()>,
+}
+impl<'epoch> ParallelStoppedMutatorsProof<'epoch> {
+    pub(in crate::tagged::gc) fn from_all_stopped(_: &'epoch super::AllStopped<'_>) -> Self {
+        Self {
+            legacy: StoppedMutatorsProof {
+                _owner: PhantomData,
+            },
+            _epoch: PhantomData,
+        }
+    }
+    pub(in crate::tagged::gc) fn legacy(&self) -> &StoppedMutatorsProof {
+        &self.legacy
+    }
+}
+static_assertions::assert_not_impl_any!(ParallelStoppedMutatorsProof<'static>: Send, Sync, Clone, Copy);
+
 #[derive(Debug, thiserror::Error)]
 pub(super) enum SatbDrainError {
     #[error(transparent)]

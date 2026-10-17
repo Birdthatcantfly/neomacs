@@ -115,6 +115,16 @@ impl Baton {
         self._retention.heap_identity()
     }
 
+    /// Cold metadata retention for parallel root publications, with no heap loan.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn parallel_epoch_retention(
+        &self,
+    ) -> Result<crate::tagged::gc::FacadeEpochRetention, crate::tagged::gc::FacadeMarkExclusionError>
+    {
+        self._retention.retain()
+    }
+
     /// A further owner's views of the World, starting in CURRENT. Only the
     /// holder may build them (point 2, checked in debug builds).
     pub(in crate::emacs_core::eval) fn owner_views(&self, current: Option<BufferId>) -> ReadyWorld {
@@ -176,6 +186,43 @@ impl Context {
         let era = crate::tagged::gc::ParallelHeapEra::admit(collector, keeper)
             .unwrap_or_else(|_| panic!("fresh fixture World admits its mutator era"));
         f(era)
+    }
+
+    /// Real heap roots prepared by its sole serial owner before the synthetic
+    /// parallel era. Participants receive SharedRoot handles, never raw Values.
+    #[cfg(test)]
+    pub(crate) fn with_test_rooted_mutator_era<R>(
+        f: impl for<'heap> FnOnce(
+            crate::tagged::gc::ParallelHeapEra<'heap>,
+            Vec<crate::tagged::transport::SharedRoot>,
+        ) -> R,
+    ) -> R {
+        let mut context = Self::new();
+        let mut roots = Vec::new();
+        for n in 0..4 {
+            let value = context.tagged_heap.alloc_cons(
+                crate::tagged::value::TaggedValue::fixnum(n),
+                crate::tagged::value::TaggedValue::NIL,
+            );
+            // SAFETY: sole serial owner; allocation invokes no collection or
+            // callback and the source word stays live through root admission.
+            roots.push(unsafe {
+                crate::tagged::transport::SharedRoot::new(&context.tagged_heap, value)
+            });
+        }
+        let keeper = context.issue_green_baton().expect("rooted fixture keeper");
+        let heap: *mut crate::tagged::gc::TaggedHeap = &mut *context.tagged_heap;
+        // SAFETY: same complete frozen-World census as with_test_mutator_era.
+        // SharedRoot table entries keep every synthetic input live as well.
+        let collector = unsafe {
+            (*heap).drain_to_quiescent(|heap| {
+                context.seed_registered_mutator_roots_world_stopped(heap);
+            })
+        }
+        .expect("rooted fixture collector");
+        let era = crate::tagged::gc::ParallelHeapEra::admit(collector, keeper)
+            .unwrap_or_else(|_| panic!("rooted fixture era"));
+        f(era, roots)
     }
 
     /// Issue this Green World's one Baton to the calling thread, the
