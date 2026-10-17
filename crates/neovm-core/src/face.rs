@@ -860,6 +860,37 @@ pub struct FaceColorSpecifications {
 
 static_assertions::assert_impl_all!(FaceColorSpecifications: Send, Sync);
 
+impl FaceColorSpecifications {
+    /// Digest the retained specifications by shared allocation identity.
+    ///
+    /// Merges clone specification `Arc`s from face-table entries, so one
+    /// logical face carries the same pointers through every composition.
+    /// Content-equal specifications that were parsed into distinct allocations
+    /// digest differently; the caller's `PartialEq` check remains the
+    /// authority.
+    pub fn hash_shared_identity(&self, state: &mut impl std::hash::Hasher) {
+        fn hash_arc<T: ?Sized>(
+            state: &mut impl std::hash::Hasher,
+            spec: &Option<std::sync::Arc<T>>,
+        ) {
+            match spec {
+                Some(specification) => {
+                    state.write_u8(1);
+                    let pointer = std::sync::Arc::as_ptr(specification) as *const u8;
+                    state.write_usize(pointer as usize);
+                }
+                None => state.write_u8(0),
+            }
+        }
+
+        hash_arc(state, &self.foreground);
+        hash_arc(state, &self.background);
+        hash_arc(state, &self.underline);
+        hash_arc(state, &self.underline_operations);
+        hash_arc(state, &self.distant_foreground);
+    }
+}
+
 fn retained_color_specification(
     specification: SpecifiedColor,
 ) -> Option<std::sync::Arc<SpecifiedColor>> {
@@ -989,6 +1020,37 @@ fn normalized_face_name_value(value: &Value) -> Option<Value> {
 }
 
 impl Face {
+    /// Cheap digest for content-addressed caches of composed faces.
+    ///
+    /// GNU hashes eight lface slots and only then verifies a bucket with
+    /// `lface_equal_p` (src/xfaces.c:4602-4612, 5064-5093); this is the same
+    /// shape. The digest is a bucket hint, never an equality verdict: callers
+    /// must confirm with `PartialEq`, the authority. Lisp references hash by
+    /// object identity and retained specifications by `Arc` allocation
+    /// identity, so the same logical face composed from shared table entries
+    /// digests identically while content-equal-but-distinct inputs may fall
+    /// into different buckets — that costs an extra cache entry, never a wrong
+    /// sharing decision.
+    pub fn content_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        use std::mem::discriminant;
+
+        let mut state = std::collections::hash_map::DefaultHasher::new();
+        self.color_specifications.hash_shared_identity(&mut state);
+        self.foreground.hash(&mut state);
+        self.background.hash(&mut state);
+        self.distant_foreground.hash(&mut state);
+        state.write_usize(self.family.map_or(0, Value::bits));
+        state.write_usize(self.foundry.map_or(0, Value::bits));
+        state.write_usize(self.stipple.map_or(0, Value::bits));
+        state.write_u16(self.weight.map_or(0, FontWeight::css_weight));
+        state.write_u8(u8::from(self.slant.is_some_and(|slant| slant.is_italic())));
+        discriminant(&self.height).hash(&mut state);
+        discriminant(&self.underline).hash(&mut state);
+        discriminant(&self.box_border).hash(&mut state);
+        state.finish()
+    }
+
     pub fn family_runtime_string_owned(&self) -> Option<String> {
         self.family.and_then(|value| {
             value

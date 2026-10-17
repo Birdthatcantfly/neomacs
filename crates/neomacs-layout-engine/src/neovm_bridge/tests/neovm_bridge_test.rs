@@ -3960,3 +3960,36 @@ fn distant_foreground_is_reconsidered_after_every_merge() {
         "recover the source foreground, not substituted paint"
     );
 }
+
+#[test]
+fn composed_face_sources_are_interned_by_content() {
+    let _runtime = neovm_core::emacs_core::Context::new();
+    let table = FaceTable::new();
+    let resolver = FaceResolver::new(&table, 0xFFFFFF, 0, 14.0, None);
+
+    let overlay = || {
+        let mut face = NeoFace::new("--composed-overlay--");
+        face.foreground = Some(NeoColor::rgb(255, 0, 0));
+        face
+    };
+    let first = resolver
+        .shared_composed_source(overlay(), None)
+        .expect("installed mutator heap");
+    let second = resolver
+        .shared_composed_source(overlay(), None)
+        .expect("installed mutator heap");
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &second),
+        "repeated compositions of one logical face share one rooted source"
+    );
+
+    let mut other = overlay();
+    other.foreground = Some(NeoColor::rgb(0, 255, 0));
+    let distinct = resolver
+        .shared_composed_source(other, None)
+        .expect("installed mutator heap");
+    assert!(
+        !std::sync::Arc::ptr_eq(&first, &distinct),
+        "a different face must not share the first face's source"
+    );
+}

@@ -3601,7 +3601,12 @@ impl ResolvedFace {
         }
     }
 
-    fn retain_source_over(&mut self, base: &ResolvedFace, overlay: &NeoFace) {
+    fn retain_source_over(
+        &mut self,
+        resolver: &FaceResolver,
+        base: &ResolvedFace,
+        overlay: &NeoFace,
+    ) {
         self.canonical_tty_role = None;
         let Some(source) = base.source_attributes.as_deref() else {
             return;
@@ -3610,18 +3615,7 @@ impl ResolvedFace {
         merged.inherit = None;
         merged.doc = None;
         self.source_attributes =
-            match RootedFace::with_base(merged, base.source_attributes.as_deref()) {
-                Ok(attributes) => Some(std::sync::Arc::new(attributes)),
-                Err(error) => {
-                    if base.source_attributes.is_some() {
-                        tracing::error!(
-                            ?error,
-                            "bound face composition lost its installed mutator heap"
-                        );
-                    }
-                    None
-                }
-            };
+            resolver.shared_composed_source(merged, base.source_attributes.as_deref());
     }
 
     pub(crate) fn has_same_color_source(&self, other: &Self) -> bool {
@@ -3876,9 +3870,30 @@ pub struct FaceResolver {
     /// retry speculatively, so the resolver records them without mutating the
     /// evaluator; the engine logs only the accepted attempt.
     invalid_face_references: std::cell::RefCell<Vec<String>>,
+    /// One shared [`RootedFace`] per distinct composed source, so repeated
+    /// compositions of the same logical face compare by `Arc` identity in
+    /// every downstream probe, the way GNU's merged lface vectors compare by
+    /// EQ on shared slots (src/xfaces.c:4483-4497). Content-keyed: an entry
+    /// is a function of its merged attributes, never of their provenance, so
+    /// the cache cannot go stale against this resolver's immutable table
+    /// snapshot; the cap bounds churning inline-plist faces.
+    composed_sources: std::cell::RefCell<ComposedSourceCache>,
     font_sizing: FontSizing,
     frame_font_domain: FrameFontDomain,
 }
+
+/// Shared-source interning for face compositions, mirroring GNU's face cache
+/// keyed by the merged lface vector (`lookup_face`, src/xfaces.c:5064-5093).
+#[derive(Default)]
+struct ComposedSourceCache {
+    entries: std::collections::HashMap<u64, Vec<std::sync::Arc<RootedFace>>>,
+    len: usize,
+}
+
+/// Beyond this many distinct composed sources the cache resets wholesale: a
+/// session composing thousands of distinct inline-plist faces keeps bounded
+/// memory, and steady workloads stay far under the cap.
+const COMPOSED_SOURCE_CACHE_LIMIT: usize = 4096;
 
 /// GNU basic-face lookup has two realization outcomes.  A canonical lookup
 /// keeps the fixed `enum face_id` slot.  A window-named lookup starts from the
@@ -4031,6 +4046,7 @@ impl FaceResolver {
             current_window_parameters: std::cell::RefCell::new(Vec::new()),
             current_window_id: std::cell::Cell::new(None),
             invalid_face_references: std::cell::RefCell::new(Vec::new()),
+            composed_sources: std::cell::RefCell::default(),
             font_sizing,
             frame_font_domain,
         }
@@ -4279,9 +4295,52 @@ impl FaceResolver {
         resolved
     }
 
+    /// One `Arc<RootedFace>` per distinct composed source.
+    ///
+    /// Every glyph-run composition of the same logical face reuses the shared
+    /// source, so memo probes (`face_id_for_resolved`, `remember_face`) and
+    /// frame-realization lookups compare by pointer identity instead of
+    /// walking merged attributes again — GNU's merged lface vectors get the
+    /// same effect by sharing slot objects, making `lface_equal_p`'s EQ
+    /// fast path the common case (src/xfaces.c:4483-4497).
+    fn shared_composed_source(
+        &self,
+        merged: neovm_core::face::Face,
+        base: Option<&RootedFace>,
+    ) -> Option<std::sync::Arc<RootedFace>> {
+        let hash = merged.content_hash();
+        {
+            let cache = self.composed_sources.borrow();
+            if let Some(bucket) = cache.entries.get(&hash)
+                && let Some(shared) = bucket.iter().find(|shared| *shared.attributes() == merged)
+            {
+                return Some(std::sync::Arc::clone(shared));
+            }
+        }
+        // Rooting allocates leases; run it without the cache borrowed.
+        let rooted = match RootedFace::with_base(merged, base) {
+            Ok(rooted) => std::sync::Arc::new(rooted),
+            Err(error) => {
+                tracing::error!(
+                    ?error,
+                    "bound face composition lost its installed mutator heap"
+                );
+                return None;
+            }
+        };
+        let mut cache = self.composed_sources.borrow_mut();
+        if cache.len >= COMPOSED_SOURCE_CACHE_LIMIT {
+            cache.entries.clear();
+            cache.len = 0;
+        }
+        cache.entries.entry(hash).or_default().push(rooted.clone());
+        cache.len += 1;
+        Some(rooted)
+    }
+
     fn apply_specified_face_over(&self, base: &ResolvedFace, face: &NeoFace) -> ResolvedFace {
         let mut rf = base.clone();
-        rf.retain_source_over(base, face);
+        rf.retain_source_over(self, base, face);
         FaceColorAttributes::from_base(base)
             .merge(face)
             .realize()
@@ -5241,7 +5300,7 @@ impl FaceResolver {
         rf.lisp_name = None;
         match source {
             FaceRealizationSource::MergeOverDefault => {
-                rf.retain_source_over(&self.default_face, face)
+                rf.retain_source_over(self, &self.default_face, face)
             }
             FaceRealizationSource::Complete(source) => {
                 rf.source_attributes = Some(source);
