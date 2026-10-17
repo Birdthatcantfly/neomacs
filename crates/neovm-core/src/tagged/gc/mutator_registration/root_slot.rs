@@ -1,0 +1,125 @@
+//! Indexed homes in the owner's existing published root census.
+use super::*;
+use crate::tagged::transport::{ConsRootSeal, RootSlotOps, RootedSlot};
+use crate::tagged::value::TaggedValue;
+
+/// An opaque owner-local root home, not an object reference or a raw value.
+/// Values stay in the canonical owner census even if a handle is dropped or
+/// forgotten. ACK/native entry moves that census into the existing GC image;
+/// restore returns the same indexed values. Explicit clear invalidates every
+/// handle before reusing indices. No handle contains a pointer into the Vec.
+/// Cloning aliases that same home; it does not allocate or create a new root.
+#[derive(Clone)]
+pub struct OwnerRootSlot<'era> {
+    key: MutatorKey,
+    generation: u64,
+    index: usize,
+    _era: PhantomData<&'era ()>,
+    _thread: PhantomData<Rc<()>>,
+}
+static_assertions::assert_impl_all!(OwnerRootSlot<'static>: Clone);
+static_assertions::assert_not_impl_any!(OwnerRootSlot<'static>: Send, Sync, Copy);
+
+impl OwnerRootSlot<'_> {
+    #[inline]
+    fn check(&self, run: &RunAccess<'_, '_>) -> Result<(), RegistrationError> {
+        let key = run.owner.entry.key;
+        if self.key.heap != key.heap {
+            return Err(RegistrationError::WrongHeap);
+        }
+        if self.key.owner != key.owner {
+            return Err(RegistrationError::WrongOwner);
+        }
+        let local = run.owner.local.as_ref().expect("resident owner roots");
+        if self.key != key
+            || self.generation != local.root_slot_generation
+            || self.index >= local.root_scratch.len()
+        {
+            return Err(RegistrationError::StaleRegistration);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn word_for_test(&self, run: &RunAccess<'_, '_>) -> usize {
+        self.check(run).unwrap();
+        run.owner.local.as_ref().unwrap().root_scratch[self.index]
+            .value()
+            .bits()
+    }
+}
+
+impl RootSlotOps for OwnerRootSlot<'_> {
+    #[inline]
+    fn validate(&self, run: &RunAccess<'_, '_>, _: ConsRootSeal) -> Result<(), RegistrationError> {
+        self.check(run)
+    }
+    #[inline]
+    fn word(&self, run: &RunAccess<'_, '_>, _: ConsRootSeal) -> usize {
+        run.owner
+            .local
+            .as_ref()
+            .expect("validated owner roots")
+            .root_scratch[self.index]
+            .value()
+            .bits()
+    }
+    #[inline]
+    fn install(&mut self, run: &mut RunAccess<'_, '_>, value: TaggedValue, _: ConsRootSeal) {
+        // Validation preceded allocation. The allocation core cannot resize,
+        // clear, publish or otherwise change the root bank, and runs no Lisp.
+        run.owner
+            .local
+            .as_mut()
+            .expect("validated owner roots")
+            .root_scratch[self.index] = super::super::mark_word::MarkWord::of(value);
+    }
+}
+impl RootedSlot for OwnerRootSlot<'_> {}
+
+impl<'owner, 'era> RunAccess<'owner, 'era> {
+    /// Only the sealed transport bridge can admit a live source word.
+    pub(crate) fn admit_root_slot(
+        &mut self,
+        word: usize,
+        _: ConsRootSeal,
+    ) -> Result<OwnerRootSlot<'era>, RegistrationError> {
+        self.owner.check_thread()?;
+        let local = self.owner.local.as_mut().expect("resident owner roots");
+        if local.root_scratch.len() >= local.root_slot_limit {
+            return Err(RegistrationError::Capacity);
+        }
+        let index = local.root_scratch.len();
+        // register(root_capacity) reserved this bank once. Never grow it here.
+        debug_assert!(local.root_scratch.capacity() >= local.root_slot_limit);
+        local
+            .root_scratch
+            .push(super::super::mark_word::MarkWord::of(
+                TaggedValue::from_bits(word),
+            ));
+        Ok(OwnerRootSlot {
+            key: self.owner.entry.key,
+            generation: local.root_slot_generation,
+            index,
+            _era: PhantomData,
+            _thread: PhantomData,
+        })
+    }
+
+    /// End the current root frame. No raw value can escape from these handles;
+    /// a checked generation change invalidates all of them before index reuse.
+    /// Call only after transferring any needed result into another root home.
+    #[cold]
+    #[inline(never)]
+    pub fn clear_root_slots(&mut self) -> Result<(), RegistrationError> {
+        self.owner.check_thread()?;
+        let local = self.owner.local.as_mut().expect("resident owner roots");
+        let next = local
+            .root_slot_generation
+            .checked_add(1)
+            .ok_or(RegistrationError::Exhausted)?;
+        local.root_slot_generation = next;
+        local.root_scratch.clear();
+        Ok(())
+    }
+}

@@ -10,7 +10,8 @@ use crate::tagged::value::TaggedValue;
 
 #[path = "cons_root.rs"]
 mod cons_root;
-pub(crate) use cons_root::{ConsRootSeal, RootedConsInputs};
+pub use cons_root::RootedSlot;
+pub(crate) use cons_root::{ConsRootSeal, RootSlotOps, RootedConsInputs, cons_into};
 
 /// A Lisp value detached from any one mutator thread.
 ///

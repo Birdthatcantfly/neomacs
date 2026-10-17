@@ -2,7 +2,7 @@
 use super::super::cons_storage::CatalogSource;
 use super::super::*;
 use super::*;
-use crate::tagged::transport::{ConsRootSeal, RootedConsInputs, SharedRoot};
+use crate::tagged::transport::{ConsRootSeal, RootedConsInputs, RootedSlot, SharedRoot};
 
 /// Only a completely initialized exclusive cell can create this handoff.
 /// The run loan remains active until the transport bridge installs its root.
@@ -37,16 +37,34 @@ impl RunAccess<'_, '_> {
         SharedRoot::cons_from_run(self, car, cdr)
     }
 
+    /// The lasting single-cons primitive for rooted VM/frame or transport homes.
+    /// All three homes are validated before any reservation or mutation.
+    #[inline]
+    pub fn cons_into<C: RootedSlot, D: RootedSlot, R: RootedSlot>(
+        &mut self,
+        car: &C,
+        cdr: &D,
+        result: &mut R,
+    ) -> Result<(), RegistrationError> {
+        crate::tagged::transport::cons_into(self, car, cdr, result)
+    }
+
+    #[inline]
     pub(crate) fn allocate_rooted_cons(
         &mut self,
         inputs: &RootedConsInputs<'_>,
     ) -> Result<InitializedCons<'_>, RegistrationError> {
-        self.owner.check_thread()?;
+        // run_access checked the thread before lending the unique !Send/!Sync
+        // guard. Nothing can change its owner or release its loan while this
+        // borrow exists. Keep asynchronous poison refusal without acquiring a
+        // temporary std::thread::Thread/Arc on each cons.
+        if self.owner.registry.poisoned.load(Ordering::Acquire) {
+            return Err(RegistrationError::Poisoned);
+        }
         if inputs.heap_identity() != self.heap_identity() {
             return Err(RegistrationError::WrongHeap);
         }
         let registry = self.owner.registry;
-        let key = self.owner.entry.key;
         if !self.owner.entry.live_run_loan.load(Ordering::Acquire) {
             return Err(RegistrationError::OutstandingLoan);
         }
@@ -59,40 +77,7 @@ impl RunAccess<'_, '_> {
             .as_ref()
             .is_none_or(|region| region.empty());
         if needs_refill {
-            self.close_cons_region()?;
-            let local = self.owner.local.as_mut().expect("owner storage");
-            const MAX: usize = super::super::alloc_region::CONS_REGION_MAX_CELLS;
-            // Refuse arithmetic overflow before reserving or charging storage.
-            local
-                .hot
-                .allocated_count
-                .checked_add(MAX)
-                .ok_or(RegistrationError::Capacity)?;
-            local
-                .hot
-                .bytes_since_gc
-                .checked_add(MAX * size_of::<ConsCell>())
-                .ok_or(RegistrationError::Capacity)?;
-            if local.cold.young.id() != self.owner.entry.young {
-                return Err(RegistrationError::StaleRegistration);
-            }
-            let young = local.cold.young.resident_mut()?;
-            let region = registry.cons_catalog.grant(key, young, MAX)?;
-            let n = region.total();
-            local.hot.allocated_count += n;
-            let slot = MemoryUseCountSlot::ConsCells.index();
-            local.hot.memory_use_counts[slot] =
-                local.hot.memory_use_counts[slot].wrapping_add(n as u64);
-            local.hot.bytes_since_gc += n * size_of::<ConsCell>();
-            local.region_stats.cons_refills += 1;
-            local.region_stats.cons_cells_granted += n as u64;
-            local.region_stats.cons_short_runs += u64::from(n < 8);
-            match region.source() {
-                CatalogSource::FreeList => local.region_stats.cons_from_free_list += 1,
-                CatalogSource::BlockTail => local.region_stats.cons_from_block_tail += 1,
-                CatalogSource::FreshBlock => local.region_stats.cons_from_fresh_block += 1,
-            }
-            local.catalog_region = Some(region);
+            self.refill_rooted_cons_region()?;
         }
         let local = self.owner.local.as_mut().expect("owner storage");
         // SAFETY: this canonical RunAccess uniquely owns the stamped region.
@@ -124,6 +109,48 @@ impl RunAccess<'_, '_> {
             _run: PhantomData,
             _thread: PhantomData,
         })
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn refill_rooted_cons_region(&mut self) -> Result<(), RegistrationError> {
+        let registry = self.owner.registry;
+        let key = self.owner.entry.key;
+        self.close_cons_region()?;
+        let local = self.owner.local.as_mut().expect("owner storage");
+        const MAX: usize = super::super::alloc_region::CONS_REGION_MAX_CELLS;
+        // Refuse arithmetic overflow before reserving or charging storage.
+        local
+            .hot
+            .allocated_count
+            .checked_add(MAX)
+            .ok_or(RegistrationError::Capacity)?;
+        local
+            .hot
+            .bytes_since_gc
+            .checked_add(MAX * size_of::<ConsCell>())
+            .ok_or(RegistrationError::Capacity)?;
+        if local.cold.young.id() != self.owner.entry.young {
+            return Err(RegistrationError::StaleRegistration);
+        }
+        let young = local.cold.young.resident_mut()?;
+        let region = registry.cons_catalog.grant(key, young, MAX)?;
+        let n = region.total();
+        local.hot.allocated_count += n;
+        let slot = MemoryUseCountSlot::ConsCells.index();
+        local.hot.memory_use_counts[slot] =
+            local.hot.memory_use_counts[slot].wrapping_add(n as u64);
+        local.hot.bytes_since_gc += n * size_of::<ConsCell>();
+        local.region_stats.cons_refills += 1;
+        local.region_stats.cons_cells_granted += n as u64;
+        local.region_stats.cons_short_runs += u64::from(n < 8);
+        match region.source() {
+            CatalogSource::FreeList => local.region_stats.cons_from_free_list += 1,
+            CatalogSource::BlockTail => local.region_stats.cons_from_block_tail += 1,
+            CatalogSource::FreshBlock => local.region_stats.cons_from_fresh_block += 1,
+        }
+        local.catalog_region = Some(region);
+        Ok(())
     }
 
     /// Explicitly return unhanded capacity before relinquishing the run or

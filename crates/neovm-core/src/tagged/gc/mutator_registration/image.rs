@@ -53,6 +53,8 @@ pub(in crate::tagged::gc) struct OwnerGcState {
     pub(in crate::tagged::gc) regions: RegionBook,
     pub(in crate::tagged::gc) region_stats: RegionStats,
     pub(in crate::tagged::gc) root_scratch: Vec<MarkWord>,
+    pub(super) root_slot_limit: usize,
+    pub(super) root_slot_generation: u64,
     pub(super) catalog_region: Option<super::super::cons_storage::CatalogRegion>,
 }
 
@@ -296,6 +298,8 @@ impl OwnerGcState {
             regions: RegionBook::new(),
             region_stats: RegionStats::default(),
             root_scratch,
+            root_slot_limit: root_capacity,
+            root_slot_generation: 1,
             catalog_region: None,
         })
     }
