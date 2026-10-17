@@ -76,20 +76,37 @@ impl CatalogRegion {
         (self.first.as_ptr().addr(), end.addr(), self.unused())
     }
 
-    /// # Safety
-    /// The caller holds the matching live owner's run authority, initializes
-    /// the complete returned ConsCell, and roots its value before ending that
-    /// operation. No Lisp, safepoint, collection, or cross-owner access may
-    /// occur during initialization. Cells are white/young in this proof era.
-    pub(super) unsafe fn take_cell(&mut self) -> Option<*mut ConsCell> {
-        if self.empty() || self.identity.abandoned.load(Ordering::Acquire) {
-            return None;
+    /// Admit a finite exclusive run once at slice entry/refill. Poison retains
+    /// backing; it never revokes a region already lent to a running slice.
+    pub(super) fn slice_bounds(
+        &self,
+        catalog: &ConsCatalog,
+        owner: MutatorKey,
+    ) -> Result<(*mut ConsCell, *mut ConsCell), RegistrationError> {
+        catalog.check_live()?;
+        if !Arc::ptr_eq(&self.identity, &catalog.identity) || self.owner != owner {
+            return Err(RegistrationError::StaleRegistration);
         }
-        // SAFETY: grant bounds this exclusive run within one retained block.
-        // Preserve its original allocation provenance through pointer.add.
-        let cell = unsafe { self.first.as_ptr().add(self.used) };
-        self.used += 1;
-        Some(cell)
+        if !self.active || self.used > self.total {
+            return Err(RegistrationError::OutstandingLoan);
+        }
+        // SAFETY: both offsets are within this retained, exclusive allocation.
+        Ok(unsafe {
+            (
+                self.first.as_ptr().add(self.used),
+                self.first.as_ptr().add(self.total),
+            )
+        })
+    }
+
+    /// # Safety
+    /// cursor comes from this run and includes only fully initialized/rooted
+    /// cells. Commit before any close, refund or publication. No heap borrow.
+    pub(super) unsafe fn commit_slice_cursor(&mut self, cursor: *mut ConsCell) {
+        // SAFETY: slice admission preserves this allocation's provenance.
+        let used = unsafe { cursor.offset_from(self.first.as_ptr()) } as usize;
+        debug_assert!(used >= self.used && used <= self.total);
+        self.used = used;
     }
 }
 impl Drop for CatalogRegion {
@@ -154,6 +171,29 @@ impl ConsCatalog {
                 abandoned: AtomicBool::new(false),
             }),
             state: Mutex::new(None),
+        }
+    }
+
+    /// Cold admission confirms installation before a slice callback can run.
+    /// The live RunAccess loan excludes stopped restoration of this catalog.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn admit_slice(&self, owner: MutatorKey) -> Result<(), RegistrationError> {
+        if owner.heap_identity() != self.heap {
+            return Err(RegistrationError::WrongHeap);
+        }
+        let gate = self.lock()?;
+        if gate.is_none() {
+            return Err(RegistrationError::Publication);
+        }
+        Ok(())
+    }
+
+    pub(super) fn check_live(&self) -> Result<(), RegistrationError> {
+        if self.identity.abandoned.load(Ordering::Acquire) {
+            Err(RegistrationError::Poisoned)
+        } else {
+            Ok(())
         }
     }
 

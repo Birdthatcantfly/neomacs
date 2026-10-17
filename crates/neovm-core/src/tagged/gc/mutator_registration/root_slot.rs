@@ -13,7 +13,7 @@ use crate::tagged::value::TaggedValue;
 pub struct OwnerRootSlot<'era> {
     key: MutatorKey,
     generation: u64,
-    index: usize,
+    pub(super) index: usize,
     _era: PhantomData<&'era ()>,
     _thread: PhantomData<Rc<()>>,
 }
@@ -22,19 +22,28 @@ static_assertions::assert_not_impl_any!(OwnerRootSlot<'static>: Send, Sync, Copy
 
 impl OwnerRootSlot<'_> {
     #[inline]
-    fn check(&self, run: &RunAccess<'_, '_>) -> Result<(), RegistrationError> {
-        let key = run.owner.entry.key;
+    pub(super) fn check(&self, run: &RunAccess<'_, '_>) -> Result<(), RegistrationError> {
+        let local = run.owner.local.as_ref().expect("resident owner roots");
+        self.check_binding(
+            run.owner.entry.key,
+            local.root_slot_generation,
+            local.root_scratch.len(),
+        )
+    }
+
+    pub(super) fn check_binding(
+        &self,
+        key: MutatorKey,
+        generation: u64,
+        len: usize,
+    ) -> Result<(), RegistrationError> {
         if self.key.heap != key.heap {
             return Err(RegistrationError::WrongHeap);
         }
         if self.key.owner != key.owner {
             return Err(RegistrationError::WrongOwner);
         }
-        let local = run.owner.local.as_ref().expect("resident owner roots");
-        if self.key != key
-            || self.generation != local.root_slot_generation
-            || self.index >= local.root_scratch.len()
-        {
+        if self.key != key || self.generation != generation || self.index >= len {
             return Err(RegistrationError::StaleRegistration);
         }
         Ok(())

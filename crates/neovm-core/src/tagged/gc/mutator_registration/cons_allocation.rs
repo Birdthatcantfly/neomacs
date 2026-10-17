@@ -54,136 +54,49 @@ impl RunAccess<'_, '_> {
         &mut self,
         inputs: &RootedConsInputs<'_>,
     ) -> Result<InitializedCons<'_>, RegistrationError> {
-        // run_access checked the thread before lending the unique !Send/!Sync
-        // guard. Nothing can change its owner or release its loan while this
-        // borrow exists. Keep asynchronous poison refusal without acquiring a
-        // temporary std::thread::Thread/Arc on each cons.
-        if self.owner.registry.poisoned.load(Ordering::Acquire) {
-            return Err(RegistrationError::Poisoned);
-        }
         if inputs.heap_identity() != self.heap_identity() {
             return Err(RegistrationError::WrongHeap);
         }
-        let registry = self.owner.registry;
-        if !self.owner.entry.live_run_loan.load(Ordering::Acquire) {
-            return Err(RegistrationError::OutstandingLoan);
+        let heap = self.heap_identity();
+        let mut state = self.cons_state();
+        state.check_boundary()?;
+        if state.region.as_ref().is_none_or(|region| region.empty()) {
+            state.refill()?;
         }
-        let needs_refill = self
-            .owner
-            .local
-            .as_ref()
-            .expect("owner storage")
-            .catalog_region
-            .as_ref()
-            .is_none_or(|region| region.empty());
-        if needs_refill {
-            self.refill_rooted_cons_region()?;
-        }
-        let local = self.owner.local.as_mut().expect("owner storage");
-        // SAFETY: this canonical RunAccess uniquely owns the stamped region.
-        // Its storage stays in the registry catalog; only this operation takes
-        // this cell. The rooted operands outlive initialization/registration.
-        let cell = unsafe {
-            local
-                .catalog_region
-                .as_mut()
-                .expect("reserved region")
-                .take_cell()
-        }
-        .ok_or(RegistrationError::Poisoned)?;
+        let region = state.region.as_mut().expect("reserved region");
+        let (mut cursor, _) = region.slice_bounds(&state.registry.cons_catalog, state.entry.key)?;
         let (car, cdr) = inputs.words();
-        // SAFETY: the cell is exclusive and in bounds. Full initialization is
-        // one raw write; no reference covers another owner's disjoint cells.
-        unsafe {
-            cell.write(ConsCell {
-                car: TaggedValue::from_bits(car),
-                cdr_or_next: crate::tagged::header::ConsCdrOrNext {
-                    cdr: TaggedValue::from_bits(cdr),
-                },
-            });
-        }
+        // SAFETY: the same finite-region primitive used by RunSlice. Borrowed
+        // rooted inputs remain live through the transport's immediate store.
+        let value = unsafe { initialize_next_cons(&mut cursor, car, cdr) };
+        unsafe { region.commit_slice_cursor(cursor) };
+
         Ok(InitializedCons {
-            heap: registry.heap,
-            // SAFETY: the preceding write initialized this exact owned cell.
-            value: unsafe { TaggedValue::from_cons_ptr(cell) },
+            heap,
+            value,
             _run: PhantomData,
             _thread: PhantomData,
         })
     }
 
-    #[cold]
-    #[inline(never)]
-    fn refill_rooted_cons_region(&mut self) -> Result<(), RegistrationError> {
-        let registry = self.owner.registry;
-        let key = self.owner.entry.key;
-        self.close_cons_region()?;
-        let local = self.owner.local.as_mut().expect("owner storage");
-        const MAX: usize = super::super::alloc_region::CONS_REGION_MAX_CELLS;
-        // Refuse arithmetic overflow before reserving or charging storage.
-        local
-            .hot
-            .allocated_count
-            .checked_add(MAX)
-            .ok_or(RegistrationError::Capacity)?;
-        local
-            .hot
-            .bytes_since_gc
-            .checked_add(MAX * size_of::<ConsCell>())
-            .ok_or(RegistrationError::Capacity)?;
-        if local.cold.young.id() != self.owner.entry.young {
-            return Err(RegistrationError::StaleRegistration);
-        }
-        let young = local.cold.young.resident_mut()?;
-        let region = registry.cons_catalog.grant(key, young, MAX)?;
-        let n = region.total();
-        local.hot.allocated_count += n;
-        let slot = MemoryUseCountSlot::ConsCells.index();
-        local.hot.memory_use_counts[slot] =
-            local.hot.memory_use_counts[slot].wrapping_add(n as u64);
-        local.hot.bytes_since_gc += n * size_of::<ConsCell>();
-        local.region_stats.cons_refills += 1;
-        local.region_stats.cons_cells_granted += n as u64;
-        local.region_stats.cons_short_runs += u64::from(n < 8);
-        match region.source() {
-            CatalogSource::FreeList => local.region_stats.cons_from_free_list += 1,
-            CatalogSource::BlockTail => local.region_stats.cons_from_block_tail += 1,
-            CatalogSource::FreshBlock => local.region_stats.cons_from_fresh_block += 1,
-        }
-        local.catalog_region = Some(region);
-        Ok(())
-    }
-
-    /// Explicitly return unhanded capacity before relinquishing the run or
-    /// publishing an ACK. Drop never performs this potentially contended work.
+    /// Close the canonical region before dropping the run or publishing.
     #[cold]
     #[inline(never)]
     pub fn close_cons_region(&mut self) -> Result<(), RegistrationError> {
-        self.owner.check_thread()?;
-        let local = self.owner.local.as_mut().expect("owner storage");
-        let Some(region) = local.catalog_region.take() else {
-            return Ok(());
-        };
-        let result = self
-            .owner
-            .registry
-            .cons_catalog
-            .close(self.owner.entry.key, region);
-        let unused = match result {
-            Ok(unused) => unused,
-            Err((error, region)) => {
-                local.catalog_region = Some(region);
-                // close released every catalog/allocator guard first.
-                self.owner.registry.poison();
-                return Err(error);
-            }
-        };
-        local.hot.allocated_count -= unused;
-        local.hot.bytes_since_gc -= unused * size_of::<ConsCell>();
-        let slot = MemoryUseCountSlot::ConsCells.index();
-        local.hot.memory_use_counts[slot] =
-            local.hot.memory_use_counts[slot].wrapping_sub(unused as u64);
-        local.region_stats.cons_tail_closes += u64::from(unused != 0);
-        Ok(())
+        self.cons_state().close()
+    }
+
+    pub(super) fn cons_state(&mut self) -> ConsRunState<'_> {
+        let local = self.owner.local.as_mut().expect("resident owner state");
+        ConsRunState {
+            registry: self.owner.registry,
+            entry: &self.owner.entry,
+            thread: self.owner.thread,
+            hot: &mut local.hot,
+            cold: &mut local.cold,
+            stats: &mut local.region_stats,
+            region: &mut local.catalog_region,
+        }
     }
 
     #[cfg(test)]
@@ -194,5 +107,115 @@ impl RunAccess<'_, '_> {
             .catalog_region
             .as_ref()
             .map(|r| r.bounds_for_test())
+    }
+}
+
+/// Disjoint allocator loans: cold refill never reborrows the root bank or a
+/// whole OwnerGcState/heap while branded root pointers are live.
+pub(super) struct ConsRunState<'run> {
+    pub(super) registry: &'run Registry,
+    pub(super) entry: &'run MutatorEntry,
+    pub(super) thread: ThreadId,
+    pub(super) hot: &'run mut super::super::mutator_gc::MutatorGcState,
+    pub(super) cold: &'run mut super::super::mutator_gc::SatbMutatorState,
+    pub(super) stats: &'run mut super::super::alloc_region::RegionStats,
+    pub(super) region: &'run mut Option<super::super::cons_storage::CatalogRegion>,
+}
+impl ConsRunState<'_> {
+    pub(super) fn check_boundary(&self) -> Result<(), RegistrationError> {
+        if self.thread != std::thread::current().id() {
+            return Err(RegistrationError::WrongThread);
+        }
+        if self.registry.poisoned.load(Ordering::Acquire) {
+            return Err(RegistrationError::Poisoned);
+        }
+        if !self.entry.live_run_loan.load(Ordering::Acquire) {
+            return Err(RegistrationError::OutstandingLoan);
+        }
+        self.registry.cons_catalog.check_live()
+    }
+
+    #[cold]
+    #[inline(never)]
+    pub(super) fn refill(&mut self) -> Result<(), RegistrationError> {
+        self.close()?;
+        const MAX: usize = super::super::alloc_region::CONS_REGION_MAX_CELLS;
+        self.hot
+            .allocated_count
+            .checked_add(MAX)
+            .ok_or(RegistrationError::Capacity)?;
+        self.hot
+            .bytes_since_gc
+            .checked_add(MAX * size_of::<ConsCell>())
+            .ok_or(RegistrationError::Capacity)?;
+        if self.cold.young.id() != self.entry.young {
+            return Err(RegistrationError::StaleRegistration);
+        }
+        let region = self.registry.cons_catalog.grant(
+            self.entry.key,
+            self.cold.young.resident_mut()?,
+            MAX,
+        )?;
+        let n = region.total();
+        self.hot.allocated_count += n;
+        let slot = MemoryUseCountSlot::ConsCells.index();
+        self.hot.memory_use_counts[slot] = self.hot.memory_use_counts[slot].wrapping_add(n as u64);
+        self.hot.bytes_since_gc += n * size_of::<ConsCell>();
+        self.stats.cons_refills += 1;
+        self.stats.cons_cells_granted += n as u64;
+        self.stats.cons_short_runs += u64::from(n < 8);
+        match region.source() {
+            CatalogSource::FreeList => self.stats.cons_from_free_list += 1,
+            CatalogSource::BlockTail => self.stats.cons_from_block_tail += 1,
+            CatalogSource::FreshBlock => self.stats.cons_from_fresh_block += 1,
+        }
+        *self.region = Some(region);
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    pub(super) fn close(&mut self) -> Result<(), RegistrationError> {
+        self.check_boundary()?;
+        let Some(region) = self.region.take() else {
+            return Ok(());
+        };
+        let unused = match self.registry.cons_catalog.close(self.entry.key, region) {
+            Ok(unused) => unused,
+            Err((error, region)) => {
+                *self.region = Some(region);
+                self.registry.poison();
+                return Err(error);
+            }
+        };
+        self.hot.allocated_count -= unused;
+        self.hot.bytes_since_gc -= unused * size_of::<ConsCell>();
+        let slot = MemoryUseCountSlot::ConsCells.index();
+        self.hot.memory_use_counts[slot] =
+            self.hot.memory_use_counts[slot].wrapping_sub(unused as u64);
+        self.stats.cons_tail_closes += u64::from(unused != 0);
+        Ok(())
+    }
+}
+
+/// The one admitted initialization/bump primitive. The caller owns a nonempty
+/// region and keeps both operand homes rooted until the immediate result store.
+#[inline(always)]
+pub(super) unsafe fn initialize_next_cons(
+    cursor: &mut *mut ConsCell,
+    car: usize,
+    cdr: usize,
+) -> TaggedValue {
+    let cell = *cursor;
+    // SAFETY: caller proves the finite exclusive range has another cell.
+    unsafe {
+        cell.write(ConsCell {
+            car: TaggedValue::from_bits(car),
+            cdr_or_next: crate::tagged::header::ConsCdrOrNext {
+                cdr: TaggedValue::from_bits(cdr),
+            },
+        });
+        *cursor = cell.add(1);
+        TaggedValue::from_cons_ptr(cell)
     }
 }

@@ -2796,7 +2796,7 @@ pub use mutator_registration::{
     MutatorFinishFailure, MutatorKey, MutatorPermit, MutatorStartFailure, OwnerPublication,
     OwnerRootSlot, ParallelHeapEra, Phase, RegistrationCensus, RegistrationError, Rendezvous,
     RendezvousError, Request, ResumeGcImage, ResumeGcImageFailure, RootedRetireFailure, RunAccess,
-    Snapshot, StoppedSummaries, YoungWorkerLoan,
+    RunSlice, SliceRoot, Snapshot, StoppedSummaries, YoungWorkerLoan,
 };
 
 pub(crate) use mutator_registration::{OwnerRootAdmission, StoppedRootAdmission};
