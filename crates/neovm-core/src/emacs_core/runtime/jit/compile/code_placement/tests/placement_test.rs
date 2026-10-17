@@ -364,6 +364,57 @@ mod native {
     }
 
     #[test]
+    fn placement_switch64_unmarked_packed_functions_preserve_bytes_relocations_and_execution() {
+        let _scope = config_scope_for_test(PlacementConfig::Policy(PlacementPolicy::Off));
+        let mut module = module();
+        let mut reference_ctx = fixture(&mut module);
+        let reference_id = module
+            .declare_anonymous_function(&reference_ctx.func.signature)
+            .unwrap();
+        module
+            .define_function(reference_id, &mut reference_ctx)
+            .unwrap();
+        let reference = reference_ctx
+            .compiled_code()
+            .unwrap()
+            .code_buffer()
+            .to_vec();
+        let mut entries = Vec::new();
+        for _ in 0..8 {
+            let mut ctx = fixture(&mut module);
+            assert!(
+                ctx.func.srclocs.is_empty(),
+                "fixture takes the unmarked fast path"
+            );
+            let id = module
+                .declare_anonymous_function(&ctx.func.signature)
+                .unwrap();
+            define_placed_function(
+                &mut module,
+                id,
+                &mut ctx,
+                PlacementConfig::Policy(PlacementPolicy::Switch64),
+            )
+            .unwrap();
+            let code = ctx.compiled_code().unwrap();
+            assert_eq!(code.code_buffer(), &reference);
+            assert!(!code.buffer.relocs().is_empty());
+            entries.push(id);
+        }
+        module.finalize_definitions().unwrap();
+        for id in entries {
+            let entry = module.get_finalized_function(id);
+            assert_eq!(entry as usize % 64, 0);
+            // SAFETY: fixture has this exact C ABI and the live owning module
+            // finalized its external helper relocation and executable pages.
+            let run: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(entry) };
+            assert_eq!(run(100), 5057);
+            assert_eq!(run(0), 7);
+        }
+        assert_eq!(take_allocation_hint(), None);
+    }
+
+    #[test]
     fn placement_function64_aligns_every_function_in_an_unsealed_batch() {
         let mut module = module();
         let mut ids = Vec::new();

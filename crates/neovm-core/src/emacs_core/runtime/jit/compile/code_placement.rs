@@ -23,6 +23,8 @@ mod replay;
 pub(crate) struct PlacementOffset(u8);
 
 impl PlacementOffset {
+    const ZERO: Self = Self(0);
+
     pub(crate) fn new(offset: usize) -> Result<Self, PlacementError> {
         if offset < 64 {
             Ok(Self(offset as u8))
@@ -243,6 +245,26 @@ impl PlacementScope {
     fn consumed(&self) -> bool {
         ALLOCATION_HINT.with(|hint| hint.get().is_none())
     }
+
+    /// A successful definition either consumed this request or used another
+    /// provider. Dropping this scope restores any enclosing compiler's hint.
+    fn finish(self, configuration: PlacementConfig) -> Result<(), PlacementError> {
+        if !self.consumed() {
+            match configuration {
+                PlacementConfig::Offset(_) => return Err(PlacementError::UnsupportedProvider),
+                PlacementConfig::Policy(_) => {
+                    static WARNED: OnceLock<()> = OnceLock::new();
+                    WARNED.get_or_init(|| {
+                        tracing::warn!(
+                            target: "neovm_jit",
+                            "JIT placement unavailable without the arena; retaining ordinary placement"
+                        );
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Drop for PlacementScope {
@@ -268,6 +290,24 @@ pub(crate) fn define_placed_function<M: Module>(
         tracing::error!(target: "neovm_jit", %error, "JIT code placement failed");
         CompileError::Backend(BackendError::Define(error))
     };
+    // No post-codegen metadata is needed for entry alignment or a function
+    // with no source locations at all. Preserve Cranelift's owned relocation
+    // path instead of collecting a vector that define_function_bytes clones.
+    let entry_only = match configuration {
+        PlacementConfig::Policy(PlacementPolicy::Function64) => true,
+        PlacementConfig::Policy(PlacementPolicy::Switch64) => ctx.func.srclocs.is_empty(),
+        PlacementConfig::Policy(PlacementPolicy::Off | PlacementPolicy::Loop64)
+        | PlacementConfig::Offset(_) => false,
+    };
+    if entry_only {
+        let scope = PlacementScope::stage(PlacementOffset::ZERO);
+        module
+            .define_function(fid, ctx)
+            .map_err(|error| failure(error.to_string()))?;
+        return scope
+            .finish(configuration)
+            .map_err(|error| failure(error.to_string()));
+    }
     if let PlacementConfig::Offset(_) = configuration {
         // Exact byte-offset replay validates every instruction in trusted
         // Cranelift VCode before relaxing constant-pool buffer alignment.
@@ -318,23 +358,9 @@ pub(crate) fn define_placed_function<M: Module>(
     module
         .define_function_bytes(fid, alignment, bytes, &relocations)
         .map_err(|error| failure(error.to_string()))?;
-    if !scope.consumed() {
-        match configuration {
-            PlacementConfig::Offset(_) => {
-                return Err(failure(PlacementError::UnsupportedProvider.to_string()));
-            }
-            PlacementConfig::Policy(_) => {
-                static WARNED: OnceLock<()> = OnceLock::new();
-                WARNED.get_or_init(|| {
-                    tracing::warn!(
-                        target: "neovm_jit",
-                        "JIT placement unavailable without the arena; retaining ordinary placement"
-                    );
-                });
-            }
-        }
-    }
-    Ok(())
+    scope
+        .finish(configuration)
+        .map_err(|error| failure(error.to_string()))
 }
 
 #[cfg(test)]
