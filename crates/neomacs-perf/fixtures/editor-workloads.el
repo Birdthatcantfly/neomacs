@@ -669,6 +669,14 @@ GNU has no such variable and ignores this."
              (boundp 'neomacs--startup-gc-ceiling-active))
     (setq neomacs--startup-gc-ceiling-active nil)))
 
+(defun neomacs-perf-workload--prepare-sampling ()
+  "Realize the display and collect garbage before sampling begins."
+  ;; GNU runs the zero-delay workload timer before the initial preliminary
+  ;; redisplay. Realize the first frame's faces here so cold display setup
+  ;; stays outside every workload's sampling gate.
+  (redisplay t)
+  (garbage-collect))
+
 (defun neomacs-perf-workload--run-with-gc-window (gc-window-path)
   "Run the unchanged workload with invocation-local sampling GC snapshots.
 
@@ -740,7 +748,7 @@ mutator.  A capture has one owner of its existing sampling gate."
                         (setq expected-mode (symbol-name major-mode)
                               initial-checksum (neomacs-perf-workload--checksum)
                               initial-point (point))
-                        (garbage-collect)
+                        (neomacs-perf-workload--prepare-sampling)
                         (setq gc-start-count gcs-done
                               gc-end-count gc-start-count
                               gc-start-us (round (* 1000000 gc-elapsed))
@@ -798,7 +806,7 @@ mutator.  A capture has one owner of its existing sampling gate."
           (setq expected-mode (symbol-name major-mode)
                 initial-checksum (neomacs-perf-workload--checksum)
                 initial-point (point))
-          (garbage-collect)
+          (neomacs-perf-workload--prepare-sampling)
           (setq gc-start-count gcs-done
                 gc-end-count gc-start-count
                 gc-start-us (round (* 1000000 gc-elapsed))
@@ -913,7 +921,7 @@ mutator.  A capture has one owner of its existing sampling gate."
                         (setq expected-mode (symbol-name major-mode)
                               initial-checksum (neomacs-perf-workload--checksum)
                               initial-point (point))
-                        (garbage-collect)
+                        (neomacs-perf-workload--prepare-sampling)
                         (setq gc-start-count gcs-done
                               gc-end-count gc-start-count
                               gc-start-us (round (* 1000000 gc-elapsed))
@@ -965,7 +973,7 @@ mutator.  A capture has one owner of its existing sampling gate."
           (setq expected-mode (symbol-name major-mode)
                 initial-checksum (neomacs-perf-workload--checksum)
                 initial-point (point))
-          (garbage-collect)
+          (neomacs-perf-workload--prepare-sampling)
           (setq gc-start-count gcs-done
                 gc-end-count gc-start-count
                 gc-start-us (round (* 1000000 gc-elapsed))
