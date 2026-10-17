@@ -1,12 +1,14 @@
 //! Cold canonical registration, rooted rendezvous and scoped stopped collection.
 //! Running authority admits rooted cons allocation only. The serial inline
-//! iterator remains the Sim representation; Lisp execution stays excluded.
+//! iterator remains the Sim representation. The restricted overlap executor
+//! is the `restricted_lisp` test module and is absent from every
+//! `NEOVM_THREADS` mode. Production still has no public Lisp overlap entry.
 //!
 //! An era owns the actual World Baton and the quiescent heap loan. Only a
 //! metadata permit crosses a thread boundary; owner buffers are built there.
 //! Unfinished teardown retains both authority and backing instead of returning
 //! a usable serial World after an abandoned owner.
-#![allow(dead_code)] // Production Context execution admission remains a later proof batch.
+#![allow(dead_code)]
 
 mod collection;
 mod cons_allocation;
@@ -753,3 +755,6 @@ mod root_slot_tests;
 
 #[cfg(test)]
 mod slice_tests;
+
+#[cfg(test)]
+mod restricted_lisp;
