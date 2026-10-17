@@ -38,14 +38,6 @@
 
 use super::*;
 
-#[cfg(test)]
-#[path = "tests/coalesced_cons_young_test.rs"]
-mod coalesced_cons_young_tests;
-
-#[cfg(test)]
-#[path = "tests/packed_cons_region_book_test.rs"]
-mod packed_cons_region_book_tests;
-
 /// The most cells one cons region takes (2 KiB).
 pub(super) const CONS_REGION_MAX_CELLS: usize = 128;
 /// The most slots one float region takes (2 KiB of slots, 1.5 KiB charged:
@@ -86,7 +78,7 @@ pub(super) enum RegionColor {
 }
 
 /// The open regions' bookkeeping that only Rust reads. Keep the previous
-/// footprint and pack the cons range and phase color in the final word.
+/// footprint and cache a canonical no-old-block proof with the phase color.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub(super) struct RegionBook {
@@ -94,11 +86,12 @@ pub(super) struct RegionBook {
     /// Floats have no color: a slot is born at the current parity, which a
     /// region cannot outlive (it closes before every parity flip).
     pub(super) float: FloatRegionSource,
-    /// Negative first address plus the phase color (white 0, black 1).
-    /// The first cons is 16-aligned, so the low bit retains the color.
-    /// Adjacent grants extend the handed-young prefix until an external
-    /// close before collection/promotion. Closed regions retain only color.
-    pub(super) cons_young_bias: usize,
+    /// A block whose canonical allocator old_count was zero at this grant,
+    /// plus color in bit0. This is an allocation-epoch certificate, not a
+    /// second young-block registry. Every collector entry closes it before
+    /// changing ages/counts. Mixed blocks and closed regions encode 2|color:
+    /// clearing only color leaves 2, never a 64KiB-aligned owner base.
+    pub(super) cons_block_and_color: usize,
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -108,7 +101,7 @@ const _: () = {
     assert!(std::mem::align_of::<RegionBook>() == 8);
     assert!(std::mem::offset_of!(RegionBook, cons) == 0);
     assert!(std::mem::offset_of!(RegionBook, float) == 16);
-    assert!(std::mem::offset_of!(RegionBook, cons_young_bias) == 32);
+    assert!(std::mem::offset_of!(RegionBook, cons_block_and_color) == 32);
 };
 
 impl RegionBook {
@@ -116,19 +109,18 @@ impl RegionBook {
         Self {
             cons: ConsRegionSource::Closed,
             float: FloatRegionSource::Closed,
-            cons_young_bias: 0,
+            cons_block_and_color: 2,
         }
     }
 
-    #[inline]
-    pub(super) fn cons_first(&self) -> usize {
-        let bias = self.cons_young_bias;
-        (bias & 1).wrapping_sub(bias)
+    #[inline(always)]
+    pub(super) fn no_old_cons_block_contains(&self, addr: usize) -> bool {
+        (addr & !(CONS_BLOCK_ALIGN - 1)) == (self.cons_block_and_color & !1)
     }
 
     #[inline]
     pub(super) fn cons_color(&self) -> RegionColor {
-        if self.cons_young_bias & 1 == 0 {
+        if self.cons_block_and_color & 1 == 0 {
             RegionColor::White
         } else {
             RegionColor::Black
@@ -136,18 +128,22 @@ impl RegionBook {
     }
 
     #[inline]
-    pub(super) fn set_cons_first_and_color(&mut self, first: usize, color: RegionColor) {
-        debug_assert_eq!(first & (size_of::<ConsCell>() - 1), 0);
+    pub(super) fn set_cons_block_and_color(
+        &mut self,
+        no_old_block: Option<usize>,
+        color: RegionColor,
+    ) {
+        debug_assert!(no_old_block.is_none_or(|base| base & (CONS_BLOCK_ALIGN - 1) == 0));
         let color_bit = match color {
             RegionColor::White => 0,
             RegionColor::Black => 1,
         };
-        self.cons_young_bias = 0usize.wrapping_sub(first).wrapping_add(color_bit);
+        self.cons_block_and_color = no_old_block.unwrap_or(2) | color_bit;
     }
 
     #[inline]
-    pub(super) fn clear_cons_first(&mut self) {
-        self.cons_young_bias &= 1;
+    pub(super) fn clear_cons_block(&mut self) {
+        self.cons_block_and_color = (self.cons_block_and_color & 1) | 2;
     }
 }
 
@@ -191,13 +187,11 @@ impl TaggedHeap {
     #[cold]
     #[inline(never)]
     fn refill_cons_region(&mut self) -> *mut ConsCell {
-        let previous_cur = self.jit.cons_cur.get();
-        let previous_first = self.region_book.cons_first();
         self.close_cons_region();
         let want = self.region_budget(size_of::<ConsCell>(), CONS_REGION_MAX_CELLS);
         let (first, n, source) = self.reserve_cons_run(want);
         debug_assert!(n >= 1 && n <= want);
-        if self.generational.enabled {
+        let no_old_block = if self.generational.enabled {
             // All three region sources have installed their base registry
             // entry before this point. Record the carve before initializing
             // or publishing a cell, once per cold refill rather than per cons.
@@ -209,16 +203,21 @@ impl TaggedHeap {
                     .note_carve(ConsBlockBase::of(&self.cons_blocks[block_index]), log),
                 Err(error) => Err(error),
             };
-            if let Err(error) = recorded {
-                // No cell was initialized, marked, charged or handed out.
-                // SAFETY: reserve_cons_run gave us this entire exclusive,
-                // unmarked/young range in a still-owned registered block.
-                // Returning it to the private free list also handles a fresh
-                // or bump-tail grant without leaving untracked used cells.
-                unsafe { self.cons_allocator.return_unused(first, n) };
-                panic!("canonical young recording refused an unhanded cons grant: {error:?}");
+            match recorded {
+                Ok(age) => age.no_old_owners().then_some(base),
+                Err(error) => {
+                    // No cell was initialized, marked, charged or handed out.
+                    // SAFETY: reserve_cons_run gave us this entire exclusive,
+                    // unmarked/young range in a still-owned registered block.
+                    // Returning it to the private free list also handles a fresh
+                    // or bump-tail grant without leaving untracked used cells.
+                    unsafe { self.cons_allocator.return_unused(first, n) };
+                    panic!("canonical young recording refused an unhanded cons grant: {error:?}");
+                }
             }
-        }
+        } else {
+            None
+        };
         let color = if self.allocates_black() {
             let base = ConsBlock::block_base_for_ptr(first);
             ConsBlock::mark_run_at(base, ConsBlock::index_of_ptr(first), n, true);
@@ -234,18 +233,8 @@ impl TaggedHeap {
         stats.cons_cells_granted += n as u64;
         stats.cons_short_runs += u64::from(n < 8);
         let first_addr = first as usize;
-        // No collection or callback occurs between closing and granting.
-        // An adjacent run extends the already handed-young prefix; a gap,
-        // block rollover or external close starts a new one. Only this
-        // barrier prefix coalesces: black births and charges stay per grant.
-        // A payload ends below its block boundary, so equality cannot bridge blocks.
-        let prefix_first = if previous_cur != 0 && first_addr == previous_cur {
-            previous_first
-        } else {
-            first_addr
-        };
         self.region_book
-            .set_cons_first_and_color(prefix_first, color);
+            .set_cons_block_and_color(no_old_block, color);
         self.jit.cons_cur.set(first_addr + size_of::<ConsCell>());
         self.jit
             .cons_lim
@@ -488,7 +477,7 @@ impl TaggedHeap {
         self.close_black_cons_region(cur);
         self.jit.cons_cur.set(0);
         self.jit.cons_lim.set(0);
-        self.region_book.clear_cons_first();
+        self.region_book.clear_cons_block();
         self.region_book.cons = ConsRegionSource::Closed;
         if source == ConsRegionSource::Closed {
             debug_assert!(cur == 0 && lim == 0, "a closed region has no cursor");

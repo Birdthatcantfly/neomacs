@@ -23,10 +23,23 @@ fn installed_generational_heap_with_chunk_map(enabled: bool) -> Box<TaggedHeap> 
     heap
 }
 
-fn make_old_cons(heap: &mut TaggedHeap, owner: TaggedValue) {
-    heap.close_alloc_regions();
-    let (trailer, index) = heap.old_cons_trailer(owner).unwrap();
-    trailer.set_old(index);
+fn make_old_cons(heap: &mut TaggedHeap, owner: TaggedValue, other_roots: &[TaggedValue]) {
+    // Keep the canonical young-block logs and cached old counts consistent.
+    // Root other live fixtures through every minor needed by the age policy.
+    for _ in 0..3 {
+        if heap.cons_age_is_old_for_test(owner) {
+            break;
+        }
+        heap.begin_minor_collection().unwrap();
+        heap.seed_root(owner);
+        for &root in other_roots {
+            heap.seed_root(root);
+        }
+        heap.complete_minor_collection();
+        heap.finish_incremental_sweep_now();
+    }
+    assert!(heap.cons_age_is_old_for_test(owner));
+    assert_eq!(heap.cons_region_for_test(), (0, 0));
 }
 
 fn make_tenured_vector(owner: TaggedValue) {
@@ -39,7 +52,7 @@ fn generational_inline_slot_immediates_leave_old_cards_and_logs_clean() {
     let mut heap = installed_heap(true);
     let cons = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
     let vector = heap.alloc_vector(vec![TaggedValue::NIL]);
-    make_old_cons(&mut heap, cons);
+    make_old_cons(&mut heap, cons, &[vector]);
     make_tenured_vector(vector);
 
     for value in [TaggedValue::fixnum(-17), TaggedValue::char('λ')] {
@@ -67,7 +80,7 @@ fn generational_inline_slot_symbols_still_dirty_cards_and_remember_vectors() {
         let mut heap = installed_heap(true);
         let cons = heap.alloc_cons(TaggedValue::fixnum(1), TaggedValue::fixnum(2));
         let vector = heap.alloc_vector(vec![TaggedValue::fixnum(3)]);
-        make_old_cons(&mut heap, cons);
+        make_old_cons(&mut heap, cons, &[vector]);
         make_tenured_vector(vector);
         assert!(set_cons_car(cons, symbol));
         assert!(set_cons_cdr(cons, symbol));
@@ -170,7 +183,7 @@ fn gen0_inline_slot_tenured_immediates_outside_window_keep_bookkeeping() {
 fn inline_slot_heap_switch_rederives_generation_and_real_window_obligations() {
     let mut generational = installed_heap(true);
     let cons = generational.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
-    make_old_cons(&mut generational, cons);
+    make_old_cons(&mut generational, cons, &[]);
     assert!(set_cons_car(cons, TaggedValue::fixnum(53)));
     assert!(!generational.owner_card_is_dirty_for_test(cons));
 
@@ -200,7 +213,7 @@ fn generational_inline_cons_age_marks_only_old_owners_with_chunk_map_on_and_off(
             let mut heap = installed_generational_heap_with_chunk_map(chunk_map);
             let owner = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
             if old {
-                make_old_cons(&mut heap, owner);
+                make_old_cons(&mut heap, owner, &[]);
             }
             let child = heap.alloc_cons(TaggedValue::T, TaggedValue::NIL);
             assert!(set_cons_car(owner, child));

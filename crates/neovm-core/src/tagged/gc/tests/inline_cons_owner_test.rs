@@ -29,10 +29,17 @@ fn cons(heap: &mut TaggedHeap) -> TaggedValue {
 
 fn promoted_cons(heap: &mut TaggedHeap) -> TaggedValue {
     let owner = cons(heap);
-    heap.begin_minor_collection();
-    heap.seed_root(owner);
-    heap.complete_minor_collection();
-    heap.finish_incremental_sweep_now();
+    // Exercise canonical promotion under either one- or two-minor policies.
+    // Admission closes the allocation region before changing any age state.
+    for _ in 0..3 {
+        if heap.cons_age_is_old_for_test(owner) {
+            break;
+        }
+        heap.begin_minor_collection().unwrap();
+        heap.seed_root(owner);
+        heap.complete_minor_collection();
+        heap.finish_incremental_sweep_now();
+    }
     assert!(heap.cons_age_is_old_for_test(owner));
     assert_eq!(heap.cons_region_for_test(), (0, 0));
     owner

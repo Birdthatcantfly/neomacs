@@ -3,6 +3,22 @@
 use super::barrier_window::published_cons_barrier_window;
 use super::*;
 
+fn promote_cons_until_old(heap: &mut TaggedHeap, owner: TaggedValue) {
+    // Real promotion maintains canonical young-block logs and old counts.
+    // Observe the selected age policy rather than assuming a single minor.
+    for _ in 0..3 {
+        if heap.cons_age_is_old_for_test(owner) {
+            break;
+        }
+        heap.begin_minor_collection().unwrap();
+        heap.seed_root(owner);
+        heap.complete_minor_collection();
+        heap.finish_incremental_sweep_now();
+    }
+    assert!(heap.cons_age_is_old_for_test(owner));
+    assert_eq!(heap.cons_region_for_test(), (0, 0));
+}
+
 #[test]
 fn symbol_cons_stores_do_not_install_a_heap() {
     let mut heap = TaggedHeap::new();
@@ -110,9 +126,7 @@ fn generational_cons_protocol_window_marks_symbols_and_keeps_preimages() {
     heap.publish_barrier_window();
     set_tagged_heap(&mut heap);
     let owner = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
-    heap.close_alloc_regions();
-    let (trailer, index) = heap.old_cons_trailer(owner).unwrap();
-    trailer.set_old(index);
+    promote_cons_until_old(&mut heap, owner);
     owner.set_car(TaggedValue::fixnum(1));
     assert!(!heap.owner_card_is_dirty_for_test(owner));
     owner.set_car(TaggedValue::T);
@@ -136,9 +150,7 @@ fn generational_cold_cons_reject_skips_full_hook_for_immediates_and_ineligible_o
     heap.publish_barrier_window();
     set_tagged_heap(&mut heap);
     let old = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
-    heap.close_alloc_regions();
-    let (trailer, index) = heap.old_cons_trailer(old).unwrap();
-    trailer.set_old(index);
+    promote_cons_until_old(&mut heap, old);
     let before = BARRIER_SLOW_CALLS.with(Cell::get);
     old.set_car(TaggedValue::fixnum(7));
     old.set_cdr(TaggedValue::char('x'));

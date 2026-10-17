@@ -1787,14 +1787,15 @@ fn barrier_gate(owner: TaggedValue) -> bool {
 #[inline(always)]
 fn generation_only_cons_is_old(heap: &TaggedHeap, owner: TaggedValue) -> bool {
     let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
-    let cur = heap.jit.cons_cur.get();
-    // All cells in this contiguous handed-out prefix are young. Regions
-    // close before every collection/promotion; a reused free-list cell has
-    // its old age cleared before the allocator can reserve it. The closed range
-    // is empty. This range proof needs no foreign-pointer metadata access.
-    if handed_young_cons_range_contains(cur, heap.region_book.cons_young_bias, addr) {
+    // Reuse the canonical allocator's zero-old-count certificate from the
+    // current grant. Its young-work flag alone is insufficient: mixed blocks
+    // contain old owners too. All collector entries close this certificate
+    // before changing ages/counts, even when survivors remain young. No
+    // owner memory, registry or allocator mutex is read on this fast path.
+    if heap.region_book.no_old_cons_block_contains(addr) {
         return false;
     }
+    let cur = heap.jit.cons_cur.get();
     let Some(offset) = generation_only_cons_cell_offset(addr) else {
         return false;
     };
@@ -1818,16 +1819,6 @@ fn generation_only_cons_is_old(heap: &TaggedHeap, owner: TaggedValue) -> bool {
     // require mutator exclusion, and this leaf has no safe point.
     let trailer = unsafe { ConsBlockTrailer::from_block_base(base) };
     trailer.age_is_old(offset / size_of::<ConsCell>())
-}
-
-/// Membership for an already untagged (8-aligned) cons owner, without
-/// touching its memory. The bias is negative first plus phase color 0/1.
-/// Black expands the interval by only first-1, which cannot be an aligned
-/// owner. Closed cursor 0 with bias 0/1 therefore rejects every owner too.
-#[inline(always)]
-fn handed_young_cons_range_contains(cur: usize, bias: usize, addr: usize) -> bool {
-    debug_assert_eq!(addr & crate::tagged::value::TAG_MASK, 0);
-    addr.wrapping_add(bias) < cur.wrapping_add(bias)
 }
 
 /// The existing cons payload/alignment test, expressed without a saturating
@@ -2105,12 +2096,8 @@ pub(crate) fn note_string_interval_preimage(
 }
 
 #[cfg(test)]
-#[path = "tests/cons_region_young_test.rs"]
-mod cons_region_young_tests;
-
-#[cfg(test)]
-#[path = "tests/handed_young_cons_range_test.rs"]
-mod handed_young_cons_range_tests;
+#[path = "tests/canonical_cons_block_barrier_test.rs"]
+mod canonical_cons_block_barrier_tests;
 
 #[cfg(test)]
 #[path = "tests/cons_payload_alignment_test.rs"]
