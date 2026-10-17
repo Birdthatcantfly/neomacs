@@ -11,7 +11,7 @@ error[E0277]: `Rc<()>` cannot be sent between threads safely
   = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `Rc<()>`
 note: required because it appears within the type `PhantomData<Rc<()>>`
  --> $RUST/core/src/marker.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
+note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
   | pub struct ParallelHeapEra<'heap> {
@@ -28,204 +28,26 @@ error[E0277]: `*mut GcHeader` cannot be sent between threads safely
  --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
   |
 8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut GcHeader` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut GcHeader` cannot be sent between threads safely
+  |     |
   |     required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut GcHeader`
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut GcHeader`
 note: required because it appears within the type `TaggedHeap`
  --> src/tagged/gc.rs
   |
   | pub struct TaggedHeap {
   |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
  --> src/tagged/gc/facade_mark.rs
   |
   | pub struct QuiescentCollector<'heap> {
   |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
  --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
- --> src/tagged/gc/mutator_registration.rs
-  |
-  | pub struct ParallelHeapEra<'heap> {
-  |            ^^^^^^^^^^^^^^^
-note: required because it's used within this closure
- --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
-  |
-8 |     std::thread::spawn(move || consume(era));
-  |                        ^^^^^^^
-note: required by a bound in `spawn`
- --> $RUST/std/src/thread/functions.rs
-
-error[E0277]: `*mut HashTableObj` cannot be sent between threads safely
- --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
-  |
-8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut HashTableObj` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
-  |     required by a bound introduced by this call
-  |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut HashTableObj`
-note: required because it appears within the type `PhantomData<*mut HashTableObj>`
- --> $RUST/core/src/marker.rs
-note: required because it appears within the type `alloc::raw_vec::RawVec<*mut HashTableObj>`
- --> $RUST/alloc/src/raw_vec/mod.rs
-note: required because it appears within the type `Vec<*mut HashTableObj>`
- --> $RUST/alloc/src/vec/mod.rs
-note: required because it appears within the type `TaggedHeap`
- --> src/tagged/gc.rs
-  |
-  | pub struct TaggedHeap {
-  |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
- --> src/tagged/gc/facade_mark.rs
-  |
-  | pub struct QuiescentCollector<'heap> {
-  |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
- --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
- --> src/tagged/gc/mutator_registration.rs
-  |
-  | pub struct ParallelHeapEra<'heap> {
-  |            ^^^^^^^^^^^^^^^
-note: required because it's used within this closure
- --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
-  |
-8 |     std::thread::spawn(move || consume(era));
-  |                        ^^^^^^^
-note: required by a bound in `spawn`
- --> $RUST/std/src/thread/functions.rs
-
-error[E0277]: `*mut FinalizerObj` cannot be sent between threads safely
- --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
-  |
-8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut FinalizerObj` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
-  |     required by a bound introduced by this call
-  |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut FinalizerObj`
-note: required because it appears within the type `PhantomData<*mut FinalizerObj>`
- --> $RUST/core/src/marker.rs
-note: required because it appears within the type `alloc::raw_vec::RawVec<*mut FinalizerObj>`
- --> $RUST/alloc/src/raw_vec/mod.rs
-note: required because it appears within the type `Vec<*mut FinalizerObj>`
- --> $RUST/alloc/src/vec/mod.rs
-note: required because it appears within the type `TaggedHeap`
- --> src/tagged/gc.rs
-  |
-  | pub struct TaggedHeap {
-  |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
- --> src/tagged/gc/facade_mark.rs
-  |
-  | pub struct QuiescentCollector<'heap> {
-  |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
- --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
- --> src/tagged/gc/mutator_registration.rs
-  |
-  | pub struct ParallelHeapEra<'heap> {
-  |            ^^^^^^^^^^^^^^^
-note: required because it's used within this closure
- --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
-  |
-8 |     std::thread::spawn(move || consume(era));
-  |                        ^^^^^^^
-note: required by a bound in `spawn`
- --> $RUST/std/src/thread/functions.rs
-
-error[E0277]: `*mut *mut MarkerObj` cannot be sent between threads safely
- --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
-  |
-8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut *mut MarkerObj` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
-  |     required by a bound introduced by this call
-  |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut *mut MarkerObj`
-note: required because it appears within the type `PhantomData<*mut *mut MarkerObj>`
- --> $RUST/core/src/marker.rs
-note: required because it appears within the type `alloc::raw_vec::RawVec<*mut *mut MarkerObj>`
- --> $RUST/alloc/src/raw_vec/mod.rs
-note: required because it appears within the type `Vec<*mut *mut MarkerObj>`
- --> $RUST/alloc/src/vec/mod.rs
-note: required because it appears within the type `TaggedHeap`
- --> src/tagged/gc.rs
-  |
-  | pub struct TaggedHeap {
-  |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
- --> src/tagged/gc/facade_mark.rs
-  |
-  | pub struct QuiescentCollector<'heap> {
-  |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
- --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
- --> src/tagged/gc/mutator_registration.rs
-  |
-  | pub struct ParallelHeapEra<'heap> {
-  |            ^^^^^^^^^^^^^^^
-note: required because it's used within this closure
- --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
-  |
-8 |     std::thread::spawn(move || consume(era));
-  |                        ^^^^^^^
-note: required by a bound in `spawn`
- --> $RUST/std/src/thread/functions.rs
-
-error[E0277]: `*mut u8` cannot be sent between threads safely
- --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
-  |
-8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut u8` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
-  |     required by a bound introduced by this call
-  |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut u8`
-note: required because it appears within the type `gc::cons_blocks::ConsBlock`
- --> src/tagged/gc/cons_blocks.rs
-  |
-  | pub(super) struct ConsBlock {
-  |                   ^^^^^^^^^
-note: required because it appears within the type `PhantomData<gc::cons_blocks::ConsBlock>`
- --> $RUST/core/src/marker.rs
-note: required because it appears within the type `alloc::raw_vec::RawVec<gc::cons_blocks::ConsBlock>`
- --> $RUST/alloc/src/raw_vec/mod.rs
-note: required because it appears within the type `Vec<gc::cons_blocks::ConsBlock>`
- --> $RUST/alloc/src/vec/mod.rs
-note: required because it appears within the type `TaggedHeap`
- --> src/tagged/gc.rs
-  |
-  | pub struct TaggedHeap {
-  |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
- --> src/tagged/gc/facade_mark.rs
-  |
-  | pub struct QuiescentCollector<'heap> {
-  |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
- --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
   | pub struct ParallelHeapEra<'heap> {
@@ -256,30 +78,193 @@ note: required because it appears within the type `TaggedValue`
   |
   | pub struct TaggedValue(pub(crate) usize, ThreadConfined);
   |            ^^^^^^^^^^^
-note: required because it appears within the type `gc::CanonicalEmptyString`
- --> src/tagged/gc.rs
+note: required because it appears within the type `PhantomData<TaggedValue>`
+ --> $RUST/core/src/marker.rs
+note: required because it appears within the type `alloc::raw_vec::RawVec<TaggedValue>`
+ --> $RUST/alloc/src/raw_vec/mod.rs
+note: required because it appears within the type `Vec<TaggedValue>`
+ --> $RUST/alloc/src/vec/mod.rs
+note: required because it appears within the type `eval::world::green_owner::parallel_roots::FrozenLegacyRoots`
+ --> src/emacs_core/runtime/eval/world/parallel_roots.rs
   |
-  | enum CanonicalEmptyString {
-  |      ^^^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `gc::CanonicalEmptyStrings`
- --> src/tagged/gc.rs
+  | pub(crate) struct FrozenLegacyRoots {
+  |                   ^^^^^^^^^^^^^^^^^
+note: required because it appears within the type `Option<eval::world::green_owner::parallel_roots::FrozenLegacyRoots>`
+ --> $RUST/core/src/option.rs
+note: required because it appears within the type `ParallelHeapEra<'static>`
+ --> src/tagged/gc/mutator_registration.rs
   |
-  | struct CanonicalEmptyStrings {
-  |        ^^^^^^^^^^^^^^^^^^^^^
+  | pub struct ParallelHeapEra<'heap> {
+  |            ^^^^^^^^^^^^^^^
+note: required because it's used within this closure
+ --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
+  |
+8 |     std::thread::spawn(move || consume(era));
+  |                        ^^^^^^^
+note: required by a bound in `spawn`
+ --> $RUST/std/src/thread/functions.rs
+
+error[E0277]: `*mut HashTableObj` cannot be sent between threads safely
+ --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
+  |
+8 |     std::thread::spawn(move || consume(era));
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut HashTableObj` cannot be sent between threads safely
+  |     |
+  |     required by a bound introduced by this call
+  |
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut HashTableObj`
+note: required because it appears within the type `PhantomData<*mut HashTableObj>`
+ --> $RUST/core/src/marker.rs
+note: required because it appears within the type `alloc::raw_vec::RawVec<*mut HashTableObj>`
+ --> $RUST/alloc/src/raw_vec/mod.rs
+note: required because it appears within the type `Vec<*mut HashTableObj>`
+ --> $RUST/alloc/src/vec/mod.rs
 note: required because it appears within the type `TaggedHeap`
  --> src/tagged/gc.rs
   |
   | pub struct TaggedHeap {
   |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
  --> src/tagged/gc/facade_mark.rs
   |
   | pub struct QuiescentCollector<'heap> {
   |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
  --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
+ --> src/tagged/gc/mutator_registration.rs
+  |
+  | pub struct ParallelHeapEra<'heap> {
+  |            ^^^^^^^^^^^^^^^
+note: required because it's used within this closure
+ --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
+  |
+8 |     std::thread::spawn(move || consume(era));
+  |                        ^^^^^^^
+note: required by a bound in `spawn`
+ --> $RUST/std/src/thread/functions.rs
+
+error[E0277]: `*mut FinalizerObj` cannot be sent between threads safely
+ --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
+  |
+8 |     std::thread::spawn(move || consume(era));
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut FinalizerObj` cannot be sent between threads safely
+  |     |
+  |     required by a bound introduced by this call
+  |
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut FinalizerObj`
+note: required because it appears within the type `PhantomData<*mut FinalizerObj>`
+ --> $RUST/core/src/marker.rs
+note: required because it appears within the type `alloc::raw_vec::RawVec<*mut FinalizerObj>`
+ --> $RUST/alloc/src/raw_vec/mod.rs
+note: required because it appears within the type `Vec<*mut FinalizerObj>`
+ --> $RUST/alloc/src/vec/mod.rs
+note: required because it appears within the type `TaggedHeap`
+ --> src/tagged/gc.rs
+  |
+  | pub struct TaggedHeap {
+  |            ^^^^^^^^^^
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
+ --> src/tagged/gc/facade_mark.rs
+  |
+  | pub struct QuiescentCollector<'heap> {
+  |            ^^^^^^^^^^^^^^^^^^
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
+ --> $RUST/core/src/option.rs
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
+ --> src/tagged/gc/mutator_registration.rs
+  |
+  | pub struct ParallelHeapEra<'heap> {
+  |            ^^^^^^^^^^^^^^^
+note: required because it's used within this closure
+ --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
+  |
+8 |     std::thread::spawn(move || consume(era));
+  |                        ^^^^^^^
+note: required by a bound in `spawn`
+ --> $RUST/std/src/thread/functions.rs
+
+error[E0277]: `*mut *mut MarkerObj` cannot be sent between threads safely
+ --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
+  |
+8 |     std::thread::spawn(move || consume(era));
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut *mut MarkerObj` cannot be sent between threads safely
+  |     |
+  |     required by a bound introduced by this call
+  |
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut *mut MarkerObj`
+note: required because it appears within the type `PhantomData<*mut *mut MarkerObj>`
+ --> $RUST/core/src/marker.rs
+note: required because it appears within the type `alloc::raw_vec::RawVec<*mut *mut MarkerObj>`
+ --> $RUST/alloc/src/raw_vec/mod.rs
+note: required because it appears within the type `Vec<*mut *mut MarkerObj>`
+ --> $RUST/alloc/src/vec/mod.rs
+note: required because it appears within the type `TaggedHeap`
+ --> src/tagged/gc.rs
+  |
+  | pub struct TaggedHeap {
+  |            ^^^^^^^^^^
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
+ --> src/tagged/gc/facade_mark.rs
+  |
+  | pub struct QuiescentCollector<'heap> {
+  |            ^^^^^^^^^^^^^^^^^^
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
+ --> $RUST/core/src/option.rs
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
+ --> src/tagged/gc/mutator_registration.rs
+  |
+  | pub struct ParallelHeapEra<'heap> {
+  |            ^^^^^^^^^^^^^^^
+note: required because it's used within this closure
+ --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
+  |
+8 |     std::thread::spawn(move || consume(era));
+  |                        ^^^^^^^
+note: required by a bound in `spawn`
+ --> $RUST/std/src/thread/functions.rs
+
+error[E0277]: `*mut u8` cannot be sent between threads safely
+ --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
+  |
+8 |     std::thread::spawn(move || consume(era));
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut u8` cannot be sent between threads safely
+  |     |
+  |     required by a bound introduced by this call
+  |
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut u8`
+note: required because it appears within the type `gc::cons_blocks::ConsBlock`
+ --> src/tagged/gc/cons_blocks.rs
+  |
+  | pub(super) struct ConsBlock {
+  |                   ^^^^^^^^^
+note: required because it appears within the type `PhantomData<gc::cons_blocks::ConsBlock>`
+ --> $RUST/core/src/marker.rs
+note: required because it appears within the type `alloc::raw_vec::RawVec<gc::cons_blocks::ConsBlock>`
+ --> $RUST/alloc/src/raw_vec/mod.rs
+note: required because it appears within the type `Vec<gc::cons_blocks::ConsBlock>`
+ --> $RUST/alloc/src/vec/mod.rs
+note: required because it appears within the type `TaggedHeap`
+ --> src/tagged/gc.rs
+  |
+  | pub struct TaggedHeap {
+  |            ^^^^^^^^^^
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
+ --> src/tagged/gc/facade_mark.rs
+  |
+  | pub struct QuiescentCollector<'heap> {
+  |            ^^^^^^^^^^^^^^^^^^
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
+ --> $RUST/core/src/option.rs
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
   | pub struct ParallelHeapEra<'heap> {
@@ -296,13 +281,11 @@ error[E0277]: `*mut ConsCell` cannot be sent between threads safely
  --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
   |
 8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut ConsCell` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut ConsCell` cannot be sent between threads safely
+  |     |
   |     required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut ConsCell`
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut ConsCell`
 note: required because it appears within the type `gc::arena_pages::MappedConsRange`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -319,15 +302,16 @@ note: required because it appears within the type `TaggedHeap`
   |
   | pub struct TaggedHeap {
   |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
  --> src/tagged/gc/facade_mark.rs
   |
   | pub struct QuiescentCollector<'heap> {
   |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
  --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
   | pub struct ParallelHeapEra<'heap> {
@@ -344,13 +328,11 @@ error[E0277]: `*mut FloatObj` cannot be sent between threads safely
  --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
   |
 8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut FloatObj` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut FloatObj` cannot be sent between threads safely
+  |     |
   |     required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut FloatObj`
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut FloatObj`
 note: required because it appears within the type `gc::arena_pages::MappedFloatRange`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -367,15 +349,16 @@ note: required because it appears within the type `TaggedHeap`
   |
   | pub struct TaggedHeap {
   |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
  --> src/tagged/gc/facade_mark.rs
   |
   | pub struct QuiescentCollector<'heap> {
   |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
  --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
   | pub struct ParallelHeapEra<'heap> {
@@ -392,13 +375,11 @@ error[E0277]: `*mut VecLikeHeader` cannot be sent between threads safely
  --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
   |
 8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut VecLikeHeader` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut VecLikeHeader` cannot be sent between threads safely
+  |     |
   |     required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut VecLikeHeader`
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut VecLikeHeader`
 note: required because it appears within the type `gc::arena_pages::MappedVecLikeObject`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -415,15 +396,16 @@ note: required because it appears within the type `TaggedHeap`
   |
   | pub struct TaggedHeap {
   |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
  --> src/tagged/gc/facade_mark.rs
   |
   | pub struct QuiescentCollector<'heap> {
   |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
  --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
   | pub struct ParallelHeapEra<'heap> {
@@ -440,13 +422,11 @@ error[E0277]: `*mut StringObj` cannot be sent between threads safely
  --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
   |
 8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut StringObj` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut StringObj` cannot be sent between threads safely
+  |     |
   |     required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut StringObj`
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut StringObj`
 note: required because it appears within the type `gc::arena_pages::MappedStringObject`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -463,15 +443,16 @@ note: required because it appears within the type `TaggedHeap`
   |
   | pub struct TaggedHeap {
   |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
  --> src/tagged/gc/facade_mark.rs
   |
   | pub struct QuiescentCollector<'heap> {
   |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
  --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
   | pub struct ParallelHeapEra<'heap> {
@@ -488,13 +469,11 @@ error[E0277]: `*mut VectorObj` cannot be sent between threads safely
  --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
   |
 8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut VectorObj` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut VectorObj` cannot be sent between threads safely
+  |     |
   |     required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut VectorObj`
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut VectorObj`
 note: required because it appears within the type `PhantomData<*mut VectorObj>`
  --> $RUST/core/src/marker.rs
 note: required because it appears within the type `gc::arena_pages::ObjectPage<VectorObj>`
@@ -518,15 +497,16 @@ note: required because it appears within the type `TaggedHeap`
   |
   | pub struct TaggedHeap {
   |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
  --> src/tagged/gc/facade_mark.rs
   |
   | pub struct QuiescentCollector<'heap> {
   |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
  --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
   | pub struct ParallelHeapEra<'heap> {
@@ -543,13 +523,11 @@ error[E0277]: `*mut ByteCodeObj` cannot be sent between threads safely
  --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
   |
 8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut ByteCodeObj` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut ByteCodeObj` cannot be sent between threads safely
+  |     |
   |     required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut ByteCodeObj`
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut ByteCodeObj`
 note: required because it appears within the type `PhantomData<*mut ByteCodeObj>`
  --> $RUST/core/src/marker.rs
 note: required because it appears within the type `gc::arena_pages::ObjectPage<ByteCodeObj>`
@@ -573,15 +551,16 @@ note: required because it appears within the type `TaggedHeap`
   |
   | pub struct TaggedHeap {
   |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
  --> src/tagged/gc/facade_mark.rs
   |
   | pub struct QuiescentCollector<'heap> {
   |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
  --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
   | pub struct ParallelHeapEra<'heap> {
@@ -598,13 +577,11 @@ error[E0277]: `*mut LambdaObj` cannot be sent between threads safely
  --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
   |
 8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut LambdaObj` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut LambdaObj` cannot be sent between threads safely
+  |     |
   |     required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut LambdaObj`
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut LambdaObj`
 note: required because it appears within the type `PhantomData<*mut LambdaObj>`
  --> $RUST/core/src/marker.rs
 note: required because it appears within the type `gc::arena_pages::ObjectPage<LambdaObj>`
@@ -628,15 +605,16 @@ note: required because it appears within the type `TaggedHeap`
   |
   | pub struct TaggedHeap {
   |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
  --> src/tagged/gc/facade_mark.rs
   |
   | pub struct QuiescentCollector<'heap> {
   |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
  --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
   | pub struct ParallelHeapEra<'heap> {
@@ -653,13 +631,11 @@ error[E0277]: `*mut MacroObj` cannot be sent between threads safely
  --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
   |
 8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut MacroObj` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut MacroObj` cannot be sent between threads safely
+  |     |
   |     required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut MacroObj`
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut MacroObj`
 note: required because it appears within the type `PhantomData<*mut MacroObj>`
  --> $RUST/core/src/marker.rs
 note: required because it appears within the type `gc::arena_pages::ObjectPage<MacroObj>`
@@ -683,15 +659,16 @@ note: required because it appears within the type `TaggedHeap`
   |
   | pub struct TaggedHeap {
   |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
  --> src/tagged/gc/facade_mark.rs
   |
   | pub struct QuiescentCollector<'heap> {
   |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
  --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
   | pub struct ParallelHeapEra<'heap> {
@@ -708,13 +685,11 @@ error[E0277]: `*mut RecordObj` cannot be sent between threads safely
  --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
   |
 8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut RecordObj` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut RecordObj` cannot be sent between threads safely
+  |     |
   |     required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut RecordObj`
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut RecordObj`
 note: required because it appears within the type `PhantomData<*mut RecordObj>`
  --> $RUST/core/src/marker.rs
 note: required because it appears within the type `gc::arena_pages::ObjectPage<RecordObj>`
@@ -738,15 +713,16 @@ note: required because it appears within the type `TaggedHeap`
   |
   | pub struct TaggedHeap {
   |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
  --> src/tagged/gc/facade_mark.rs
   |
   | pub struct QuiescentCollector<'heap> {
   |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
  --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
   | pub struct ParallelHeapEra<'heap> {
@@ -763,13 +739,11 @@ error[E0277]: `*mut SymbolWithPosObj` cannot be sent between threads safely
  --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
   |
 8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut SymbolWithPosObj` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut SymbolWithPosObj` cannot be sent between threads safely
+  |     |
   |     required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut SymbolWithPosObj`
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut SymbolWithPosObj`
 note: required because it appears within the type `PhantomData<*mut SymbolWithPosObj>`
  --> $RUST/core/src/marker.rs
 note: required because it appears within the type `gc::arena_pages::ObjectPage<SymbolWithPosObj>`
@@ -793,15 +767,16 @@ note: required because it appears within the type `TaggedHeap`
   |
   | pub struct TaggedHeap {
   |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
  --> src/tagged/gc/facade_mark.rs
   |
   | pub struct QuiescentCollector<'heap> {
   |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
  --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
   | pub struct ParallelHeapEra<'heap> {
@@ -818,13 +793,11 @@ error[E0277]: `*mut MarkerObj` cannot be sent between threads safely
  --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
   |
 8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut MarkerObj` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut MarkerObj` cannot be sent between threads safely
+  |     |
   |     required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut MarkerObj`
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut MarkerObj`
 note: required because it appears within the type `PhantomData<*mut MarkerObj>`
  --> $RUST/core/src/marker.rs
 note: required because it appears within the type `gc::arena_pages::ObjectPage<MarkerObj>`
@@ -848,15 +821,16 @@ note: required because it appears within the type `TaggedHeap`
   |
   | pub struct TaggedHeap {
   |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
  --> src/tagged/gc/facade_mark.rs
   |
   | pub struct QuiescentCollector<'heap> {
   |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
  --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
   | pub struct ParallelHeapEra<'heap> {
@@ -873,13 +847,11 @@ error[E0277]: `*mut BignumObj` cannot be sent between threads safely
  --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
   |
 8 |     std::thread::spawn(move || consume(era));
-  |     ------------------ -------^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `*mut BignumObj` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `*mut BignumObj` cannot be sent between threads safely
+  |     |
   |     required by a bound introduced by this call
   |
-  = help: within `{closure@$DIR/tests/p1rv_ui/era_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `*mut BignumObj`
+  = help: within `Option<QuiescentCollector<'static>>`, the trait `Send` is not implemented for `*mut BignumObj`
 note: required because it appears within the type `PhantomData<*mut BignumObj>`
  --> $RUST/core/src/marker.rs
 note: required because it appears within the type `gc::arena_pages::ObjectPage<BignumObj>`
@@ -903,15 +875,16 @@ note: required because it appears within the type `TaggedHeap`
   |
   | pub struct TaggedHeap {
   |            ^^^^^^^^^^
-  = note: required because it appears within the type `&mut TaggedHeap`
-note: required because it appears within the type `QuiescentCollector<'_>`
+  = note: required because it appears within the type `&'static mut TaggedHeap`
+note: required because it appears within the type `QuiescentCollector<'static>`
  --> src/tagged/gc/facade_mark.rs
   |
   | pub struct QuiescentCollector<'heap> {
   |            ^^^^^^^^^^^^^^^^^^
-note: required because it appears within the type `Option<QuiescentCollector<'_>>`
+note: required because it appears within the type `Option<QuiescentCollector<'static>>`
  --> $RUST/core/src/option.rs
-note: required because it appears within the type `ParallelHeapEra<'_>`
+  = note: required for `RefCell<Option<QuiescentCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
   | pub struct ParallelHeapEra<'heap> {
