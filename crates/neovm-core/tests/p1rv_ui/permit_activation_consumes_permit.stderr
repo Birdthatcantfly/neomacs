@@ -1,0 +1,15 @@
+error[E0382]: use of moved value: `permit`
+ --> tests/p1rv_ui/permit_activation_consumes_permit.rs:9:18
+  |
+7 | fn activate_twice(permit: MutatorPermit<'_>, heap: HeapIdentity, owner: u64) {
+  |                   ------ move occurs because `permit` has type `MutatorPermit<'_>`, which does not implement the `Copy` trait
+8 |     let first = permit.activate(heap, owner);
+  |                        --------------------- `permit` moved due to this method call
+9 |     let second = permit.activate(heap, owner);
+  |                  ^^^^^^ value used here after move
+  |
+note: `MutatorPermit::<'era>::activate` takes ownership of the receiver `self`, which moves `permit`
+ --> src/tagged/gc/mutator_registration/token.rs
+  |
+  |         mut self,
+  |             ^^^^

@@ -1,0 +1,12 @@
+error[E0505]: cannot move out of `mutator` because it is borrowed
+  --> tests/p1rv_ui/finish_owner_while_publication_live.rs:13:20
+   |
+ 8 | fn finish_while_borrowed(mut mutator: Mutator<'_>, epoch: NonZeroU64) {
+   |                          ----------- binding `mutator` declared here
+ 9 |     let publication = match mutator.begin_publication(epoch) {
+   |                             ------- borrow of `mutator` occurs here
+...
+13 |     let finished = mutator.finish(epoch);
+   |                    ^^^^^^^ move out of `mutator` occurs here
+14 |     consume(publication.publish());
+   |             ----------- borrow later used here

@@ -1,0 +1,7 @@
+error[E0515]: cannot return value referencing function parameter `mutator`
+ --> tests/p1rv_ui/publication_cannot_outlive_owner.rs:6:28
+  |
+5 |     match mutator.begin_publication(epoch) {
+  |           ------- `mutator` is borrowed here
+6 |         Ok(publication) => publication,
+  |                            ^^^^^^^^^^^ returns a value referencing data owned by the current function

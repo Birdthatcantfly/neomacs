@@ -1,0 +1,5 @@
+error[E0599]: no method named `alloc_cons` found for mutable reference `&mut Mutator<'_>` in the current scope
+ --> tests/p1rv_ui/mutator_has_no_heap_facade.rs:9:21
+  |
+9 |     consume(mutator.alloc_cons(TaggedValue::NIL, TaggedValue::NIL));
+  |                     ^^^^^^^^^^ method not found in `&mut Mutator<'_>`

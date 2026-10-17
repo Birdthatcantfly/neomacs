@@ -1,0 +1,15 @@
+error[E0382]: use of moved value: `publication`
+ --> tests/p1rv_ui/publication_publish_consumes_guard.rs:9:18
+  |
+7 | fn publish_twice(publication: OwnerPublication<'_, '_>) {
+  |                  ----------- move occurs because `publication` has type `OwnerPublication<'_, '_>`, which does not implement the `Copy` trait
+8 |     let first = publication.publish();
+  |                             --------- `publication` moved due to this method call
+9 |     let second = publication.publish();
+  |                  ^^^^^^^^^^^ value used here after move
+  |
+note: `OwnerPublication::<'owner, 'era>::publish` takes ownership of the receiver `self`, which moves `publication`
+ --> src/tagged/gc/mutator_registration/token.rs
+  |
+  |     pub fn publish(self) -> Result<(), RegistrationError> {
+  |                    ^^^^

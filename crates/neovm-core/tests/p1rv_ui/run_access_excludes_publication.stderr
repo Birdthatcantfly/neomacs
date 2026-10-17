@@ -1,0 +1,10 @@
+error[E0499]: cannot borrow `*mutator` as mutable more than once at a time
+  --> tests/p1rv_ui/run_access_excludes_publication.rs:13:23
+   |
+ 9 |     let running = match mutator.run_access() {
+   |                         ------- first mutable borrow occurs here
+...
+13 |     let publication = mutator.begin_publication(epoch);
+   |                       ^^^^^^^ second mutable borrow occurs here
+14 |     consume((running, publication));
+   |              ------- first borrow later used here
