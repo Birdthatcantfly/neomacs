@@ -210,8 +210,10 @@ impl ConsCatalog {
         }
         let placeholder = ConsAllocatorOwner::new(self.heap);
         if !heap.cons_allocator.threads_admitted() {
-            // SAFETY: inherited from install's stopped/closed storage contract.
-            unsafe { heap.admit_threads_world_stopped() };
+            // SAFETY: install already verified closed regions and stopped,
+            // quiescent authority. Admit this allocator directly: no second
+            // whole-heap close/admission operation is needed here.
+            unsafe { heap.cons_allocator.stopped_world() }.admit_threads();
         }
         let allocator = std::mem::replace(&mut heap.cons_allocator, placeholder);
         let placeholder =
