@@ -62,6 +62,7 @@ impl From<YoungRegistryError> for RegistrationError {
     fn from(error: YoungRegistryError) -> Self {
         match error {
             YoungRegistryError::WrongHeap => Self::WrongHeap,
+            #[cfg(test)]
             YoungRegistryError::RegistrationExhausted => Self::Exhausted,
             _ => Self::OutstandingLoan,
         }
@@ -386,7 +387,8 @@ impl<'heap> ParallelHeapEra<'heap> {
             .young_index
             .try_reserve(1)
             .map_err(|_| RegistrationError::Capacity)?;
-        let young = YoungRegistrationId::issue_parallel(registry.heap)?;
+        let young = YoungRegistrationId::issue_parallel(registry.heap)
+            .map_err(|_| RegistrationError::Exhausted)?;
         let generation = issue_generation(&NEXT_REGISTRATION_GENERATION)?;
         let key = MutatorKey {
             heap: registry.heap,

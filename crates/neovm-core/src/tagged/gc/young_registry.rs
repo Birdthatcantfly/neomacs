@@ -33,6 +33,11 @@ pub(super) struct YoungRegistrationId {
 const PARALLEL_ORDINAL_TAG: usize = 1usize << (usize::BITS - 1);
 static NEXT_PARALLEL_ORDINAL: AtomicUsize = AtomicUsize::new(PARALLEL_ORDINAL_TAG);
 
+/// Parallel admission failure stays separate from the legacy error enum: an
+/// added legacy variant changes the success niche of its allocation Results.
+#[derive(Debug)]
+pub(super) struct ParallelYoungIdExhausted;
+
 static_assertions::assert_impl_all!(YoungRegistrationId: Send, Sync, Copy);
 
 impl YoungRegistrationId {
@@ -43,13 +48,13 @@ impl YoungRegistrationId {
 
     #[cold]
     #[inline(never)]
-    pub(super) fn issue_parallel(heap: HeapIdentity) -> Result<Self, YoungRegistryError> {
+    pub(super) fn issue_parallel(heap: HeapIdentity) -> Result<Self, ParallelYoungIdExhausted> {
         // MAX remains the exhausted sentinel; wrapping would alias an old ID.
         let ordinal = NEXT_PARALLEL_ORDINAL
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
                 next.checked_add(1)
             })
-            .map_err(|_| YoungRegistryError::RegistrationExhausted)?;
+            .map_err(|_| ParallelYoungIdExhausted)?;
         Ok(Self {
             heap,
             ordinal: NonZeroUsize::new(ordinal).expect("parallel ordinals have their high bit set"),
@@ -380,14 +385,15 @@ pub(super) enum YoungRegistryError {
     GenerationMismatch,
     #[error("young loan generation space exhausted")]
     GenerationExhausted,
+    #[cfg(test)]
+    #[error("young registration ordinal space exhausted")]
+    RegistrationExhausted,
     #[error("young outstanding loan count exhausted")]
     LoanCountExhausted,
     #[error("young loan count invariant violated")]
     LoanCountInvariant,
     #[error("collection requires all {0} young loans returned")]
     OutstandingLoans(usize),
-    #[error("young registration ordinal space exhausted")]
-    RegistrationExhausted,
 }
 
 /// Failure owns the original loan, so a rejected cross-heap return can retry
