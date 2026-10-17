@@ -1585,19 +1585,27 @@ pub(crate) struct DisplayAdvance {
 }
 
 fn line_bounds(buf: &Buffer, point: EmacsBytePos) -> EmacsByteRange {
-    let accessible = buf.accessible_emacs_byte_region();
-    let begv = accessible.start();
-    let zv = accessible.end();
-    let pt = accessible.clamp(point);
+    let zv = buf.accessible_emacs_byte_region().end();
+    let pt = buf.accessible_emacs_byte_region().clamp(point);
     // GNU `find_newline`: memchr over the contiguous gap segments.  The
     // byte-at-a-time walk through the checked accessor this replaces cost
     // ~35 Ir per byte -- 2.7K per `current-column` call in indent-region.
-    let bol = buf
-        .prev_newline_emacs_byte(pt, begv)
-        .map(|newline| newline.add_len(EmacsByteLen::new(1)))
-        .unwrap_or(begv);
+    let bol = bol_emacs_byte(buf, point);
     let eol = buf.next_newline_emacs_byte(pt, zv).unwrap_or(zv);
     EmacsByteRange::new(bol, eol)
+}
+
+/// Beginning of the line's source text at `point`: the byte after the
+/// previous newline, or BEGV — GNU `find_newline`'s backward half. Kept
+/// separate from `line_bounds` because a position-targeted column scan needs
+/// only this half; see `scan_for_column`.
+fn bol_emacs_byte(buf: &Buffer, point: EmacsBytePos) -> EmacsBytePos {
+    let accessible = buf.accessible_emacs_byte_region();
+    let begv = accessible.start();
+    let pt = accessible.clamp(point);
+    buf.prev_newline_emacs_byte(pt, begv)
+        .map(|newline| newline.add_len(EmacsByteLen::new(1)))
+        .unwrap_or(begv)
 }
 
 #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
@@ -2518,7 +2526,7 @@ fn scan_for_column(
     };
     let control_rendering = std::cell::OnceCell::new();
     let mut character_widths = None;
-    let (mut scan, line_end, tab_width, line_end_policy, encoding) = {
+    let (mut scan, end, tab_width, line_end_policy, encoding) = {
         let buf = ctx.buffers.get(buffer_id).ok_or_else(|| {
             signal(
                 LispCondition::Error,
@@ -2533,7 +2541,20 @@ fn scan_for_column(
         // (auto-hscroll) measure the column at an arbitrary position such as a
         // non-selected window's `pointm`.
         let anchor = end_byte.unwrap_or_else(|| buf.point_emacs_byte_pos());
-        let line = line_bounds(buf, anchor);
+        // Only the beginning of the line is always needed. The line END is
+        // resolved solely for column-goal scans: a position-targeted scan
+        // stops at its own target, which lies inside its line, so GNU's
+        // compute_motion with a position goal never resolves the line end
+        // either. Eagerly resolving it made auto-hscroll's pre-redisplay
+        // probe walk a whole newline-less tail to ZV (three full-buffer
+        // scans on the first redisplay after a large inserted block).
+        let accessible = buf.accessible_emacs_byte_region();
+        let zv = accessible.end();
+        let pt = accessible.clamp(anchor);
+        let end = match end_byte {
+            Some(pos) => pos.get().min(zv.get()),
+            None => buf.next_newline_emacs_byte(pt, zv).unwrap_or(zv).get(),
+        };
         // These BUFFER_OBJFWD slots already contain live local/default
         // values. GNU reads BVAR directly; avoid resolving fixed slot names.
         let line_end_policy = if buf.slots
@@ -2545,8 +2566,8 @@ fn scan_for_column(
             LineEndPolicy::Newline
         };
         (
-            line.start().get(),
-            line.end().get(),
+            bol_emacs_byte(buf, anchor).get(),
+            end,
             TabWidth::from(buf.slots[crate::buffer::buffer::BUFFER_SLOT_TAB_WIDTH.index()]),
             line_end_policy,
             if buf.get_multibyte() {
@@ -2556,10 +2577,6 @@ fn scan_for_column(
             },
         )
     };
-    let end = end_byte
-        .map(|pos| pos.get())
-        .unwrap_or(line_end)
-        .min(line_end);
     let mut column = 0usize;
     let mut previous_byte_pos = scan;
     let mut previous_column = 0usize;

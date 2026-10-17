@@ -262,6 +262,44 @@ fn current_column_counts_source_text_when_invisibility_requests_an_ellipsis() {
 }
 
 #[test]
+fn current_column_positions_on_a_long_newline_less_tail_match_short_lines() {
+    crate::test_utils::init_test_tracing();
+    let mut ev = crate::test_utils::runtime_startup_context();
+    // A position-targeted column scan stops at its target and must not
+    // resolve the line end: on a newline-less tail the line end is ZV, and
+    // resolving it walked the whole buffer per probe (auto-hscroll's
+    // pre-redisplay pass). Columns come from the line start, so every
+    // position must answer exactly as it does on a short line.
+    let value = ev
+        .eval_str(
+            r#"(with-temp-buffer
+                 (insert "xyz\n")
+                 (insert (make-string 100000 ?a))
+                 (list (progn (goto-char 5) (current-column))
+                       (progn (goto-char 55) (current-column))
+                       (progn (goto-char 100004) (current-column))
+                       (progn (goto-char 2) (current-column))
+                       (progn (goto-char 4) (current-column))
+                       (progn (goto-char 100005)
+                         (move-to-column 7)
+                         (list (point) (current-column)))))"#,
+        )
+        .expect("eval long-line columns");
+    let items = list_to_vec(&value).expect("list result");
+    assert_eq!(
+        items,
+        vec![
+            Value::fixnum(0),
+            Value::fixnum(50),
+            Value::fixnum(99999),
+            Value::fixnum(1),
+            Value::fixnum(3),
+            Value::list(vec![Value::fixnum(12), Value::fixnum(7)]),
+        ]
+    );
+}
+
+#[test]
 fn backward_vertical_motion_reaches_buffer_start_with_hidden_prefix() {
     crate::test_utils::init_test_tracing();
     let mut ev = crate::test_utils::runtime_startup_context();
