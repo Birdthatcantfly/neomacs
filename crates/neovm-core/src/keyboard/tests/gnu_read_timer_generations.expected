@@ -1,0 +1,1 @@
+((nil nil (timer redisplay) t) (t 120 (timer redisplay) t))

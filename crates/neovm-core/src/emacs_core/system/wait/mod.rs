@@ -1017,13 +1017,27 @@ impl super::eval::Context {
         self.service_wait_request_once(&WaitRequest::input_pending_with_timers())
     }
 
-    pub(crate) fn service_input_wait_with_redisplay(
+    /// GNU read_char checks for pending input with timer service before its
+    /// preliminary redisplay (keyboard.c:2693-2721, 12042-12052). Keep the
+    /// phases together so display hooks see timer changes and timer-created
+    /// unread events, while process and special-input service stays afterward.
+    pub(crate) fn service_read_char_preliminary_redisplay(
         &mut self,
         idle_policy: crate::keyboard::IdleTransitionPolicy,
     ) -> Result<(), Flow> {
+        // GNU's initial-frame and inhibit guards are inside redisplay, not
+        // around timer-aware detection (xdisp.c:17369-17387). Neither guard
+        // suppresses this timer-only pass; it preserves the current idle epoch.
+        self.service_timers_without_redisplay()?;
+        self.redisplay_for_input_wait()?;
+
         // Initial batch frames suppress display, including redisplay caused
-        // by a ripe timer, while retaining the ordinary timer/service pass.
+        // by service, while retaining the input/process service pass.
         let mut request = WaitRequest::service_once(self.input_wait_redisplay_allowed());
+        // Do not take another timer snapshot before read_char's unread-event
+        // and deadline checks. A timer created by the batch above belongs to
+        // a later wait pass (GNU keyboard.c:4911-4943, 2992-3010, 3061-3064).
+        request.timers = TimerWaitPolicy::Suppress;
         request.idle_policy = idle_policy;
         self.service_wait_request_once(&request)
     }

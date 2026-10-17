@@ -2723,3 +2723,7 @@ mod gnu_help_echo_direct_oracle;
 #[cfg(test)]
 #[path = "gnu_timed_read_redisplay_oracle.rs"]
 mod gnu_timed_read_redisplay_oracle;
+
+#[cfg(test)]
+#[path = "gnu_read_timer_redisplay_oracle.rs"]
+mod gnu_read_timer_redisplay_oracle;

@@ -5847,8 +5847,7 @@ impl crate::emacs_core::eval::Context {
                 ));
             }
 
-            self.redisplay_for_input_wait()?;
-            self.service_input_wait_with_redisplay(idle_policy)?;
+            self.service_read_char_preliminary_redisplay(idle_policy)?;
 
             // GNU read_char re-checks Vunread_command_events after idle
             // timers/sit-for/read-event can requeue input, before consulting
