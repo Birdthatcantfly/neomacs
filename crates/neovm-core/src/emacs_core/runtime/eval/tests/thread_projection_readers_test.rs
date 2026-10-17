@@ -368,3 +368,47 @@ fn pdump_writes_the_projected_variable() {
         );
     }
 }
+
+/// A projected LOCALIZED read in a buffer whose registered object does not
+/// exist allocates nothing: admission republishes its host mirrors through
+/// this exact reader with the collector closed (`republish_owner_mirrors`),
+/// and a buffer's canonical object is materialized lazily. The value is the
+/// one the buffer's own index names, the read materializes no object, and a
+/// later read stays correct once the object exists and the cache can name it.
+#[test]
+fn projected_localized_read_allocates_nothing_without_the_buffer_object() {
+    let mut ev = fixture();
+    // A buffer no Lisp object exists for yet, with its own local binding of
+    // the projected variable's base.
+    let buffer_id = ev.buffers.create_buffer("tpr-unmaterialized");
+    let id = intern("tpr-local");
+    ev.buffers
+        .set_buffer_local_property_by_sym_id(buffer_id, id, Value::fixnum(4547))
+        .expect("the local binding is written");
+    let buffer_object = || crate::tagged::gc::with_tagged_heap(|heap| heap.buffer_value(buffer_id));
+    assert!(buffer_object().is_none(), "the buffer object starts absent");
+    let allocated = ev.tagged_heap.allocated_count();
+
+    project(&mut ev, "tpr-local");
+    let projection = projection_of(&ev, id);
+    let CanonicalArm::Localized(blv) = projection.arm() else {
+        panic!("tpr-local keeps a localized arm")
+    };
+    let buffer = ev.buffers.get(buffer_id).expect("the buffer");
+    let value = ev.obarray.read_projected_localized(id, blv, Some(buffer));
+    assert_eq!(print_value(&value), "4547");
+    assert_eq!(
+        ev.tagged_heap.allocated_count(),
+        allocated,
+        "the read allocated nothing"
+    );
+    assert!(buffer_object().is_none(), "the read materialized no object");
+
+    let object = Value::make_buffer(buffer_id);
+    let buffer = ev.buffers.get(buffer_id).expect("the buffer");
+    let value = ev.obarray.read_projected_localized(id, blv, Some(buffer));
+    assert_eq!(print_value(&value), "4547");
+    assert!(
+        buffer_object().is_some_and(|value| crate::emacs_core::value::eq_value(&value, &object))
+    );
+}

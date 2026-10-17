@@ -505,6 +505,18 @@ impl Obarray {
     /// `Localized` BLV, in BUFFER (the record's default without one): the
     /// read [`Self::read_localized_in_buffer`] makes, on the record the
     /// projection names rather than the one a cell would.
+    ///
+    /// The target buffer is its registered object only. `Value::make_buffer`
+    /// would allocate one when the registry has none yet, and admission's
+    /// commit republishes its mirrors through here with the collector closed
+    /// and nothing may allocate; a fabricated object could not be stored
+    /// into the BLV cache either, never being `eq` the registered one. With
+    /// no object yet, the load still records THIS buffer's answer --
+    /// `found` and `valcell`, with no buffer to name: `set_where(NIL)`
+    /// stores `NO_WHERE_BUF`, which no read fast path matches, and
+    /// `variable-binding-locus` refuses a nil `where_buf`, re-deriving from
+    /// the buffer itself and answering with the object it allocates there.
+    /// The next read after the object exists swaps the cache in as usual.
     pub(crate) fn read_projected_localized(
         &self,
         id: SymId,
@@ -513,15 +525,45 @@ impl Obarray {
     ) -> crate::emacs_core::value::Value {
         let blv_ptr = blv.blv().as_ptr();
         match buffer {
-            // SAFETY: a projection's localized arm names a record this
-            // obarray's BLV pool owns (it was the cell's record when the
-            // variable was projected or revealed), and no reference to it
-            // is held across the call.
-            Some(buffer) => unsafe {
-                Self::read_blv_with_lookup(blv_ptr, Value::make_buffer(buffer.id), || {
-                    buffer.local_variable_binding_cell(id).unwrap_or(Value::NIL)
-                })
-            },
+            Some(buffer) => {
+                let target_buf =
+                    crate::tagged::gc::with_tagged_heap(|heap| heap.buffer_value(buffer.id));
+                match target_buf {
+                    // SAFETY: a projection's localized arm names a record this
+                    // obarray's BLV pool owns (it was the cell's record when the
+                    // variable was projected or revealed), and no reference to it
+                    // is held across the call.
+                    Some(target_buf) => unsafe {
+                        Self::read_blv_with_lookup(blv_ptr, target_buf, || {
+                            buffer.local_variable_binding_cell(id).unwrap_or(Value::NIL)
+                        })
+                    },
+                    None => {
+                        let found_cell =
+                            buffer.local_variable_binding_cell(id).unwrap_or(Value::NIL);
+                        let found = !found_cell.is_nil();
+                        // SAFETY: as above; the same stores
+                        // `read_blv_with_lookup` makes on its miss, so a
+                        // concurrent collector reads the same pair under the
+                        // same release ordering.
+                        unsafe {
+                            (*blv_ptr).set_where(Value::NIL);
+                            (*blv_ptr).found = found;
+                            let valcell = if found {
+                                found_cell
+                            } else {
+                                (*blv_ptr).defcell
+                            };
+                            crate::tagged::header::store_value_atomic(
+                                &mut (*blv_ptr).valcell,
+                                valcell,
+                            );
+                            (*blv_ptr).alist_epoch = super::blv_alist_epoch();
+                            valcell.cons_cdr()
+                        }
+                    }
+                }
+            }
             // SAFETY: as above; the default cell is read without a write.
             None => unsafe { (*blv_ptr).defcell.cons_cdr() },
         }
