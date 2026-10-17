@@ -1019,6 +1019,57 @@ fn normalized_face_name_value(value: &Value) -> Option<Value> {
     }
 }
 
+/// Fx-style hashing for the per-composition cache digests.
+///
+/// `DefaultHasher` (SipHash-1-3) pays a keyed round setup per digest, and
+/// `content_hash` runs on every composition probe; digesting the same face
+/// with fold-multiply rounds instead removes that setup without changing the
+/// contract: the digest is only a bucket hint, `PartialEq` remains the
+/// equality verdict.
+struct FastFaceHasher {
+    hash: u64,
+}
+
+impl FastFaceHasher {
+    #[inline]
+    fn add(&mut self, bits: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ bits).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+impl std::hash::Hasher for FastFaceHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.add(byte as u64);
+        }
+    }
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.add(i);
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.add(i as u64);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
 impl Face {
     /// Cheap digest for content-addressed caches of composed faces.
     ///
@@ -1035,7 +1086,7 @@ impl Face {
         use std::hash::{Hash, Hasher};
         use std::mem::discriminant;
 
-        let mut state = std::collections::hash_map::DefaultHasher::new();
+        let mut state = FastFaceHasher { hash: 0 };
         self.color_specifications.hash_shared_identity(&mut state);
         self.foreground.hash(&mut state);
         self.background.hash(&mut state);

@@ -4013,9 +4013,9 @@ fn repeated_face_compositions_reuse_their_merged_source() {
         face
     };
     let mut first = base.clone();
-    first.retain_source_over(&resolver, &base, &overlay());
+    first.retain_source_over(&resolver, &base, &overlay(), None);
     let mut second = base.clone();
-    second.retain_source_over(&resolver, &base, &overlay());
+    second.retain_source_over(&resolver, &base, &overlay(), None);
     assert!(
         std::sync::Arc::ptr_eq(
             first.source_attributes.as_ref().unwrap(),
@@ -4026,5 +4026,58 @@ fn repeated_face_compositions_reuse_their_merged_source() {
     assert!(
         std::sync::Arc::ptr_eq(base.source_attributes.as_ref().unwrap(), &base_source),
         "composing must not disturb the base's own source"
+    );
+}
+
+#[test]
+fn named_overlay_specs_are_shared_by_identity() {
+    let _runtime = neovm_core::emacs_core::Context::new();
+    let mut table = FaceTable::new();
+    let mut face = NeoFace::new("identity-named-face");
+    face.foreground = Some(NeoColor::rgb(12, 34, 56));
+    table.define("identity-named-face", face);
+    let resolver = FaceResolver::new(&table, 0xFFFFFF, 0, 14.0, None);
+
+    // Composing the same named face over the same base twice must reuse the
+    // same merged source Arc, keyed by the shared specification identity.
+    let mut base_attributes = NeoFace::new("--identity-base--");
+    base_attributes.family = Some(Value::string("identity-family"));
+    let base_source =
+        std::sync::Arc::new(RootedFace::new(base_attributes).expect("installed mutator heap"));
+    let mut base = ResolvedFace::default();
+    base.source_attributes = Some(std::sync::Arc::clone(&base_source));
+
+    let shared_overlay = resolver.resolve_named_face_overlay_spec(
+        "identity-named-face",
+        0,
+        FaceReferenceDiagnostics::Suppress,
+    );
+    assert!(
+        resolver
+            .cached_named_overlay_spec("identity-named-face")
+            .is_some_and(|memo| std::sync::Arc::ptr_eq(&memo, &shared_overlay)),
+        "the first fold must populate the named-spec memo"
+    );
+    let overlay = (*shared_overlay).clone();
+    let mut first = base.clone();
+    first.retain_source_over(
+        &resolver,
+        &base,
+        &overlay,
+        Some(&std::sync::Arc::clone(&shared_overlay)),
+    );
+    let mut second = base.clone();
+    second.retain_source_over(
+        &resolver,
+        &base,
+        &overlay,
+        Some(&std::sync::Arc::clone(&shared_overlay)),
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(
+            first.source_attributes.as_ref().unwrap(),
+            second.source_attributes.as_ref().unwrap()
+        ),
+        "the same named overlay identity over the same base must reuse the merged source"
     );
 }

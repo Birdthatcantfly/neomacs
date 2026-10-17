@@ -3606,12 +3606,22 @@ impl ResolvedFace {
         resolver: &FaceResolver,
         base: &ResolvedFace,
         overlay: &NeoFace,
+        overlay_identity: Option<&std::sync::Arc<NeoFace>>,
     ) {
         self.canonical_tty_role = None;
         let Some(source) = base.source_attributes.clone() else {
             return;
         };
+        if let Some(identity) = overlay_identity
+            && let Some(shared) = resolver.cached_composed_identity_over(&source, identity)
+        {
+            self.source_attributes = Some(shared);
+            return;
+        }
         if let Some(shared) = resolver.cached_composed_over(&source, overlay) {
+            if let Some(identity) = overlay_identity {
+                resolver.record_composed_identity_over(source, identity.clone(), shared.clone());
+            }
             self.source_attributes = Some(shared);
             return;
         }
@@ -3622,7 +3632,10 @@ impl ResolvedFace {
             self.source_attributes = None;
             return;
         };
-        resolver.record_composed_over(source, overlay.clone(), shared.clone());
+        resolver.record_composed_over(source.clone(), overlay.clone(), shared.clone());
+        if let Some(identity) = overlay_identity {
+            resolver.record_composed_identity_over(source, identity.clone(), shared.clone());
+        }
         self.source_attributes = Some(shared);
     }
 
@@ -3772,6 +3785,24 @@ impl OrderedFaceSources {
     }
 }
 
+/// One resolved face source: its logical attributes plus, when the source is
+/// a single named face folded in this resolver, the shared specification it
+/// was folded into. The identity lets a repeated composition be recognized by
+/// pointer equality instead of re-digesting the content.
+struct FaceSpecContribution {
+    face: NeoFace,
+    identity: Option<std::sync::Arc<NeoFace>>,
+}
+
+impl FaceSpecContribution {
+    fn anonymous(face: NeoFace) -> Self {
+        Self {
+            face,
+            identity: None,
+        }
+    }
+}
+
 /// Accumulates GNU lface attributes without realizing colors or decorations.
 ///
 /// `ResolvedFace` is deliberately absent from the stored state.  Consequently
@@ -3780,6 +3811,7 @@ impl OrderedFaceSources {
 #[derive(Default)]
 struct UnresolvedFaceComposition {
     attributes: Option<NeoFace>,
+    identity: Option<std::sync::Arc<NeoFace>>,
 }
 
 /// GNU's face merger reports invalid references only at the display-property
@@ -3792,22 +3824,32 @@ enum FaceReferenceDiagnostics {
 }
 
 impl UnresolvedFaceComposition {
-    fn merge(&mut self, contribution: NeoFace) {
-        self.attributes = Some(match self.attributes.take() {
-            Some(attributes) => attributes.merge(&contribution),
-            None => contribution,
-        });
+    /// The identity survives only a single-source composition; once a second
+    /// source merges in, the accumulated attributes no longer equal any one
+    /// shared specification.
+    fn merge_ided(&mut self, contribution: FaceSpecContribution) {
+        match self.attributes.take() {
+            Some(attributes) => {
+                self.attributes = Some(attributes.merge(&contribution.face));
+                self.identity = None;
+            }
+            None => {
+                self.attributes = Some(contribution.face);
+                self.identity = contribution.identity;
+            }
+        }
     }
 
-    fn merge_optional(&mut self, contribution: Option<NeoFace>) {
+    fn merge_optional(&mut self, contribution: Option<FaceSpecContribution>) {
         if let Some(contribution) = contribution {
-            self.merge(contribution);
+            self.merge_ided(contribution);
         }
     }
 
     fn realize(self, resolver: &FaceResolver, base: &ResolvedFace) -> Option<ResolvedFace> {
-        self.attributes
-            .map(|attributes| resolver.apply_specified_face_over(base, &attributes))
+        self.attributes.map(|attributes| {
+            resolver.apply_specified_face_over(base, &attributes, self.identity.as_ref())
+        })
     }
 }
 
@@ -3901,6 +3943,18 @@ struct ComposedSourceCache {
     /// reference: a freed base cannot match, and a live allocation cannot be
     /// confused with another face that later reuses its address.
     compositions: std::collections::HashMap<(usize, u64), Vec<ComposedOverlayEntry>>,
+    /// `base + overlay` compositions keyed by allocation identity, GNU's
+    /// `EQ`-first bucket verification (src/xfaces.c:4483-4497): both keys are
+    /// pinned by weak references, so a hit is two pointer comparisons.
+    identity_compositions: std::collections::HashMap<(usize, usize), Vec<IdentityComposedEntry>>,
+    /// Fully folded overlay specifications per named face — GNU resolves a
+    /// named face through the immutable `face_face` frame table every time
+    /// (`get_lface_attributes`), which this resolver snapshots once, so the
+    /// folded result is a function of the name. Only names resolved without
+    /// any buffer-local remapping are memoized: a remapped fold also reads
+    /// the buffer's live `face-remapping-alist`, which a keyed memo could
+    /// serve stale after in-place mutation.
+    named_specs: std::collections::HashMap<Box<str>, std::sync::Arc<NeoFace>>,
     len: usize,
 }
 
@@ -3910,10 +3964,18 @@ struct ComposedOverlayEntry {
     merged: std::sync::Arc<RootedFace>,
 }
 
+struct IdentityComposedEntry {
+    base: std::sync::Weak<RootedFace>,
+    overlay: std::sync::Weak<NeoFace>,
+    merged: std::sync::Arc<RootedFace>,
+}
+
 impl ComposedSourceCache {
     fn clear(&mut self) {
         self.entries.clear();
         self.compositions.clear();
+        self.identity_compositions.clear();
+        self.named_specs.clear();
         self.len = 0;
     }
 }
@@ -4365,6 +4427,33 @@ impl FaceResolver {
         Some(rooted)
     }
 
+    /// The folded overlay specification for `name`, when it was already folded
+    /// in this resolver. Folding resolves the table entry plus its `:inherit`
+    /// graph, a pure function of the immutable snapshot, so one fold per name
+    /// per resolver is enough; GNU keeps the same economy by reusing the
+    /// frame's cached lface for a named face (`get_lface_attributes`,
+    /// src/xfaces.c:2124-2163).
+    fn cached_named_overlay_spec(&self, name: &str) -> Option<std::sync::Arc<NeoFace>> {
+        self.composed_sources
+            .borrow()
+            .named_specs
+            .get(name)
+            .map(std::sync::Arc::clone)
+    }
+
+    fn record_named_overlay_spec(&self, name: &str, folded: NeoFace) -> std::sync::Arc<NeoFace> {
+        let shared = std::sync::Arc::new(folded);
+        let mut cache = self.composed_sources.borrow_mut();
+        if cache.len >= COMPOSED_SOURCE_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache
+            .named_specs
+            .insert(name.into(), std::sync::Arc::clone(&shared));
+        cache.len += 1;
+        shared
+    }
+
     /// The previously merged source for `overlay` over `base`, when this exact
     /// composition was already built. Composition is a pure function of the
     /// base's source identity and the overlay's content, so a hit is exact.
@@ -4389,6 +4478,63 @@ impl FaceResolver {
                     && &entry.overlay == overlay
             })
             .map(|entry| std::sync::Arc::clone(&entry.merged))
+    }
+
+    /// Identity-keyed composition reuse: both the base's rooted source and the
+    /// overlay's folded specification are shared allocations, so the probe is
+    /// pointer equality on both, GNU's `EQ` fast path for shared lface slots
+    /// (src/xfaces.c:4483-4497). Weak pins on both sides keep address reuse
+    /// from aliasing a different face.
+    fn cached_composed_identity_over(
+        &self,
+        base: &std::sync::Arc<RootedFace>,
+        overlay: &std::sync::Arc<NeoFace>,
+    ) -> Option<std::sync::Arc<RootedFace>> {
+        let key = (
+            std::sync::Arc::as_ptr(base) as usize,
+            std::sync::Arc::as_ptr(overlay) as usize,
+        );
+        let cache = self.composed_sources.borrow();
+        let bucket = cache.identity_compositions.get(&key)?;
+        bucket
+            .iter()
+            .find(|entry| {
+                entry
+                    .base
+                    .upgrade()
+                    .is_some_and(|pinned| std::sync::Arc::ptr_eq(&pinned, base))
+                    && entry
+                        .overlay
+                        .upgrade()
+                        .is_some_and(|pinned| std::sync::Arc::ptr_eq(&pinned, overlay))
+            })
+            .map(|entry| std::sync::Arc::clone(&entry.merged))
+    }
+
+    fn record_composed_identity_over(
+        &self,
+        base: std::sync::Arc<RootedFace>,
+        overlay: std::sync::Arc<NeoFace>,
+        merged: std::sync::Arc<RootedFace>,
+    ) {
+        let key = (
+            std::sync::Arc::as_ptr(&base) as usize,
+            std::sync::Arc::as_ptr(&overlay) as usize,
+        );
+        let mut cache = self.composed_sources.borrow_mut();
+        if cache.len >= COMPOSED_SOURCE_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache
+            .identity_compositions
+            .entry(key)
+            .or_default()
+            .push(IdentityComposedEntry {
+                base: std::sync::Arc::downgrade(&base),
+                overlay: std::sync::Arc::downgrade(&overlay),
+                merged,
+            });
+        cache.len += 1;
     }
 
     fn record_composed_over(
@@ -4417,9 +4563,14 @@ impl FaceResolver {
         cache.len += 1;
     }
 
-    fn apply_specified_face_over(&self, base: &ResolvedFace, face: &NeoFace) -> ResolvedFace {
+    fn apply_specified_face_over(
+        &self,
+        base: &ResolvedFace,
+        face: &NeoFace,
+        face_identity: Option<&std::sync::Arc<NeoFace>>,
+    ) -> ResolvedFace {
         let mut rf = base.clone();
-        rf.retain_source_over(self, base, face);
+        rf.retain_source_over(self, base, face, face_identity);
         FaceColorAttributes::from_base(base)
             .merge(face)
             .realize()
@@ -4531,12 +4682,20 @@ impl FaceResolver {
         name: &str,
         depth: usize,
         diagnostics: FaceReferenceDiagnostics,
-    ) -> NeoFace {
+    ) -> std::sync::Arc<NeoFace> {
         if depth > 40 {
-            return NeoFace::default();
+            return std::sync::Arc::new(NeoFace::default());
         }
         if name == "default" && depth > 0 {
-            return NeoFace::default();
+            return std::sync::Arc::new(NeoFace::default());
+        }
+        // `default` folds differently per depth, so only ordinary names are
+        // shared; invalid names stay unmemoized to keep per-lookup
+        // diagnostics.
+        if name != "default"
+            && let Some(shared) = self.cached_named_overlay_spec(name)
+        {
+            return shared;
         }
 
         let Some(face) = self.face_table.get(name).cloned() else {
@@ -4545,9 +4704,15 @@ impl FaceResolver {
                     .borrow_mut()
                     .push(name.to_owned());
             }
-            return NeoFace::default();
+            return std::sync::Arc::new(NeoFace::default());
         };
-        self.resolve_face_overlay_spec(face, depth, FaceReferenceDiagnostics::Suppress)
+        let folded =
+            self.resolve_face_overlay_spec(face, depth, FaceReferenceDiagnostics::Suppress);
+        if name != "default" {
+            self.record_named_overlay_spec(name, folded)
+        } else {
+            std::sync::Arc::new(folded)
+        }
     }
 
     fn resolve_face_overlay_spec(
@@ -4576,6 +4741,7 @@ impl FaceResolver {
         diagnostics: FaceReferenceDiagnostics,
     ) -> NeoFace {
         self.resolve_face_value_overlay_spec(face_ref, depth, diagnostics)
+            .map(|contribution| contribution.face)
             .unwrap_or_default()
     }
 
@@ -4586,13 +4752,17 @@ impl FaceResolver {
         face_ref: Value,
         depth: usize,
         diagnostics: FaceReferenceDiagnostics,
-    ) -> Option<NeoFace> {
+    ) -> Option<FaceSpecContribution> {
         if depth > 40 || face_ref.is_nil() || face_ref.is_bare_symbol_named("nil") {
             return None;
         }
 
         if let Some(name) = Self::face_name_from_value(&face_ref) {
-            return Some(self.resolve_named_face_overlay_spec(name, depth, diagnostics));
+            let shared = self.resolve_named_face_overlay_spec(name, depth, diagnostics);
+            return Some(FaceSpecContribution {
+                face: (*shared).clone(),
+                identity: Some(shared),
+            });
         }
 
         let items = list_to_vec(&face_ref)?;
@@ -4614,7 +4784,8 @@ impl FaceResolver {
         }
         if Self::face_spec_is_plist(&items) {
             let face = NeoFace::from_plist_realized("--inline--", &items, self.plist_palette());
-            return Some(self.resolve_face_overlay_spec(face, depth + 1, diagnostics));
+            let face = self.resolve_face_overlay_spec(face, depth + 1, diagnostics);
+            return Some(FaceSpecContribution::anonymous(face));
         }
 
         let mut composition = UnresolvedFaceComposition::default();
@@ -4625,7 +4796,10 @@ impl FaceResolver {
                 diagnostics,
             ));
         }
-        composition.attributes
+        composition.attributes.map(|face| FaceSpecContribution {
+            face,
+            identity: composition.identity,
+        })
     }
 
     fn face_name_from_value(value: &Value) -> Option<&str> {
@@ -4828,7 +5002,7 @@ impl FaceResolver {
         remap_stack: &mut Vec<String>,
         depth: usize,
         diagnostics: FaceReferenceDiagnostics,
-    ) -> Option<NeoFace> {
+    ) -> Option<FaceSpecContribution> {
         if depth > 40 || name == "nil" {
             return None;
         }
@@ -4859,7 +5033,19 @@ impl FaceResolver {
         // let a higher-priority `italic` overlay erase a lower-priority
         // `bold` text face.
         if name == "default" {
-            return Some(NeoFace::default());
+            return Some(FaceSpecContribution::anonymous(NeoFace::default()));
+        }
+
+        // With no buffer-local remapping the fold is a pure function of the
+        // resolver's table snapshot, so it is shared per name. A live
+        // `face-remapping-alist` makes the fold read mutable buffer state and
+        // disqualifies sharing.
+        let shareable = remapping.alist().is_none();
+        if shareable && let Some(shared) = self.cached_named_overlay_spec(name) {
+            return Some(FaceSpecContribution {
+                face: (*shared).clone(),
+                identity: Some(shared),
+            });
         }
 
         let Some(mut face) = self.face_table.get(name).cloned() else {
@@ -4868,7 +5054,7 @@ impl FaceResolver {
                     .borrow_mut()
                     .push(name.to_owned());
             }
-            return Some(NeoFace::default());
+            return Some(FaceSpecContribution::anonymous(NeoFace::default()));
         };
         let parent = face.inherit.take().and_then(|inherit_ref| {
             self.resolve_buffer_face_value_overlay_spec_inner(
@@ -4879,10 +5065,19 @@ impl FaceResolver {
                 FaceReferenceDiagnostics::Suppress,
             )
         });
-        Some(match parent {
-            Some(parent) => parent.merge(&face),
+        let folded = match parent {
+            Some(parent) => parent.face.merge(&face),
             None => face,
-        })
+        };
+        if shareable {
+            let shared = self.record_named_overlay_spec(name, folded);
+            Some(FaceSpecContribution {
+                face: (*shared).clone(),
+                identity: Some(shared),
+            })
+        } else {
+            Some(FaceSpecContribution::anonymous(folded))
+        }
     }
 
     fn resolve_buffer_face_value_overlay_spec_inner(
@@ -4892,7 +5087,7 @@ impl FaceResolver {
         remap_stack: &mut Vec<String>,
         depth: usize,
         diagnostics: FaceReferenceDiagnostics,
-    ) -> Option<NeoFace> {
+    ) -> Option<FaceSpecContribution> {
         if depth > 40 {
             return None;
         }
@@ -4944,8 +5139,8 @@ impl FaceResolver {
                         )
                     });
                     return Some(match parent {
-                        Some(parent) => parent.merge(&inline),
-                        None => inline,
+                        Some(parent) => FaceSpecContribution::anonymous(parent.face.merge(&inline)),
+                        None => FaceSpecContribution::anonymous(inline),
                     });
                 }
 
@@ -4959,7 +5154,10 @@ impl FaceResolver {
                         diagnostics,
                     ));
                 }
-                composition.attributes
+                composition.attributes.map(|face| FaceSpecContribution {
+                    face,
+                    identity: composition.identity,
+                })
             }
             _ => None,
         }
@@ -4988,7 +5186,9 @@ impl FaceResolver {
             0,
             FaceReferenceDiagnostics::Report,
         )
-        .map(|attributes| self.apply_specified_face_over(base, &attributes))
+        .map(|contribution| {
+            self.apply_specified_face_over(base, &contribution.face, contribution.identity.as_ref())
+        })
     }
 
     /// Resolve NAME in a captured displayed-window face environment.
@@ -5091,7 +5291,13 @@ impl FaceResolver {
             0,
             FaceReferenceDiagnostics::Report,
         )
-        .map(|attributes| self.apply_specified_face_over(&self.default_face, &attributes))
+        .map(|contribution| {
+            self.apply_specified_face_over(
+                &self.default_face,
+                &contribution.face,
+                contribution.identity.as_ref(),
+            )
+        })
         .unwrap_or_else(|| self.default_face.clone())
     }
 
@@ -5101,7 +5307,13 @@ impl FaceResolver {
         val: &Value,
     ) -> Option<ResolvedFace> {
         self.resolve_face_value_overlay_spec(*val, 0, FaceReferenceDiagnostics::Report)
-            .map(|attributes| self.apply_specified_face_over(base, &attributes))
+            .map(|contribution| {
+                self.apply_specified_face_over(
+                    base,
+                    &contribution.face,
+                    contribution.identity.as_ref(),
+                )
+            })
     }
 
     /// Merge a frame-local GNU Lisp face over `base` without converting the
@@ -5113,7 +5325,13 @@ impl FaceResolver {
     ) -> Option<ResolvedFace> {
         let face_ref = self.face_table.lisp_face_ref(lisp_face_id)?;
         self.resolve_face_value_overlay_spec(face_ref, 0, FaceReferenceDiagnostics::Suppress)
-            .map(|attributes| self.apply_specified_face_over(base, &attributes))
+            .map(|contribution| {
+                self.apply_specified_face_over(
+                    base,
+                    &contribution.face,
+                    contribution.identity.as_ref(),
+                )
+            })
     }
 
     pub(crate) fn lisp_face_ref(
@@ -5379,7 +5597,7 @@ impl FaceResolver {
         rf.lisp_name = None;
         match source {
             FaceRealizationSource::MergeOverDefault => {
-                rf.retain_source_over(self, &self.default_face, face)
+                rf.retain_source_over(self, &self.default_face, face, None)
             }
             FaceRealizationSource::Complete(source) => {
                 rf.source_attributes = Some(source);
