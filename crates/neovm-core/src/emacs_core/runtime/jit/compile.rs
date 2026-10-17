@@ -4165,6 +4165,7 @@ pub(crate) use shim_refs::{RtRefs, Shim, ShimGroups, ShimIds};
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) mod code_arena;
+pub(crate) mod code_placement;
 pub(crate) mod shared;
 
 mod dispatch;

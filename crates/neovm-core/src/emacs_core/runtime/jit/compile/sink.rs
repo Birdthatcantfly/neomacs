@@ -91,7 +91,7 @@ pub(crate) trait LeafSink {
 
 /// Declare `entry` in `module` and define `func` under it in a fresh context:
 /// the in-place sequence every module-backed sink runs.
-pub(crate) fn define_in_place<M: Module>(
+pub(crate) fn define_in_place<M: LeafModule>(
     module: &mut M,
     entry: LeafEntry<'_>,
     func: Function,
@@ -110,7 +110,7 @@ pub(crate) fn define_in_place<M: Module>(
 /// Run Cranelift on the function in `ctx` and define it as `fid` (the
 /// `codegen` phase), stashing the disassembly when asked. Leaves `ctx`
 /// holding the compiled function; the caller clears it.
-pub(crate) fn define_with_context<M: Module>(
+pub(crate) fn define_with_context<M: LeafModule>(
     module: &mut M,
     fid: FuncId,
     ctx: &mut cranelift_codegen::Context,
@@ -121,14 +121,68 @@ pub(crate) fn define_with_context<M: Module>(
         ctx.set_disasm(true);
     }
     let codegen_phase = enter_phase(CompilePhase::Codegen);
-    module
-        .define_function(fid, ctx)
-        .map_err(|e| CompileError::Backend(BackendError::Define(e.to_string())))?;
+    module.define_leaf_function(fid, ctx)?;
     drop(codegen_phase);
     if disasm {
         stats::asm_dump::stash(ctx);
     }
     Ok(())
+}
+
+/// Module distinction is static: object emission never uses JIT placement.
+pub(crate) trait LeafModule: Module {
+    fn define_leaf_function(
+        &mut self,
+        fid: FuncId,
+        ctx: &mut cranelift_codegen::Context,
+    ) -> Result<(), CompileError>;
+}
+
+impl LeafModule for cranelift_jit::JITModule {
+    fn define_leaf_function(
+        &mut self,
+        fid: FuncId,
+        ctx: &mut cranelift_codegen::Context,
+    ) -> Result<(), CompileError> {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            use super::code_placement::{PlacementConfig, PlacementPolicy};
+            let configuration = super::code_placement::config().map_err(|error| {
+                tracing::error!(target: "neovm_jit", %error, "invalid JIT code placement configuration");
+                CompileError::Backend(BackendError::Define(error.to_string()))
+            })?;
+            let selected = match configuration {
+                PlacementConfig::Policy(PlacementPolicy::Off) => false,
+                PlacementConfig::Policy(PlacementPolicy::Function64 | PlacementPolicy::Loop64) => {
+                    true
+                }
+                PlacementConfig::Offset(_) => super::code_placement::diagnostic_function_matches(
+                    self.declarations().get_function_decl(fid).name.as_deref(),
+                ),
+            };
+            if selected {
+                return super::code_placement::define_placed_function(
+                    self,
+                    fid,
+                    ctx,
+                    configuration,
+                );
+            }
+        }
+        self.define_function(fid, ctx)
+            .map_err(|e| CompileError::Backend(BackendError::Define(e.to_string())))
+    }
+}
+
+impl LeafModule for cranelift_object::ObjectModule {
+    fn define_leaf_function(
+        &mut self,
+        fid: FuncId,
+        ctx: &mut cranelift_codegen::Context,
+    ) -> Result<(), CompileError> {
+        self.define_function(fid, ctx)
+            .map_err(|e| CompileError::Backend(BackendError::Define(e.to_string())))
+    }
 }
 
 impl LeafSink for cranelift_jit::JITModule {

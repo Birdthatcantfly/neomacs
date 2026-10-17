@@ -218,34 +218,69 @@ pub(crate) struct ArenaHandle {
 
 impl ArenaHandle {
     fn allocate_code(&mut self, size: usize, align: usize) -> io::Result<*mut u8> {
-        if align > page_size() {
+        if !align.is_power_of_two() || align > page_size() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "code alignment above the page size",
+                "code alignment must be a power of two no larger than the page size",
             ));
         }
+        let placement = super::code_placement::take_allocation_hint();
+        if let Some(offset) = placement {
+            offset
+                .validate_alignment(align as u64)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        }
+        // A staged entry offset applies to this allocation only. Every address
+        // remains aligned for Cranelift's constant pool and machine operands.
+        let placed_address = |bump: usize| -> io::Result<usize> {
+            match placement {
+                None => Ok(align_up(bump, align)),
+                Some(_) if align >= 64 => Ok(align_up(bump, align)),
+                Some(offset) => {
+                    let offset = offset.bytes();
+                    let within_line = bump & 63;
+                    let skip = (offset + 64 - within_line) & 63;
+                    bump.checked_add(skip).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "code address overflow")
+                    })
+                }
+            }
+        };
         if let Some(run) = &mut self.open {
-            let at = align_up(run.bump, align);
-            if at + size <= run.end {
-                run.bump = at + size;
+            let at = placed_address(run.bump)?;
+            if let Some(end) = at.checked_add(size)
+                && end <= run.end
+            {
+                run.bump = end;
                 self.arena.lock().stats.code_bytes += size as u64;
                 return Ok(at as *mut u8);
             }
         }
+        // A fresh run starts at a page boundary. Include the requested entry
+        // offset in its reservation, including the contiguous-growth case.
+        let reservation = size
+            .max(1)
+            .checked_add(placement.map_or(0, |offset| offset.bytes()))
+            .and_then(|bytes| bytes.checked_add(page_size() - 1))
+            .map(|bytes| bytes / page_size() * page_size())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "code reservation overflow")
+            })?;
         let mut arena = self.arena.lock();
-        let (start, end) = arena.take(page_ceil(size.max(1)))?;
+        let (start, end) = arena.take(reservation)?;
         arena.stats.code_bytes += size as u64;
         drop(arena);
         match &mut self.open {
             // Contiguous with the open run: grow it (one seal later).
             Some(run) if run.end == start => {
-                let at = align_up(run.bump, align);
+                let at = placed_address(run.bump)?;
                 debug_assert!(at + size <= end);
                 run.end = end;
                 run.bump = at + size;
                 Ok(at as *mut u8)
             }
             open => {
+                let at = placed_address(start)?;
                 if let Some(run) = open.take()
                     && run.bump > run.start
                 {
@@ -253,10 +288,10 @@ impl ArenaHandle {
                 }
                 *open = Some(Run {
                     start,
-                    bump: start + size,
+                    bump: at + size,
                     end,
                 });
-                Ok(start as *mut u8)
+                Ok(at as *mut u8)
             }
         }
     }

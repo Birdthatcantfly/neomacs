@@ -3006,6 +3006,11 @@ pub(crate) fn build_jit_isa(
     use cranelift_codegen::settings::{self, Configurable};
     let init_err = |e: String| CompileError::Backend(BackendError::ModuleInit(e));
     let mut flags = settings::builder();
+    if super::code_placement::needs_machine_cfg() {
+        flags
+            .set("machine_code_cfg_info", "true")
+            .map_err(|e| init_err(e.to_string()))?;
+    }
     flags
         .set("use_colocated_libcalls", "false")
         .map_err(|e| init_err(e.to_string()))?;

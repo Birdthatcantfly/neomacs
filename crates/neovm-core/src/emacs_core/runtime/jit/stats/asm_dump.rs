@@ -22,6 +22,8 @@ use super::perf_map::LabelTier;
 pub(crate) struct PendingAsm {
     vcode: String,
     size: usize,
+    /// Empty unless machine CFG metadata was explicitly requested by a policy.
+    machine_edges: Vec<(u32, u32)>,
 }
 
 thread_local! {
@@ -72,6 +74,7 @@ pub(crate) fn stash(ctx: &cranelift_codegen::Context) {
     let pending = PendingAsm {
         vcode: code.vcode.clone().unwrap_or_default(),
         size: code.code_buffer().len(),
+        machine_edges: code.bb_edges.clone(),
     };
     PENDING.with(|p| *p.borrow_mut() = Some(pending));
 }
@@ -146,6 +149,12 @@ fn render(info: &AsmLeafInfo<'_>, pending: &PendingAsm) -> String {
     out.push_str(&pending.vcode);
     if !pending.vcode.ends_with('\n') {
         out.push('\n');
+    }
+    if !pending.machine_edges.is_empty() {
+        out.push_str(&format!(
+            ";; machine-cfg-edges: {:?}\n",
+            pending.machine_edges
+        ));
     }
     // The finalized bytes (relocations applied), for
     // `xxd -r -p | objdump -D -b binary -mi386:x86-64 --adjust-vma=<addr>`.
