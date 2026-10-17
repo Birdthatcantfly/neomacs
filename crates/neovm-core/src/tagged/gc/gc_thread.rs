@@ -1723,15 +1723,18 @@ pub fn note_heap_slot_write(
             }
             return;
         }
-        if !TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get().covers(addr)) {
-            return;
-        }
         if TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr)) {
             note_heap_write_slow(owner, kind, Some(slot), Some(value));
             return;
         }
-        // A mirror hit outside the real window proves an installed GEN1
-        // heap: GEN0 mirrors the real window, and uninstall clears both.
+        // GEN0's mirror equals the real window: after a miss it cannot be
+        // ALL, which covers every aligned owner. Only GEN1 leaves an ALL
+        // mirror here. Test its length instead of a second address range.
+        if TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get().len()) != usize::MAX {
+            return;
+        }
+        // The missed real window and ALL mirror prove an installed GEN1
+        // heap. Uninstall clears both mirrors, including this length.
         // No allocation, callback or safe point can change the installation.
         let ptr = TAGGED_HEAP.with(Cell::get);
         debug_assert!(!ptr.is_null());
@@ -2118,6 +2121,10 @@ mod inline_slot_barrier_tests;
 #[cfg(test)]
 #[path = "tests/foreign_cons_footer_test.rs"]
 mod foreign_cons_footer_tests;
+
+#[cfg(test)]
+#[path = "tests/cons_real_window_first_test.rs"]
+mod cons_real_window_first_tests;
 
 #[cfg(test)]
 #[path = "tests/concurrent_major_worker_test.rs"]
