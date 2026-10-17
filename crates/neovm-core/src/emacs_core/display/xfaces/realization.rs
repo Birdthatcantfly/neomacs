@@ -811,8 +811,11 @@ impl<'a> InitialTerminalFaces<'a> {
         // GNU's first basic pass precedes Fmodify_frame_parameters. The plain
         // Rust constructor has stored these parameters already; hide them until
         // that pass finishes, then replay their actual parameter handlers.
-        owner.remove_known_parameter(FrameParam::ForegroundColor);
-        owner.remove_known_parameter(FrameParam::BackgroundColor);
+        // GNU's parameter alist has no colors yet, but frame-parameter
+        // synthesizes these TTY defaults (frame.c:4209-4233). Represent that
+        // same Lisp-visible state while hiding constructor-stored user colors.
+        owner.set_known_parameter(FrameParam::ForegroundColor, Value::string("unspecified-fg"));
+        owner.set_known_parameter(FrameParam::BackgroundColor, Value::string("unspecified-bg"));
         Some(Self {
             context,
             frame,
@@ -845,6 +848,31 @@ impl Drop for InitialTerminalFaces<'_> {
             frame.face_realization.invalidate();
         }
         *self.context.face_table = self.runtime.clone();
+    }
+}
+
+/// The plain constructor already stored the complete parameter list. GNU
+/// applies colors individually only after init_frame_faces and the selected
+/// frame's lfaces have been copied (frame.c:1822,1880-1897,4294-4303).
+/// Keep each future color at its terminal default until its own handler runs;
+/// otherwise the first handler realizes the other, unapplied user color too.
+/// This runs after the initial guard has restored its owners, preserving that
+/// guard's constructor-state restoration on a callback error.
+fn defer_creation_color_parameters(
+    context: &mut super::super::eval::Context,
+    frame: FrameId,
+    colors: &[Value],
+) {
+    let Some(owner) = context.frames.get_mut(frame) else {
+        return;
+    };
+    for pair in colors {
+        let (parameter, initial) = match pair.cons_car().as_bare_symbol_name() {
+            Some("foreground-color") => (FrameParam::ForegroundColor, "unspecified-fg"),
+            Some("background-color") => (FrameParam::BackgroundColor, "unspecified-bg"),
+            _ => continue,
+        };
+        owner.set_known_parameter(parameter, Value::string(initial));
     }
 }
 
@@ -886,6 +914,7 @@ pub(crate) fn initialize_new_terminal_frame_faces(
         })
         .collect();
     if !colors.is_empty() {
+        defer_creation_color_parameters(context, frame, &colors);
         let color_parameters = Value::list(colors);
         let _replay_roots = RealizationRoots::from_values([color_parameters]);
         super::super::frame::builtin_modify_frame_parameters(

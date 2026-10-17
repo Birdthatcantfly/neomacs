@@ -176,8 +176,14 @@ fn initial_terminal_faces_hide_creation_colors_and_restore_owners() {
     {
         let initial = InitialTerminalFaces::new(&mut context, frame).expect("live frame");
         let owner = initial.context.frames.get(frame).expect("live frame");
-        assert_eq!(owner.known_parameter(FrameParam::ForegroundColor), None);
-        assert_eq!(owner.known_parameter(FrameParam::BackgroundColor), None);
+        assert_eq!(
+            owner.known_parameter(FrameParam::ForegroundColor),
+            Some(Value::string("unspecified-fg"))
+        );
+        assert_eq!(
+            owner.known_parameter(FrameParam::BackgroundColor),
+            Some(Value::string("unspecified-bg"))
+        );
         assert_ne!(owner.face_hash_table, definitions);
     }
     let owner = context.frames.get(frame).expect("live frame");
@@ -190,6 +196,126 @@ fn initial_terminal_faces_hide_creation_colors_and_restore_owners() {
         Some(background)
     );
     assert_eq!(owner.face_hash_table, definitions);
+}
+
+#[test]
+fn creation_color_replay_defers_the_other_color_and_initial_error_restores_parameters() {
+    let mut context = crate::emacs_core::Context::new();
+    let frame = crate::emacs_core::window_cmds::ensure_selected_frame_id(&mut context);
+    let foreground = Value::string("#123456");
+    let background = Value::string("#654321");
+    let foreground_pair = Value::cons(FrameParam::ForegroundColor.symbol(), foreground);
+    let background_pair = Value::cons(FrameParam::BackgroundColor.symbol(), background);
+    let _roots = RealizationRoots::from_values([foreground_pair, background_pair]);
+    {
+        let owner = context.frames.get_mut(frame).unwrap();
+        owner.set_known_parameter(FrameParam::ForegroundColor, foreground);
+        owner.set_known_parameter(FrameParam::BackgroundColor, background);
+    }
+    let failed_initialization: Result<(), Flow> = (|| {
+        let initial = InitialTerminalFaces::new(&mut context, frame).unwrap();
+        assert_eq!(
+            initial
+                .context
+                .frames
+                .get(frame)
+                .unwrap()
+                .known_parameter(FrameParam::ForegroundColor),
+            Some(Value::string("unspecified-fg"))
+        );
+        Err(crate::emacs_core::error::signal(
+            "error",
+            vec![Value::string("initial face callback failed")],
+        ))
+    })();
+    assert!(failed_initialization.is_err());
+    assert_eq!(
+        context
+            .frames
+            .get(frame)
+            .unwrap()
+            .known_parameter(FrameParam::ForegroundColor),
+        Some(foreground)
+    );
+    assert_eq!(
+        context
+            .frames
+            .get(frame)
+            .unwrap()
+            .known_parameter(FrameParam::BackgroundColor),
+        Some(background)
+    );
+
+    defer_creation_color_parameters(&mut context, frame, &[foreground_pair, background_pair]);
+    assert_eq!(
+        context
+            .frames
+            .get(frame)
+            .unwrap()
+            .known_parameter(FrameParam::ForegroundColor),
+        Some(Value::string("unspecified-fg"))
+    );
+    assert_eq!(
+        context
+            .frames
+            .get(frame)
+            .unwrap()
+            .known_parameter(FrameParam::BackgroundColor),
+        Some(Value::string("unspecified-bg"))
+    );
+    super::super::super::frame::builtin_modify_frame_parameters(
+        &mut context,
+        vec![
+            Value::make_frame(frame.0),
+            Value::list(vec![background_pair]),
+        ],
+    )
+    .expect("first reverse-order color handler");
+    assert_eq!(
+        context
+            .frames
+            .get(frame)
+            .unwrap()
+            .known_parameter(FrameParam::ForegroundColor),
+        Some(Value::string("unspecified-fg"))
+    );
+    assert_eq!(
+        context
+            .frames
+            .get(frame)
+            .unwrap()
+            .known_parameter(FrameParam::BackgroundColor),
+        Some(background)
+    );
+    let vector = lookup_frame_lisp_face_vector(&context, frame, "default").unwrap();
+    assert_eq!(
+        lisp_face_vector_attr(vector, LFaceAttr::Foreground),
+        Some(Value::string("unspecified-fg"))
+    );
+    super::super::super::frame::builtin_modify_frame_parameters(
+        &mut context,
+        vec![
+            Value::make_frame(frame.0),
+            Value::list(vec![foreground_pair]),
+        ],
+    )
+    .expect("second reverse-order color handler");
+    assert_eq!(
+        context
+            .frames
+            .get(frame)
+            .unwrap()
+            .known_parameter(FrameParam::ForegroundColor),
+        Some(foreground)
+    );
+    assert_eq!(
+        context
+            .frames
+            .get(frame)
+            .unwrap()
+            .known_parameter(FrameParam::BackgroundColor),
+        Some(background)
+    );
 }
 
 #[test]
