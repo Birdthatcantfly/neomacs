@@ -225,7 +225,9 @@ impl ConsBlockBase {
         self.0
     }
 
-    fn of_cell(cell: *const ConsCell) -> Self {
+    /// Recover an identity without dereferencing the cell. Canonical
+    /// operations still validate registration and the heap/log binding.
+    pub(super) fn of_cell(cell: *const ConsCell) -> Self {
         Self(ConsBlock::block_base_for_ptr(cell))
     }
 }
@@ -1878,6 +1880,13 @@ thread_local! {
 #[cfg(test)]
 fn test_fault_is(fault: ConsAllocatorFault) -> bool {
     CONS_ALLOCATOR_FAULT.with(|slot| slot.get() == Some(fault))
+}
+
+/// Refill-cache tests must preserve every existing canonical fault site.
+/// Read the existing slot; no additional thread-local or allocator state.
+#[cfg(test)]
+pub(super) fn carve_fault_active() -> bool {
+    CONS_ALLOCATOR_FAULT.with(|slot| slot.get().is_some())
 }
 
 #[cfg(test)]

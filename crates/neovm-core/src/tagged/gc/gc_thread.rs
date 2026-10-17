@@ -1781,9 +1781,10 @@ fn barrier_gate(owner: TaggedValue) -> bool {
 }
 
 /// Test an owned cons's atomic age byte after the real window refused it.
-/// Foreign conses are valid setter inputs, so ownership precedes every
-/// trailer access. This metadata query must not record a Lisp read: setters
-/// already own their journal/observation policy. No arm safepoints.
+/// Slot stores already require a live, well-formed ConsCell: they dereference
+/// this same owner immediately after the barrier. Foreign conses are valid
+/// inputs, so ownership must still precede every trailer access. This query
+/// does not record a Lisp read; setters own that policy. No arm safepoints.
 #[inline(always)]
 fn generation_only_cons_is_old(heap: &TaggedHeap, owner: TaggedValue) -> bool {
     let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
@@ -1796,9 +1797,6 @@ fn generation_only_cons_is_old(heap: &TaggedHeap, owner: TaggedValue) -> bool {
         return false;
     }
     let cur = heap.jit.cons_cur.get();
-    let Some(offset) = generation_only_cons_cell_offset(addr) else {
-        return false;
-    };
     let ptr = addr as *const ConsCell;
     let base = ConsBlock::block_base_for_ptr(ptr);
     // An open region's cursor belongs to a live owned block, even when it
@@ -1814,16 +1812,19 @@ fn generation_only_cons_is_old(heap: &TaggedHeap, owner: TaggedValue) -> bool {
             return false;
         }
     }
-    // SAFETY: cursor, map or registry proves a live owned block; the first
-    // check proves a cell index inside its payload. Release and promotion
-    // require mutator exclusion, and this leaf has no safe point.
+    // A live cell in this owned block necessarily has payload-cell geometry.
+    // Foreign eight-aligned cells fail ownership above, before any trailer read.
+    #[cfg(debug_assertions)]
+    debug_assert!(generation_only_cons_cell_offset(addr).is_some());
+    // SAFETY: ownership plus the slot store's live ConsCell contract proves
+    // the payload index. Release and promotion require mutator exclusion,
+    // and this leaf has no safe point.
     let trailer = unsafe { ConsBlockTrailer::from_block_base(base) };
-    trailer.age_is_old(offset / size_of::<ConsCell>())
+    trailer.age_is_old((addr & (CONS_BLOCK_ALIGN - 1)) / size_of::<ConsCell>())
 }
 
-/// The existing cons payload/alignment test, expressed without a saturating
-/// subtraction: masking a block base cannot make it exceed the address.
-/// Return only a byte offset; ownership still precedes every trailer read.
+/// Debug/test witness for the owned slot-store input invariant.
+#[cfg(any(debug_assertions, test))]
 #[inline(always)]
 fn generation_only_cons_cell_offset(addr: usize) -> Option<usize> {
     let offset = addr & (CONS_BLOCK_ALIGN - 1);
@@ -1844,10 +1845,13 @@ fn generation_only_registered_cons_is_old(heap: &TaggedHeap, ptr: *const ConsCel
     if !heap.cons_block_index_by_base.contains_key(&base) {
         return false;
     }
-    // SAFETY: the caller checked cell alignment and payload bounds; the
-    // registry proves this mutator owns the block. This leaf cannot safepoint.
+    let addr = ptr as usize;
+    #[cfg(debug_assertions)]
+    debug_assert!(generation_only_cons_cell_offset(addr).is_some());
+    // SAFETY: the registry proves ownership; the caller's live ConsCell input
+    // proves payload geometry. This leaf cannot safepoint.
     let trailer = unsafe { ConsBlockTrailer::from_block_base(base) };
-    trailer.age_is_old(ConsBlock::index_of_ptr(ptr))
+    trailer.age_is_old((addr & (CONS_BLOCK_ALIGN - 1)) / size_of::<ConsCell>())
 }
 
 /// Dispatch cons writes admitted by the protocol mirror. A real-window hit
@@ -2110,6 +2114,10 @@ mod inline_cons_owner_tests;
 #[cfg(test)]
 #[path = "tests/inline_slot_barrier_test.rs"]
 mod inline_slot_barrier_tests;
+
+#[cfg(test)]
+#[path = "tests/foreign_cons_footer_test.rs"]
+mod foreign_cons_footer_tests;
 
 #[cfg(test)]
 #[path = "tests/concurrent_major_worker_test.rs"]
