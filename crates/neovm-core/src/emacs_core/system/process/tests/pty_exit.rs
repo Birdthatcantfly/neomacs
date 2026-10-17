@@ -1,15 +1,15 @@
-//! Force child reaping ahead of the final PTY read, without a clock race.
+//! Inject child status ahead of the final PTY read, without a clock race.
 
 use super::*;
 use crate::emacs_core::Context;
-use std::io::{self, Read};
+use std::io::{self, Cursor, Read};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
 
 /// Owned by one fixture's process manager; no global or thread-local hooks.
-/// The inner reader is a real PTY master with unread output from a reaped child.
+/// The inner reader supplies the unread master bytes at the process I/O seam.
 struct InterruptedPtyRead {
     inner: Box<dyn Read + Send>,
     interruptions: usize,
@@ -27,29 +27,12 @@ impl Read for InterruptedPtyRead {
     }
 }
 
-/// Keep the slave alive until the fixture has consumed every output byte.
-/// Each fixture owns this state; no other evaluator or mutator can access it.
-struct SlaveUntilRead {
-    inner: Box<dyn Read + Send>,
-    slave: Option<Box<dyn portable_pty::SlavePty + Send>>,
-    remaining: usize,
-}
-
-impl Read for SlaveUntilRead {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let count = self.inner.read(buffer)?;
-        self.remaining = self
-            .remaining
-            .checked_sub(count)
-            .expect("fixture output size");
-        if self.remaining == 0 {
-            drop(self.slave.take());
-        }
-        Ok(count)
-    }
-}
-
-fn reaped_pty_before_read(interruptions: usize) -> (Context, ProcessId, Arc<AtomicUsize>) {
+/// Inject the reaper's recorded status and unread master bytes independently.
+/// Darwin can wait for output to drain during slave close, so a real blocking
+/// child wait before reading cannot establish this ordering portably. These
+/// fixture-owned events exercise the production status/read paths on every OS;
+/// native PTY lifecycle coverage lives in the immediate-exit GNU oracle test.
+fn recorded_pty_status_before_read(interruptions: usize) -> (Context, ProcessId, Arc<AtomicUsize>) {
     let mut eval = Context::new();
     let buffer = eval
         .eval_str(r#"(get-buffer-create " *pty-exit-drain*")"#)
@@ -64,51 +47,19 @@ fn reaped_pty_before_read(interruptions: usize) -> (Context, ProcessId, Arc<Atom
     eval.processes
         .sync_process_mark(&mut eval.buffers, id)
         .expect("process mark");
-    let pair = portable_pty::native_pty_system()
-        .openpty(portable_pty::PtySize::default())
-        .expect("fixture PTY");
-    let tty_name = pair.master.tty_name().expect("slave path");
-    sys::configure_child_pty_tty(tty_name.as_os_str()).expect("GNU terminal modes");
-    let fd = pair.master.as_raw_fd().expect("Unix master fd");
-    sys::set_fd_nonblocking(fd).expect("nonblocking master");
-    let mut command = portable_pty::CommandBuilder::new("/bin/sh");
-    command.args(["-c", "printf 'process-output\\n'"]);
-    // A controlling terminal is irrelevant to drain ordering. Darwin revokes
-    // one at session-leader exit; disable that and retain the slave until its
-    // output is read so kernel teardown cannot discard our deterministic tail.
-    command.set_controlling_tty(false);
-    crate::emacs_core::callproc::retain_child_exit_status().expect("retain own child status");
-    let child = pair.slave.spawn_command(command).expect("fixture child");
-    let reader = pair.master.try_clone_reader().expect("master reader");
     let proc = eval.processes.get_mut(id).expect("fixture process");
-    proc.os_pid = child.process_id();
-    proc.live_io.child = ChildOwnership::of_pty_child(child);
-    proc.live_io.pty_master = Some(pair.master);
-    proc.live_io.pty_reader = Some(PtyOutputReader::new(Box::new(SlaveUntilRead {
-        inner: reader,
-        slave: Some(pair.slave),
-        remaining: b"process-output\n".len(),
-    })));
-    // Wait on our own child, with the master still unread. No sleeps, signal
-    // handlers, pid polling or scheduler assumptions establish this ordering.
-    proc.live_io.child.wait_for_termination();
-    eval.processes.deactivate_child_status_source(id);
-    // Inject the SIGCHLD record at the same seam used by the owning reaper.
-    eval.processes
-        .set_child_status_pending(id, process_status_exit_value(0));
-    let proc = eval.processes.get_mut(id).expect("pending process");
-    assert!(matches!(proc.live_io.child, ChildOwnership::Reaped));
-    let reader = proc
-        .live_io
-        .pty_reader
-        .take()
-        .expect("master stays open after reap");
+    // No actual pid is attached to this injected reap: teardown must never
+    // signal or wait for an unrelated process on behalf of this fixture.
+    proc.live_io.child = ChildOwnership::Reaped;
     let calls = Arc::new(AtomicUsize::new(0));
     proc.live_io.pty_reader = Some(PtyOutputReader::new(Box::new(InterruptedPtyRead {
-        inner: Box::new(reader),
+        inner: Box::new(Cursor::new(b"process-output\n".to_vec())),
         interruptions,
         calls: Arc::clone(&calls),
     })));
+    // The same status-recording seam used after the owning WNOHANG reaper.
+    eval.processes
+        .set_child_status_pending(id, process_status_exit_value(0));
     (eval, id, calls)
 }
 
@@ -134,8 +85,8 @@ fn assert_complete_output_before_finished(eval: &mut Context, id: ProcessId) {
 }
 
 #[test]
-fn accept_process_output_pty_reaped_before_final_read_drains_output() {
-    let (mut eval, id, calls) = reaped_pty_before_read(0);
+fn accept_process_output_pty_recorded_status_before_final_read_drains_output() {
+    let (mut eval, id, calls) = recorded_pty_status_before_read(0);
     assert_complete_output_before_finished(&mut eval, id);
     assert!(
         calls.load(Ordering::Relaxed) >= 2,
@@ -144,8 +95,8 @@ fn accept_process_output_pty_reaped_before_final_read_drains_output() {
 }
 
 #[test]
-fn accept_process_output_pty_reaped_before_interrupted_read_drains_output() {
-    let (mut eval, id, calls) = reaped_pty_before_read(2);
+fn accept_process_output_pty_recorded_status_before_interrupted_read_drains_output() {
+    let (mut eval, id, calls) = recorded_pty_status_before_read(2);
     assert_complete_output_before_finished(&mut eval, id);
     assert!(
         calls.load(Ordering::Relaxed) >= 4,
@@ -191,8 +142,8 @@ impl Read for EioBeforeFinalPtyRead {
 
 #[test]
 fn accept_process_output_pty_eio_keeps_master_for_exit_drain() {
-    let (mut eval, id, _) = reaped_pty_before_read(0);
-    // The kernel reap has already happened; delay its notification record
+    let (mut eval, id, _) = recorded_pty_status_before_read(0);
+    // The injected reap has already happened; delay its notification record
     // until after a readable-event pass encounters PTY closure. This forces
     // both orders independently of whether the kernel delivers SIGCHLD first.
     eval.processes.clear_status_notify_pending(id);
@@ -212,7 +163,7 @@ fn accept_process_output_pty_eio_keeps_master_for_exit_drain() {
 
 #[test]
 fn pty_eof_zero_timeout_polls_do_not_read_master() {
-    let (mut eval, id, calls) = reaped_pty_before_read(0);
+    let (mut eval, id, calls) = recorded_pty_status_before_read(0);
     eval.processes.clear_status_notify_pending(id);
     eval.processes.mark_status_change_notified(id);
     let proc = eval.processes.get_mut(id).expect("live process");
