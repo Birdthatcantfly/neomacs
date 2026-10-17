@@ -44,30 +44,43 @@ pub(crate) fn plan_plain_row_classified<B: LayoutBufferView>(
     // Cheap pre-gate BEFORE the pen walk: the refusal the steady-state edit
     // path hits every keystroke — the cursor row, including the common
     // typing-at-EOB shape where the cursor row IS the newline-less tail row
-    // — is decidable from a newline search plus arithmetic, so the per-row
-    // probe cost on it is one memchr (plus, inside the ambiguous byte range,
-    // one branch-light count), not a full classifier walk.
-    // * Line extent: up to the newline, or — phase 2h rung 2 — the whole
-    //   remaining text when no newline exists (the end-of-source tail line;
-    //   the read bound never cuts mid-line).
-    // * Point on this line (through its newline, or through the tail's
+    // — is decidable from one bounded extent scan plus arithmetic, not a
+    // full classifier walk.
+    // * Line extent: up to the newline, or up to the scan window
+    //   (`get_narrowed_width`, src/xdisp.c:3717-3735) when no newline exists
+    //   inside it (the end-of-source tail line, or an over-wide line's
+    //   unrouted remainder: no verdict below depends on extent beyond the
+    //   window, because the fit walk below cannot cover past it either).
+    //   Scanning the whole remaining text here instead would walk the
+    //   buffer once per candidate row of a newline-less line — work GNU's
+    //   iterator never does, since it stops at the row edge
+    //   (src/xdisp.c:10422-10451).
+    // * Point on this line (through its newline, or through the extent's
     //   end-of-buffer position): refuse. Byte length bounds char length from
     //   above, so `point > charpos + line_byte_len` proves point is past
     //   this line with no further work; inside that ambiguous byte range,
-    //   one branch-light non-continuation-byte count gives the EXACT char
-    //   length, deciding line membership without the pen walk. This
+    //   the non-continuation-byte count in the same pass gives the EXACT
+    //   char length, deciding line membership without the pen walk. This
     //   deliberately refuses point in the unrouted tail of an over-wide line
     //   too (which phase 2f used to route): the cursor row is the row the
     //   steady-state edit path re-lays every keystroke, and its refusal must
-    //   cost a memchr, not a classifier walk. For the end-of-source tail the
-    //   inclusive upper bound is one past the last char — GNU places the EOB
-    //   cursor on that row (xdisp.c:26811, first ends_at_zv row wins).
-    let line_byte_len =
-        memchr::memchr(b'\n', &row.text[row.byte_idx..]).unwrap_or(row.text.len() - row.byte_idx);
-    let line_char_len = row.text[row.byte_idx..row.byte_idx + line_byte_len]
-        .iter()
-        .filter(|&&byte| (byte & 0xC0) != 0x80)
-        .count();
+    //   cost one bounded scan, not a classifier walk. For the end-of-source
+    //   tail the inclusive upper bound is one past the last char — GNU
+    //   places the EOB cursor on that row (xdisp.c:26811, first ends_at_zv
+    //   row wins).
+    let mut line_byte_len = 0usize;
+    let mut line_char_len = 0usize;
+    while line_char_len < policy.scan_window_chars.max(1) {
+        match row.text.get(row.byte_idx + line_byte_len) {
+            None | Some(&b'\n') => break,
+            Some(&byte) => {
+                line_byte_len += 1;
+                if (byte & 0xC0) != 0x80 {
+                    line_char_len += 1;
+                }
+            }
+        }
+    }
     if policy.point_charpos >= row.charpos
         && policy.point_charpos <= row.charpos + line_byte_len as i64
         && policy.point_charpos <= row.charpos + line_char_len as i64

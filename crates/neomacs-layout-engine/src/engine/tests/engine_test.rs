@@ -22403,6 +22403,7 @@ fn plain_route_classification<B: crate::neovm_bridge::LayoutBufferView>(
                 show_trailing_whitespace: false,
                 wrap_mode: crate::types::LineWrapMode::Truncate,
                 overlay_string_window: Some(0),
+                scan_window_chars: 1_000_000,
             },
         ),
     )
@@ -23668,6 +23669,7 @@ fn assert_segmented_plain_shadow_row(
             show_trailing_whitespace: false,
             wrap_mode: crate::types::LineWrapMode::Truncate,
             overlay_string_window: Some(0),
+            scan_window_chars: 1_000_000,
         },
     )
     .expect("scenario row must classify for the item route");

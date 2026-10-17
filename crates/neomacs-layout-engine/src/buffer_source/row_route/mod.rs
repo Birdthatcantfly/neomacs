@@ -201,6 +201,16 @@ pub(crate) struct RowRouteWindowPolicy {
     /// classifier and the commit's session agree by construction about which
     /// overlays apply.
     pub(crate) overlay_string_window: Option<u64>,
+    /// The per-row source-scan allowance, the engine's mirror of GNU
+    /// `get_narrowed_width` (src/xdisp.c:3717-3735): `fact × window columns`
+    /// characters — always more than a row could cover. The classifier's
+    /// line-extent work (the point pre-gate, the composition check and the
+    /// display/overlay scan ranges) stays inside this allowance so a
+    /// newline-less tail cannot make a candidate row scan the remaining
+    /// buffer, exactly as GNU's iterator stops at the row edge
+    /// (`move_it_in_display_line_to` against `it->last_visible_x`,
+    /// src/xdisp.c:10422-10451).
+    pub(crate) scan_window_chars: usize,
 }
 
 /// Why a candidate row stayed on the buffer pipeline. Every refusal point in

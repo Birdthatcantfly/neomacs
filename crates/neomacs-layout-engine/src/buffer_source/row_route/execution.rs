@@ -135,6 +135,7 @@ impl<'rows, 'emit, 'surface>
                 || self.row_carryover.trailing_whitespace.is_enabled(),
             wrap_mode: params.wrap_mode,
             overlay_string_window: self.surface.overlay_context.string_window_id(),
+            scan_window_chars: params.narrowed_width_chars(),
         };
         // P4.8(a): the entry taxonomy is gone, but continuation routing still
         // needs this positional fact for its other admission checks.  It is

@@ -23,6 +23,9 @@ fn plain_policy() -> RowRouteWindowPolicy {
         show_trailing_whitespace: false,
         wrap_mode: LineWrapMode::Truncate,
         overlay_string_window: Some(0),
+        // Far above every test line, so the extent scan still sees whole
+        // lines and the assertions keep their pre-window meaning.
+        scan_window_chars: 1_000_000,
     }
 }
 
@@ -3036,6 +3039,52 @@ fn classifier_refuses_eob_tail_containing_point() {
             "point {point} sits on the EOB tail row"
         );
     }
+}
+
+#[test]
+fn point_gate_scans_only_the_narrowed_window_of_a_newline_less_tail() {
+    // GNU's iterator never walks a whole long line for one row: it stops at
+    // the row edge (move_it_in_display_line_to against it->last_visible_x,
+    // src/xdisp.c:10422-10451), and long-line work is bounded by the
+    // get_narrowed_width allowance (src/xdisp.c:3717-3735). The pre-gate's
+    // line-extent scan takes the same allowance, so a newline-less tail
+    // line whose point sits beyond the window no longer refuses EVERY row
+    // of the line up front: the rows before the cursor row route their
+    // fitting prefix, and only the row whose coverage actually reaches
+    // point refuses (the cursor row stays pipeline-owned).
+    let mut eval = Context::new();
+    let text = "a".repeat(200);
+    let buf_id = buffer_with_text(&mut eval, &text);
+    let buffer = eval.buffer_manager().get(buf_id).expect("buffer");
+    let windowed = RowRouteWindowPolicy {
+        scan_window_chars: 96,
+        ..plain_policy()
+    };
+    // Point beyond the window: the row's own coverage decides, and the
+    // fitting prefix (8 chars at this fit) does not reach it.
+    let plan = plan_plain_row_classified(
+        buffer,
+        row_start(text.as_bytes(), 0, 0),
+        fit_to(8.0),
+        RowRouteWindowPolicy {
+            point_charpos: 200,
+            ..windowed
+        },
+    )
+    .expect("the pre-cursor rows of a long tail line route");
+    assert_eq!(plan.line_end(), RoutedRowLineEnd::OverflowHandoff);
+    // Point inside the window: refused without any pen walk, exactly as
+    // before — the steady-state cursor row keeps its cheap refusal.
+    let refused = plan_plain_row_classified(
+        buffer,
+        row_start(text.as_bytes(), 0, 0),
+        fit_to(8.0),
+        RowRouteWindowPolicy {
+            point_charpos: 50,
+            ..windowed
+        },
+    );
+    assert_eq!(refused.unwrap_err(), RouteRefusal::PointInRow);
 }
 
 #[test]
