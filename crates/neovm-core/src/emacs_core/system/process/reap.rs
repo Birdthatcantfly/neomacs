@@ -172,21 +172,70 @@ struct DeferredChild {
 }
 
 #[cfg(test)]
-static DEFERRED_WATCHERS: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
+static DEFERRED_WATCHERS: Mutex<Option<Vec<std::thread::JoinHandle<()>>>> = Mutex::new(None);
 
-/// Synchronize native completion in tests, after their process I/O has closed.
-/// This joins event watchers; it never reaps a child on the test's behalf.
+/// Explicit, process-wide test opt-in to retaining native watcher handles.
+/// Ordinary tests detach just like production. One scope owns retention across
+/// all mutators in its test process; it must outlive the process I/O being
+/// dropped. The guard stays on its creating test thread and joins on unwind.
 #[cfg(test)]
-pub(super) fn finish_deferred_reaping_for_test() {
-    let handles = std::mem::take(
-        &mut *DEFERRED_WATCHERS
+#[must_use]
+#[derive(Debug)]
+pub(super) struct DeferredWatcherTestScope {
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[cfg(test)]
+static_assertions::assert_not_impl_any!(DeferredWatcherTestScope: Send, Sync);
+
+#[cfg(test)]
+impl DeferredWatcherTestScope {
+    pub(super) fn new() -> Self {
+        let mut watchers = DEFERRED_WATCHERS
             .lock()
-            .unwrap_or_else(|error| error.into_inner()),
-    );
-    for handle in handles {
-        handle
-            .join()
-            .expect("native deleted-child watcher panicked");
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(
+            watchers.is_none(),
+            "native watcher test scopes cannot overlap"
+        );
+        *watchers = Some(Vec::new());
+        Self {
+            _thread_bound: std::marker::PhantomData,
+        }
+    }
+
+    /// Join native exit watchers explicitly, after the test has closed its I/O.
+    /// This does not drive a child-status sweep or reap on the test's behalf.
+    pub(super) fn finish(self) {
+        let handles = DEFERRED_WATCHERS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        // Join every handle before propagating any watcher panic. Drop also
+        // joins handles registered while these joins were in progress.
+        let panicked = handles
+            .into_iter()
+            .filter_map(|handle| handle.join().err())
+            .count();
+        assert_eq!(panicked, 0, "native deleted-child watcher panicked");
+    }
+}
+
+#[cfg(test)]
+impl Drop for DeferredWatcherTestScope {
+    fn drop(&mut self) {
+        let handles = DEFERRED_WATCHERS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .unwrap_or_default();
+        for handle in handles {
+            // Do not panic during unwinding. Explicit finish reports failures;
+            // the worker's own panic has already been reported by Rust.
+            let _ = handle.join();
+        }
     }
 }
 
@@ -257,7 +306,10 @@ fn start_deferred_child_watcher(
     }) {
         Ok(handle) => {
             #[cfg(test)]
-            DEFERRED_WATCHERS.lock().unwrap_or_else(|error| error.into_inner()).push(handle);
+            match DEFERRED_WATCHERS.lock().unwrap_or_else(|error| error.into_inner()).as_mut() {
+                Some(watchers) => watchers.push(handle),
+                None => drop(handle),
+            }
             #[cfg(not(test))]
             drop(handle);
         }

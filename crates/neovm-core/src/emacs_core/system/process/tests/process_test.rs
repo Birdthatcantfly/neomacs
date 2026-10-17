@@ -3549,6 +3549,7 @@ fn terminal_pty_process_releases_live_io_when_exit_record_is_retained() {
 #[cfg(target_os = "linux")]
 #[test]
 fn deleted_pty_process_releases_live_io_and_reaps_child() {
+    let watchers = super::reap::DeferredWatcherTestScope::new();
     crate::test_utils::init_test_tracing();
     let sh = find_bin("sh");
     let mut processes = ProcessManager::new();
@@ -3580,7 +3581,7 @@ fn deleted_pty_process_releases_live_io_and_reaps_child() {
     // GNU deletion closes I/O immediately and transfers the native child to
     // deleted_pid_list. Synchronize with its independent exit-event collector,
     // without running another evaluator wait or reaping by a second owner.
-    super::reap::finish_deferred_reaping_for_test();
+    watchers.finish();
     assert!(
         !std::path::Path::new(&format!("/proc/{os_pid}")).exists(),
         "the deferred collector must reap the deleted child"
@@ -3590,6 +3591,7 @@ fn deleted_pty_process_releases_live_io_and_reaps_child() {
 #[cfg(target_os = "linux")]
 #[test]
 fn dropping_process_manager_terminates_and_reaps_live_child() {
+    let watchers = super::reap::DeferredWatcherTestScope::new();
     crate::test_utils::init_test_tracing();
     let sh = find_bin("sh");
     let mut processes = ProcessManager::new();
@@ -3610,7 +3612,7 @@ fn dropping_process_manager_terminates_and_reaps_live_child() {
 
     // No later Context/ProcessManager wait drives this cleanup. Joining the
     // native exit watcher is only a test synchronization point.
-    super::reap::finish_deferred_reaping_for_test();
+    watchers.finish();
     assert!(
         !std::path::Path::new(&format!("/proc/{os_pid}")).exists(),
         "dropping the live-resource owner must independently reap its child"

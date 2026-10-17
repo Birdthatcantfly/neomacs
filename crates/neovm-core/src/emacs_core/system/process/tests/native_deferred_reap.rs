@@ -45,18 +45,20 @@ fn pty_with_unread_output() -> (ProcessManager, ProcessId, u32) {
 
 #[test]
 fn deleted_pty_with_unread_output_reaps_without_another_context_wait() {
+    let watchers = super::reap::DeferredWatcherTestScope::new();
     let (mut manager, id, pid) = pty_with_unread_output();
     assert!(manager.delete_process(id));
     assert!(manager.get(id).is_none());
-    super::reap::finish_deferred_reaping_for_test();
+    watchers.finish();
     assert!(!super::reap::deferred_child_is_owned_for_test(pid));
 }
 
 #[test]
 fn dropped_pty_with_unread_output_reaps_without_another_context_wait() {
+    let watchers = super::reap::DeferredWatcherTestScope::new();
     let (manager, _, pid) = pty_with_unread_output();
     drop(manager);
     // The native watcher, rather than another process wait, performs cleanup.
-    super::reap::finish_deferred_reaping_for_test();
+    watchers.finish();
     assert!(!super::reap::deferred_child_is_owned_for_test(pid));
 }
