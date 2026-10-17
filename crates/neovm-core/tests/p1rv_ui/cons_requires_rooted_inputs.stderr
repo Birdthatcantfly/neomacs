@@ -1,0 +1,17 @@
+error[E0308]: arguments to this method are incorrect
+ --> tests/p1rv_ui/cons_requires_rooted_inputs.rs:9:17
+  |
+9 |     consume(run.cons(&car, &cdr));
+  |                 ^^^^ ----  ---- expected `&SharedRoot`, found `&TaggedValue`
+  |                      |
+  |                      expected `&SharedRoot`, found `&TaggedValue`
+  |
+  = note: expected reference `&SharedRoot`
+             found reference `&TaggedValue`
+  = note: expected reference `&SharedRoot`
+             found reference `&TaggedValue`
+note: method defined here
+ --> src/tagged/gc/mutator_registration/cons_allocation.rs
+  |
+  |     pub fn cons(
+  |            ^^^^

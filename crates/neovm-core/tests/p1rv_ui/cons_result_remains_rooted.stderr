@@ -1,0 +1,7 @@
+error[E0308]: mismatched types
+ --> tests/p1rv_ui/cons_result_remains_rooted.rs:6:5
+  |
+5 | fn unrooted_result(run: &mut RunAccess<'_, '_>, car: &SharedRoot, cdr: &SharedRoot) -> TaggedValue {
+  |                                                                                        ----------- expected `TaggedValue` because of return type
+6 |     run.cons(car, cdr).expect("fixture cons allocation failed")
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `TaggedValue`, found `SharedRoot`

@@ -1,0 +1,13 @@
+error[E0505]: cannot move out of `owner` because it is borrowed
+  --> tests/p1rv_ui/close_cons_region_does_not_release_owner.rs:19:20
+   |
+10 |     mut owner: Mutator<'_>,
+   |     --------- binding `owner` declared here
+...
+15 |     let mut running = owner.run_access().expect("fixture run access failed");
+   |                       ----- borrow of `owner` occurs here
+...
+19 |     let finished = owner.finish(epoch);
+   |                    ^^^^^ move out of `owner` occurs here
+20 |     consume((finished, running.cons(car, cdr)));
+   |                        ------- borrow later used here

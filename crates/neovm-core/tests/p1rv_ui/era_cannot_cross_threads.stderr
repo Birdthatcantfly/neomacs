@@ -24,6 +24,36 @@ note: required because it's used within this closure
 note: required by a bound in `spawn`
  --> $RUST/std/src/thread/functions.rs
 
+error[E0277]: `NonNull<TaggedHeap>` cannot be sent between threads safely
+ --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
+  |
+8 |     std::thread::spawn(move || consume(era));
+  |     ------------------ ^^^^^^^^^^^^^^^^^^^^ `NonNull<TaggedHeap>` cannot be sent between threads safely
+  |     |
+  |     required by a bound introduced by this call
+  |
+  = help: within `Option<gc::facade_mark::cons_suspend::SuspendedConsCollector<'static>>`, the trait `Send` is not implemented for `NonNull<TaggedHeap>`
+note: required because it appears within the type `gc::facade_mark::cons_suspend::SuspendedConsCollector<'static>`
+ --> src/tagged/gc/facade_mark/cons_suspend.rs
+  |
+  | pub(in crate::tagged::gc) struct SuspendedConsCollector<'heap> {
+  |                                  ^^^^^^^^^^^^^^^^^^^^^^
+note: required because it appears within the type `Option<gc::facade_mark::cons_suspend::SuspendedConsCollector<'static>>`
+ --> $RUST/core/src/option.rs
+  = note: required for `RefCell<Option<gc::facade_mark::cons_suspend::SuspendedConsCollector<'static>>>` to implement `Send`
+note: required because it appears within the type `ParallelHeapEra<'static>`
+ --> src/tagged/gc/mutator_registration.rs
+  |
+  | pub struct ParallelHeapEra<'heap> {
+  |            ^^^^^^^^^^^^^^^
+note: required because it's used within this closure
+ --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
+  |
+8 |     std::thread::spawn(move || consume(era));
+  |                        ^^^^^^^
+note: required by a bound in `spawn`
+ --> $RUST/std/src/thread/functions.rs
+
 error[E0277]: `*mut GcHeader` cannot be sent between threads safely
  --> tests/p1rv_ui/era_cannot_cross_threads.rs:8:24
   |

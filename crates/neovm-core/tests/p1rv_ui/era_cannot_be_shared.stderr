@@ -17,6 +17,25 @@ note: required by a bound in `require_sync`
 3 | fn require_sync<T: Sync>() {}
   |                    ^^^^ required by this bound in `require_sync`
 
+error[E0277]: `RefCell<Option<gc::facade_mark::cons_suspend::SuspendedConsCollector<'static>>>` cannot be shared between threads safely
+ --> tests/p1rv_ui/era_cannot_be_shared.rs:6:20
+  |
+6 |     require_sync::<ParallelHeapEra<'static>>();
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^ `RefCell<Option<gc::facade_mark::cons_suspend::SuspendedConsCollector<'static>>>` cannot be shared between threads safely
+  |
+  = help: within `ParallelHeapEra<'static>`, the trait `Sync` is not implemented for `RefCell<Option<gc::facade_mark::cons_suspend::SuspendedConsCollector<'static>>>`
+  = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` instead
+note: required because it appears within the type `ParallelHeapEra<'static>`
+ --> src/tagged/gc/mutator_registration.rs
+  |
+  | pub struct ParallelHeapEra<'heap> {
+  |            ^^^^^^^^^^^^^^^
+note: required by a bound in `require_sync`
+ --> tests/p1rv_ui/era_cannot_be_shared.rs:3:20
+  |
+3 | fn require_sync<T: Sync>() {}
+  |                    ^^^^ required by this bound in `require_sync`
+
 error[E0277]: `Rc<()>` cannot be shared between threads safely
  --> tests/p1rv_ui/era_cannot_be_shared.rs:6:20
   |
