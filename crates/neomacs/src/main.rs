@@ -4693,12 +4693,25 @@ pub fn run(mode: RuntimeMode) {
         // (frame.c:1754-1823). Install the deferred auxiliary-device factory
         // without initializing a primary terminal or a keyboard receiver.
         let (auxiliary_input_tx, _auxiliary_input_rx) = crossbeam_channel::unbounded();
-        evaluator.set_tty_frame_host_factory(Box::new(secondary_tty::SecondaryTtyFactory::new(
+        let mut factory = secondary_tty::SecondaryTtyFactory::new(
             secondary_ttys.clone(),
             auxiliary_input_tx,
             evaluator.wait_notifier(),
             evaluator.quit_requested.clone(),
-        )));
+        );
+        // A noninteractive daemon still installs redisplay immediately below.
+        // Plain --batch waits until make-terminal-frame opens a device
+        // (frame.c:1811) so elb-style batch never builds the display runtime.
+        if startup.daemon.is_none() {
+            let render_registry = secondary_ttys.clone();
+            factory.defer_redisplay_until_open(Box::new(move |eval| {
+                frame_layout::install_headless_tty_redisplay(
+                    eval,
+                    Some(Box::new(move |eval| render_registry.render_selected(eval))),
+                );
+            }));
+        }
+        evaluator.set_tty_frame_host_factory(Box::new(factory));
     }
 
     // 8. Set up redisplay callback (layout engine + TTY RIF render).

@@ -2,7 +2,7 @@ use super::pure::*;
 use crate::emacs_core::error::{FlowKind, FlowResultExt as _};
 use crate::emacs_core::eval::Context;
 use crate::emacs_core::value::Value;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 #[cfg(test)]
@@ -41,6 +41,34 @@ impl TtyFrameHostFactory for RecordingTtyFrameHostFactory {
 impl TtyFrameHostFactory for FailingTtyFrameHostFactory {
     fn open_tty(&mut self, _request: TtyFrameOpenRequest) -> Result<OpenedTtyFrameHost, String> {
         Err("test TTY open failure".to_string())
+    }
+}
+
+struct DeferredRedisplayFactory {
+    runs: Rc<Cell<u32>>,
+    open: bool,
+}
+
+impl TtyFrameHostFactory for DeferredRedisplayFactory {
+    fn open_tty(&mut self, _request: TtyFrameOpenRequest) -> Result<OpenedTtyFrameHost, String> {
+        if !self.open {
+            return Err("test TTY open failure".to_string());
+        }
+        Ok(OpenedTtyFrameHost::new(
+            TtyFrameSize::new(80, 25).expect("non-zero test dimensions"),
+            neomacs_display_protocol::tty_capabilities::TtyAttributeCapabilities::full_with_color_cells(256),
+            127,
+            Box::new(RecordingTerminalHost {
+                log: Rc::new(RefCell::new(Vec::new())),
+            }),
+        ))
+    }
+
+    fn take_deferred_redisplay(&mut self) -> Option<Box<dyn FnOnce(&mut Context)>> {
+        let runs = Rc::clone(&self.runs);
+        Some(Box::new(move |_| {
+            runs.set(runs.get() + 1);
+        }))
     }
 }
 
@@ -791,6 +819,55 @@ fn make_terminal_frame_opens_and_owns_an_explicit_secondary_tty() {
     builtin_resume_tty(&mut eval, vec![terminal]).expect("resume secondary tty");
     builtin_delete_terminal(&mut eval, vec![terminal, Value::T]).expect("delete secondary tty");
     assert_eq!(&*lifecycle.borrow(), &["suspend", "resume", "delete"]);
+}
+
+fn open_explicit_tty(eval: &mut Context) -> Result<Value, crate::emacs_core::error::Flow> {
+    let params = Value::list(vec![
+        Value::cons(Value::symbol("tty"), Value::string("/dev/pts/42")),
+        Value::cons(Value::symbol("tty-type"), Value::string("xterm-256color")),
+    ]);
+    crate::emacs_core::frame::builtin_make_terminal_frame(eval, vec![params])
+}
+
+#[test]
+fn make_terminal_frame_arms_deferred_redisplay_only_after_the_host_opens() {
+    crate::test_utils::init_test_tracing();
+    reset_terminal_thread_locals();
+    configure_terminal_runtime(TerminalRuntimeConfig::window_system(
+        neomacs_display_protocol::GraphicalDisplayIdentity::named(
+            neomacs_display_protocol::GraphicalBackend::X11,
+            ":0",
+        )
+        .unwrap(),
+    ));
+    let mut eval = Context::new();
+    let scratch = eval.buffers.create_buffer("*scratch*");
+    eval.buffers.set_current(scratch);
+    let runs = Rc::new(Cell::new(0));
+    eval.set_tty_frame_host_factory(Box::new(DeferredRedisplayFactory {
+        runs: Rc::clone(&runs),
+        open: false,
+    }));
+    assert!(open_explicit_tty(&mut eval).is_err());
+    assert_eq!(runs.get(), 0, "a failed open must not arm batch redisplay");
+
+    eval.set_tty_frame_host_factory(Box::new(DeferredRedisplayFactory {
+        runs: Rc::clone(&runs),
+        open: true,
+    }));
+    open_explicit_tty(&mut eval).expect("open the secondary TTY");
+    assert_eq!(
+        runs.get(),
+        1,
+        "the first successful open arms redisplay once"
+    );
+    crate::emacs_core::frame::builtin_make_terminal_frame(&mut eval, vec![Value::NIL])
+        .expect("reuse the open terminal");
+    assert_eq!(
+        runs.get(),
+        1,
+        "a frame on an already-open terminal does not arm redisplay again"
+    );
 }
 
 #[test]

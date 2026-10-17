@@ -352,26 +352,37 @@ pub fn install_tty_redisplay_callback(evaluator: &mut Context, startup: &Startup
 
 pub(crate) type TryRenderSelectedTerminal = Box<dyn FnMut(&mut Context) -> bool>;
 
+/// Redisplay for a session that has no primary terminal.
+///
+/// GNU batch does not call `init_display`. A terminal exists only after
+/// `init_tty` (`src/frame.c:1811`). Constructing [`REDISPLAY_RUNTIME`] scans
+/// the system font database, which TTY frames do not use (`src/frame.c:1184-1185`).
+/// Call this only once a daemon is serving clients or an auxiliary TTY has opened.
+pub(crate) fn install_headless_tty_redisplay(
+    evaluator: &mut Context,
+    mut try_render_selected_auxiliary: Option<TryRenderSelectedTerminal>,
+) {
+    // No primary terminal exists. Explicit/attached TTYs own their renderers
+    // and are the only valid destination for this redisplay.
+    REDISPLAY_RUNTIME.with(RedisplayRuntime::disable_cosmic_metrics);
+    evaluator.redisplay_fn = Some(Box::new(move |eval: &mut Context| {
+        if let Some(render) = try_render_selected_auxiliary.as_mut() {
+            render(eval);
+        }
+    }));
+    install_frame_snapshot_fn(evaluator);
+    install_window_layout_query_fn(evaluator);
+    install_font_shape_driver(evaluator);
+}
+
 pub fn install_tty_redisplay_callback_with_popup_redraw(
     evaluator: &mut Context,
     startup: &StartupOptions,
     force_full_redraw: Option<Arc<AtomicBool>>,
     mut try_render_selected_auxiliary: Option<TryRenderSelectedTerminal>,
 ) {
-    if startup.daemon.is_some()
-        || (startup.noninteractive && neovm_core::face::realization::enabled())
-    {
-        // No primary terminal exists. Explicit/attached TTYs own their renderers
-        // and are the only valid destination for daemon redisplay.
-        REDISPLAY_RUNTIME.with(RedisplayRuntime::disable_cosmic_metrics);
-        evaluator.redisplay_fn = Some(Box::new(move |eval: &mut Context| {
-            if let Some(render) = try_render_selected_auxiliary.as_mut() {
-                render(eval);
-            }
-        }));
-        install_frame_snapshot_fn(evaluator);
-        install_window_layout_query_fn(evaluator);
-        install_font_shape_driver(evaluator);
+    if startup.daemon.is_some() {
+        install_headless_tty_redisplay(evaluator, try_render_selected_auxiliary);
         return;
     }
     if !tty_init::should_enable_live_tty_io(startup) {

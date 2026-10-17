@@ -170,6 +170,9 @@ pub struct SecondaryTtyFactory {
     input_tx: crossbeam_channel::Sender<InputEvent>,
     notifier: Option<WaitNotifier>,
     quit_requested: QuitRequest,
+    /// Installed once, after the first successful `open_tty`, so batch startup
+    /// does not build a display runtime before any terminal exists.
+    deferred_redisplay: Option<Box<dyn FnOnce(&mut neovm_core::emacs_core::eval::Context)>>,
 }
 
 impl SecondaryTtyFactory {
@@ -184,11 +187,28 @@ impl SecondaryTtyFactory {
             input_tx,
             notifier,
             quit_requested,
+            deferred_redisplay: None,
         }
+    }
+
+    /// Batch `make-terminal-frame` arms redisplay only after this factory opens
+    /// a device. Interactive and daemon sessions install redisplay up front and
+    /// leave this empty.
+    pub fn defer_redisplay_until_open(
+        &mut self,
+        install: Box<dyn FnOnce(&mut neovm_core::emacs_core::eval::Context)>,
+    ) {
+        self.deferred_redisplay = Some(install);
     }
 }
 
 impl TtyFrameHostFactory for SecondaryTtyFactory {
+    fn take_deferred_redisplay(
+        &mut self,
+    ) -> Option<Box<dyn FnOnce(&mut neovm_core::emacs_core::eval::Context)>> {
+        self.deferred_redisplay.take()
+    }
+
     fn open_tty(&mut self, request: TtyFrameOpenRequest) -> Result<OpenedTtyFrameHost, String> {
         #[cfg(unix)]
         {

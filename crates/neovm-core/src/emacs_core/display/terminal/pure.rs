@@ -326,6 +326,19 @@ impl OpenedTtyFrameHost {
 /// descriptors, raw mode, input threads, and the renderer bound to them.
 pub trait TtyFrameHostFactory {
     fn open_tty(&mut self, request: TtyFrameOpenRequest) -> Result<OpenedTtyFrameHost, String>;
+
+    /// Take the one-shot installer for batch redisplay, if the frontend deferred it.
+    ///
+    /// GNU batch skips `init_display` and acquires a terminal only inside
+    /// `init_tty` (`src/frame.c:1811`, from `Fmake_terminal_frame` at
+    /// `:1754-1823`). Until that open succeeds there is no TTY to redisplay,
+    /// and a TTY frame never loads a system font database (`src/frame.c:1184-1185`).
+    /// The default keeps interactive and test factories unchanged.
+    fn take_deferred_redisplay(
+        &mut self,
+    ) -> Option<Box<dyn FnOnce(&mut crate::emacs_core::eval::Context)>> {
+        None
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

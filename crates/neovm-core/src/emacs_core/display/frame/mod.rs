@@ -1201,6 +1201,16 @@ pub(crate) fn builtin_make_terminal_frame(
         if let Some(frame) = frames.get_mut(frame_id) {
             apply_terminal_viewport_to_tty_frame(frame, buffers, size, displays_chrome);
         }
+        // The host is open. Arm batch redisplay only now: doing it at startup
+        // built the display runtime (and its font database) for every batch
+        // process, including ones that never call make-terminal-frame.
+        let deferred_redisplay = eval
+            .tty_frame_host_factory
+            .as_mut()
+            .and_then(|factory| factory.take_deferred_redisplay());
+        if let Some(install) = deferred_redisplay {
+            install(eval);
+        }
         // GNU frame.c:1822-1823 initializes basic faces eagerly only outside batch.
         super::xfaces::realization::initialize_new_terminal_frame_faces(
             eval, frame_id, parameters,
