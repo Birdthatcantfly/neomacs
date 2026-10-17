@@ -1,0 +1,8 @@
+error: lifetime may not live long enough
+ --> tests/p1rv_ui/owner_root_slot_cannot_outlive_era.rs:8:5
+  |
+4 | fn escape<'owner, 'era>(
+  |                   ---- lifetime `'era` defined here
+...
+8 |     run.root_slot(source).unwrap()
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'era` must outlive `'static`

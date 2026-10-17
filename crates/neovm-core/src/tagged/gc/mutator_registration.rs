@@ -744,3 +744,7 @@ mod collection_scalar_tests;
 
 #[cfg(test)]
 mod cons_allocation_tests;
+#[cfg(test)]
+mod cons_micro_tests;
+#[cfg(test)]
+mod root_slot_tests;
