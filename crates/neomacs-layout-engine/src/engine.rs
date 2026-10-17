@@ -4223,6 +4223,36 @@ impl LayoutEngine {
             .is_ok()
     }
 
+    /// Source newlines in a dirty span, the mirror of GNU `find_newline` over
+    /// a changed region (backed by the buffer's newline cache; the line delta
+    /// `try_window_id` scrolls its matrix by, src/xdisp.c). The text index
+    /// answers without touching bytes; only an uncovered range falls back to
+    /// a chunked `\n` count. This replaces a per-character
+    /// `char_at_emacs_byte_pos` walk that cost ~77 Ir per inserted character
+    /// on the first redisplay after a bulk insert — the dominant linear term
+    /// of a cold redisplay over a newline-less tail.
+    fn span_source_newline_count(
+        buffer: &neovm_core::buffer::Buffer,
+        dirty_start: i64,
+        dirty_end: i64,
+    ) -> usize {
+        use neovm_core::buffer::{CharPos0, EmacsByteRange};
+        let start = CharPos0::new(dirty_start.max(0) as usize);
+        let end = CharPos0::new(dirty_end.max(0) as usize);
+        let from = buffer.char_pos_to_emacs_byte_pos_clamped(start);
+        let to = buffer.char_pos_to_emacs_byte_pos_clamped(end.max(start));
+        let range = EmacsByteRange::new(from, to);
+        if let Some(count) = buffer.indexed_newline_count(range) {
+            return count;
+        }
+        let mut count = 0;
+        let _ = buffer.try_for_each_emacs_byte_range_chunk(range, |chunk| {
+            count += chunk.iter().filter(|byte| **byte == b'\n').count();
+            Ok::<(), std::convert::Infallible>(())
+        });
+        count
+    }
+
     /// Phase 3: if this window's previous-frame matrix can be reused after a
     /// localized (plain) edit — reuse the rows above the dirty span verbatim and
     /// re-walk only the dirty line + below — return the replay (a [`ScrollReplay`]
@@ -4271,6 +4301,30 @@ impl LayoutEngine {
         use crate::incremental_layout::edit_sync::{self, BelowReuse, EditSyncMode};
         use crate::incremental_layout::{EditReplayPositions, EditReplaySourceProof};
         let positions = EditReplayPositions::new(dirty_start, dirty_end, delta);
+        let span_newlines = Self::span_source_newline_count(buffer, dirty_start, dirty_end);
+        // The one-line-one-row ASCII proof is this engine's extra safety for
+        // below-reuse; GNU gets the same guarantee by re-syncing its
+        // regenerated region against the old matrix after the walk and never
+        // scans the changed text semantically. It also refuses to try when
+        // the change is not local to the window: `try_window_id` gives up
+        // outright when the window start lies inside the changed area
+        // (GIVE_UP (15), src/xdisp.c), and its regenerated region is always
+        // the window. Bound the proof identically: a span covering the
+        // window start, or longer than the whole narrowed region the window
+        // can display (`get_narrowed_len` = width × height, src/xdisp.c:3732),
+        // is never proven — below-reuse declines and the window re-lays,
+        // which is exactly the bounded cost GNU pays in the same situation.
+        // The newline count above is kept: it feeds the Sync walk's damage
+        // record the way GNU feeds `find_newline` counts to its matrix
+        // scroll, and costs bytes-per-span rather than chars-per-span.
+        let proof_span_covers_window_start =
+            curr_key.window_start >= dirty_start && curr_key.window_start < dirty_end;
+        let proof_scan_allowed = self.allow_below_reuse
+            && !proof_span_covers_window_start
+            && (dirty_end.saturating_sub(dirty_start).max(0) as usize)
+                <= params
+                    .source_interpretation_rows()
+                    .saturating_mul(params.narrowed_width_chars());
         let (replay, span_newlines, span_structure_safe) = if edit_sync::lazy_proof_enabled()
             && self.allow_below_reuse
             && edit_sync::edit_sync_mode() == EditSyncMode::Sync
@@ -4284,22 +4338,19 @@ impl LayoutEngine {
             let replay = prev.edit_replay_sync_lazy(&curr_key, positions, || {
                 #[cfg(test)]
                 crate::incremental_layout::lazy_proof_test_support::note_source_proof();
-                let mut newlines = 0usize;
-                let simple = (dirty_start..dirty_end).all(|cp| {
-                    #[cfg(test)]
-                    crate::incremental_layout::lazy_proof_test_support::note_char_query();
-                    let byte = buffer.char_pos_to_emacs_byte_pos_clamped(
-                        neovm_core::buffer::CharPos0::new(cp as usize),
-                    );
-                    match buffer.char_at_emacs_byte_pos(byte) {
-                        Some('\n') => {
-                            newlines += 1;
-                            true
+                let simple = proof_scan_allowed
+                    && (dirty_start..dirty_end).all(|cp| {
+                        #[cfg(test)]
+                        crate::incremental_layout::lazy_proof_test_support::note_char_query();
+                        let byte = buffer.char_pos_to_emacs_byte_pos_clamped(
+                            neovm_core::buffer::CharPos0::new(cp as usize),
+                        );
+                        match buffer.char_at_emacs_byte_pos(byte) {
+                            Some('\n') => true,
+                            Some(c) => c.is_ascii_graphic() || c == ' ',
+                            None => false,
                         }
-                        Some(c) => c.is_ascii_graphic() || c == ' ',
-                        None => false,
-                    }
-                });
+                    });
                 let structure_range = neovm_core::buffer::CharRange::new(
                     neovm_core::buffer::CharPos0::new(dirty_start.max(0) as usize),
                     neovm_core::buffer::CharPos0::new(dirty_end.max(0) as usize),
@@ -4312,10 +4363,12 @@ impl LayoutEngine {
                         &EditReplayStructureProperty::symbols(),
                     )
                 };
-                observed_newlines = Some(newlines);
+                observed_newlines = Some(span_newlines);
                 observed_safe = Some(safe);
                 if safe {
-                    EditReplaySourceProof::Simple { newlines }
+                    EditReplaySourceProof::Simple {
+                        newlines: span_newlines,
+                    }
                 } else {
                     EditReplaySourceProof::Rejected
                 }
@@ -4339,12 +4392,17 @@ impl LayoutEngine {
             // A pure delete has an empty NEW span (its old extent is the deleted
             // range) — vacuously ASCII-safe; edit_replay + the post-walk
             // validation own the delete-specific safety.
+            //
+            // The scan itself is window-bounded through `proof_scan_allowed`
+            // above (GNU try_window_id's GIVE_UP (15) + get_narrowed_len): a
+            // bulk insert covering the window start or longer than the window
+            // can display skips the proof and pays one bounded window re-lay.
+            // Newlines come from `span_source_newline_count`, not this scan.
             #[cfg(test)]
             if self.allow_below_reuse {
                 crate::incremental_layout::lazy_proof_test_support::note_source_proof();
             }
-            let mut span_newlines = 0usize;
-            let simple_span = self.allow_below_reuse
+            let simple_span = proof_scan_allowed
                 && (dirty_start..dirty_end).all(|cp| {
                     #[cfg(test)]
                     crate::incremental_layout::lazy_proof_test_support::note_char_query();
@@ -4352,10 +4410,7 @@ impl LayoutEngine {
                         neovm_core::buffer::CharPos0::new(cp as usize),
                     );
                     match buffer.char_at_emacs_byte_pos(byte) {
-                        Some('\n') => {
-                            span_newlines += 1;
-                            true
-                        }
+                        Some('\n') => true,
                         Some(c) => c.is_ascii_graphic() || c == ' ',
                         None => false,
                     }
