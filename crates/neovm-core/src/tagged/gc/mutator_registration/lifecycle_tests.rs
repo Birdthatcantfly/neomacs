@@ -14,7 +14,7 @@ fn epoch() -> NonZeroU64 {
 fn retain_failed_era(failure: EraFinishFailure<'_>, expected: RegistrationError) {
     assert_eq!(failure.reason, expected);
     assert!(failure.era.keeper.is_some());
-    assert!(failure.era.collector.is_some());
+    assert!(failure.era.collector.borrow().is_some());
     assert!(failure.era.registry.is_some());
     // The fallback must retain authority/backing. No test repairs a forgotten
     // resource or pretends that its missing destructor discharged an obligation.

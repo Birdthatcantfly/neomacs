@@ -53,6 +53,32 @@ impl Drop for RegistryGuard<'_> {
 }
 
 impl Registry {
+    /// Internal stopped image prepare/commit only. Never wait while retaining a gate,
+    /// entry/root-table/allocator guard, or a callback into owner code.
+    pub(super) fn lock_blocking(&self) -> Result<RegistryGuard<'_>, RegistrationError> {
+        if self.poisoned.load(Ordering::Acquire) {
+            return Err(RegistrationError::Poisoned);
+        }
+        if self.gate_owner.load(Ordering::Acquire) == current_thread() {
+            return Err(RegistrationError::Busy);
+        }
+        match self.state.lock() {
+            Ok(guard) => {
+                let guard = RegistryGuard::new(self, guard);
+                if self.poisoned.load(Ordering::Acquire) {
+                    Err(RegistrationError::Poisoned)
+                } else {
+                    Ok(guard)
+                }
+            }
+            Err(error) => {
+                let _guard = RegistryGuard::new(self, error.into_inner());
+                self.poison();
+                Err(RegistrationError::Poisoned)
+            }
+        }
+    }
+
     pub(super) fn lock(&self) -> Result<RegistryGuard<'_>, RegistrationError> {
         if self.poisoned.load(Ordering::Acquire) {
             return Err(RegistrationError::Poisoned);

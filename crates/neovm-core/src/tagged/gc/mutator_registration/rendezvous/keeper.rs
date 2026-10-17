@@ -179,6 +179,25 @@ impl ParallelHeapEra<'_> {
 }
 
 impl<'era> AllStopped<'era> {
+    pub(crate) fn check_world_roots(
+        &self,
+        heap: super::super::HeapIdentity,
+    ) -> Result<(), RendezvousError> {
+        keeper(self.registry)?;
+        if self.registry.heap != heap {
+            return Err(RendezvousError::Identity);
+        }
+        let gate = self.registry.lock()?;
+        self.validate(&gate)
+    }
+
+    pub(in crate::tagged::gc::mutator_registration) fn matches_registry(
+        &self,
+        registry: &Registry,
+    ) -> bool {
+        std::ptr::eq(self.registry, registry)
+    }
+
     pub fn epoch(&self) -> NonZeroU64 {
         self.epoch
     }

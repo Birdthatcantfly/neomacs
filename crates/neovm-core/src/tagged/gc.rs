@@ -2791,11 +2791,11 @@ pub use facade_mark::{
     QuiescentCollector,
 };
 pub use mutator_registration::{
-    AllStopped, AllStoppedFailure, Mode, Mutator, MutatorEntry, MutatorFinishFailure, MutatorKey,
-    MutatorPermit, MutatorStartFailure, OwnerPublication, ParallelHeapEra, Phase,
-    RegistrationCensus, RegistrationError, Rendezvous, RendezvousError, Request, ResumeGcImage,
-    ResumeGcImageFailure, RootedRetireFailure, RunAccess, Snapshot, StoppedSummaries,
-    YoungWorkerLoan,
+    AllStopped, AllStoppedFailure, CollectionError, CollectionReport, Mode, Mutator, MutatorEntry,
+    MutatorFinishFailure, MutatorKey, MutatorPermit, MutatorStartFailure, OwnerPublication,
+    ParallelHeapEra, Phase, RegistrationCensus, RegistrationError, Rendezvous, RendezvousError,
+    Request, ResumeGcImage, ResumeGcImageFailure, RootedRetireFailure, RunAccess, Snapshot,
+    StoppedSummaries, YoungWorkerLoan,
 };
 
 pub(crate) use mutator_registration::{OwnerRootAdmission, StoppedRootAdmission};

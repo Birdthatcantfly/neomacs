@@ -67,7 +67,7 @@ impl<'era> Mutator<'era> {
     }
 
     #[cfg(test)]
-    pub(super) fn begin_restore_retry(
+    pub(in crate::tagged::gc::mutator_registration) fn begin_restore_retry(
         &mut self,
         native: bool,
     ) -> Result<ResumeGcImage<'_, 'era>, RendezvousError> {

@@ -1,14 +1,17 @@
-//! Cold canonical registration. This module grants no heap execution or trace
-//! authority. The serial inline iterator remains the Sim representation.
+//! Cold canonical registration, rooted rendezvous and scoped stopped collection.
+//! Running heap execution remains excluded. The serial inline iterator remains
+//! the Sim representation.
 //!
 //! An era owns the actual World Baton and the quiescent heap loan. Only a
 //! metadata permit crosses a thread boundary; owner buffers are built there.
 //! Unfinished teardown retains both authority and backing instead of returning
 //! a usable serial World after an abandoned owner.
-#![allow(dead_code)] // Consumers are admitted in subsequent proof batches.
+#![allow(dead_code)] // Production Context execution admission remains a later proof batch.
 
+mod collection;
 mod gate;
 mod image;
+pub use collection::{CollectionError, CollectionReport};
 use gate::RegistryGuard;
 mod rendezvous;
 mod summaries;
@@ -25,7 +28,7 @@ pub use token::{
     YoungWorkerLoan,
 };
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::rc::Rc;
@@ -37,7 +40,7 @@ use rustc_hash::FxHashMap;
 
 use super::young_registry::{YoungRegistrationId, YoungRegistryError};
 use super::{HeapIdentity, QuiescentCollector};
-use crate::emacs_core::eval::world::Baton;
+use crate::emacs_core::eval::world::{Baton, FrozenLegacyRoots};
 use image::{OwnerGcState, PublishedGcImage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,7 +221,8 @@ impl Registry {
 /// There is deliberately no Deref, heap accessor, or constructor from IDs.
 #[must_use = "finish explicitly; abandonment retains the World and poisons the era"]
 pub struct ParallelHeapEra<'heap> {
-    collector: Option<QuiescentCollector<'heap>>,
+    collector: RefCell<Option<QuiescentCollector<'heap>>>,
+    legacy_roots: Option<FrozenLegacyRoots>,
     keeper: Option<Baton>,
     registry: Option<Arc<Registry>>,
     _thread: PhantomData<Rc<()>>,
@@ -341,7 +345,8 @@ impl<'heap> ParallelHeapEra<'heap> {
         let mut young_index = FxHashMap::default();
         young_index.insert(young, 0);
         Ok(Self {
-            collector: Some(collector),
+            collector: RefCell::new(Some(collector)),
+            legacy_roots: None,
             keeper: Some(keeper),
             registry: Some(Arc::new(Registry {
                 heap,
@@ -453,16 +458,16 @@ impl<'heap> ParallelHeapEra<'heap> {
         StoppedSummaries::new(self.registry())
     }
 
-    /// Explicit teardown is metadata-only. No collection, polling, or waits.
-    /// New young backlinks and result roots must first be discharged by the
-    /// later collector/root authority; A3 refuses them conservatively.
+    /// Explicit teardown performs no collection or implicit owner resumption.
+    /// Collection and owner handoff must discharge young logs and execution
+    /// roots before this terminal transfer can restore serial ownership.
     pub(crate) fn finish(
         mut self,
     ) -> Result<(QuiescentCollector<'heap>, Baton), EraFinishFailure<'heap>> {
         if let Err(reason) = self.prepare_finish() {
             return Err(EraFinishFailure { reason, era: self });
         }
-        let collector = self.collector.take().expect("live era");
+        let collector = self.collector.get_mut().take().expect("live era");
         let keeper = self.keeper.take().expect("live era");
         self.registry.take();
         Ok((collector, keeper))
@@ -676,6 +681,7 @@ impl<'heap> ParallelHeapEra<'heap> {
         }
         if let Err(failure) = image.restore_legacy(
             self.collector
+                .get_mut()
                 .as_mut()
                 .expect("live era")
                 .registration_heap_mut(),
@@ -710,8 +716,15 @@ static_assertions::assert_impl_all!(MutatorEntry: Send, Sync);
 static_assertions::assert_impl_all!(MutatorKey: Send, Sync, Copy);
 
 #[cfg(test)]
+mod collection_tests;
+#[cfg(test)]
 mod image_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
+mod peer_young_collection_tests;
+#[cfg(test)]
 mod tests;
+
+#[cfg(all(test, not(feature = "gc-memory-telemetry")))]
+mod collection_scalar_tests;

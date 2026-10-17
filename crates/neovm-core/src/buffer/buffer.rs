@@ -8454,3 +8454,7 @@ mod tests;
 #[cfg(test)]
 #[path = "buffer/tests/world_storage_test.rs"]
 mod world_storage_tests;
+
+// Cold proof-1 collector projection; no change to the serial root walk.
+#[path = "parallel_roots.rs"]
+mod parallel_roots;

@@ -1416,6 +1416,16 @@ pub(super) struct ConsStopAll<'a> {
     _owner: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
+/// Temporary index into the canonical stopped images, never an owner registry.
+pub(in crate::tagged::gc) trait ParallelYoungLogs {
+    fn heap_identity(&self) -> HeapIdentity;
+    fn registrations(&self) -> &[YoungRegistrationId];
+    fn resolve_mut(
+        &mut self,
+        id: YoungRegistrationId,
+    ) -> Result<&mut YoungBlockLog, YoungRegistryError>;
+}
+
 static_assertions::assert_not_impl_any!(ConsStopAll<'_>: Send, Sync);
 
 /// Panic bookkeeping is confined to collector stop-all extents, never refill.
@@ -1469,6 +1479,98 @@ impl Drop for StoppedAllocatorState<'_> {
 }
 
 impl ConsStopAll<'_> {
+    /// Capture every owner's pending young blocks before an eager major.
+    /// Existing promotion clears their flags only after marking finishes.
+    #[cold]
+    pub(in crate::tagged::gc) fn capture_parallel_major(
+        &mut self,
+        logs: &mut impl ParallelYoungLogs,
+    ) -> Result<(), YoungRegistryError> {
+        if logs.heap_identity() != self.state.identity {
+            return Err(YoungRegistryError::WrongHeap);
+        }
+        assert!(
+            self.state.mark_work.is_empty(),
+            "previous mark work not promoted"
+        );
+        let ids = logs.registrations().to_vec();
+        let mut total = 0usize;
+        // Prove BOTH directions before touching any canonical payload.
+        for (position, id) in ids.iter().copied().enumerate() {
+            if ids[..position].contains(&id) {
+                return Err(YoungRegistryError::UnknownRegistration);
+            }
+            let log = logs.resolve_mut(id)?;
+            if log.id() != id {
+                return Err(YoungRegistryError::UnknownRegistration);
+            }
+            match log.pending_index() {
+                Some(index)
+                    if !log.blocks().is_empty()
+                        && self.state.pending_mutators.get(index.index()) == Some(&id) => {}
+                None if log.blocks().is_empty() => {}
+                _ => return Err(YoungRegistryError::UnknownRegistration),
+            }
+            for (index, base) in log.blocks().iter().enumerate() {
+                let Some(&slot) = self.state.blocks.get(base) else {
+                    return Err(YoungRegistryError::UnknownRegistration);
+                };
+                let block = self.state.block(slot);
+                let backlink = block
+                    .young_log_slot
+                    .ok_or(YoungRegistryError::UnknownRegistration)?;
+                if backlink.registration != id
+                    || backlink.index.index() != index
+                    || !block.young.load(Ordering::Relaxed)
+                {
+                    return Err(YoungRegistryError::UnknownRegistration);
+                }
+            }
+            total = total
+                .checked_add(log.blocks().len())
+                .expect("live block inventory fits usize");
+        }
+        for (index, id) in self.state.pending_mutators.iter().copied().enumerate() {
+            let log = logs.resolve_mut(id)?;
+            if !ids.contains(&id)
+                || log.pending_index().map(|i| i.index()) != Some(index)
+                || log.blocks().is_empty()
+            {
+                return Err(YoungRegistryError::UnknownRegistration);
+            }
+        }
+        for &slot in self.state.blocks.values() {
+            let block = self.state.block(slot);
+            if let Some(backlink) = block.young_log_slot {
+                let log = logs.resolve_mut(backlink.registration)?;
+                if !ids.contains(&backlink.registration)
+                    || log.blocks().get(backlink.index.index()) != Some(&block.base)
+                {
+                    return Err(YoungRegistryError::UnknownRegistration);
+                }
+            } else if block.young.load(Ordering::Relaxed) {
+                return Err(YoungRegistryError::UnknownRegistration);
+            }
+        }
+        let mut work = Vec::with_capacity(total);
+        while let Some(&id) = self.state.pending_mutators.last() {
+            let first = work.len();
+            let log = logs
+                .resolve_mut(id)
+                .expect("preflighted canonical owner remains published");
+            work.extend(log.drain_blocks());
+            assert!(
+                log.remove_pending(&mut self.state.pending_mutators)
+                    .is_none()
+            );
+            for &base in &work[first..] {
+                self.state.block_for_base_mut(base).young_log_slot = None;
+            }
+        }
+        self.state.mark_work = work;
+        Ok(())
+    }
+
     /// One-way admission commits at the stop-all boundary. Consuming this
     /// capability prevents using its former unlocked state after publication.
     pub(super) fn admit_threads(mut self) {
@@ -1807,6 +1909,9 @@ impl TaggedHeap {
     }
 }
 
+#[cfg(test)]
+#[path = "tests/parallel_young_test.rs"]
+mod parallel_young_tests;
 #[cfg(test)]
 #[path = "tests/cons_allocator_test.rs"]
 mod tests;

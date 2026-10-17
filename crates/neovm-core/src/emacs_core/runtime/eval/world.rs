@@ -25,7 +25,7 @@ use std::sync::Arc;
 mod green_owner;
 mod slot;
 mod sole_owner;
-pub(crate) use green_owner::Baton;
+pub(crate) use green_owner::{Baton, FrozenLegacyRoots};
 pub(crate) use slot::WorldSlot;
 pub(crate) use sole_owner::{
     PublishedSoleOwnerDriver, SoleOwnerDriver, SoleOwnerRegistration, SoleOwnerVm,

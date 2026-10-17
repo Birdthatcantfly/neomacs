@@ -860,12 +860,7 @@ impl TaggedHeap {
         // Check ALL canonical owners before finish can consume residual work
         // or resource teardown can begin. Current-owner retirement alone does
         // not cover a worker holding another registration's young payload.
-        if self._satb_layout_reserve.has_outstanding_young_loans() {
-            return Err(MarkFinishError::MutatorsNotStopped(self.heap_identity()));
-        }
-        if self.facade_mark_is_excluded() {
-            return Err(MarkFinishError::FacadeRetained(self.heap_identity()));
-        }
+        self.shutdown_admission()?;
         self.finish_concurrent_mark()?;
         // The enclosing owner is consumed by this explicit shutdown extent.
         // Retire before unregistration/native teardown; Drop itself never
@@ -877,6 +872,18 @@ impl TaggedHeap {
             .acknowledge();
         crate::tagged::gc::clear_tagged_heap_if_installed(&self);
         self.reclaim_intrusive_objects(ReclamationMode::Explicit);
+        Ok(())
+    }
+
+    /// Read-only shutdown refusal, shared with retained-era regression checks.
+    #[inline(always)]
+    pub(super) fn shutdown_admission(&self) -> Result<(), MarkFinishError> {
+        if self._satb_layout_reserve.has_outstanding_young_loans() {
+            return Err(MarkFinishError::MutatorsNotStopped(self.heap_identity()));
+        }
+        if self.facade_mark_is_excluded() {
+            return Err(MarkFinishError::FacadeRetained(self.heap_identity()));
+        }
         Ok(())
     }
 

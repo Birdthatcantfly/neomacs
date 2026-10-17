@@ -1,7 +1,7 @@
 //! Owned stopped facts, never a reference to an owner's hot state.
 //!
 //! Producing an image does not establish stop-all authority. Encoded words and
-//! addresses remain opaque until a future collector admission authorizes their
+//! addresses remain opaque until a stopped collector admission authorizes their
 //! decoding. Publication/registration identity belongs to the parent module.
 //! The parent's sealed state also prevents publishing an emptied shell twice.
 
@@ -90,6 +90,47 @@ struct Facts {
 pub(in crate::tagged::gc) struct PublishedGcImage {
     facts: Facts,
     young: YoungBlockLog,
+}
+
+/// Owned cycle obligations; address families retain their original meaning.
+pub(super) struct CollectionWork {
+    pub(super) roots: Vec<MarkWord>,
+    pub(super) remembered: Vec<MarkWord>,
+    pub(super) mapped: Vec<usize>,
+    pub(super) black_headers: Vec<usize>,
+    pub(super) black_regions: Vec<BlackBornRegion>,
+    pub(super) symbols: Vec<SymId>,
+    pub(super) cons_writes: Vec<MarkWord>,
+    pub(super) written_owners: Vec<usize>,
+}
+
+/// Only the serial owner's cumulative history is restored after a temporary
+/// stopped aggregate. The post-sweep live balance remains canonical in owner 0.
+pub(super) struct CollectionHistory {
+    memory: [u64; MEMORY_USE_COUNT_LEN],
+    banked: u64,
+    pending: usize,
+    pacing: GenerationPacingCounters,
+}
+impl CollectionHistory {
+    pub(super) fn save(heap: &TaggedHeap) -> Self {
+        let h = heap.current_mutator_gc();
+        Self {
+            memory: h.memory_use_counts,
+            banked: h.bytes_banked_at_resets,
+            pending: h.bytes_since_gc,
+            pacing: h.pacing,
+        }
+    }
+    pub(super) fn restore(self, heap: &mut TaggedHeap, generational: bool) {
+        let h = heap.current_mutator_gc_mut();
+        h.memory_use_counts = self.memory;
+        h.bytes_banked_at_resets = self.banked.saturating_add(self.pending as u64);
+        h.bytes_since_gc = 0;
+        if !generational {
+            h.pacing = self.pacing;
+        }
+    }
 }
 
 /// A borrowed census item. Visiting preserves the underlying pending facts;
@@ -300,6 +341,102 @@ impl OwnerGcState {
 }
 
 impl PublishedGcImage {
+    #[cfg(test)]
+    pub(in crate::tagged::gc) fn seed_collection_words_for_test(
+        &mut self,
+        root: MarkWord,
+        remembered: MarkWord,
+        cons_write: MarkWord,
+    ) {
+        self.facts.roots.push(root);
+        self.facts.remset.push(remembered);
+        self.facts.cons_writes.push(cons_write);
+    }
+
+    /// Copy into collector-owned work before retiring any original cycle log.
+    /// Root scratch is owner state and survives the response unchanged.
+    pub(super) fn take_collection_work(&mut self) -> CollectionWork {
+        let f = &mut self.facts;
+        let work = CollectionWork {
+            roots: f.roots.clone(),
+            remembered: f.remset.clone(),
+            mapped: f.mapped_seen.iter().copied().collect(),
+            black_headers: f.black_headers.clone(),
+            black_regions: f.black_regions.clone(),
+            symbols: f.symbol_preimages.clone(),
+            cons_writes: f.cons_writes.clone(),
+            written_owners: f.snapshotted_owners.iter().copied().collect(),
+        };
+        f.remset.clear();
+        f.mapped_seen.clear();
+        f.black_headers.clear();
+        f.black_regions.clear();
+        f.symbol_preimages.clear();
+        f.cons_writes.clear();
+        f.snapshotted_owners.clear();
+        // This set only deduplicates string preimages. Publication proved the
+        // actual SATB word buffer empty; its addresses are not tagged roots.
+        f.string_preimage_addrs.clear();
+        work
+    }
+
+    /// Aggregate only scalars into the stopped collector's inline scratch.
+    /// All regions are closed; no allocation or observation can race this sum.
+    pub(super) fn add_collection_scalars(&self, heap: &mut TaggedHeap) {
+        let f = &self.facts;
+        let h = heap.current_mutator_gc_mut();
+        h.allocated_count = h.allocated_count.saturating_add(f.allocated_count);
+        h.bytes_since_gc = h.bytes_since_gc.saturating_add(f.bytes_since_gc);
+        h.bytes_banked_at_resets = h
+            .bytes_banked_at_resets
+            .saturating_add(f.bytes_banked_at_resets);
+        for (dst, src) in h.memory_use_counts.iter_mut().zip(f.memory_use_counts) {
+            *dst = dst.wrapping_add(src);
+        }
+        h.pacing.promoted_since_major = h
+            .pacing
+            .promoted_since_major
+            .saturating_add(f.pacing.promoted_since_major);
+        h.pacing.minors_since_major = h
+            .pacing
+            .minors_since_major
+            .saturating_add(f.pacing.minors_since_major);
+        h.pacing.stress_cycles_since_major = h
+            .pacing
+            .stress_cycles_since_major
+            .saturating_add(f.pacing.stress_cycles_since_major);
+        macro_rules! add_stats { ($($field:ident),* $(,)?) => { $(heap.region_stats.$field = heap.region_stats.$field.saturating_add(f.region_stats.$field);)* }; }
+        add_stats!(
+            cons_refills,
+            cons_cells_granted,
+            cons_short_runs,
+            cons_from_free_list,
+            cons_from_block_tail,
+            cons_from_fresh_block,
+            cons_tail_closes,
+            float_refills,
+            float_slots_granted,
+            float_short_runs,
+            float_tail_closes
+        );
+    }
+
+    pub(super) fn finish_major_response(&mut self, generational: bool) {
+        // This is a charged live balance, not lifetime allocation history or
+        // object ownership. Owner 0 retains the exact post-sweep aggregate;
+        // peers start accruing new local credits after this response.
+        self.facts.allocated_count = 0;
+        self.facts.bytes_banked_at_resets = self
+            .facts
+            .bytes_banked_at_resets
+            .saturating_add(self.facts.bytes_since_gc as u64);
+        self.facts.bytes_since_gc = 0;
+        if generational {
+            self.facts.pacing = GenerationPacingCounters::default();
+        }
+        self.facts.region_stats = RegionStats::default();
+    }
+
     /// A4's stopped fixture consumes only its known immediate work marker.
     /// It cannot discard another payload or act as a production collector.
     #[cfg(test)]
@@ -493,8 +630,8 @@ impl PublishedGcImage {
             && self.young.pending_index().is_none()
     }
 
-    /// Merge once at explicit era finish. Young backlinks cannot yet be moved
-    /// between registrations; A3 refuses rather than silently losing them.
+    /// Merge once at explicit era finish. Young backlinks must already have
+    /// been drained by collection; terminal transfer never silently loses them.
     pub(in crate::tagged::gc) fn merge_non_young(
         &mut self,
         other: Self,
