@@ -750,3 +750,6 @@ mod cons_allocation_tests;
 mod cons_micro_tests;
 #[cfg(test)]
 mod root_slot_tests;
+
+#[cfg(test)]
+mod slice_tests;

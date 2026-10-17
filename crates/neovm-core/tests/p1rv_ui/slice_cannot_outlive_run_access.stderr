@@ -1,0 +1,12 @@
+error[E0505]: cannot move out of `run` because it is borrowed
+ --> tests/p1rv_ui/slice_cannot_outlive_run_access.rs:4:28
+  |
+3 | fn use_slice_after_dropping_run(mut run: RunAccess<'_, '_>, home: &OwnerRootSlot<'_>) {
+  |                                 ------- binding `run` declared here
+4 |     let _ = run.with_slice(|slice| {
+  |             --- ---------- ^^^^^^^ move out of `run` occurs here
+  |             |   |
+  |             |   borrow later used by call
+  |             borrow of `run` occurs here
+5 |         drop(run);
+  |              --- move occurs due to use in closure

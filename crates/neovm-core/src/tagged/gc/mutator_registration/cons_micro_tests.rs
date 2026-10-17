@@ -3,7 +3,7 @@
 use super::*;
 use crate::emacs_core::eval::Context;
 use crate::tagged::gc::alloc_region::RegionStats;
-use crate::tagged::gc::{OwnerRootSlot, TaggedHeap};
+use crate::tagged::gc::{RunSlice, SliceRoot, TaggedHeap};
 use crate::tagged::header::ConsCell;
 use crate::tagged::transport::SharedRoot;
 use crate::tagged::value::TaggedValue as Value;
@@ -54,15 +54,15 @@ fn r2_cons_micro_sim_loop(heap: &mut TaggedHeap, car: Value, mut head: Value, n:
 /// The complete list remains observable through the final canonical slot.
 /// No assertion/counter/black_box is added per cons beyond normal Result use.
 #[inline(never)]
-fn r2_cons_micro_local_loop<'era>(
-    run: &mut RunAccess<'_, 'era>,
-    car: &OwnerRootSlot<'era>,
-    cdr: &OwnerRootSlot<'era>,
-    head: &mut OwnerRootSlot<'era>,
+fn r2_cons_micro_local_loop<'brand>(
+    slice: &mut RunSlice<'brand, '_>,
+    car: &SliceRoot<'brand>,
+    cdr: &SliceRoot<'brand>,
+    head: &mut SliceRoot<'brand>,
     n: usize,
 ) {
     for _ in 0..n {
-        run.cons_into(car, cdr, head).unwrap();
+        slice.cons_into(car, cdr, head).unwrap();
     }
 }
 
@@ -192,38 +192,48 @@ fn local(shape: &str, n: usize) {
             let (head_word, warm, delta, bank) = {
                 let mut run = owner.run_access().unwrap();
                 let car = run.root_slot(&car_root).unwrap();
-                let mut head = run.root_slot(&nil_root).unwrap();
-                // Clone immutable slot identity ONCE. Both handles name the
-                // same canonical home; cons_into reads cdr before installing.
-                let cdr = head.clone();
+                let head = run.root_slot(&nil_root).unwrap();
                 assert_eq!(run.state().region_stats.cons_from_fresh_block, 0);
-                let mut warm = 0;
-                for _ in 0..MAX_WARM {
-                    run.cons_into(&car, &cdr, &mut head).unwrap();
-                    warm += 1;
-                    if run.state().region_stats.cons_from_fresh_block != 0 {
-                        break;
-                    }
-                }
-                assert!(
-                    warm < MAX_WARM,
-                    "warmup reaches actual catalog fresh source"
-                );
-                let bounds = run.cons_region_for_test().unwrap();
-                assert!(bounds.2 >= 127);
-                let before = Counts::of(&run.state().region_stats);
                 let bank_len = run.state().root_scratch.len();
                 let bank_capacity = run.state().root_scratch.capacity();
-                r2_cons_micro_local_loop(&mut run, &car, &cdr, &mut head, n);
-                let delta = Counts::of(&run.state().region_stats).since(before);
+                // Entry validation, cold binding and one alias clone precede
+                // both warmup and the measured marker. The wrapper retains
+                // the actual guard and closes it after the marker returns.
+                let (warm, delta) = run
+                    .with_slice(|slice| {
+                        let car = slice.bind(&car).unwrap();
+                        let mut head = slice.bind(&head).unwrap();
+                        let cdr = head.clone();
+                        let mut warm = 0;
+                        for _ in 0..MAX_WARM {
+                            slice.cons_into(&car, &cdr, &mut head).unwrap();
+                            warm += 1;
+                            if slice.stats_for_test().cons_from_fresh_block != 0 {
+                                break;
+                            }
+                        }
+                        assert!(
+                            warm < MAX_WARM,
+                            "warmup reaches actual catalog fresh source"
+                        );
+                        assert!(slice.remaining_for_test() >= 127);
+                        let before = Counts::of(&slice.stats_for_test());
+                        r2_cons_micro_local_loop(slice, &car, &cdr, &mut head, n);
+                        let delta = Counts::of(&slice.stats_for_test()).since(before);
+                        if shape == "resident" {
+                            assert_eq!(delta.refills, 0);
+                            assert_eq!(delta.granted, 0);
+                        }
+                        (warm, delta)
+                    })
+                    .unwrap();
                 assert_eq!(run.state().root_scratch.len(), bank_len);
                 assert_eq!(run.state().root_scratch.capacity(), bank_capacity);
-                if shape == "resident" {
-                    assert_eq!(delta.refills, 0);
-                    assert_eq!(delta.granted, 0);
-                }
                 let word = head.word_for_test(&run);
-                run.close_cons_region().unwrap();
+                assert!(
+                    run.cons_region_for_test().is_none(),
+                    "slice wrapper closed its region"
+                );
                 assert_eq!(run.state().hot.allocated_count, warm + n);
                 (word, warm, delta, (bank_len, bank_capacity))
             };
@@ -255,7 +265,7 @@ fn local(shape: &str, n: usize) {
 }
 
 /// Run directly from ONE preserved optimized libtest ELF, not through Cargo
-/// during measurement. See tmp/peer-p1rv/r2/MICRO-PLAN.md and run-micro.py.
+/// during measurement. See tmp/peer-p1rv/r7/TEST-PLAN.md and run-micro.py.
 #[test]
 #[ignore = "same-binary CPU12 Callgrind micro; run explicitly"]
 fn rooted_slot_cons_micro() {

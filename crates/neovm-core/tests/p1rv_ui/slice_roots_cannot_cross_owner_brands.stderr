@@ -1,0 +1,89 @@
+error[E0521]: borrowed data escapes outside of closure
+  --> tests/p1rv_ui/slice_roots_cannot_cross_owner_brands.rs:14:21
+   |
+10 |         let foreign = left.bind(first_home).unwrap();
+   |             ------- `foreign` declared here, outside of the closure body
+11 |         let _ = second.with_slice(|right| {
+   |                                    ----- `right` is a reference that is only valid in the closure body
+...
+14 |             let _ = right.cons_into(&foreign, &local, &mut result);
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `right` escapes the closure body here
+   |
+   = note: requirement occurs because of the type `SliceRoot<'_>`, which makes the generic argument `'_` invariant
+   = note: the struct `SliceRoot<'brand>` is invariant over the parameter `'brand`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error[E0521]: borrowed data escapes outside of closure
+  --> tests/p1rv_ui/slice_roots_cannot_cross_owner_brands.rs:14:21
+   |
+ 9 |     let _ = first.with_slice(|left| {
+   |                               ----
+   |                               |
+   |                               `left` is a reference that is only valid in the closure body
+   |                               has type `&mut RunSlice<'1, '_>`
+...
+14 |             let _ = right.cons_into(&foreign, &local, &mut result);
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |                     |
+   |                     `left` escapes the closure body here
+   |                     argument requires that `'1` must outlive `'static`
+
+error[E0521]: borrowed data escapes outside of closure
+  --> tests/p1rv_ui/slice_roots_cannot_cross_owner_brands.rs:30:21
+   |
+26 |         let foreign = left.bind(first_home).unwrap();
+   |             ------- `foreign` declared here, outside of the closure body
+27 |         let _ = second.with_slice(|right| {
+   |                                    ----- `right` is a reference that is only valid in the closure body
+...
+30 |             let _ = right.cons_into(&local, &foreign, &mut result);
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `right` escapes the closure body here
+   |
+   = note: requirement occurs because of the type `SliceRoot<'_>`, which makes the generic argument `'_` invariant
+   = note: the struct `SliceRoot<'brand>` is invariant over the parameter `'brand`
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error[E0521]: borrowed data escapes outside of closure
+  --> tests/p1rv_ui/slice_roots_cannot_cross_owner_brands.rs:30:21
+   |
+25 |     let _ = first.with_slice(|left| {
+   |                               ----
+   |                               |
+   |                               `left` is a reference that is only valid in the closure body
+   |                               has type `&mut RunSlice<'1, '_>`
+...
+30 |             let _ = right.cons_into(&local, &foreign, &mut result);
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |                     |
+   |                     `left` escapes the closure body here
+   |                     argument requires that `'1` must outlive `'static`
+
+error[E0521]: borrowed data escapes outside of closure
+  --> tests/p1rv_ui/slice_roots_cannot_cross_owner_brands.rs:45:21
+   |
+42 |         let mut foreign = left.bind(first_home).unwrap();
+   |             ----------- `foreign` declared here, outside of the closure body
+43 |         let _ = second.with_slice(|right| {
+   |                                    ----- `right` is a reference that is only valid in the closure body
+44 |             let local = right.bind(second_home).unwrap();
+45 |             let _ = right.cons_into(&local, &local, &mut foreign);
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `right` escapes the closure body here
+   |
+   = note: requirement occurs because of a mutable reference to `SliceRoot<'_>`
+   = note: mutable references are invariant over their type parameter
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error[E0521]: borrowed data escapes outside of closure
+  --> tests/p1rv_ui/slice_roots_cannot_cross_owner_brands.rs:45:21
+   |
+41 |     let _ = first.with_slice(|left| {
+   |                               ----
+   |                               |
+   |                               `left` is a reference that is only valid in the closure body
+   |                               has type `&mut RunSlice<'1, '_>`
+...
+45 |             let _ = right.cons_into(&local, &local, &mut foreign);
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |                     |
+   |                     `left` escapes the closure body here
+   |                     argument requires that `'1` must outlive `'static`

@@ -1,0 +1,12 @@
+error: lifetime may not live long enough
+ --> tests/p1rv_ui/slice_root_cannot_escape_factory.rs:4:28
+  |
+4 |     run.with_slice(|slice| slice.bind(home).unwrap()).unwrap()
+  |                     ------ ^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+  |                     |    |
+  |                     |    return type of closure is SliceRoot<'2>
+  |                     has type `&mut RunSlice<'1, '_>`
+  |
+  = note: requirement occurs because of the type `SliceRoot<'_>`, which makes the generic argument `'_` invariant
+  = note: the struct `SliceRoot<'brand>` is invariant over the parameter `'brand`
+  = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
