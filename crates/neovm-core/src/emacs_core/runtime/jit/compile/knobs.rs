@@ -2243,14 +2243,22 @@ pub(crate) fn force_opt_osr_entry_for_test(on: Option<bool>) {
 }
 
 /// Opt switch constant rematerialization and IR epoch-guard scheduling.
-/// Default off. Immutable process configuration, with no Lisp runtime state.
+///
+/// Unset and `on` enable it. `off`, and every other spelling, is the opt-out
+/// and preserves the original CLIF. Immutable process configuration, with no
+/// Lisp runtime state. Graduated on together with
+/// `NEOVM_JIT_CODE_PLACEMENT=switch64`.
 pub(crate) fn jit_switch_hoist_on() -> bool {
     #[cfg(test)]
     if let Some(on) = SWITCH_HOIST_TEST_OVERRIDE.with(std::cell::Cell::get) {
         return on;
     }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("NEOVM_JIT_SWITCH_HOIST").as_deref() == Ok("on"))
+    *ON.get_or_init(|| match std::env::var("NEOVM_JIT_SWITCH_HOIST") {
+        Err(std::env::VarError::NotPresent) => true,
+        Ok(value) if value == "on" => true,
+        _ => false,
+    })
 }
 
 #[cfg(test)]

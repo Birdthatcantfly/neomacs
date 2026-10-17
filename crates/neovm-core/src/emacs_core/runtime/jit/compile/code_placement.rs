@@ -1,4 +1,6 @@
-//! Experimental whole-function placement without changing emitted bytes.
+//! Whole-function placement without changing emitted bytes.
+//!
+//! Unset `NEOVM_JIT_CODE_PLACEMENT` is `switch64`. `off` is the explicit opt-out.
 //!
 //! Configuration is immutable process state. The allocation hint is a scalar
 //! owned by one synchronous compiler invocation on its current thread; it never
@@ -96,7 +98,8 @@ pub(crate) fn parse_config(
     offset: Option<&str>,
 ) -> Result<PlacementConfig, PlacementError> {
     let policy = match policy {
-        None => PlacementPolicy::Off,
+        // Graduated with `NEOVM_JIT_SWITCH_HOIST`. `off` remains the opt-out.
+        None => PlacementPolicy::Switch64,
         Some(value) => value
             .trim()
             .parse()

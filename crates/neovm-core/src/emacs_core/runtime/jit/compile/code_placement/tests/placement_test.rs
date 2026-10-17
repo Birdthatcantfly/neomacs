@@ -7,7 +7,17 @@ use super::*;
 fn placement_configuration_rejects_ambiguous_or_invalid_offsets() {
     assert_eq!(
         parse_config(None, None).unwrap(),
-        PlacementConfig::Policy(PlacementPolicy::Off)
+        PlacementConfig::Policy(PlacementPolicy::Switch64),
+        "unset placement is the graduated switch64 default"
+    );
+    assert_eq!(
+        parse_config(Some("off"), None).unwrap(),
+        PlacementConfig::Policy(PlacementPolicy::Off),
+        "off remains the explicit opt-out"
+    );
+    assert_eq!(
+        parse_config(Some("switch64"), None).unwrap(),
+        PlacementConfig::Policy(PlacementPolicy::Switch64)
     );
     for value in ["-1", "64", "256", "garbage", ""] {
         assert!(parse_config(None, Some(value)).is_err(), "{value}");
