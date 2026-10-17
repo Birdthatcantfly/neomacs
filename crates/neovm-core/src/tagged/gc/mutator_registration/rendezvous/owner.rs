@@ -95,7 +95,16 @@ impl<'era> Mutator<'era> {
     /// its image remain retained and participate in later frozen memberships.
     pub fn retire_rooted(mut self, roots: &[SharedRoot]) -> Result<(), RootedRetireFailure<'era>> {
         let result = (|| {
-            if entry_state(&self.entry)?.rendezvous.mode != Mode::NativeStopped {
+            // Every Running/Resuming entry access shares the canonical gate.
+            // An ungated mode probe could make another owner's post-restore
+            // membership census fail Busy after its image had already moved.
+            let already_native = {
+                let gate = self.registry.lock()?;
+                self.registry.validate(&gate, self.entry.key)?;
+                let current = entry_state(&self.entry)?;
+                current.rendezvous.mode == Mode::NativeStopped
+            };
+            if !already_native {
                 self.publish_roots(None, true, roots)?;
             }
             let gate = self.registry.lock()?;

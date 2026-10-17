@@ -99,6 +99,20 @@ fn park(owner: &mut Mutator<'_>, roots: &[SharedRoot]) -> u64 {
     returned
 }
 
+// Observers obey the same gate-before-entry order as mutating owners. An
+// ungated test-only inspector can otherwise manufacture a post-restore Busy.
+fn inspect_entry<R>(
+    rv: Rendezvous<'_>,
+    entry: &MutatorEntry,
+    mut inspect: impl FnMut(&EntryState) -> R,
+) -> R {
+    retry(|| {
+        let _gate = rv.registry.lock()?;
+        let state = entry_state(entry)?;
+        Ok(inspect(&state))
+    })
+}
+
 fn seed(owner: &mut Mutator<'_>, marker: i64) {
     loop {
         match owner.run_access() {
@@ -426,7 +440,7 @@ fn native_owner_sleeps_two_epochs_latest_image_and_synthetic_work_once() {
                 assert_eq!(image.epoch(), 2);
                 apply(image);
                 assert_eq!(
-                    owner.entry().state.lock().unwrap().rendezvous.image_takes,
+                    inspect_entry(rv, &owner.entry(), |state| state.rendezvous.image_takes),
                     1
                 );
                 retire(owner, &native_roots);
@@ -469,10 +483,13 @@ fn native_owner_sleeps_two_epochs_latest_image_and_synthetic_work_once() {
                 });
                 complete(stopped);
                 assert_eq!(
-                    native_entry.state.lock().unwrap().rendezvous.image_epoch,
+                    inspect_entry(rv, &native_entry, |state| state.rendezvous.image_epoch),
                     epoch
                 );
-                assert_eq!(native_entry.state.lock().unwrap().rendezvous.image_takes, 0);
+                assert_eq!(
+                    inspect_entry(rv, &native_entry, |state| state.rendezvous.image_takes),
+                    0
+                );
             }
             assert_eq!(folded, 1);
             wake_native.send(()).unwrap();
