@@ -110,20 +110,21 @@
 //! [`ChildOwnership`] is `p->alive` with the pid attached to the live arm:
 //!
 //! * [`ChildOwnership::Unreaped`] holds a [`ReapableChild`], whose fields are
-//!   private to this module.  **Every reap in `neovm-core`'s process table is
-//!   one of the three methods on it**, so a second reaper is not something to
-//!   remember not to write -- there is no handle to write it against.
-//! * [`ChildOwnership::Reaped`] carries the terminal status and **no pid**, so
+//!   private to this module. All process-table reaps and transfers go through
+//!   this owner; the child handle cannot be probed independently.
+//! * [`ChildOwnership::Reaped`] carries **no pid**, so
 //!   `kill` on a reaped pid is not a case that is checked for: it is a
 //!   sentence with no subject.
+//! * [`ChildOwnership::Deferred`] also carries no pid: asynchronous deletion
+//!   transferred the sole unreaped handle into the deleted-child registry.
 //! * every transition to `Reaped` happens *inside* the operation that
 //!   performed the reap, so the bit cannot be forgotten the way a hand-set
 //!   `bool` can.
 //!
-//! GNU's critical section has no analogue here and needs none: this port's
-//! reap runs on the Lisp thread, and its signal handlers are restricted to a
-//! counter bump and a self-pipe `write` (ledger 184's `os_signal.rs`), so
-//! nothing can clear the bit between the test and the `kill`.
+//! Each process-table owner belongs to its mutator. The deferred registry
+//! contains native handles only and serializes transfers and nonblocking
+//! sweeps with a mutex, allowing multiple mutators to collect safely. Signal
+//! handlers never access either owner; they only wake the existing wait path.
 //!
 //! The honest limit, stated the way `os_signal.rs` states its own: Rust does
 //! not stop a future author from writing a fresh `libc::waitpid` elsewhere.
@@ -133,6 +134,182 @@
 
 use super::{Value, process_status_exit_value};
 use crate::emacs_core::callproc::SpawnedChild;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+
+/// GNU's deleted_pid_list (process.c:7700-7715). Each entry owns the only
+/// handle permitted to reap its child, and contains no Lisp state. Native exit
+/// watchers collect independently of the evaluator; failed native sources fall
+/// back to existing child-status safe points. The mutex serializes
+/// transfers and nonblocking probes across mutators and watchers. The acquire/release flag
+/// publishes queue membership. Ordinary waits inspect only the fallback flag,
+/// so native-managed deleted children add no locks or syscalls to Lisp polls.
+static DEFERRED_CHILDREN: Mutex<Vec<DeferredChild>> = Mutex::new(Vec::new());
+static HAS_DEFERRED_CHILDREN: AtomicBool = AtomicBool::new(false);
+static HAS_SAFE_POINT_FALLBACK: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeferredReapDriver {
+    NativeExit,
+    WaitSafePointFallback,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DeferredReapSweep {
+    NativeExit,
+    WaitSafePoint,
+}
+
+/// Native ownership plus a completion identity that cannot be confused with
+/// a later child reusing the same pid. Registry and watcher share only this
+/// atomic completion flag, never the child handle or Lisp state.
+struct DeferredChild {
+    owner: ReapableChild,
+    completed: Arc<AtomicBool>,
+    driver: DeferredReapDriver,
+}
+
+#[cfg(test)]
+static DEFERRED_WATCHERS: Mutex<Vec<std::thread::JoinHandle<()>>> = Mutex::new(Vec::new());
+
+/// Synchronize native completion in tests, after their process I/O has closed.
+/// This joins event watchers; it never reaps a child on the test's behalf.
+#[cfg(test)]
+pub(super) fn finish_deferred_reaping_for_test() {
+    let handles = std::mem::take(
+        &mut *DEFERRED_WATCHERS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+    );
+    for handle in handles {
+        handle
+            .join()
+            .expect("native deleted-child watcher panicked");
+    }
+}
+
+#[cfg(test)]
+pub(super) fn deferred_child_is_owned_for_test(pid: u32) -> bool {
+    DEFERRED_CHILDREN
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .iter()
+        .any(|child| child.owner.pid == pid)
+}
+
+fn publish_deferred_child(child: ReapableChild, driver: DeferredReapDriver) -> Arc<AtomicBool> {
+    let completed = Arc::new(AtomicBool::new(false));
+    let mut children = DEFERRED_CHILDREN
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    children.push(DeferredChild {
+        owner: child,
+        completed: Arc::clone(&completed),
+        driver,
+    });
+    HAS_DEFERRED_CHILDREN.store(true, Ordering::Release);
+    if driver == DeferredReapDriver::WaitSafePointFallback {
+        HAS_SAFE_POINT_FALLBACK.store(true, Ordering::Release);
+    }
+    completed
+}
+
+fn use_safe_point_fallback(completed: &Arc<AtomicBool>) {
+    let mut children = DEFERRED_CHILDREN
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(child) = children
+        .iter_mut()
+        .find(|child| Arc::ptr_eq(&child.completed, completed))
+    {
+        child.driver = DeferredReapDriver::WaitSafePointFallback;
+        HAS_SAFE_POINT_FALLBACK.store(true, Ordering::Release);
+    }
+}
+
+fn start_deferred_child_watcher(
+    event: std::io::Result<super::sys::ChildExitEvent>,
+    completed: Arc<AtomicBool>,
+) {
+    let event = match event {
+        Ok(event) => event,
+        Err(error) => {
+            use_safe_point_fallback(&completed);
+            tracing::warn!(%error, "deleted-child native exit registration failed; retaining deferred ownership");
+            return;
+        }
+    };
+    let watcher_completed = Arc::clone(&completed);
+    match std::thread::Builder::new().name("neovm-child-reap".into()).spawn(move || {
+        loop {
+            // Registration may have raced an exit that is already waitable.
+            // Sweep before sleeping, and after each actual native event.
+            collect_deferred_children(DeferredReapSweep::NativeExit);
+            if watcher_completed.load(Ordering::Acquire) { break; }
+            if let Err(error) = event.wait() {
+                use_safe_point_fallback(&watcher_completed);
+                tracing::warn!(%error, "deleted-child native exit wait failed; retaining deferred ownership");
+                break;
+            }
+        }
+    }) {
+        Ok(handle) => {
+            #[cfg(test)]
+            DEFERRED_WATCHERS.lock().unwrap_or_else(|error| error.into_inner()).push(handle);
+            #[cfg(not(test))]
+            drop(handle);
+        }
+        Err(error) => {
+            use_safe_point_fallback(&completed);
+            tracing::warn!(%error, "deleted-child watcher creation failed; retaining deferred ownership");
+        }
+    }
+}
+
+/// Only native-source failures need the ordinary wait's WNOHANG fallback.
+/// Native-managed pending children never add a lock or syscall to zero-timeout
+/// accept-process-output or input-pending-p polls.
+pub(super) fn collect_deferred_child_status_changes() {
+    collect_deferred_children(DeferredReapSweep::WaitSafePoint);
+}
+
+fn collect_deferred_children(sweep: DeferredReapSweep) {
+    let pending = match sweep {
+        DeferredReapSweep::NativeExit => &HAS_DEFERRED_CHILDREN,
+        DeferredReapSweep::WaitSafePoint => &HAS_SAFE_POINT_FALLBACK,
+    };
+    if !pending.load(Ordering::Acquire) {
+        return;
+    }
+    let mut children = DEFERRED_CHILDREN
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    children.retain_mut(|child| {
+        match (sweep, child.driver) {
+            (DeferredReapSweep::WaitSafePoint, DeferredReapDriver::NativeExit) => return true,
+            (
+                DeferredReapSweep::NativeExit,
+                DeferredReapDriver::NativeExit | DeferredReapDriver::WaitSafePointFallback,
+            )
+            | (DeferredReapSweep::WaitSafePoint, DeferredReapDriver::WaitSafePointFallback) => {}
+        }
+        if child.owner.try_reap_deleted() {
+            child.completed.store(true, Ordering::Release);
+            false
+        } else {
+            true
+        }
+    });
+    HAS_DEFERRED_CHILDREN.store(!children.is_empty(), Ordering::Release);
+    HAS_SAFE_POINT_FALLBACK.store(
+        children
+            .iter()
+            .any(|child| child.driver == DeferredReapDriver::WaitSafePointFallback),
+        Ordering::Release,
+    );
+}
 
 /// A child this port spawned and has **not** reaped: GNU's `p->alive == 1`,
 /// carrying the pid that authorises `waitpid` and `kill` on it.
@@ -163,6 +340,8 @@ enum ChildHandle {
     /// `portable_pty`'s child handle.
     Pty(Box<dyn portable_pty::Child + Send + Sync>),
 }
+
+static_assertions::assert_impl_all!(ReapableChild: Send);
 
 /// What one probe of a child's status found.
 ///
@@ -219,6 +398,9 @@ pub(crate) enum ChildOwnership {
     /// where this port records it, exactly as GNU records it in
     /// `p->raw_status` rather than in `p->alive`.
     Reaped,
+    /// The sole unreaped handle belongs to the deferred registry. This process
+    /// cannot signal or wait for it again; a later safe point performs the reap.
+    Deferred,
 }
 
 impl ChildOwnership {
@@ -262,7 +444,7 @@ impl ChildOwnership {
     pub(crate) fn pid_if_unreaped(&self) -> Option<u32> {
         match self {
             Self::Unreaped(child) => Some(child.pid),
-            Self::NotAChild | Self::Reaped => None,
+            Self::NotAChild | Self::Reaped | Self::Deferred => None,
         }
     }
 
@@ -351,40 +533,61 @@ impl ChildOwnership {
         change
     }
 
-    /// GNU's `record_kill_process` (src/callproc.c:196-211) followed by the
-    /// blocking reap the delete path needs so the child does not become a
-    /// zombie nothing revisits.
+    /// GNU's `record_kill_process` (src/callproc.c:196-211): signal, then leave
+    /// the sole child handle for a later nonblocking deleted-pid sweep.
     ///
     /// The `if (p->alive)` is the `let ... else`, and there is no other arm: a
     /// reaped child is neither signalled nor waited a second time.
-    pub(crate) fn terminate_and_reap(&mut self, kill_signal: i32) {
+    pub(crate) fn terminate_and_defer_reaping(&mut self, kill_signal: i32) {
         let Self::Unreaped(child) = self else {
             return;
         };
         // One probe, through the owner, so an already-exited child is settled
         // rather than signalled.  GNU reaches the same place from the other
         // side: its handler has already cleared `p->alive`.
-        if matches!(
-            child.probe(),
-            ChildStatusChange::Reaped(_) | ChildStatusChange::Gone
-        ) {
+        if child.try_reap_deleted() {
             *self = Self::Reaped;
             return;
         }
         child.kill_group_then_handle(kill_signal);
-        child.waitpid_blocking();
-        *self = Self::Reaped;
+        self.defer_reaping();
     }
 
-    /// GNU's `wait_for_termination (child, NULL, ...)` (src/sysdep.c:500,
-    /// called that way at src/callproc.c:257) on a child that is already
-    /// terminal or has just been signalled.
-    pub(crate) fn wait_for_termination(&mut self) {
-        let Self::Unreaped(child) = self else {
-            return;
-        };
-        child.waitpid_blocking();
-        *self = Self::Reaped;
+    /// GNU asynchronous delete records an unreaped pid instead of waiting
+    /// (callproc.c:202-207). A Darwin child can still be draining its terminal
+    /// during exit, so blocking here before closing the master can deadlock.
+    pub(crate) fn defer_reaping(&mut self) {
+        if let Some(child) = self.take_unreaped_for_transfer() {
+            // Register while the pid still belongs exclusively to this owner.
+            // Publishing first would allow another mutator to reap/recycle it.
+            let event = super::sys::ChildExitEvent::open(child.pid);
+            let driver = match &event {
+                Ok(_) => DeferredReapDriver::NativeExit,
+                Err(_) => DeferredReapDriver::WaitSafePointFallback,
+            };
+            let completed = publish_deferred_child(child, driver);
+            // An early exit remains recorded by the already-open native source.
+            start_deferred_child_watcher(event, completed);
+        }
+    }
+
+    #[cfg(test)]
+    fn defer_reaping_for_test(&mut self) {
+        // Synthetic handles have no OS child. Exercise the same ownership
+        // transfer without registering native events against their metadata.
+        if let Some(child) = self.take_unreaped_for_transfer() {
+            let _ = publish_deferred_child(child, DeferredReapDriver::WaitSafePointFallback);
+        }
+    }
+
+    fn take_unreaped_for_transfer(&mut self) -> Option<ReapableChild> {
+        match std::mem::replace(self, Self::Deferred) {
+            Self::Unreaped(child) => Some(child),
+            unchanged @ (Self::NotAChild | Self::Reaped | Self::Deferred) => {
+                *self = unchanged;
+                None
+            }
+        }
     }
 
     /// The handle's own `kill`, for the callers that fall back to it when the
@@ -432,15 +635,56 @@ impl ReapableChild {
         }
     }
 
-    /// GNU's `wait_for_termination`: `get_child_status (child, status, 0,
-    /// interruptible)` (src/sysdep.c:500-503).
-    fn waitpid_blocking(&mut self) {
-        match &mut self.handle {
-            ChildHandle::Pipe(child) => {
-                let _ = child.wait();
-            }
-            ChildHandle::Pty(child) => {
-                let _ = child.wait();
+    /// Probe without allocating Lisp values: deleted children have no pending
+    /// status or sentinel to publish. Errors other than ECHILD retain ownership
+    /// for a later sweep. EINTR resumes immediately so a one-shot native exit
+    /// event cannot be consumed without attempting the reap again.
+    fn try_reap_deleted(&mut self) -> bool {
+        loop {
+            match &mut self.handle {
+                #[cfg(unix)]
+                ChildHandle::Pipe(_) => {
+                    use super::sys::ChildWait;
+                    match super::sys::poll_child_status(self.pid) {
+                        ChildWait::Exited(_) | ChildWait::Signaled { .. } | ChildWait::NoChild => {
+                            return true;
+                        }
+                        ChildWait::Running
+                        | ChildWait::Stopped(_)
+                        | ChildWait::Continued
+                        | ChildWait::Undecoded => return false,
+                        ChildWait::Error => {
+                            if std::io::Error::last_os_error().kind()
+                                != std::io::ErrorKind::Interrupted
+                            {
+                                return false;
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                ChildHandle::Pipe(child) => match child.try_wait() {
+                    Ok(Some(_)) => return true,
+                    Ok(None) => return false,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => return false,
+                },
+                ChildHandle::Pty(child) => match child.try_wait() {
+                    Ok(Some(_)) => return true,
+                    Ok(None) => return false,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => {
+                        #[cfg(unix)]
+                        {
+                            return error.raw_os_error() == Some(libc::ECHILD);
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let _ = error;
+                            return false;
+                        }
+                    }
+                },
             }
         }
     }
@@ -473,6 +717,11 @@ impl std::fmt::Debug for ChildOwnership {
             Self::NotAChild => f.write_str("NotAChild"),
             Self::Unreaped(child) => write!(f, "Unreaped({})", child.pid),
             Self::Reaped => f.write_str("Reaped"),
+            Self::Deferred => f.write_str("Deferred"),
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tests/deferred_reap.rs"]
+mod deferred_reap_tests;

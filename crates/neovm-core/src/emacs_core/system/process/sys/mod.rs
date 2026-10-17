@@ -28,6 +28,9 @@ pub use signals::{
 mod process_status;
 pub use process_status::process_is_alive;
 
+mod child_exit_event;
+pub use child_exit_event::ChildExitEvent;
+
 mod process_attributes;
 pub use process_attributes::{
     ProcStatSnapshot, boot_time_secs, clock_ticks_per_second, group_name, list_process_ids,

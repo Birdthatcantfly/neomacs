@@ -353,17 +353,11 @@ pub(super) fn kill_real_process_child(proc: &mut Process, signal_num: i32) {
     proc.live_io.child.kill_handle();
 }
 
-/// GNU's `wait_for_termination (child, NULL, ...)` (src/sysdep.c:500, called
-/// that way at src/callproc.c:257) on a child that is already terminal or has
-/// just been killed explicitly.
-///
-/// Dropping either Rust child handle closes the handle but does not perform
-/// Unix `waitpid`, which leaves a zombie.  Call this only on the synchronous
-/// delete path; normal status polling has already reaped naturally exited
-/// children -- and, since ledger 187, has also given up the pid, so a child
-/// that was reaped there is not waited a second time here.
-pub(super) fn wait_for_real_process_child_termination(proc: &mut Process) {
-    proc.live_io.child.wait_for_termination();
+/// GNU asynchronous delete transfers the child to deleted_pid_list
+/// (callproc.c:202-207); handle_child_signal later reaps it with WNOHANG
+/// (process.c:7700-7715). Never block while the child can need its PTY drained.
+pub(super) fn defer_real_process_child_reaping(proc: &mut Process) {
+    proc.live_io.child.defer_reaping();
 }
 
 pub(super) fn signal_hup_number() -> i32 {

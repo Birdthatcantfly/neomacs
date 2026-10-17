@@ -3577,9 +3577,13 @@ fn deleted_pty_process_releases_live_io_and_reaps_child() {
         baseline_ptmx,
         "deleting must deactivate and release the process's live PTY I/O"
     );
+    // GNU deletion closes I/O immediately and transfers the native child to
+    // deleted_pid_list. Synchronize with its independent exit-event collector,
+    // without running another evaluator wait or reaping by a second owner.
+    super::reap::finish_deferred_reaping_for_test();
     assert!(
         !std::path::Path::new(&format!("/proc/{os_pid}")).exists(),
-        "delete-process must wait for the killed child instead of retaining a zombie"
+        "the deferred collector must reap the deleted child"
     );
 }
 
@@ -3604,13 +3608,12 @@ fn dropping_process_manager_terminates_and_reaps_live_child() {
 
     drop(processes);
 
-    let child_survived = std::path::Path::new(&format!("/proc/{os_pid}")).exists();
-    if child_survived {
-        let _ = sys::send_signal_to_group(os_pid as i64, signal_kill_number());
-    }
+    // No later Context/ProcessManager wait drives this cleanup. Joining the
+    // native exit watcher is only a test synchronization point.
+    super::reap::finish_deferred_reaping_for_test();
     assert!(
-        !child_survived,
-        "dropping the live-resource owner must terminate and reap its child"
+        !std::path::Path::new(&format!("/proc/{os_pid}")).exists(),
+        "dropping the live-resource owner must independently reap its child"
     );
 }
 

@@ -555,3 +555,7 @@ mod timeout_tests;
 #[cfg(all(test, unix))]
 #[path = "tests/pty_exit.rs"]
 mod pty_exit_tests;
+
+#[cfg(all(test, unix))]
+#[path = "tests/native_deferred_reap.rs"]
+mod native_deferred_reap_tests;

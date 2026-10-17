@@ -735,14 +735,14 @@ impl LiveProcessIo {
     /// and reads its `ECHILD` -- *nobody has that child* -- as "still
     /// running", so `kill(-pid, SIGKILL)` went to a pid the kernel had handed
     /// back.  See `process/reap.rs`.
-    pub(super) fn terminate_and_reap_children(&mut self) {
-        self.child.terminate_and_reap(signal_kill_number());
+    pub(super) fn terminate_and_defer_children(&mut self) {
+        self.child.terminate_and_defer_reaping(signal_kill_number());
     }
 }
 
 impl Drop for LiveProcessIo {
     fn drop(&mut self) {
-        self.terminate_and_reap_children();
+        self.terminate_and_defer_children();
     }
 }
 
@@ -7043,7 +7043,7 @@ impl ProcessManager {
         } else {
             StatusChangeSite::DeleteProcessChild
         };
-        wait_for_real_process_child_termination(proc);
+        defer_real_process_child_reaping(proc);
         proc.status_notify_pending = false;
         proc.pending_status = Value::NIL;
         Self::deactivate_process_io(self.wait_backend.poller(), proc);

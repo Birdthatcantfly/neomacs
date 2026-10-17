@@ -483,6 +483,7 @@ impl ProcessManager {
         site: crate::emacs_core::wait::WaitStatusNotifySite,
     ) -> usize {
         let _ = site;
+        super::reap::collect_deferred_child_status_changes();
         STATUS_NOTIFY_WALKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut population: Vec<SweepableChild> = self
             .processes
