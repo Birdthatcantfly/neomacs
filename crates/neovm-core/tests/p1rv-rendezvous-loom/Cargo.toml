@@ -1,0 +1,33 @@
+[package]
+name = "p1rv-rendezvous-loom"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+autotests = false
+
+# Independent model: no production workspace feature, dependency or VM code.
+[workspace]
+
+[dev-dependencies]
+loom = "=0.7.2"
+static_assertions = "=1.1.0"
+
+[profile.test]
+opt-level = 1
+
+[[test]]
+name = "rendezvous"
+path = "tests/rendezvous.rs"
+
+[[test]]
+name = "visibility"
+path = "tests/visibility.rs"
+
+[[test]]
+name = "readers"
+path = "tests/readers.rs"
+
+[[test]]
+name = "wait_graph"
+path = "tests/wait_graph.rs"
