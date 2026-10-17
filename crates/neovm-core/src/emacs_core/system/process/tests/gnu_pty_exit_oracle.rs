@@ -38,9 +38,59 @@ const PTY_EXIT_FORM: &str = r#"(let ((payloads '("process-output\n" "café世界
 
 #[test]
 fn accept_process_output_pty_immediate_exit_matches_gnu_oracle() {
+    assert_exit_oracle(
+        PTY_EXIT_FORM,
+        "gnu_pty_exit.expected",
+        include_str!("gnu_pty_exit.expected"),
+    );
+}
+
+const PIPE_EXIT_FORM: &str = r#"(let ((shapes '((t utf-8-dos) (t utf-8-unix) (nil utf-8-dos) (t utf-8-dos filter))) results)
+  (while shapes
+    (let* ((shape (car shapes))
+           (buffer (get-buffer-create " *pipe-exit-oracle*"))
+           (unibyte (car shape))
+           (coding (car (cdr shape)))
+           (filtered (car (cdr (cdr shape))))
+           (seen "")
+           snapshot
+           process)
+      (unwind-protect
+          (progn
+            (save-current-buffer (set-buffer buffer) (set-buffer-multibyte (null unibyte)))
+            (setq process (make-process :name "pipe-exit-oracle" :buffer buffer
+              :connection-type 'pipe :coding coding
+              :command '("/bin/sh" "-c" "printf 'caf\\303\\251\\r\\n'")
+              :filter (if filtered (lambda (_p s) (setq seen (concat seen s))) #'internal-default-process-filter)
+              :sentinel (lambda (p message)
+                (setq snapshot (list (process-status p) message
+                  (if (memq p (process-list)) t nil)
+                  (append (if filtered seen (save-current-buffer (set-buffer buffer) (buffer-string))) nil))))))
+            (set-process-query-on-exit-flag process nil)
+            (let ((attempts 0))
+              (while (and (null snapshot) (< attempts 100))
+                (accept-process-output process 0.1)
+                (setq attempts (1+ attempts))))
+            (if (null snapshot) (error "Pipe sentinel did not run"))
+            (setq results (cons snapshot results)))
+        (if (and process (memq process (process-list))) (delete-process process))
+        (kill-buffer buffer)))
+    (setq shapes (cdr shapes)))
+  (nreverse results))"#;
+
+#[test]
+fn accept_process_output_pipe_immediate_exit_matches_gnu_oracle() {
+    assert_exit_oracle(
+        PIPE_EXIT_FORM,
+        "gnu_pipe_exit.expected",
+        include_str!("gnu_pipe_exit.expected"),
+    );
+}
+
+fn assert_exit_oracle(form: &str, fixture_name: &str, compiled_expectation: &str) {
     crate::test_utils::init_test_tracing();
     let Some(emacs) = std::env::var_os("NEOVM_FORCE_ORACLE_PATH") else {
-        tracing::debug!("skipping PTY exit GNU oracle: set NEOVM_FORCE_ORACLE_PATH");
+        tracing::debug!("skipping process exit GNU oracle: set NEOVM_FORCE_ORACLE_PATH");
         return;
     };
     // Campaign runs wrap nextest itself in sandbox-run.sh and unset this
@@ -55,8 +105,8 @@ fn accept_process_output_pty_immediate_exit_matches_gnu_oracle() {
     let gnu_form = format!(
         r#"(progn
           (unless (string= emacs-version "31.1")
-            (error "PTY exit oracle requires GNU Emacs 31.1, got %s" emacs-version))
-          (let ((print-escape-newlines t)) (prin1 {PTY_EXIT_FORM}))
+            (error "process exit oracle requires GNU Emacs 31.1, got %s" emacs-version))
+          (let ((print-escape-newlines t)) (prin1 {form}))
           (terpri))"#
     );
     let output = command
@@ -65,22 +115,23 @@ fn accept_process_output_pty_immediate_exit_matches_gnu_oracle() {
         .expect("run the explicitly configured GNU Emacs oracle in its sandbox");
     assert!(
         output.status.success(),
-        "GNU PTY exit oracle failed: {}",
+        "GNU process exit oracle failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let actual_gnu = String::from_utf8(output.stdout.clone()).expect("GNU oracle UTF-8 stdout");
     let expected = if std::env::var("UPDATE_EXPECT").as_deref() == Ok("1") {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/emacs_core/system/process/tests/gnu_pty_exit.expected");
+            .join("src/emacs_core/system/process/tests")
+            .join(fixture_name);
         // Expectations come exclusively from GNU, including in refresh mode.
         std::fs::write(&fixture, &output.stdout).expect("refresh fixture exclusively from GNU");
         std::fs::read_to_string(fixture).expect("read freshly written GNU fixture")
     } else {
-        include_str!("gnu_pty_exit.expected").to_owned()
+        compiled_expectation.to_owned()
     };
     assert!(
         !expected.trim().is_empty(),
-        "refresh the blank PTY exit fixture from GNU Emacs 31.1 with UPDATE_EXPECT=1"
+        "refresh the blank process exit fixture from GNU Emacs 31.1 with UPDATE_EXPECT=1"
     );
     assert_eq!(
         actual_gnu.trim_end(),
@@ -90,13 +141,13 @@ fn accept_process_output_pty_immediate_exit_matches_gnu_oracle() {
 
     let mut eval = crate::emacs_core::Context::new();
     let actual_neovm = eval
-        .eval_str(PTY_EXIT_FORM)
-        .expect("read immediate-exit PTY output through accept-process-output");
+        .eval_str(form)
+        .expect("read immediate-exit process output through accept-process-output");
     let mut options = crate::emacs_core::print::PrintOptions::default();
     options.print_escape_newlines = true;
     assert_eq!(
         crate::emacs_core::print::print_value_with_options(&actual_neovm, options),
         expected.trim_end(),
-        "PTY output must precede the default finished sentinel"
+        "Process output must precede the default finished sentinel"
     );
 }

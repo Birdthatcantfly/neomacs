@@ -559,3 +559,7 @@ mod pty_exit_tests;
 #[cfg(all(test, unix))]
 #[path = "tests/native_deferred_reap.rs"]
 mod native_deferred_reap_tests;
+
+#[cfg(all(test, unix))]
+#[path = "tests/pipe_exit.rs"]
+mod pipe_exit_tests;

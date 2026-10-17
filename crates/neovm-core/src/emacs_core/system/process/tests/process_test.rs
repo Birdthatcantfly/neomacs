@@ -11085,11 +11085,22 @@ fn make_process_decode_coding_follows_gnu_precedence_chain() {
 /// Every expected value below was measured under GNU Emacs 31.0.90.
 #[test]
 fn make_process_unibyte_buffer_drops_character_conversion_but_keeps_eol() {
+    check_make_process_unibyte_buffer_coding("process-connection-type");
+}
+
+/// Exercise the six coding shapes on pipes explicitly: the original test
+/// inherits the Unix PTY default and therefore cannot cover pipe retirement.
+#[test]
+fn make_process_pipe_unibyte_buffer_drops_character_conversion_but_keeps_eol() {
+    check_make_process_unibyte_buffer_coding("nil");
+}
+
+fn check_make_process_unibyte_buffer_coding(connection_type: &str) {
     crate::test_utils::init_test_tracing();
     let printf = find_bin("printf");
     let sh = find_bin("sh");
     let result = eval_one(&format!(
-        r#"(progn
+        r#"(let ((process-connection-type {connection_type}))
              (defun pw131-crlf (unibyte coding &optional filter)
                (let ((buf (generate-new-buffer " *pw131*"))
                      (seen nil))
