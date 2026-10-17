@@ -7,7 +7,9 @@
 //! a usable serial World after an abandoned owner.
 #![allow(dead_code)] // Consumers are admitted in subsequent proof batches.
 
+mod gate;
 mod image;
+use gate::RegistryGuard;
 mod rendezvous;
 mod summaries;
 mod token;
@@ -179,6 +181,7 @@ struct Registry {
     world: HeapIdentity,
     state: Mutex<RegistryState>,
     poisoned: AtomicBool,
+    gate_owner: AtomicU64,
     wake: std::sync::Condvar,
     request_epoch: AtomicU64,
     completed_epoch: AtomicU64,
@@ -187,31 +190,6 @@ struct Registry {
 }
 
 impl Registry {
-    fn lock(&self) -> Result<MutexGuard<'_, RegistryState>, RegistrationError> {
-        if self.poisoned.load(Ordering::Acquire) {
-            return Err(RegistrationError::Poisoned);
-        }
-        match self.state.try_lock() {
-            Ok(gate) => {
-                if self.poisoned.load(Ordering::Acquire) {
-                    Err(RegistrationError::Poisoned)
-                } else {
-                    Ok(gate)
-                }
-            }
-            Err(std::sync::TryLockError::WouldBlock) => Err(RegistrationError::Busy),
-            Err(std::sync::TryLockError::Poisoned(_)) => {
-                self.poison();
-                Err(RegistrationError::Poisoned)
-            }
-        }
-    }
-
-    fn poison(&self) {
-        self.poisoned.store(true, Ordering::Release);
-        self.wake.notify_all();
-    }
-
     fn validate(
         &self,
         state: &RegistryState,
@@ -369,6 +347,7 @@ impl<'heap> ParallelHeapEra<'heap> {
                 heap,
                 world: heap,
                 poisoned: AtomicBool::new(false),
+                gate_owner: AtomicU64::new(0),
                 wake: std::sync::Condvar::new(),
                 request_epoch: AtomicU64::new(0),
                 completed_epoch: AtomicU64::new(0),
@@ -716,7 +695,8 @@ impl Drop for ParallelHeapEra<'_> {
             return;
         };
         registry.poison();
-        // No mutex, collection, join, callback, or implicit serial resumption.
+        // Poison serializes with the predicate gate; no collection, join,
+        // callback, or implicit serial resumption follows.
         // The leaked keeper retains World/heap backing and facade exclusion.
         std::mem::forget(registry);
         if let Some(keeper) = self.keeper.take() {

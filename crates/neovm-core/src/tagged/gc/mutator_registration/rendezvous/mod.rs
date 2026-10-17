@@ -12,7 +12,6 @@ pub use resume::{ResumeGcImage, ResumeGcImageFailure};
 
 use super::*;
 use crate::tagged::transport::{ParallelRootBatchError, ParallelRootIdentity, SharedRoot};
-use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RendezvousError {
@@ -306,36 +305,19 @@ pub(super) fn verify_stopped(
 }
 pub(super) fn wait<'a>(
     registry: &'a Registry,
-    gate: MutexGuard<'a, RegistryState>,
-) -> Result<MutexGuard<'a, RegistryState>, RendezvousError> {
-    // Drop must not block behind a retained/reentrant gate. Atomic poison can
-    // therefore race predicate->wait. A bounded *abort recheck*, treated as a
-    // spurious wake, closes that gap; it never grants ACK or collection.
-    if registry.poisoned.load(Ordering::Acquire) {
-        return Err(RendezvousError::Poisoned);
-    }
+    gate: RegistryGuard<'a>,
+) -> Result<RegistryGuard<'a>, RendezvousError> {
     wait_after_poison_check(registry, gate)
 }
 
-// Separated to force the poison-between-predicate-and-wait case in tests.
+// Separated to force poison after a caller's predicate check in regressions.
 fn wait_after_poison_check<'a>(
     registry: &'a Registry,
-    gate: MutexGuard<'a, RegistryState>,
-) -> Result<MutexGuard<'a, RegistryState>, RendezvousError> {
-    match registry.wake.wait_timeout(gate, Duration::from_millis(20)) {
-        Ok((gate, _)) => {
-            if registry.poisoned.load(Ordering::Acquire) {
-                Err(RendezvousError::Poisoned)
-            } else {
-                gate.rendezvous.live()?;
-                Ok(gate)
-            }
-        }
-        Err(_) => {
-            registry.poison();
-            Err(RendezvousError::Poisoned)
-        }
-    }
+    gate: RegistryGuard<'a>,
+) -> Result<RegistryGuard<'a>, RendezvousError> {
+    let gate = registry.wait(gate)?;
+    gate.rendezvous.live()?;
+    Ok(gate)
 }
 
 static_assertions::assert_impl_all!(Rendezvous<'static>:Send,Sync,Clone,Copy);

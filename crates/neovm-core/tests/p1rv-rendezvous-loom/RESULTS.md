@@ -94,3 +94,23 @@ README/results prose is excluded.
 | `tests/support/mod.rs` | `cf98d5cb83d0e753a9991352555fa8d5ac777b5434dfcb9638cee2ea4560bf67` |
 | `tests/visibility.rs` | `3285582e4cb1375caec17ee8d8fef7c42e419f41de80e3d2df20c17640ade786` |
 | `tests/wait_graph.rs` | `b2519a3748f3cb65560e2a6b760e993a86a5bccf83fa977f135a02ef11a02747` |
+
+## R6 event-driven poison extension
+
+The original 52-case receipts above remain the A1 baseline. R6 adds three
+positive cases and two exact-witness controls in `tests/poison.rs`. Fresh
+bounded runs passed all five binaries at bounds 2 and 3: 57 tests, 0 failures
+each. Every original source body and all 52 original iteration/witness receipts
+match the reviewed A1 baseline exactly; the manifest only adds the poison test
+binary. Full receipts are `tmp/peer-p1rv/a5/loom/results.json` and
+`preempt{2,3}.log` in the lane worktree. Bound 2 exhausted 46,800 positive
+iterations and found 28 controls in 38 searches; bound 3 exhausted 903,644
+positive iterations and found the same controls in 38 searches.
+
+| Test | Bound 2 | Bound 3 | Required witness |
+| --- | ---: | ---: | --- |
+| `negative_lock_free_poison_can_notify_before_wait_registration` | 1 | 1 | POISON_NOTIFICATION_LOST_WITHOUT_GATE |
+| `negative_always_locking_poison_has_same_thread_control_cycle` | 1 | 1 | POISON_SELF_LOCK_WITHOUT_OWNER_CHECK |
+| `external_poison_in_predicate_wait_gap_acquires_gate_and_wakes` | 19 | 28 | — |
+| `holder_poison_between_predicate_and_wait_is_rechecked_without_self_lock` | 1 | 1 | — |
+| `ownership_changes_across_condvar_release_before_later_holder_poison` | 10 | 12 | — |

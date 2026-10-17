@@ -23,7 +23,7 @@ struct Control {
     expectation: &'static str,
 }
 
-fn controls() -> [Control; 26] {
+fn controls() -> [Control; 28] {
     use MappingClass::*;
     let stale: fn() = stale_ack_identity_generation_duplicate_and_missing_image_are_refused;
     let forced: fn() = two_owners_pause_before_ack_and_while_restoring_across_two_epochs;
@@ -242,6 +242,22 @@ fn controls() -> [Control; 26] {
             check: Some(live_worker_loan_blocks_ack_and_preserves_running_owner),
             expectation: "outstanding transferable loan refuses ACK until explicitly returned; Rust run borrow separately prevents ACK",
         },
+        Control {
+            model: "negative_lock_free_poison_can_notify_before_wait_registration",
+            witness: "POISON_NOTIFICATION_LOST_WITHOUT_GATE",
+            class: LockOrder,
+            check_name: "external_poison_gap",
+            check: Some(failure::external_poison_between_predicate_and_wait_is_event_driven),
+            expectation: "external poison obtains predicate gate and wakes a real untimed wait; no notify can pass atomic release/register",
+        },
+        Control {
+            model: "negative_always_locking_poison_has_same_thread_control_cycle",
+            witness: "POISON_SELF_LOCK_WITHOUT_OWNER_CHECK",
+            class: LockOrder,
+            check_name: "same_thread_poison_gap",
+            check: Some(failure::lost_poison_notification_between_predicate_and_wait_fails_closed),
+            expectation: "holder poison recognizes its tracked identity and wait rechecks it without recursive gate acquisition",
+        },
     ]
 }
 
@@ -271,7 +287,7 @@ fn every_a1_negative_control_has_an_explicit_production_correspondence() {
             );
         }
     }
-    assert_eq!(names.len(), 26);
+    assert_eq!(names.len(), 28);
     assert_eq!(
         rows.iter()
             .filter(|row| row.class == MappingClass::FixedOrdering)
@@ -282,9 +298,9 @@ fn every_a1_negative_control_has_an_explicit_production_correspondence() {
         rows.iter()
             .filter(|row| row.class == MappingClass::LockOrder)
             .count(),
-        4
+        6
     );
-    // Guard against omitting a reviewed case while merely retaining 26 rows.
+    // Guard against omitting a reviewed case while merely retaining 28 rows.
     let reviewed_names: BTreeSet<_> = reviewed
         .lines()
         .filter_map(|line| {

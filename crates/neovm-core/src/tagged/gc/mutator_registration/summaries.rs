@@ -48,7 +48,7 @@ pub struct RegistrationCensus {
 /// no heap pointer, stopped-world constructor, raw decoding or mark operation.
 pub struct StoppedSummaries<'era> {
     registry: &'era Registry,
-    gate: MutexGuard<'era, RegistryState>,
+    gate: RegistryGuard<'era>,
     _thread: PhantomData<Rc<()>>,
 }
 

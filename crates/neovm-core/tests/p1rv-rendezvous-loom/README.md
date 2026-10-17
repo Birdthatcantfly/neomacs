@@ -15,6 +15,7 @@ paths, generated code or layouts.
 | `tests/visibility.rs` | Independent atomic publication of root/log payloads before ACK, and collector responses before resume |
 | `tests/readers.rs` | Reader admission, explicit finish, Closing publications, Busy retry, abandonment, identity/generation checks and retirement |
 | `tests/wait_graph.rs` | Declared keeper/owner/resource dependencies involving the Baton, control mutex and allocator |
+| `tests/poison.rs` | Event-driven poison, gate holder identity, Condvar owner transfer and exact lost-wake/self-lock controls |
 | `tests/support/mod.rs` | Exploration receipts and exact expected-panic witnesses |
 
 The control model intentionally uses one mutex and a condvar. Its heap phases
@@ -91,6 +92,16 @@ allocation grant ends before ACK. Negative controls restore a forbidden
 dependency and require exactly `WAIT_GRAPH_CYCLE`. They detect a finite graph
 cycle without making Loom threads actually deadlock. These checks cannot find
 an undeclared production dependency.
+
+R6 adds a separate poison protocol model. A guard records its actor identity
+while holding the real mutex, clears it before Condvar's atomic release/wait,
+and restores it after reacquisition. External poison takes the predicate gate;
+holder poison uses the exact identity bypass and wait rechecks terminal poison.
+No timer supplies progress. Negative controls use finite notification/lock-edge
+oracles to expose a lost wake or same-holder blocking cycle, rather than
+accepting a Loom deadlock as the expected witness. Actor identities are unique
+script constants; production assigns monotone thread-local identifiers. OS
+mutex poisoning/recovery is covered by production tests, not Loom's mutex.
 
 ## Reproduction and receipts
 

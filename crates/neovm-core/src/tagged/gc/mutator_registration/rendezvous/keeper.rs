@@ -171,8 +171,8 @@ impl ParallelHeapEra<'_> {
                     }
                 }
             }
-            // wait releases this predicate mutex. Its bounded timeout only
-            // rechecks terminal poison and never supplies stopped authority.
+            // Event-driven wait atomically releases this predicate mutex.
+            // Poison uses that same gate; a wake supplies no stop authority.
             gate = wait(registry, gate)?;
         }
     }
