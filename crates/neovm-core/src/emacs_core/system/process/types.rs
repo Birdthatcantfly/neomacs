@@ -582,7 +582,7 @@ pub(super) struct LiveProcessIo {
     /// PTY master handle for resize and I/O (PTY mode).
     pub(super) pty_master: Option<Box<dyn portable_pty::MasterPty + Send>>,
     /// PTY reader for non-blocking reads from the master side.
-    pub(super) pty_reader: Option<Box<dyn IoRead + Send>>,
+    pub(super) pty_reader: Option<PtyOutputReader>,
     /// PTY writer for sending input to the master side.
     pub(super) pty_writer: Option<Box<dyn std::io::Write + Send>>,
     pub(super) network_socket: Option<NetworkSocket>,
@@ -4294,6 +4294,11 @@ pub(super) fn is_standalone_pipe_process(proc: &Process) -> bool {
 
 pub(super) fn process_has_readable_process_io(proc: &Process) -> bool {
     !process_stopped_for_io(proc)
+        && proc
+            .live_io
+            .pty_reader
+            .as_ref()
+            .is_none_or(PtyOutputReader::is_monitored)
         && process_filter_accepts_output(proc)
         && process_status_has_readable_process_io(&proc.status)
 }
@@ -4307,7 +4312,12 @@ pub(super) fn process_has_observable_child_status(proc: &Process) -> bool {
 
 pub(super) fn process_defers_pty_status_after_explicit_coding(proc: &Process) -> bool {
     proc.coding_explicitly_set
-        && (proc.live_io.child.is_pty_handle() || proc.live_io.pty_reader.is_some())
+        && (proc.live_io.child.is_pty_handle()
+            || proc
+                .live_io
+                .pty_reader
+                .as_ref()
+                .is_some_and(PtyOutputReader::is_monitored))
 }
 
 pub(super) fn process_defers_status_poll_while_readable_pty(proc: &Process) -> bool {
@@ -4329,7 +4339,11 @@ pub(super) fn process_publishes_status_after_ready_output(proc: &Process) -> boo
             process_output_source(proc),
             Some(ProcessOutputSource::ChildStdout)
         )
-        || (process_output_source(proc) == Some(ProcessOutputSource::Pty)
+        || (proc
+            .live_io
+            .pty_reader
+            .as_ref()
+            .is_some_and(PtyOutputReader::is_monitored)
             && !process_command_is_shell_command(proc))
 }
 
@@ -5444,6 +5458,15 @@ impl ProcessManager {
             return;
         };
 
+        // EOF/EIO removed this PTY from the read set independently of its
+        // filter. A filter change must not rearm a drain-only descriptor.
+        let enabled = enabled
+            && proc
+                .live_io
+                .pty_reader
+                .as_ref()
+                .is_none_or(PtyOutputReader::is_monitored);
+
         if self.refresh_pending_tls_interest(id) {
             return;
         }
@@ -6404,7 +6427,7 @@ impl ProcessManager {
         let stderr_is_pty = stderr_transfer.pipe_id().is_none();
         if let Some(proc) = stderr_transfer.processes.get_mut(id) {
             proc.live_io.pty_master = Some(pty_pair.master);
-            proc.live_io.pty_reader = Some(pty_read);
+            proc.live_io.pty_reader = Some(PtyOutputReader::new(pty_read));
             proc.live_io.pty_writer = Some(Box::new(pty_write));
             proc.status = process_status_run_value();
             proc.tty_name = tty_name;
@@ -6919,11 +6942,16 @@ impl ProcessManager {
         self.record_status_change(StatusChangeSite::SubprocessReadFailure, id);
     }
 
-    /// GNU `read_process_output`: EOF/EIO on a real subprocess PTY removes the
-    /// read fd, but does not make the process terminal; SIGCHLD/status
-    /// notification observes child death later.
-    pub(super) fn deactivate_pty_process_read_io(&mut self, id: ProcessId) {
+    /// GNU `delete_read_fd` on PTY EOF/EIO (process.c:6038-6061) stops
+    /// monitoring but retains infd for status_notify's final drain (:7896-7911).
+    pub(super) fn stop_pty_process_read_monitoring(&mut self, id: ProcessId) {
         if let Some(proc) = self.processes.get_mut(&id) {
+            let Some(reader) = proc.live_io.pty_reader.as_mut() else {
+                return;
+            };
+            if !reader.is_monitored() {
+                return;
+            }
             #[cfg(unix)]
             if let (Some(poller), Some(master)) = (
                 self.wait_backend.poller(),
@@ -6932,9 +6960,20 @@ impl ProcessManager {
                     .as_ref()
                     .and_then(|master| master.as_raw_fd()),
             ) {
+                // SAFETY: the master owns this fd throughout the borrowed
+                // registration removal; neither reader nor master is dropped.
                 let borrowed = unsafe { std::os::unix::io::BorrowedFd::borrow_raw(master) };
                 let _ = poller.delete(borrowed);
             }
+            reader.stop_monitoring();
+        }
+    }
+
+    /// A permanent read failure closes the reader; unlike EOF/EIO it does not
+    /// leave a readable descriptor for the later status notification.
+    pub(super) fn deactivate_pty_process_read_io(&mut self, id: ProcessId) {
+        self.stop_pty_process_read_monitoring(id);
+        if let Some(proc) = self.processes.get_mut(&id) {
             proc.live_io.pty_reader = None;
         }
     }
@@ -9601,7 +9640,7 @@ impl super::super::eval::Context {
                 self.read_process_output_recording_coding(pid, sink)?
             };
             let mut saw_output = false;
-            let mut saw_eof_after_output = false;
+            let mut saw_pty_eof = false;
             let mut handled_terminal_eof = false;
             loop {
                 match read_result {
@@ -9706,9 +9745,7 @@ impl super::super::eval::Context {
                         break;
                     }
                     ProcessOutputRead::Eof => {
-                        if saw_output {
-                            saw_eof_after_output = true;
-                        }
+                        saw_pty_eof = true;
                         break;
                     }
                     ProcessOutputRead::WouldBlock | ProcessOutputRead::NoSource => break,
@@ -9728,12 +9765,12 @@ impl super::super::eval::Context {
                 continue;
             }
 
-            if saw_eof_after_output
+            if saw_pty_eof
                 && self.processes.get(pid).is_some_and(|process| {
                     process_output_source(process) == Some(ProcessOutputSource::Pty)
                 })
             {
-                self.processes.deactivate_pty_process_read_io(pid);
+                self.processes.stop_pty_process_read_monitoring(pid);
             }
 
             if saw_output {

@@ -82,6 +82,9 @@ pub(crate) use green_select::GreenSelectHandle;
 mod executable;
 pub(super) use executable::{ExecutableLookupMode, ExecutableSearch};
 
+mod pty_output;
+use pty_output::PtyOutputReader;
+
 /// GNU `status_notify`'s "retire, then run the sentinel" ordering, as a type.
 /// See `process/status_notify.rs`.
 mod status_notify;
@@ -538,9 +541,17 @@ pub(crate) use types::{swap_world_state, world_state_placeholder};
 mod tests;
 
 #[cfg(test)]
+#[path = "tests/gnu_pty_exit_oracle.rs"]
+mod gnu_pty_exit_oracle;
+
+#[cfg(test)]
 #[path = "tests/signal_number.rs"]
 mod signal_number_tests;
 
 #[cfg(test)]
 #[path = "tests/timeout.rs"]
 mod timeout_tests;
+
+#[cfg(all(test, unix))]
+#[path = "tests/pty_exit.rs"]
+mod pty_exit_tests;
