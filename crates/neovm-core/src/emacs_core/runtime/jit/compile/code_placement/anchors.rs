@@ -44,10 +44,11 @@ pub(crate) fn first_anchor_offset(code: &CompiledCode, anchor: PlacementAnchor) 
         .min()
 }
 
-/// Round the required entry offset upward, placing the marked range at most
-/// alignment-1 bytes after a cache-line boundary. Unmarked functions keep the
-/// ordinary page-start position. Unlike loop64 this never rounds a guard to
-/// the last few bytes before the intended boundary.
+/// Round the required entry offset down to a legal buffer alignment. The
+/// source range can include the fused compare preceding its conditional jump;
+/// placing its start just before the boundary leaves the jump near the start
+/// of the following line. Unmarked functions retain offset zero. The rule is
+/// independent of the Lisp name and preceding arena allocations.
 pub(crate) fn placement_for_anchor(
     alignment: u64,
     anchor_offset: Option<u32>,
@@ -59,7 +60,7 @@ pub(crate) fn placement_for_anchor(
     let rounded = if alignment >= 64 {
         0
     } else {
-        ((desired + alignment - 1) & !(alignment - 1)) % 64
+        desired & !(alignment - 1)
     };
     PlacementOffset::new(rounded as usize)
 }
