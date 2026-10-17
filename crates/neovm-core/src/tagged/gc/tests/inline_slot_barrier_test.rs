@@ -255,13 +255,14 @@ impl ForeignConses {
         })
     }
 
-    fn owners(&self) -> [TaggedValue; 2] {
-        // SAFETY: both fields remain live for this fixture's lifetime, and
-        // both satisfy ConsCell's eight-byte alignment requirement.
+    fn owners(&mut self) -> [TaggedValue; 2] {
+        // SAFETY: derive writable raw pointers from this exclusive borrow.
+        // Both fields remain live for this fixture's lifetime and satisfy
+        // ConsCell's eight-byte alignment requirement.
         unsafe {
             [
-                TaggedValue::from_cons_ptr(&self.aligned),
-                TaggedValue::from_cons_ptr(&self.eight_aligned),
+                TaggedValue::from_cons_ptr(std::ptr::addr_of_mut!(self.aligned).cast_const()),
+                TaggedValue::from_cons_ptr(std::ptr::addr_of_mut!(self.eight_aligned).cast_const()),
             ]
         }
     }
@@ -285,7 +286,7 @@ fn generational_inline_cons_age_rejects_foreign_boxed_owners_before_trailer_acce
     assert_eq!(size_of::<ForeignConses>(), CONS_BLOCK_BYTES);
     for chunk_map in [false, true] {
         let mut heap = installed_generational_heap_with_chunk_map(chunk_map);
-        let cells = ForeignConses::new();
+        let mut cells = ForeignConses::new();
         let owners = cells.owners();
         assert!(ConsBlock::ptr_is_cell_aligned(owners[0].xcons_ptr()));
         assert_eq!((owners[1].bits() & !TAG_MASK) % 16, 8);

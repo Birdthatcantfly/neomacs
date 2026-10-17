@@ -35,13 +35,14 @@ impl ForeignFooterConses {
         })
     }
 
-    fn owners(&self) -> [TaggedValue; 2] {
-        // SAFETY: these actual fields stay live and eight-byte aligned for
-        // the fixture's lifetime; neither belongs to a GC-owned ConsBlock.
+    fn owners(&mut self) -> [TaggedValue; 2] {
+        // SAFETY: derive writable raw pointers from this exclusive borrow.
+        // The fields stay live and eight-byte aligned for the fixture's
+        // lifetime; neither belongs to a GC-owned ConsBlock.
         unsafe {
             [
-                TaggedValue::from_cons_ptr(&self.eight_aligned),
-                TaggedValue::from_cons_ptr(&self.aligned),
+                TaggedValue::from_cons_ptr(std::ptr::addr_of_mut!(self.eight_aligned).cast_const()),
+                TaggedValue::from_cons_ptr(std::ptr::addr_of_mut!(self.aligned).cast_const()),
             ]
         }
     }
@@ -76,7 +77,7 @@ fn generational_slot_barrier_rejects_foreign_footer_cells_before_age_access() {
                 heap.close_alloc_regions();
             }
 
-            let cells = ForeignFooterConses::new();
+            let mut cells = ForeignFooterConses::new();
             let owners = cells.owners();
             assert_eq!((owners[0].bits() & !TAG_MASK) % 16, 8);
             assert_eq!((owners[1].bits() & !TAG_MASK) % 16, 0);
