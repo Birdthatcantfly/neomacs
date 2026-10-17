@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `AllStopped<'era>` in the current scope
+ --> tests/p1rv_ui/all_stopped_cannot_be_cloned.rs:4:26
+  |
+4 |     let second = stopped.clone();
+  |                          ^^^^^ method not found in `AllStopped<'static>`

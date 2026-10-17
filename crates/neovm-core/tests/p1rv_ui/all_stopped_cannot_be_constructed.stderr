@@ -1,0 +1,5 @@
+error: cannot construct `AllStopped<'_>` with struct literal syntax due to private fields
+ --> tests/p1rv_ui/all_stopped_cannot_be_constructed.rs:4:5
+  |
+4 |     AllStopped {}
+  |     ^^^^^^^^^^
