@@ -7,6 +7,10 @@ use crate::gc_trace::GcTrace;
 use crate::tagged::gc::{AllStopped, HeapIdentity, RendezvousError};
 use crate::tagged::value::TaggedValue;
 
+#[path = "parallel_admission.rs"]
+mod parallel_admission;
+pub(crate) use parallel_admission::{OwnedParallelError, OwnedParallelProjection};
+
 /// An immutable census of the original Context, whose execution is suspended
 /// for the entire era. Construction is sealed to that Context before the
 /// QuiescentCollector heap loan exists. Values never cross an owner thread.
@@ -34,9 +38,10 @@ impl Context {
     #[cold]
     #[inline(never)]
     // No external capture factory: a same-heap snapshot could become stale
-    // after arbitrary Context execution. A5's only constructors are the closed
-    // fixture sequences below; a future production admission transaction must
-    // live in this module and preserve the same capture-to-admission boundary.
+    // after arbitrary Context execution. The production transaction is
+    // `admit_owned_parallel` in the child module. It calls this capture and
+    // then `admit_rooted` with no Context execution between them. The fixture
+    // sequences below remain the test-only NIL preclean.
     fn capture_parallel_legacy_roots(
         &self,
         keeper: &Baton,

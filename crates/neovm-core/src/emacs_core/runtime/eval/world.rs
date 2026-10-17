@@ -25,7 +25,10 @@ use std::sync::Arc;
 mod green_owner;
 mod slot;
 mod sole_owner;
-pub(crate) use green_owner::{Baton, FrozenLegacyRoots};
+#[allow(unused_imports)]
+pub(crate) use green_owner::{
+    Baton, FrozenLegacyRoots, OwnedParallelError, OwnedParallelProjection,
+};
 pub(crate) use slot::WorldSlot;
 pub(crate) use sole_owner::{
     PublishedSoleOwnerDriver, SoleOwnerDriver, SoleOwnerRegistration, SoleOwnerVm,

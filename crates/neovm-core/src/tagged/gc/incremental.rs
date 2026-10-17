@@ -2372,6 +2372,16 @@ impl TaggedHeap {
         self.bytecode_arena.owns(ptr)
     }
 
+    /// Whether this heap still lists VALUE, a vectorlike, in an arena or the
+    /// residual box set. Address membership only: a reclaimed box is absent
+    /// and is not dereferenced. Admission uses this to decide whether an
+    /// unrooted empty weak table survived a serial collection.
+    pub(crate) fn retains_veclike(&self, value: TaggedValue) -> bool {
+        value.is_veclike()
+            && Self::value_heap_addr(value)
+                .is_some_and(|addr| self.owns_veclike_object(addr as *const u8))
+    }
+
     /// Test-only allocated ownership, including conses in a surviving block.
     /// A freed cons in such a block still passes the geometric oracle, so
     /// exclude nodes in the intrusive free list without reading their payload.

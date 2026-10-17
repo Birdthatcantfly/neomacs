@@ -37,7 +37,7 @@ use super::*;
 
 #[path = "parallel_roots.rs"]
 mod parallel_roots;
-pub(crate) use parallel_roots::FrozenLegacyRoots;
+pub(crate) use parallel_roots::{FrozenLegacyRoots, OwnedParallelError, OwnedParallelProjection};
 
 impl World {
     /// Finish publications before automatic field destruction reaches the heap.
