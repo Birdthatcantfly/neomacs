@@ -379,9 +379,10 @@ impl BufferSourceWalkSetup {
             // The live viewport walk owns no retry machinery, so its bound is
             // the per-scan allowance instead of an absolute horizon: every
             // row's run production, slicing and measurement stays proportional
-            // to the row (GNU `get_narrowed_width`, src/xdisp.c:3717-3735),
+            // to the row (the GNU display-line bound, `move_it_in_display_line_to`
+            // stopping against `it->last_visible_x`, src/xdisp.c:10422-10451),
             // and progress never depends on the bound.
-            .with_ordinary_run_scan_budget(CharLen::new(params.narrowed_width_chars())),
+            .with_ordinary_run_scan_budget(CharLen::new(params.display_line_scan_budget_chars())),
         };
 
         BufferSourceLoopMutableState::new(

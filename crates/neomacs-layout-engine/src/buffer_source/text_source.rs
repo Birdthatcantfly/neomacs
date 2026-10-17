@@ -168,16 +168,20 @@ pub(crate) struct BufferTextSourceCursor<'a, B: LayoutBufferView + ?Sized> {
     /// No Lisp state or mutable cache is shared between independent mutators.
     ordinary_run_horizon: Option<CharPos0>,
     /// Per-scan ordinary-run allowance in characters, the live window walk's
-    /// mirror of GNU `get_narrowed_width` (src/xdisp.c:3717-3735): how many
-    /// source characters one display row could possibly need. Each run scan
-    /// from `start` may reach at most `start + budget`, so a newline-less
-    /// tail cannot make every visible row walk the remaining buffer the way
-    /// GNU's iterator never does (`move_it_in_display_line_to` stops at the
-    /// row edge, src/xdisp.c:10422-10451). Unlike the absolute horizon this
-    /// is relative, so progress is structural — a budget of at least one
-    /// character always advances — and no retry machinery is needed.
-    /// Splitting a run early is a pure re-chunking: rows wrap and truncate
-    /// mid-run today, so the produced stream only coarsens its batching.
+    /// mirror of the GNU display-line bound: how many source characters one
+    /// display row can possibly consume — window columns plus one past the
+    /// edge for the continuation/truncation decision and composition slack
+    /// (`move_it_in_display_line_to`, src/xdisp.c:10109, stops a row against
+    /// `it->last_visible_x` at src/xdisp.c:10422-10451; see
+    /// `WindowParams::display_line_scan_budget_chars`). Each run scan from
+    /// `start` may reach at most `start + budget`, so a newline-less tail
+    /// cannot make every visible row walk the remaining buffer the way GNU's
+    /// iterator never does. Unlike the absolute horizon this is relative, so
+    /// progress is structural — a budget of at least one character always
+    /// advances — and no retry machinery is needed. Splitting a run early is
+    /// a pure re-chunking: rows wrap and truncate mid-run today, and a row
+    /// that still has columns left simply pulls the next chunk, so the
+    /// produced stream only coarsens its batching.
     /// `None` (query walks, which own their own absolute horizon) keeps scans
     /// unbounded. Walk-owned allowance; no shared Lisp state.
     ordinary_run_scan_budget: Option<CharLen>,

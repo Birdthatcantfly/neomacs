@@ -450,6 +450,11 @@ pub struct WindowParams {
     pub scroll_bar_pixel_height: f32,
 }
 
+/// Characters past the window edge one display row's scan may still need:
+/// one for GNU's continuation/truncation decision at `it->last_visible_x`
+/// (src/xdisp.c:10422-10451) plus composition-cluster slack.
+const DISPLAY_LINE_SCAN_SLACK_CHARS: usize = 16;
+
 impl WindowParams {
     pub const fn is_minibuffer(&self) -> bool {
         self.kind.is_minibuffer()
@@ -494,6 +499,25 @@ impl WindowParams {
         let fact: usize = if self.window_system { 3 } else { 2 };
         let cols = ((self.text_bounds.width / self.char_width.max(1.0)).ceil() as usize).max(1);
         fact.saturating_mul(cols)
+    }
+
+    /// The character allowance ONE display row's source work may consume:
+    /// the GNU display-line bound itself. `move_it_in_display_line_to`
+    /// (src/xdisp.c:10109) stops a row at the right window edge — it rejects
+    /// a character once `it->current_x + pixel_width > it->last_visible_x`
+    /// (src/xdisp.c:10422-10451) — so a row consumes at most `cols`
+    /// characters (every character occupies at least one column), plus one
+    /// character past the edge for the continuation/truncation decision and
+    /// slack for a composition cluster straddling the edge. Any remainder
+    /// resumes under a fresh allowance on the next row, so a smaller
+    /// allowance only re-chunks a long run; it never changes what a row
+    /// displays. `get_narrowed_width`'s fact multiple would over-cover a
+    /// single row by design — it bounds a whole narrowed region, which is
+    /// why [`Self::narrowed_width_chars`] stays the route-probe bound.
+    #[must_use]
+    pub fn display_line_scan_budget_chars(&self) -> usize {
+        let cols = ((self.text_bounds.width / self.char_width.max(1.0)).ceil() as usize).max(1);
+        cols.saturating_add(DISPLAY_LINE_SCAN_SLACK_CHARS)
     }
 
     pub fn window_start_charpos(&self) -> LayoutCharPos0 {
