@@ -10986,6 +10986,199 @@ fn accept_process_output_inside_a_kbd_macro_waits_like_gnu() {
     assert_eq!(format!("{result}"), "(t t)");
 }
 
+/// Split the printed `OK (...)` list of one exit-drain test into subcases.
+///
+/// Each element is one printed sexp: a list such as `(99 97 102 195 169 10)`,
+/// a dotted pair, or the atom `nil`. `(append STRING nil)` of an empty read
+/// prints as `nil`.
+fn ok_list_elements(printed: &str) -> Result<Vec<String>, String> {
+    let Some(rest) = printed.strip_prefix("OK ") else {
+        return Err(format!("expected an OK list, got {printed}"));
+    };
+    let rest = rest.trim();
+    if rest.len() < 2 || !rest.starts_with('(') || !rest.ends_with(')') {
+        return Err(format!("expected one list after OK, got {printed}"));
+    }
+    split_printed_sexps(&rest[1..rest.len() - 1])
+}
+
+fn split_printed_sexps(inner: &str) -> Result<Vec<String>, String> {
+    let mut elements = Vec::new();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut start: Option<usize> = None;
+    for (index, byte) in inner.bytes().enumerate() {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if byte == b'\\' {
+                escape = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => {
+                in_string = true;
+                if depth == 0 && start.is_none() {
+                    start = Some(index);
+                }
+            }
+            b'(' => {
+                if depth == 0 && start.is_none() {
+                    start = Some(index);
+                }
+                depth += 1;
+            }
+            b')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return Err(format!("unbalanced list: {inner}"));
+                }
+                if depth == 0 {
+                    let begin = start.take().unwrap_or(index);
+                    elements.push(inner[begin..=index].to_string());
+                }
+            }
+            b' ' | b'\n' | b'\t' => {
+                if depth == 0
+                    && let Some(begin) = start.take()
+                {
+                    elements.push(inner[begin..index].to_string());
+                }
+            }
+            _ => {
+                if depth == 0 && start.is_none() {
+                    start = Some(index);
+                }
+            }
+        }
+    }
+    if in_string || depth != 0 {
+        return Err(format!("unbalanced list: {inner}"));
+    }
+    if let Some(begin) = start {
+        let tail = inner[begin..].trim_end();
+        if !tail.is_empty() {
+            elements.push(tail.to_string());
+        }
+    }
+    Ok(elements)
+}
+
+/// macOS PTY last-close outcome for a single-process exit drain.
+///
+/// The drain is `(while (accept-process-output p 1))` followed by
+/// `(while (process-live-p p) (accept-process-output p 0.05))`, one process
+/// at a time. GNU Emacs 30.2 on an arm64 Mac, same unibyte `utf-8-unix` PTY
+/// snippet (`printf "caf\303\351\r\n"`), 60 batch runs × 6 subcases under 8
+/// CPU burners, returned an empty buffer for 2 of 360 subcases. GNU closes
+/// the parent's slave fd right after spawn, then `status_notify` reads
+/// `infd` only until `nread <= 0` (src/process.c:7896-7911). Darwin can drop
+/// that unread output on the last close.
+///
+/// Each of the first `output_subcases` elements is the complete expected
+/// sexp or `nil`. A shorter sexp fails. A sexp from a different decoding
+/// fails. Elements past `output_subcases` are the error and coding-system
+/// rows and match exactly. Linux and every pipe use the strict full-list
+/// `assert_eq` at the call site. This function is the macOS PTY arm.
+fn assert_macos_pty_subcases_complete_or_empty(
+    result: &str,
+    expected: &str,
+    output_subcases: usize,
+) {
+    if let Err(message) = macos_pty_subcases_complete_or_empty(result, expected, output_subcases) {
+        panic!("{message}");
+    }
+}
+
+fn macos_pty_subcases_complete_or_empty(
+    result: &str,
+    expected: &str,
+    output_subcases: usize,
+) -> Result<(), String> {
+    let got = ok_list_elements(result)?;
+    let want = ok_list_elements(expected)?;
+    if got.len() != want.len() {
+        return Err(format!(
+            "macOS PTY exit drain has {} subcases, expected {}: {result}",
+            got.len(),
+            want.len()
+        ));
+    }
+    for (index, (got, want)) in got.iter().zip(want.iter()).enumerate() {
+        if index < output_subcases {
+            if got != want && got != "nil" {
+                return Err(format!(
+                    "macOS PTY subcase {index} is {got}; the complete form is {want} and the empty form is nil"
+                ));
+            }
+        } else if got != want {
+            return Err(format!(
+                "subcase {index} is an exact row: got {got}, expected {want}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn macos_pty_exit_drain_accepts_complete_or_empty_and_rejects_partial_and_misdecoded() {
+    let expected = concat!(
+        "OK (",
+        "(99 97 102 195 169 10) ",
+        "(99 97 102 195 169 13 10) ",
+        "(utf-8-unix . utf-8-unix))",
+    );
+    assert!(macos_pty_subcases_complete_or_empty(expected, expected, 2).is_ok());
+    assert!(
+        macos_pty_subcases_complete_or_empty(
+            "OK ((99 97 102 195 169 10) nil (utf-8-unix . utf-8-unix))",
+            expected,
+            2,
+        )
+        .is_ok()
+    );
+    assert!(
+        macos_pty_subcases_complete_or_empty(
+            "OK (nil nil (utf-8-unix . utf-8-unix))",
+            expected,
+            2,
+        )
+        .is_ok()
+    );
+    // A prefix of the expected bytes is a partial read.
+    assert!(
+        macos_pty_subcases_complete_or_empty(
+            "OK ((99 97 102) (99 97 102 195 169 13 10) (utf-8-unix . utf-8-unix))",
+            expected,
+            2,
+        )
+        .is_err()
+    );
+    // é decoded to U+00E9 where the unibyte row must keep the raw bytes.
+    assert!(
+        macos_pty_subcases_complete_or_empty(
+            "OK ((99 97 102 233 10) (99 97 102 195 169 13 10) (utf-8-unix . utf-8-unix))",
+            expected,
+            2,
+        )
+        .is_err()
+    );
+    // The coding-system pair stays exact.
+    assert!(
+        macos_pty_subcases_complete_or_empty(
+            "OK ((99 97 102 195 169 10) (99 97 102 195 169 13 10) nil)",
+            expected,
+            2,
+        )
+        .is_err()
+    );
+    assert!(macos_pty_subcases_complete_or_empty("ERR (error)", expected, 2).is_err());
+}
+
 /// GNU `Fmake_process` resolves the coding system its child's output is
 /// DECODED with through a four-step chain (src/process.c:1950-1976): the
 /// `:coding` keyword's car, then `coding-system-for-read`, then the car of
@@ -11056,20 +11249,28 @@ fn make_process_decode_coding_follows_gnu_precedence_chain() {
                 (prog1 (process-coding-system p) (delete-process p)))))"#
     ));
 
-    assert_eq!(
-        result,
-        concat!(
-            "OK (",
-            "(99 97 102 4194243 4194217) ",
-            "(99 97 102 195 169) ",
-            "(99 97 102 4194243 4194217) ",
-            "(99 97 102 4194243 4194217) ",
-            "(99 97 102 233) ",
-            "(99 97 102 233) ",
-            "(coding-system-error no-such-coding-xyz) ",
-            "(utf-8-unix . utf-8-unix))",
-        )
+    // Same single-process PTY exit drain as the unibyte coding test. The
+    // first six rows are the child's buffer. The error and the coding-system
+    // pair stay exact. On a macOS PTY those six rows are each complete or
+    // empty (`nil`): GNU 30.2 returned empty for 2/360 subcases of this drain
+    // under load, and `status_notify` stops at the first `nread <= 0`
+    // (src/process.c:7896-7911). Linux keeps the strict list.
+    let expected = concat!(
+        "OK (",
+        "(99 97 102 4194243 4194217) ",
+        "(99 97 102 195 169) ",
+        "(99 97 102 4194243 4194217) ",
+        "(99 97 102 4194243 4194217) ",
+        "(99 97 102 233) ",
+        "(99 97 102 233) ",
+        "(coding-system-error no-such-coding-xyz) ",
+        "(utf-8-unix . utf-8-unix))",
     );
+    if cfg!(target_os = "macos") {
+        assert_macos_pty_subcases_complete_or_empty(&result, expected, 6);
+    } else {
+        assert_eq!(result, expected);
+    }
 }
 
 /// GNU decides an asynchronous process's decoder in TWO stages.  The chain
@@ -11169,18 +11370,27 @@ fn check_make_process_unibyte_buffer_coding(connection_type: &str) {
                   (kill-buffer ub)))))"#
     ));
 
-    assert_eq!(
-        result,
-        concat!(
-            "OK (",
-            "(99 97 102 195 169 10) ",
-            "(99 97 102 195 169 13 10) ",
-            "(99 97 102 233 10) ",
-            "(99 97 102 233 10) ",
-            "(99 97 102 195 169) ",
-            "(99 97 102 195 169 10))",
-        )
+    // `"nil"` is the pipe companion, strict on every OS. The variable
+    // `process-connection-type` is the Unix PTY default, one process at a
+    // time. On a macOS PTY, GNU 30.2 returned an empty buffer for 2 of 360
+    // subcases of this drain under 8 CPU burners. GNU closes the parent's
+    // slave fd after spawn, then `status_notify` reads `infd` only until
+    // `nread <= 0` (src/process.c:7896-7911), so each subcase is the complete
+    // list or `nil`. Linux keeps the strict list.
+    let expected = concat!(
+        "OK (",
+        "(99 97 102 195 169 10) ",
+        "(99 97 102 195 169 13 10) ",
+        "(99 97 102 233 10) ",
+        "(99 97 102 233 10) ",
+        "(99 97 102 195 169) ",
+        "(99 97 102 195 169 10))",
     );
+    if cfg!(target_os = "macos") && connection_type == "process-connection-type" {
+        assert_macos_pty_subcases_complete_or_empty(&result, expected, 6);
+    } else {
+        assert_eq!(result, expected);
+    }
 }
 
 /// The ENCODE half of the same C block (src/process.c:1979-2007) runs the
