@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use strum::{EnumString, IntoStaticStr};
 
 mod dump_codes;
+pub mod realization;
 mod remapping;
 pub use remapping::{FaceRemapEntry, FaceRemapping};
 
@@ -795,6 +796,17 @@ impl FontWidth {
 #[derive(Clone, Debug)]
 pub enum FaceAttrValue {
     Color(Color),
+    /// Preserve an lface color string together with its current realization.
+    /// Failed realization retains the specification for a later retry.
+    SpecifiedColor {
+        specification: SpecifiedColor,
+        realized: Option<Color>,
+    },
+    /// An underline whose original color specification must survive realization.
+    SpecifiedUnderline {
+        underline: Underline,
+        color: Option<SpecifiedColor>,
+    },
     Weight(FontWeight),
     Slant(FontSlant),
     Height(FaceHeight),
@@ -818,13 +830,67 @@ pub enum FaceAttrValue {
 // Face
 // ---------------------------------------------------------------------------
 
+/// One color operation in an underline attribute plist, in Lisp order.
+///
+/// GNU realizes every string-valued `:color` even when a later occurrence
+/// replaces it; the `foreground-color` symbol resets the slot without lookup
+/// (xfaces.c:6763-6780). Owned immutable data can cross mutator boundaries.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum UnderlineColorOperation {
+    Lookup(SpecifiedColor),
+    Foreground,
+}
+
+/// Original lface colors retained alongside their current renderable values.
+///
+/// Immutable specifications contain only owned Rust data and can be shared
+/// across mutators through `Arc`. Each face owner mutates its own slots; there
+/// is no thread-local or shared mutable Lisp state. Sharing makes cloning a
+/// face retain its strings without allocating on the glyph-resolution path.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FaceColorSpecifications {
+    pub foreground: Option<std::sync::Arc<SpecifiedColor>>,
+    pub background: Option<std::sync::Arc<SpecifiedColor>>,
+    pub underline: Option<std::sync::Arc<SpecifiedColor>>,
+    /// `Some` preserves an underline plist's ordered operations, including an
+    /// empty plist. `None` denotes a non-plist underline value.
+    pub underline_operations: Option<std::sync::Arc<[UnderlineColorOperation]>>,
+    pub distant_foreground: Option<std::sync::Arc<SpecifiedColor>>,
+}
+
+static_assertions::assert_impl_all!(FaceColorSpecifications: Send, Sync);
+
+fn retained_color_specification(
+    specification: SpecifiedColor,
+) -> Option<std::sync::Arc<SpecifiedColor>> {
+    match specification {
+        SpecifiedColor::Unspecified => None,
+        specification => Some(std::sync::Arc::new(specification)),
+    }
+}
+
+fn merged_color_specification(
+    base: &Option<std::sync::Arc<SpecifiedColor>>,
+    overlay: &Option<std::sync::Arc<SpecifiedColor>>,
+    overlay_realized: Option<Color>,
+) -> Option<std::sync::Arc<SpecifiedColor>> {
+    if overlay.is_some() || overlay_realized.is_some() {
+        overlay.clone()
+    } else {
+        base.clone()
+    }
+}
+
 /// A face definition. Fields are `Option` to support partial specification
 /// (inheriting unset attributes from the default face).
 ///
 /// The face name is owned by the surrounding registry key, matching GNU
 /// Emacs's frame-local face hash table design.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Face {
+    /// The source specifications for colors that came from Lisp strings.
+    /// A failed lookup must not erase the input needed after invalidation.
+    pub color_specifications: FaceColorSpecifications,
     /// Foreground color.
     pub foreground: Option<Color>,
     /// Background color.
@@ -963,10 +1029,40 @@ impl Face {
             };
         }
 
+        macro_rules! set_color {
+            ($field:expr, $source:expr) => {
+                match value {
+                    FaceAttrValue::Color(color) => {
+                        $field = Some(color);
+                        $source = None;
+                    }
+                    FaceAttrValue::SpecifiedColor {
+                        specification,
+                        realized,
+                    } => {
+                        $field = realized;
+                        $source = retained_color_specification(specification);
+                    }
+                    FaceAttrValue::Unspecified => {
+                        $field = None;
+                        $source = None;
+                    }
+                    _ => return false,
+                }
+            };
+        }
+
         match attr {
-            LFaceAttr::Foreground => set_option!(self.foreground, Color),
-            LFaceAttr::Background => set_option!(self.background, Color),
-            LFaceAttr::DistantForeground => set_option!(self.distant_foreground, Color),
+            LFaceAttr::Foreground => {
+                set_color!(self.foreground, self.color_specifications.foreground)
+            }
+            LFaceAttr::Background => {
+                set_color!(self.background, self.color_specifications.background)
+            }
+            LFaceAttr::DistantForeground => set_color!(
+                self.distant_foreground,
+                self.color_specifications.distant_foreground
+            ),
             LFaceAttr::Weight => set_option!(self.weight, Weight),
             LFaceAttr::Slant => set_option!(self.slant, Slant),
             LFaceAttr::Width => set_option!(self.width, Width),
@@ -981,19 +1077,31 @@ impl Face {
                 FaceAttrValue::Unspecified => self.foundry = None,
                 _ => return false,
             },
-            LFaceAttr::Underline => match value {
-                FaceAttrValue::Underline(u) => self.underline = FaceDecoration::Enabled(u),
-                FaceAttrValue::Bool(true) => {
-                    self.underline = FaceDecoration::Enabled(Underline {
-                        style: UnderlineStyle::Line,
-                        color: None,
-                        position: UnderlinePosition::FontMetric,
-                    });
-                }
-                FaceAttrValue::Bool(false) => self.underline = FaceDecoration::Disabled,
-                FaceAttrValue::Unspecified => self.underline = FaceDecoration::Unspecified,
-                _ => return false,
-            },
+            LFaceAttr::Underline => {
+                let (underline, specification) = match value {
+                    FaceAttrValue::SpecifiedUnderline { underline, color } => (
+                        FaceDecoration::Enabled(underline),
+                        color.and_then(retained_color_specification),
+                    ),
+                    FaceAttrValue::Underline(underline) => {
+                        (FaceDecoration::Enabled(underline), None)
+                    }
+                    FaceAttrValue::Bool(true) => (
+                        FaceDecoration::Enabled(Underline {
+                            style: UnderlineStyle::Line,
+                            color: None,
+                            position: UnderlinePosition::FontMetric,
+                        }),
+                        None,
+                    ),
+                    FaceAttrValue::Bool(false) => (FaceDecoration::Disabled, None),
+                    FaceAttrValue::Unspecified => (FaceDecoration::Unspecified, None),
+                    _ => return false,
+                };
+                self.underline = underline;
+                self.color_specifications.underline = specification;
+                self.color_specifications.underline_operations = None;
+            }
             LFaceAttr::Overline => match value {
                 FaceAttrValue::Bool(b) => self.overline = Some(b),
                 FaceAttrValue::Color(c) => {
@@ -1045,6 +1153,37 @@ impl Face {
     /// override those in `self`.
     pub fn merge(&self, overlay: &Face) -> Face {
         Face {
+            color_specifications: FaceColorSpecifications {
+                foreground: merged_color_specification(
+                    &self.color_specifications.foreground,
+                    &overlay.color_specifications.foreground,
+                    overlay.foreground,
+                ),
+                background: merged_color_specification(
+                    &self.color_specifications.background,
+                    &overlay.color_specifications.background,
+                    overlay.background,
+                ),
+                distant_foreground: merged_color_specification(
+                    &self.color_specifications.distant_foreground,
+                    &overlay.color_specifications.distant_foreground,
+                    overlay.distant_foreground,
+                ),
+                underline: match &overlay.underline {
+                    FaceDecoration::Unspecified => self.color_specifications.underline.clone(),
+                    FaceDecoration::Disabled | FaceDecoration::Enabled(_) => {
+                        overlay.color_specifications.underline.clone()
+                    }
+                },
+                underline_operations: match &overlay.underline {
+                    FaceDecoration::Unspecified => {
+                        self.color_specifications.underline_operations.clone()
+                    }
+                    FaceDecoration::Disabled | FaceDecoration::Enabled(_) => {
+                        overlay.color_specifications.underline_operations.clone()
+                    }
+                },
+            },
             foreground: overlay.foreground.or(self.foreground),
             background: overlay.background.or(self.background),
             family: overlay.family.or(self.family),
@@ -1155,11 +1294,15 @@ impl Face {
                 "foreground" | "foreground-color" => {
                     if let Some(s) = val.as_utf8_str() {
                         face.foreground = realize_color_spec(s, palette);
+                        face.color_specifications.foreground =
+                            retained_color_specification(SpecifiedColor::parse(s));
                     }
                 }
                 "background" | "background-color" => {
                     if let Some(s) = val.as_utf8_str() {
                         face.background = realize_color_spec(s, palette);
+                        face.color_specifications.background =
+                            retained_color_specification(SpecifiedColor::parse(s));
                     }
                 }
                 "weight" => {
@@ -1182,7 +1325,14 @@ impl Face {
                         face.family = Some(*val);
                     }
                 }
-                "underline" => face.underline = parse_underline_value(val, palette),
+                "underline" => {
+                    face.underline = parse_underline_value(val, palette);
+                    let operations = underline_color_operations(val);
+                    face.color_specifications.underline =
+                        underline_color_specification(val, operations.as_deref())
+                            .and_then(retained_color_specification);
+                    face.color_specifications.underline_operations = operations;
+                }
                 "overline" => {
                     if let Some(s) = val.as_utf8_str() {
                         face.overline = Some(true);
@@ -1222,6 +1372,8 @@ impl Face {
                 "distant-foreground" => {
                     if let Some(s) = val.as_utf8_str() {
                         face.distant_foreground = realize_color_spec(s, palette);
+                        face.color_specifications.distant_foreground =
+                            retained_color_specification(SpecifiedColor::parse(s));
                     }
                 }
                 "foundry" => {
@@ -1283,6 +1435,47 @@ impl DecorationProperty {
     }
 }
 
+/// Capture the effectful portion of an underline plist without resolving any
+/// colors. The sequence is shared by face clones and contains no Lisp Values.
+pub(crate) fn underline_color_operations(
+    value: &Value,
+) -> Option<std::sync::Arc<[UnderlineColorOperation]>> {
+    if !value.is_cons() {
+        return None;
+    }
+    let items = crate::emacs_core::value::list_to_vec(value)?;
+    Some(
+        items
+            .chunks_exact(2)
+            .filter_map(|pair| {
+                if DecorationProperty::from_value(pair[0]) != Some(DecorationProperty::Color) {
+                    return None;
+                }
+                if pair[1].is_bare_symbol_named("foreground-color") {
+                    Some(UnderlineColorOperation::Foreground)
+                } else {
+                    face_runtime_string(&pair[1])
+                        .map(|text| UnderlineColorOperation::Lookup(SpecifiedColor::parse(&text)))
+                }
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    )
+}
+
+fn underline_color_specification(
+    value: &Value,
+    operations: Option<&[UnderlineColorOperation]>,
+) -> Option<SpecifiedColor> {
+    if let Some(text) = face_runtime_string(value) {
+        return Some(SpecifiedColor::parse(&text));
+    }
+    match operations?.last()? {
+        UnderlineColorOperation::Lookup(specification) => Some(specification.clone()),
+        UnderlineColorOperation::Foreground => None,
+    }
+}
+
 /// Parse one `:underline` value from an anonymous attribute plist.
 ///
 /// The colour is realized through the terminal palette, exactly as this
@@ -1326,9 +1519,11 @@ fn parse_underline_value(
                 let item = &items[i + 1];
                 match key {
                     Some(DecorationProperty::Color) => {
-                        color = face_runtime_string(item)
-                            .as_deref()
-                            .and_then(|spec| realize_color_spec(spec, palette));
+                        if item.is_bare_symbol_named("foreground-color") {
+                            color = None;
+                        } else if let Some(text) = face_runtime_string(item) {
+                            color = realize_color_spec(&text, palette);
+                        }
                     }
                     Some(DecorationProperty::Style) => {
                         if let Some(name) = item.as_bare_symbol_name() {
@@ -2057,27 +2252,26 @@ fn trace_face_ref_roots(value: Value, roots: &mut Vec<Value>) {
     }
 }
 
+impl GcTrace for Face {
+    fn trace_roots(&self, roots: &mut Vec<Value>) {
+        roots.extend(
+            [self.family, self.foundry, self.stipple, self.doc]
+                .into_iter()
+                .flatten(),
+        );
+        // `:inherit` can be an arbitrary face_ref — walk it so any
+        // cons cells in list/plist forms stay rooted across GC.
+        if let Some(inherit) = self.inherit {
+            trace_face_ref_roots(inherit, roots);
+        }
+    }
+}
+
 impl GcTrace for FaceTable {
     fn trace_roots(&self, roots: &mut Vec<Value>) {
         roots.extend(self.faces.keys().copied());
         for face in self.faces.values() {
-            if let Some(family) = face.family {
-                roots.push(family);
-            }
-            if let Some(foundry) = face.foundry {
-                roots.push(foundry);
-            }
-            if let Some(stipple) = face.stipple {
-                roots.push(stipple);
-            }
-            if let Some(doc) = face.doc {
-                roots.push(doc);
-            }
-            // `:inherit` can be an arbitrary face_ref — walk it so any
-            // cons cells in list/plist forms stay rooted across GC.
-            if let Some(inherit) = face.inherit {
-                trace_face_ref_roots(inherit, roots);
-            }
+            face.trace_roots(roots);
         }
     }
 }
@@ -2089,3 +2283,7 @@ impl GcTrace for FaceTable {
 #[cfg(test)]
 #[path = "face/tests/face_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "face/tests/color_specifications_test.rs"]
+mod color_specifications_tests;

@@ -5728,6 +5728,9 @@ impl Context {
     /// Refresh the render-facing face table from this frame's Lisp face
     /// vectors before redisplay.
     pub fn sync_runtime_faces_for_frame(&mut self, frame_id: crate::window::FrameId) -> bool {
+        if crate::face::realization::enabled() {
+            return super::xfaces::realization::prepare_runtime_faces(self, frame_id);
+        }
         let source = (frame_id, self.face_change_count);
         if (*self.materialized_face_table_source) == Some(source) {
             return false;

@@ -4302,6 +4302,8 @@ pub struct Frame {
     pub(crate) window_state_change: bool,
     /// Real frame-local Lisp face hash table, mirroring GNU `frame->face_hash_table`.
     pub face_hash_table: Value,
+    /// Derived realization state, owned by this frame's exclusive mutator.
+    pub(crate) face_realization: crate::face::realization::FrameFaceRealizationCache,
     /// Per-frame realized Lisp faces, mirroring GNU's `frame->face_hash_table`
     /// runtime surface for renderer-facing consumers.
     /// GNU `struct frame.z_order`: stacking order among sibling child frames.
@@ -4456,6 +4458,7 @@ impl Frame {
             window_hook_record: FrameWindowHookRecord::default(),
             window_state_change: false,
             face_hash_table: Value::hash_table(HashTableTest::Eq),
+            face_realization: Default::default(),
             z_order: 0,
             undecorated: false,
             no_accept_focus: false,
@@ -8920,6 +8923,7 @@ impl GcTrace for FrameManager {
                 roots.push(*v);
             }
             roots.push(frame.face_hash_table);
+            frame.face_realization.trace_roots(roots);
             // Chrome string objects in published snapshots are rooted by
             // their own `SharedRoot` leases.
             frame.tree().trace_roots(roots);

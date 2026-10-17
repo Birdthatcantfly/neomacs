@@ -6721,6 +6721,9 @@ fn load_font_slant(s: &DumpFontSlant) -> FontSlant {
 
 fn load_face(decoder: &mut LoadDecoder, df: &DumpFace) -> Face {
     Face {
+        // Retained color input is reconstructed from the frame's authoritative
+        // Lisp face vectors when its runtime face table is synchronized.
+        color_specifications: Default::default(),
         foreground: df.foreground.map(|c| load_color(&c)),
         background: df.background.map(|c| load_color(&c)),
         family: df

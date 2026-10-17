@@ -1130,6 +1130,7 @@ pub(crate) fn builtin_make_terminal_frame(
             vec![Value::symbol("listp"), args[0]],
         ));
     }
+    let parameters = args[0];
     let tty_device = terminal_frame_string_parameter(args[0], "tty")?;
     let tty_type = terminal_frame_string_parameter(args[0], "tty-type")?;
 
@@ -1200,6 +1201,10 @@ pub(crate) fn builtin_make_terminal_frame(
         if let Some(frame) = frames.get_mut(frame_id) {
             apply_terminal_viewport_to_tty_frame(frame, buffers, size, displays_chrome);
         }
+        // GNU frame.c:1822-1823 initializes basic faces eagerly only outside batch.
+        super::xfaces::realization::initialize_new_terminal_frame_faces(
+            eval, frame_id, parameters,
+        )?;
         return Ok(frame);
     }
     // GNU `Fmake_terminal_frame` -> `init_tty` signals "Unknown terminal type"
@@ -1224,6 +1229,7 @@ fn make_terminal_frame_on_existing_terminal(
     args: Vec<Value>,
     terminal_id: u64,
 ) -> EvalResult {
+    let parameters = args.first().copied().unwrap_or(Value::NIL);
     let (width, height) = eval
         .frames
         .selected_frame()
@@ -1269,6 +1275,7 @@ fn make_terminal_frame_on_existing_terminal(
             .expect("live terminal frames have nonzero dimensions");
         apply_terminal_viewport_to_tty_frame(frame, buffers, size, displays_chrome);
     }
+    super::xfaces::realization::initialize_new_terminal_frame_faces(eval, frame_id, parameters)?;
     Ok(frame)
 }
 

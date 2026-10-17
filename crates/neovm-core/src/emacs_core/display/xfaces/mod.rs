@@ -10,6 +10,7 @@
 //! `crate::face`; font.c matching stays in `super::font`.
 
 pub(crate) mod height;
+pub(crate) mod realization;
 
 use crate::emacs_core::error::EvalResult;
 use crate::emacs_core::error::{expect_args, expect_max_args, expect_min_args};
@@ -2032,11 +2033,21 @@ pub(crate) fn runtime_face_from_lisp_face_vector_resolved(
         let Some(value) = lisp_face_vector_attr(vector, attr) else {
             continue;
         };
-        if runtime_unspecified_lisp_face_attr(attr, value) {
+        let terminal_default = crate::face::realization::enabled()
+            && matches!(attr, LFaceAttr::Foreground | LFaceAttr::Background)
+            && matches!(
+                value.as_utf8_str(),
+                Some("unspecified-fg" | "unspecified-bg")
+            );
+        if !terminal_default && runtime_unspecified_lisp_face_attr(attr, value) {
             continue;
         }
         if let Some(face_attr) = lisp_value_to_face_attr_resolved(attr, value, resolver) {
             face.set_attribute(attr, face_attr);
+            if attr == LFaceAttr::Underline {
+                face.color_specifications.underline_operations =
+                    crate::face::underline_color_operations(&value);
+            }
         }
     }
     face
@@ -3407,9 +3418,12 @@ fn lisp_value_to_face_attr_resolved(
             // Parse the lface string to a spec exactly once; realization —
             // the only spec-to-pixel bridge — happens here, at the boundary
             // where the runtime face table is built for a known frame class.
-            Some(FaceAttrValue::Color(
-                resolver.realize(&SpecifiedColor::parse(s))?,
-            ))
+            let specification = SpecifiedColor::parse(s);
+            let realized = resolver.realize(&specification);
+            Some(FaceAttrValue::SpecifiedColor {
+                specification,
+                realized,
+            })
         }
         LFaceAttr::Weight => {
             let name = value.as_bare_symbol_name()?;
@@ -3443,18 +3457,23 @@ fn lisp_value_to_face_attr_resolved(
                 return Some(FaceAttrValue::Bool(true));
             }
             if let Some(s) = value.as_utf8_str() {
-                let color = resolver.realize(&SpecifiedColor::parse(s));
-                return Some(FaceAttrValue::Underline(Underline {
-                    style: UnderlineStyle::Line,
-                    color,
-                    position: UnderlinePosition::FontMetric,
-                }));
+                let specification = SpecifiedColor::parse(s);
+                let color = resolver.realize(&specification);
+                return Some(FaceAttrValue::SpecifiedUnderline {
+                    underline: Underline {
+                        style: UnderlineStyle::Line,
+                        color,
+                        position: UnderlinePosition::FontMetric,
+                    },
+                    color: Some(specification),
+                });
             }
             // Plist form: (:style STYLE :color COLOR :position POS)
             if let Some(plist) = super::value::list_to_vec(&value) {
                 let mut style = UnderlineStyle::Line;
                 let mut color = None;
                 let mut position = UnderlinePosition::FontMetric;
+                let mut specification = None;
                 let mut i = 0;
                 while i + 1 < plist.len() {
                     let key = plist[i].as_bare_symbol_name().unwrap_or("");
@@ -3467,9 +3486,16 @@ fn lisp_value_to_face_attr_resolved(
                                 .unwrap_or(UnderlineStyle::Line);
                         }
                         ":color" => {
-                            if let Some(s) = val.as_utf8_str().or_else(|| val.as_bare_symbol_name())
-                            {
-                                color = resolver.realize(&SpecifiedColor::parse(s));
+                            if val.is_bare_symbol_named("foreground-color") {
+                                // GNU xfaces.c:6771-6773 leaves the terminal
+                                // underline slot at zero; this is not a color
+                                // name and must never call tty-color-desc.
+                                color = None;
+                                specification = None;
+                            } else if let Some(s) = val.as_utf8_str() {
+                                let spec = SpecifiedColor::parse(s);
+                                color = resolver.realize(&spec);
+                                specification = Some(spec);
                             }
                         }
                         ":position" => {
@@ -3479,11 +3505,14 @@ fn lisp_value_to_face_attr_resolved(
                     }
                     i += 2;
                 }
-                return Some(FaceAttrValue::Underline(Underline {
-                    style,
-                    color,
-                    position,
-                }));
+                return Some(FaceAttrValue::SpecifiedUnderline {
+                    underline: Underline {
+                        style,
+                        color,
+                        position,
+                    },
+                    color: specification,
+                });
             }
             Some(FaceAttrValue::Bool(true))
         }
