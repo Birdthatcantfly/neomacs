@@ -89,6 +89,35 @@ fn definition_root_lease_is_reused_until_source_retirement_and_keeps_old_sources
 }
 
 #[test]
+fn face_change_walks_only_frames_whose_realizations_stay_valid() {
+    let mut context = crate::emacs_core::Context::new();
+    let selected = crate::emacs_core::window_cmds::ensure_selected_frame_id(&mut context);
+    let buffer = context.buffers.create_buffer("*face-change-other*");
+    let other = context.frames.create_frame("other", 80, 25, buffer);
+
+    assert!(!super::other_frames_keep_realizations(
+        &context.frames,
+        FaceChangeScope::AllFrames,
+    ));
+    assert!(!super::other_frames_keep_realizations(
+        &context.frames,
+        FaceChangeScope::Frames(&[selected, other]),
+    ));
+    assert!(super::other_frames_keep_realizations(
+        &context.frames,
+        FaceChangeScope::Frames(&[selected]),
+    ));
+    assert!(super::other_frames_keep_realizations(
+        &context.frames,
+        FaceChangeScope::Frames(&[]),
+    ));
+    assert!(super::other_frames_keep_realizations(
+        &context.frames,
+        FaceChangeScope::DefinitionsOnly(&[selected]),
+    ));
+}
+
+#[test]
 fn default_realization_binding_restores_after_lisp_error() {
     let mut context = super::super::super::eval::Context::new();
     context.set_variable("inhibit-redisplay", Value::NIL);

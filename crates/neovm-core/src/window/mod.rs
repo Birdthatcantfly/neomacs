@@ -7109,6 +7109,13 @@ impl FrameManager {
         self.frames.keys().copied().collect()
     }
 
+    /// True when a live frame is absent from `affected`.
+    pub(crate) fn has_frame_outside(&self, affected: &[FrameId]) -> bool {
+        self.frames
+            .keys()
+            .any(|frame_id| !affected.contains(frame_id))
+    }
+
     /// Return FRAME's parent frame id, when FRAME is a child frame.
     pub fn frame_parent_id(&self, id: FrameId) -> Option<FrameId> {
         self.frames

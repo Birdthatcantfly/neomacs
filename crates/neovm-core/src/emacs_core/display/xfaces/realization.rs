@@ -45,6 +45,22 @@ pub(crate) fn record_named_face_change(
     record_face_change(context, scope);
 }
 
+/// GNU sets one global `face_change` flag, or `f->face_change` on the frames
+/// whose definition changed (xfaces.c:3104-3111, 3190-3201, 3770-3776). It does
+/// not visit the other frames. The counter bump already retires every cache
+/// that is not carried forward, so a walk exists only to preserve realizations
+/// GNU would have left alone.
+fn other_frames_keep_realizations(
+    frames: &crate::window::FrameManager,
+    scope: FaceChangeScope<'_>,
+) -> bool {
+    match scope {
+        FaceChangeScope::AllFrames => false,
+        FaceChangeScope::Frames(affected) => frames.has_frame_outside(affected),
+        FaceChangeScope::DefinitionsOnly(_) => true,
+    }
+}
+
 /// Preserve GNU's frame-local realization invalidation while keeping the
 /// existing global counter for layout freshness. One exclusive Context
 /// mutator updates its own frame caches; no new shared state is introduced.
@@ -55,7 +71,9 @@ pub(crate) fn record_face_change(
     let previous = context.face_change_count;
     context.face_change_count += 1;
     let current = context.face_change_count;
-    if !crate::face::realization::enabled() {
+    if !crate::face::realization::enabled()
+        || !other_frames_keep_realizations(&context.frames, scope)
+    {
         return;
     }
     for frame_id in context.frames.frame_list() {
