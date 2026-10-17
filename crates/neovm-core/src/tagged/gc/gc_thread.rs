@@ -2127,6 +2127,10 @@ mod foreign_cons_footer_tests;
 mod cons_real_window_first_tests;
 
 #[cfg(test)]
+#[path = "tests/once_survived_young_cons_test.rs"]
+mod once_survived_young_cons_tests;
+
+#[cfg(test)]
 #[path = "tests/concurrent_major_worker_test.rs"]
 mod concurrent_major_worker_tests;
 
