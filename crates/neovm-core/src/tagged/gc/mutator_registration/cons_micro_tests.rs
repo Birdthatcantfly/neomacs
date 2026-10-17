@@ -93,7 +93,7 @@ fn receipt(
     // absence of lock_contended symbols. Profile/disassembly + the separate
     // held-root-table-lock gate establish the local non-registration path.
     println!(
-        "R2_CONS_MICRO {{\"arm\":\"{arm}\",\"shape\":\"{shape}\",\"n\":{n},\"gen\":{},\"warm\":{warm},\"verified\":true,\"refills\":{},\"cells_granted\":{},\"source_grants\":[{},{},{}],\"slot_creations\":0,\"slot_bank_len\":{},\"slot_bank_capacity\":{},\"root_registrations\":null,\"lock_attempts\":null,\"host_allocations\":null,\"event_counts_observed\":false}}",
+        "R2_CONS_MICRO {{\"arm\":\"{arm}\",\"shape\":\"{shape}\",\"n\":{n},\"gen\":{},\"warm\":{warm},\"initial_heap_fixture\":\"full_collected_world\",\"verified\":true,\"refills\":{},\"cells_granted\":{},\"source_grants\":[{},{},{}],\"slot_creations\":0,\"slot_bank_len\":{},\"slot_bank_capacity\":{},\"root_registrations\":null,\"lock_attempts\":null,\"host_allocations\":null,\"event_counts_observed\":false}}",
         usize::from(gen1),
         counts.refills,
         counts.granted,
@@ -106,33 +106,70 @@ fn receipt(
 }
 
 fn sim(shape: &str, n: usize) {
-    let mut heap = TaggedHeap::new();
-    heap.gc_threshold = usize::MAX;
-    let initial = heap.allocated_count();
-    let mut head = Value::NIL;
-    let mut warm = 0;
-    for _ in 0..MAX_WARM {
-        head = heap.alloc_cons(Value::fixnum(CAR), head);
-        warm += 1;
-        if heap.region_stats.cons_from_fresh_block != 0 {
-            break;
-        }
-    }
-    assert!(warm < MAX_WARM, "warmup reaches an actual fresh region");
-    let remaining = (heap.jit.cons_lim.get() - heap.jit.cons_cur.get()) / size_of::<ConsCell>();
-    assert!(remaining >= 127, "fresh maximum region after one warm cell");
-    let before = Counts::of(&heap.region_stats);
-    let gen1 = heap.generational_enabled();
-    head = r2_cons_micro_sim_loop(&mut heap, Value::fixnum(CAR), head, n);
-    let delta = Counts::of(&heap.region_stats).since(before);
-    if shape == "resident" {
-        assert_eq!(delta.refills, 0);
-        assert_eq!(delta.granted, 0);
-    }
-    heap.close_alloc_regions();
-    assert_eq!(heap.allocated_count() - initial, warm + n);
-    verify_list(&heap, head, warm + n);
-    receipt("sim", shape, n, gen1, warm, delta, (0, 0));
+    Context::with_test_collection_era(
+        |context| {
+            // Use the SAME collected World heap as the local arm, while this
+            // setup still owns its serial, non-admitted allocator. The marker
+            // must never run after the fixture freezes/adopts that heap.
+            let heap = &mut *context.tagged_heap;
+            heap.gc_threshold = usize::MAX;
+            assert!(
+                !heap.threads_admitted(),
+                "Sim marker uses the sole allocator"
+            );
+            let initial = heap.allocated_count();
+            let fresh_before = heap.region_stats.cons_from_fresh_block;
+            let mut head = Value::NIL;
+            let mut warm = 0;
+            for _ in 0..MAX_WARM {
+                head = heap.alloc_cons(Value::fixnum(CAR), head);
+                warm += 1;
+                if heap.region_stats.cons_from_fresh_block > fresh_before {
+                    break;
+                }
+            }
+            assert!(warm < MAX_WARM, "warmup reaches a new actual fresh region");
+            let remaining =
+                (heap.jit.cons_lim.get() - heap.jit.cons_cur.get()) / size_of::<ConsCell>();
+            assert!(remaining >= 127, "fresh maximum region after one warm cell");
+            let before = Counts::of(&heap.region_stats);
+            let gen1 = heap.generational_enabled();
+            head = r2_cons_micro_sim_loop(heap, Value::fixnum(CAR), head, n);
+            let delta = Counts::of(&heap.region_stats).since(before);
+            if shape == "resident" {
+                assert_eq!(delta.refills, 0);
+                assert_eq!(delta.granted, 0);
+            }
+            heap.close_alloc_regions();
+            assert_eq!(heap.allocated_count() - initial, warm + n);
+            verify_list(heap, head, warm + n);
+            // SAFETY: setup remains the sole serial owner and the complete
+            // list is live. One fixed root AFTER the measured marker retains
+            // it across the fixture's subsequent drain/capture/admission.
+            let root = unsafe { SharedRoot::new(heap, head) };
+            (root, gen1, warm, delta)
+        },
+        |era, (root, gen1, warm, delta)| {
+            // No synthetic owner and no detached catalog are needed for the
+            // serial arm. The real major drains canonical legacy young work;
+            // cleanup and verification are entirely outside the marker.
+            let mut stopped = era.stop().unwrap();
+            let report = era.collect_stopped(&mut stopped).unwrap();
+            assert!(report.major);
+            assert_eq!(report.frozen_owners, 0);
+            era.with_stopped_heap_for_test(&stopped, |heap| {
+                let head = root.materialize(heap).unwrap();
+                verify_list(heap, head.value(), warm + n);
+            })
+            .unwrap();
+            stopped.complete().unwrap();
+            drop(root);
+            let (collector, keeper) = era.finish().unwrap();
+            drop(collector);
+            drop(keeper);
+            receipt("sim", shape, n, gen1, warm, delta, (0, 0));
+        },
+    );
 }
 
 fn local(shape: &str, n: usize) {
@@ -159,6 +196,7 @@ fn local(shape: &str, n: usize) {
                 // Clone immutable slot identity ONCE. Both handles name the
                 // same canonical home; cons_into reads cdr before installing.
                 let cdr = head.clone();
+                assert_eq!(run.state().region_stats.cons_from_fresh_block, 0);
                 let mut warm = 0;
                 for _ in 0..MAX_WARM {
                     run.cons_into(&car, &cdr, &mut head).unwrap();
