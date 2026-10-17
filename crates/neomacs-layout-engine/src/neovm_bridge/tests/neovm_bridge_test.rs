@@ -3993,3 +3993,38 @@ fn composed_face_sources_are_interned_by_content() {
         "a different face must not share the first face's source"
     );
 }
+
+#[test]
+fn repeated_face_compositions_reuse_their_merged_source() {
+    let _runtime = neovm_core::emacs_core::Context::new();
+    let table = FaceTable::new();
+    let resolver = FaceResolver::new(&table, 0xFFFFFF, 0, 14.0, None);
+
+    let mut base_attributes = NeoFace::new("--composition-base--");
+    base_attributes.family = Some(Value::string("retained-family"));
+    let base_source =
+        std::sync::Arc::new(RootedFace::new(base_attributes).expect("installed mutator heap"));
+    let mut base = ResolvedFace::default();
+    base.source_attributes = Some(std::sync::Arc::clone(&base_source));
+
+    let overlay = || {
+        let mut face = NeoFace::new("--composition-overlay--");
+        face.foreground = Some(NeoColor::rgb(255, 0, 0));
+        face
+    };
+    let mut first = base.clone();
+    first.retain_source_over(&resolver, &base, &overlay());
+    let mut second = base.clone();
+    second.retain_source_over(&resolver, &base, &overlay());
+    assert!(
+        std::sync::Arc::ptr_eq(
+            first.source_attributes.as_ref().unwrap(),
+            second.source_attributes.as_ref().unwrap()
+        ),
+        "the same overlay over the same base must not rebuild its merged source"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(base.source_attributes.as_ref().unwrap(), &base_source),
+        "composing must not disturb the base's own source"
+    );
+}

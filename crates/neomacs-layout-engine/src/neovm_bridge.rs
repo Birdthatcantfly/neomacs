@@ -3608,14 +3608,22 @@ impl ResolvedFace {
         overlay: &NeoFace,
     ) {
         self.canonical_tty_role = None;
-        let Some(source) = base.source_attributes.as_deref() else {
+        let Some(source) = base.source_attributes.clone() else {
             return;
         };
+        if let Some(shared) = resolver.cached_composed_over(&source, overlay) {
+            self.source_attributes = Some(shared);
+            return;
+        }
         let mut merged = source.attributes().merge(overlay);
         merged.inherit = None;
         merged.doc = None;
-        self.source_attributes =
-            resolver.shared_composed_source(merged, base.source_attributes.as_deref());
+        let Some(shared) = resolver.shared_composed_source(merged, Some(&source)) else {
+            self.source_attributes = None;
+            return;
+        };
+        resolver.record_composed_over(source, overlay.clone(), shared.clone());
+        self.source_attributes = Some(shared);
     }
 
     pub(crate) fn has_same_color_source(&self, other: &Self) -> bool {
@@ -3886,8 +3894,28 @@ pub struct FaceResolver {
 /// keyed by the merged lface vector (`lookup_face`, src/xfaces.c:5064-5093).
 #[derive(Default)]
 struct ComposedSourceCache {
+    /// Distinct merged sources by content digest.
     entries: std::collections::HashMap<u64, Vec<std::sync::Arc<RootedFace>>>,
+    /// `base + overlay` compositions, so a repeated composition reuses its
+    /// merged source without rebuilding it. The base is pinned by a weak
+    /// reference: a freed base cannot match, and a live allocation cannot be
+    /// confused with another face that later reuses its address.
+    compositions: std::collections::HashMap<(usize, u64), Vec<ComposedOverlayEntry>>,
     len: usize,
+}
+
+struct ComposedOverlayEntry {
+    base: std::sync::Weak<RootedFace>,
+    overlay: NeoFace,
+    merged: std::sync::Arc<RootedFace>,
+}
+
+impl ComposedSourceCache {
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.compositions.clear();
+        self.len = 0;
+    }
 }
 
 /// Beyond this many distinct composed sources the cache resets wholesale: a
@@ -4330,12 +4358,63 @@ impl FaceResolver {
         };
         let mut cache = self.composed_sources.borrow_mut();
         if cache.len >= COMPOSED_SOURCE_CACHE_LIMIT {
-            cache.entries.clear();
-            cache.len = 0;
+            cache.clear();
         }
         cache.entries.entry(hash).or_default().push(rooted.clone());
         cache.len += 1;
         Some(rooted)
+    }
+
+    /// The previously merged source for `overlay` over `base`, when this exact
+    /// composition was already built. Composition is a pure function of the
+    /// base's source identity and the overlay's content, so a hit is exact.
+    fn cached_composed_over(
+        &self,
+        base: &std::sync::Arc<RootedFace>,
+        overlay: &NeoFace,
+    ) -> Option<std::sync::Arc<RootedFace>> {
+        let key = (
+            std::sync::Arc::as_ptr(base) as usize,
+            overlay.content_hash(),
+        );
+        let cache = self.composed_sources.borrow();
+        let bucket = cache.compositions.get(&key)?;
+        bucket
+            .iter()
+            .find(|entry| {
+                entry
+                    .base
+                    .upgrade()
+                    .is_some_and(|pinned| std::sync::Arc::ptr_eq(&pinned, base))
+                    && &entry.overlay == overlay
+            })
+            .map(|entry| std::sync::Arc::clone(&entry.merged))
+    }
+
+    fn record_composed_over(
+        &self,
+        base: std::sync::Arc<RootedFace>,
+        overlay: NeoFace,
+        merged: std::sync::Arc<RootedFace>,
+    ) {
+        let key = (
+            std::sync::Arc::as_ptr(&base) as usize,
+            overlay.content_hash(),
+        );
+        let mut cache = self.composed_sources.borrow_mut();
+        if cache.len >= COMPOSED_SOURCE_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache
+            .compositions
+            .entry(key)
+            .or_default()
+            .push(ComposedOverlayEntry {
+                base: std::sync::Arc::downgrade(&base),
+                overlay,
+                merged,
+            });
+        cache.len += 1;
     }
 
     fn apply_specified_face_over(&self, base: &ResolvedFace, face: &NeoFace) -> ResolvedFace {
