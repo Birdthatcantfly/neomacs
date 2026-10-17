@@ -1339,11 +1339,20 @@ impl<'body, 'heap> Session<'body, 'heap> {
         let (retired_tx, retired_rx) = channel();
         let mut go_txs = Vec::with_capacity(n);
         let mut done_txs = Vec::with_capacity(n);
+        // Design 3.3: fixed participants register while stopped, before any
+        // owner thread exists. `OwnerLaunch::run` activates immediately, and
+        // activation holds the registry gate; registering owner i+1 after
+        // spawning owner i races that gate, which answers Busy instead of
+        // blocking — a slow scheduler (TSan) turns the harness itself into
+        // the failure. Register every permit first, then hand each to its
+        // thread.
+        let mut permits = Vec::with_capacity(n);
         for index in 0..n {
             let id = id_base + index as u64;
-            let permit = era
-                .register(id, nslots)
-                .unwrap_or_else(|error| panic!("register {id}: {error:?}"));
+            permits.push(retry_reg(|| era.register(id, nslots)));
+        }
+        for (index, permit) in permits.into_iter().enumerate() {
+            let id = id_base + index as u64;
             let (go_tx, go_rx) = channel();
             let (done_tx, done_rx) = channel();
             go_txs.push(go_tx);
