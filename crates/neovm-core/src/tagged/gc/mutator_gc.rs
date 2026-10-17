@@ -212,14 +212,14 @@ pub(super) struct SatbMutatorState {
     pub(super) satb_string_preimage_addrs: FxHashSet<usize>,
     lifecycle: SatbMutatorLifecycle,
     /// Same cold registration and retire path as SATB; never a ThreadId map.
-    young: YoungLogSlot,
+    pub(super) young: YoungLogSlot,
 }
 
 static_assertions::assert_not_impl_any!(SatbMutatorState: Send, Sync, Clone, Copy);
 static_assertions::assert_impl_all!(SatbMutatorState: std::fmt::Debug);
 
 impl SatbMutatorState {
-    fn new(young: YoungLogSlot) -> Self {
+    pub(super) fn new(young: YoungLogSlot) -> Self {
         Self {
             satb: SatbBuffer::new(),
             satb_snapshotted_owners: FxHashSet::default(),

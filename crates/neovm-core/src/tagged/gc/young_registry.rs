@@ -8,6 +8,7 @@
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(test)]
 use typed_index_collections::TiVec;
@@ -25,12 +26,39 @@ pub(super) struct YoungRegistrationId {
     ordinal: NonZeroUsize,
 }
 
+// Keep parallel registrations disjoint from the legacy current/test ordinals.
+// Issuance is process-wide and never rolls back or reuses an ordinal, including
+// after a failed start or an era's retirement. This counter carries identity
+// only; registration/payload publication has its own synchronization.
+const PARALLEL_ORDINAL_TAG: usize = 1usize << (usize::BITS - 1);
+static NEXT_PARALLEL_ORDINAL: AtomicUsize = AtomicUsize::new(PARALLEL_ORDINAL_TAG);
+
 static_assertions::assert_impl_all!(YoungRegistrationId: Send, Sync, Copy);
 
 impl YoungRegistrationId {
     #[inline]
     pub(super) fn heap_identity(self) -> HeapIdentity {
         self.heap
+    }
+
+    #[cold]
+    #[inline(never)]
+    pub(super) fn issue_parallel(heap: HeapIdentity) -> Result<Self, YoungRegistryError> {
+        // MAX remains the exhausted sentinel; wrapping would alias an old ID.
+        let ordinal = NEXT_PARALLEL_ORDINAL
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .map_err(|_| YoungRegistryError::RegistrationExhausted)?;
+        Ok(Self {
+            heap,
+            ordinal: NonZeroUsize::new(ordinal).expect("parallel ordinals have their high bit set"),
+        })
+    }
+
+    #[inline]
+    pub(super) fn is_parallel(self) -> bool {
+        self.ordinal.get() >= PARALLEL_ORDINAL_TAG
     }
 }
 
@@ -207,6 +235,74 @@ impl YoungLogSlot {
         self.id
     }
 
+    #[cold]
+    #[inline(never)]
+    pub(super) fn new_parallel(id: YoungRegistrationId) -> Self {
+        assert!(
+            id.is_parallel(),
+            "parallel slot requires a parallel registration"
+        );
+        Self {
+            id,
+            state: YoungLogState::Resident(YoungBlockLog {
+                id,
+                blocks: Vec::new(),
+                pending: None,
+            }),
+            next_generation: YoungLoanGeneration(NonZeroUsize::MIN),
+        }
+    }
+
+    /// The canonical Mutator's sealed publication transition owns this unique
+    /// borrow and makes the empty shell inaccessible until checked restoration.
+    /// This is not a worker loan and does not change outstanding-loan counters.
+    /// Existing worker loans are refused before moving any payload.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn take_owner_payload(&mut self) -> Result<YoungBlockLog, YoungRegistryError> {
+        let id = self.id;
+        let resident = self.resident_mut()?;
+        Ok(std::mem::replace(
+            resident,
+            YoungBlockLog {
+                id,
+                blocks: Vec::new(),
+                pending: None,
+            },
+        ))
+    }
+
+    /// Validate the original identity and empty owner shell before committing.
+    /// A rejected return owns the unchanged payload so the caller can retry or
+    /// retain it while poisoning the era; no young flag/backlink is discarded.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn restore_owner_payload(
+        &mut self,
+        log: YoungBlockLog,
+    ) -> Result<(), (YoungRegistryError, YoungBlockLog)> {
+        let refusal = if log.id.heap != self.id.heap {
+            Some(YoungRegistryError::WrongHeap)
+        } else if log.id != self.id {
+            Some(YoungRegistryError::UnknownRegistration)
+        } else {
+            match &self.state {
+                YoungLogState::Loaned(_) => Some(YoungRegistryError::LogLoaned),
+                YoungLogState::Resident(shell)
+                    if !shell.blocks.is_empty() || shell.pending.is_some() =>
+                {
+                    Some(YoungRegistryError::LogNotLoaned)
+                }
+                YoungLogState::Resident(_) => None,
+            }
+        };
+        if let Some(reason) = refusal {
+            return Err((reason, log));
+        }
+        self.state = YoungLogState::Resident(log);
+        Ok(())
+    }
+
     /// Inventory covers canonical resident payloads. An outstanding loan owns
     /// its Vec outside the registry and is deliberately excluded until return;
     /// a stopped-world inventory cannot have such loans after preflight.
@@ -284,15 +380,14 @@ pub(super) enum YoungRegistryError {
     GenerationMismatch,
     #[error("young loan generation space exhausted")]
     GenerationExhausted,
-    #[cfg(test)]
-    #[error("young registration ordinal space exhausted")]
-    RegistrationExhausted,
     #[error("young outstanding loan count exhausted")]
     LoanCountExhausted,
     #[error("young loan count invariant violated")]
     LoanCountInvariant,
     #[error("collection requires all {0} young loans returned")]
     OutstandingLoans(usize),
+    #[error("young registration ordinal space exhausted")]
+    RegistrationExhausted,
 }
 
 /// Failure owns the original loan, so a rejected cross-heap return can retry
@@ -427,6 +522,7 @@ impl YoungRegistryControl {
             .len()
             .checked_add(1)
             .and_then(NonZeroUsize::new)
+            .filter(|ordinal| ordinal.get() < PARALLEL_ORDINAL_TAG)
             .ok_or(YoungRegistryError::RegistrationExhausted)?;
         let slot = self.make_slot(ordinal);
         self.locations
