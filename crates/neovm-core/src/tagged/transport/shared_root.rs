@@ -8,6 +8,10 @@ use super::root_table::{RootLease, TracedWord};
 use crate::tagged::gc::{HeapIdentity, TaggedHeap, current_tagged_heap_identity};
 use crate::tagged::value::TaggedValue;
 
+#[path = "cons_root.rs"]
+mod cons_root;
+pub(crate) use cons_root::{ConsRootSeal, RootedConsInputs};
+
 /// A Lisp value detached from any one mutator thread.
 ///
 /// A raw [`TaggedValue`] is thread-confined: it stays valid only while the

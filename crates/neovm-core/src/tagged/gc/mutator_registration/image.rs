@@ -53,6 +53,7 @@ pub(in crate::tagged::gc) struct OwnerGcState {
     pub(in crate::tagged::gc) regions: RegionBook,
     pub(in crate::tagged::gc) region_stats: RegionStats,
     pub(in crate::tagged::gc) root_scratch: Vec<MarkWord>,
+    pub(super) catalog_region: Option<super::super::cons_storage::CatalogRegion>,
 }
 
 impl std::fmt::Debug for OwnerGcState {
@@ -295,15 +296,19 @@ impl OwnerGcState {
             regions: RegionBook::new(),
             region_stats: RegionStats::default(),
             root_scratch,
+            catalog_region: None,
         })
     }
 
     pub(in crate::tagged::gc) fn validate_publication(&self) -> Result<(), ImageError> {
+        if self.catalog_region.is_some() {
+            return Err(ImageError::RegionsOpen);
+        }
         validate_closed(&self.hot, &self.cold, &self.jit, &self.regions)
     }
 
     pub(in crate::tagged::gc) fn publish(&mut self) -> Result<PublishedGcImage, ImageError> {
-        validate_closed(&self.hot, &self.cold, &self.jit, &self.regions)?;
+        self.validate_publication()?;
         let young = self.cold.young.take_owner_payload()?;
         let roots = std::mem::take(&mut self.root_scratch);
         let stats = std::mem::take(&mut self.region_stats);

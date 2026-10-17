@@ -916,3 +916,6 @@ mod tests {
         drop(exclusion);
     }
 }
+
+mod cons_suspend;
+pub(super) use cons_suspend::SuspendedConsCollector;

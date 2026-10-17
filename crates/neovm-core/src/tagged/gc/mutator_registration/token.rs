@@ -118,6 +118,17 @@ impl<'era> MutatorPermit<'era> {
 }
 impl Drop for RunAccess<'_, '_> {
     fn drop(&mut self) {
+        if self
+            .owner
+            .local
+            .as_ref()
+            .is_some_and(|local| local.catalog_region.is_some())
+        {
+            // No allocator work in Drop. Retain the run obligation and all
+            // backing until terminal era cleanup; never ACK an open region.
+            self.owner.registry.poison();
+            return;
+        }
         self.owner
             .entry
             .live_run_loan
@@ -179,7 +190,7 @@ impl std::fmt::Debug for MutatorFinishFailure<'_> {
 /// A unique borrow of owner state, not an authority to dereference heap
 /// objects. A4/A5 must supply the separate shared-storage/stop protocol.
 pub struct RunAccess<'owner, 'era> {
-    owner: &'owner mut Mutator<'era>,
+    pub(super) owner: &'owner mut Mutator<'era>,
 }
 
 /// The owner publication capability is produced before stop-all. Its unique
@@ -220,7 +231,8 @@ impl<'era> Mutator<'era> {
         let gate = self.registry.lock()?;
         let entry = self.registry.validate(&gate, self.entry.key)?;
         let state = entry.state.try_lock().map_err(entry_lock_error)?;
-        if state.phase != EntryPhase::Running
+        if gate.catalog_transition
+            || state.phase != EntryPhase::Running
             || state.rendezvous.mode != super::rendezvous::Mode::Running
             || matches!(
                 gate.rendezvous.phase,

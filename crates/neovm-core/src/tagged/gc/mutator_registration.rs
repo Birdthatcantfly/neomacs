@@ -1,6 +1,6 @@
 //! Cold canonical registration, rooted rendezvous and scoped stopped collection.
-//! Running heap execution remains excluded. The serial inline iterator remains
-//! the Sim representation.
+//! Running authority admits rooted cons allocation only. The serial inline
+//! iterator remains the Sim representation; Lisp execution stays excluded.
 //!
 //! An era owns the actual World Baton and the quiescent heap loan. Only a
 //! metadata permit crosses a thread boundary; owner buffers are built there.
@@ -9,6 +9,8 @@
 #![allow(dead_code)] // Production Context execution admission remains a later proof batch.
 
 mod collection;
+mod cons_allocation;
+mod cons_catalog;
 mod gate;
 mod image;
 pub use collection::{CollectionError, CollectionReport};
@@ -176,6 +178,7 @@ struct RegistryState {
     young_index: FxHashMap<YoungRegistrationId, usize>,
     next_registration: u64,
     generation_limit: u64,
+    catalog_transition: bool,
     rendezvous: rendezvous::control::State,
 }
 
@@ -190,6 +193,7 @@ struct Registry {
     completed_epoch: AtomicU64,
     keeper_thread: ThreadId,
     root_epoch: super::FacadeEpochRetention,
+    cons_catalog: super::cons_storage::ConsCatalog,
 }
 
 impl Registry {
@@ -222,6 +226,7 @@ impl Registry {
 #[must_use = "finish explicitly; abandonment retains the World and poisons the era"]
 pub struct ParallelHeapEra<'heap> {
     collector: RefCell<Option<QuiescentCollector<'heap>>>,
+    suspended_cons: RefCell<Option<super::facade_mark::SuspendedConsCollector<'heap>>>,
     legacy_roots: Option<FrozenLegacyRoots>,
     keeper: Option<Baton>,
     registry: Option<Arc<Registry>>,
@@ -346,6 +351,7 @@ impl<'heap> ParallelHeapEra<'heap> {
         young_index.insert(young, 0);
         Ok(Self {
             collector: RefCell::new(Some(collector)),
+            suspended_cons: RefCell::new(None),
             legacy_roots: None,
             keeper: Some(keeper),
             registry: Some(Arc::new(Registry {
@@ -358,11 +364,13 @@ impl<'heap> ParallelHeapEra<'heap> {
                 completed_epoch: AtomicU64::new(0),
                 keeper_thread: std::thread::current().id(),
                 root_epoch,
+                cons_catalog: super::cons_storage::ConsCatalog::new(heap),
                 state: Mutex::new(RegistryState {
                     entries: vec![entry],
                     young_index,
                     next_registration: 2,
                     generation_limit: u64::MAX,
+                    catalog_transition: false,
                     rendezvous: rendezvous::control::State::new(),
                 }),
             })),
@@ -474,6 +482,9 @@ impl<'heap> ParallelHeapEra<'heap> {
     }
 
     fn prepare_finish(&mut self) -> Result<(), RegistrationError> {
+        if self.suspended_cons.get_mut().is_some() {
+            return Err(RegistrationError::OpenRegion);
+        }
         use crate::tagged::transport::{ParallelRootBatchError, RootBatchError};
 
         fn entry_guard<'a>(
@@ -728,3 +739,6 @@ mod tests;
 
 #[cfg(all(test, not(feature = "gc-memory-telemetry")))]
 mod collection_scalar_tests;
+
+#[cfg(test)]
+mod cons_allocation_tests;
