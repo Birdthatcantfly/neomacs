@@ -54,15 +54,22 @@ fn two_destination_threads_publish_one_canonical_census() {
                     let owner = index as u64 + 1;
                     let mut token = activate_retry(permit, heap, owner);
                     assert_eq!(token.thread, std::thread::current().id());
-                    let mut run = token.run_access().unwrap();
-                    let state = run.state();
-                    state.hot.allocated_count = owner as usize;
-                    state.hot.bytes_since_gc = owner as usize * 16;
-                    state.hot.pacing.promoted_since_major = owner as usize * 10;
-                    state.hot.pacing.minors_since_major = owner as usize;
-                    state.hot.remset.push(TaggedValue::NIL);
-                    state.hot.major_cons_writes.push(TaggedValue::NIL);
-                    drop(run);
+                    loop {
+                        match token.run_access() {
+                            Ok(mut run) => {
+                                let state = run.state();
+                                state.hot.allocated_count = owner as usize;
+                                state.hot.bytes_since_gc = owner as usize * 16;
+                                state.hot.pacing.promoted_since_major = owner as usize * 10;
+                                state.hot.pacing.minors_since_major = owner as usize;
+                                state.hot.remset.push(TaggedValue::NIL);
+                                state.hot.major_cons_writes.push(TaggedValue::NIL);
+                                break;
+                            }
+                            Err(RegistrationError::Busy) => std::thread::yield_now(),
+                            Err(error) => panic!("run access failed: {error:?}"),
+                        }
+                    }
                     finish_retry(token, epoch(1));
                 });
             }
