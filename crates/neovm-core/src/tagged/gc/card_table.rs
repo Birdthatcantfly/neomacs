@@ -271,6 +271,12 @@ pub(crate) struct CardSlots {
 }
 
 impl CardSlots {
+    /// Cold catalog shell validation; no installed blocks or dirty work.
+    #[cold]
+    pub(in crate::tagged::gc) fn is_empty(&self) -> bool {
+        self.blocks.is_empty() && self.dirty.is_empty()
+    }
+
     /// Register the cons block at BASE under its slot.
     pub(crate) fn insert_block(&mut self, base: usize) {
         self.blocks

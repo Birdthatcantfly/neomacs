@@ -2739,6 +2739,7 @@ use collection_observed::{
     clear_cons_observed_block, clear_cons_observed_dead, has_noncons_collection_observations,
 };
 mod cons_allocator;
+mod cons_storage;
 use cons_allocator::{ConsAllocatorOwner, ConsBlockBase};
 mod cons_blocks;
 /// The cons-block trailer's shape, for `jit_layout::heap`.
