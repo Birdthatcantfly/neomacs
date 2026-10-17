@@ -35,3 +35,7 @@ path = "tests/wait_graph.rs"
 [[test]]
 name = "poison"
 path = "tests/poison.rs"
+
+[[test]]
+name = "cons_catalog"
+path = "tests/cons_catalog.rs"
