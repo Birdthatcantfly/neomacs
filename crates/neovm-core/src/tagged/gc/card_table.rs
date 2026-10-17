@@ -75,6 +75,24 @@ const _: () = {
     assert!(HEAP_JIT_CARD_TABLE == super::HEAP_JIT_EXCLUSION_LO + 40);
 };
 
+/// Mark OWNER_ADDR from a card-table base published outside the heap loan.
+/// `base == 0` is a generational-off snapshot and does nothing. The two
+/// stores match [`CardTable::mark`]: Relaxed, idempotent, no catalog lock.
+#[inline(always)]
+pub(super) fn mark_published(base: usize, owner_addr: usize) {
+    if base == 0 {
+        return;
+    }
+    let index = card_index(owner_addr);
+    let summary = CHUNK_SUMMARY_OFFSET + (index >> CARD_CHUNK_SHIFT);
+    // SAFETY: `base` is the card table allocated for this heap. Both indexes
+    // are masked into that allocation, which outlives every admitted owner.
+    unsafe {
+        (*(base as *const AtomicU8).add(index)).store(CARD_DIRTY, Ordering::Relaxed);
+        (*(base as *const AtomicU8).add(summary)).store(CARD_DIRTY, Ordering::Relaxed);
+    }
+}
+
 /// The card of an owner address. Total: any address names exactly one card.
 #[inline(always)]
 pub(crate) const fn card_index(owner_addr: usize) -> usize {

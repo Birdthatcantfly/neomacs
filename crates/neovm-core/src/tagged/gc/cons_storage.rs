@@ -16,7 +16,7 @@ use rustc_hash::FxHashMap;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 const MAX_GRANT: usize = 128;
@@ -146,6 +146,11 @@ pub(super) struct ConsCatalog {
     heap: HeapIdentity,
     identity: Arc<CatalogIdentity>,
     state: Mutex<Option<CatalogState>>,
+    /// Card-table base snapshotted at install. Outside the catalog mutex so a
+    /// cons field store can mark a card without the heap loan or the gate.
+    /// Zero means this era has no generational table. Not cleared on restore:
+    /// owners are stopped then, and the next install refreshes it.
+    card_base: AtomicUsize,
 }
 impl std::fmt::Debug for ConsCatalog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -171,7 +176,33 @@ impl ConsCatalog {
                 abandoned: AtomicBool::new(false),
             }),
             state: Mutex::new(None),
+            card_base: AtomicUsize::new(0),
         }
+    }
+
+    /// Two Relaxed card stores from the base captured while the heap was
+    /// still exclusively owned. No catalog lock and no heap TLS.
+    pub(super) fn mark_published_cons_card(&self, owner_addr: usize) {
+        let base = self.card_base.load(Ordering::Acquire);
+        super::card_table::mark_published(base, owner_addr);
+    }
+
+    fn publish_card_base(&self, heap: &TaggedHeap) {
+        let base = if heap.generational_enabled() {
+            usize::from_ne_bytes([
+                heap.card_table_base_0.get(),
+                heap.card_table_base_1.get(),
+                heap.card_table_base_2.get(),
+                heap.card_table_base_3.get(),
+                heap.card_table_base_4.get(),
+                heap.card_table_base_5.get(),
+                heap.card_table_base_6.get(),
+                heap.card_table_base_7.get(),
+            ])
+        } else {
+            0
+        };
+        self.card_base.store(base, Ordering::Release);
     }
 
     /// Cold admission confirms installation before a slice callback can run.
@@ -272,6 +303,7 @@ impl ConsCatalog {
             source_grants: [0; 3],
         };
         *gate = Some(state);
+        self.publish_card_base(heap);
         Ok(())
     }
 

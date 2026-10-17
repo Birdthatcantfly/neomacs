@@ -4,9 +4,31 @@ use super::super::ConsCell;
 use super::super::mark_word::MarkWord;
 use super::cons_allocation::{ConsRunState, initialize_next_cons};
 use super::*;
+use crate::tagged::value::{TAG_MASK, TaggedValue};
 use std::ptr::NonNull;
 
 type Brand<'brand> = PhantomData<fn(&'brand ()) -> &'brand ()>;
+
+fn slot_value(root: &SliceRoot<'_>) -> TaggedValue {
+    // SAFETY: bind minted this home against the live bank. The slice borrow
+    // keeps that bank resident, so the word is initialized.
+    unsafe { root.word.as_ptr().read().value() }
+}
+
+fn write_slot(root: &mut SliceRoot<'_>, value: TaggedValue) {
+    unsafe { root.word.as_ptr().write(MarkWord::of(value)) };
+}
+
+fn cons_ptr(owner: TaggedValue) -> Result<*mut ConsCell, RegistrationError> {
+    if !owner.is_cons() {
+        return Err(RegistrationError::Publication);
+    }
+    let ptr = (owner.bits() & !TAG_MASK) as *mut ConsCell;
+    if ptr.is_null() || (ptr as usize) & TAG_MASK != 0 {
+        return Err(RegistrationError::Publication);
+    }
+    Ok(ptr)
+}
 
 /// A prevalidated home in this slice's canonical root bank. The invariant
 /// generative brand prevents use with any other slice, even on the same owner.
@@ -75,6 +97,110 @@ impl<'brand> RunSlice<'brand, '_> {
             result.word.as_ptr().write(MarkWord::of(value));
         }
         Ok(())
+    }
+
+    /// Install nil, t, or a fixnum. Any other bit pattern is refused: a heap
+    /// pointer store has to go through the cons field operations so the card
+    /// mark is not skipped.
+    ///
+    /// No `NEOVM_THREADS` entry calls the field operations yet. The restricted
+    /// executor is `cfg(test)` only.
+    #[allow(dead_code)]
+    pub fn store_immediate(
+        &mut self,
+        result: &mut SliceRoot<'brand>,
+        bits: usize,
+    ) -> Result<(), RegistrationError> {
+        let value = TaggedValue::from_bits(bits);
+        if !(value.is_fixnum() || value.is_nil() || value.is_t()) {
+            return Err(RegistrationError::Publication);
+        }
+        write_slot(result, value);
+        Ok(())
+    }
+
+    /// Read car into a branded slot. The caller has already rejected a
+    /// non-cons; this still refuses one rather than manufacturing a pointer.
+    #[allow(dead_code)]
+    pub fn load_car(
+        &mut self,
+        cell: &SliceRoot<'brand>,
+        result: &mut SliceRoot<'brand>,
+    ) -> Result<(), RegistrationError> {
+        let owner = slot_value(cell);
+        let ptr = cons_ptr(owner)?;
+        write_slot(result, unsafe { (*ptr).load_car() });
+        Ok(())
+    }
+
+    /// Read cdr into a branded slot. Same cons precondition as [`Self::load_car`].
+    #[allow(dead_code)]
+    pub fn load_cdr(
+        &mut self,
+        cell: &SliceRoot<'brand>,
+        result: &mut SliceRoot<'brand>,
+    ) -> Result<(), RegistrationError> {
+        let owner = slot_value(cell);
+        let ptr = cons_ptr(owner)?;
+        write_slot(result, unsafe { (*ptr).load_cdr() });
+        Ok(())
+    }
+
+    /// Store into car. Both words are loaded before the release store. A
+    /// non-fixnum value marks the owner's published card and records the owner
+    /// cell for the next major trace. No heap TLS and no catalog lock.
+    #[allow(dead_code)]
+    pub fn store_car(
+        &mut self,
+        cell: &SliceRoot<'brand>,
+        value: &SliceRoot<'brand>,
+    ) -> Result<(), RegistrationError> {
+        self.store_field(cell, value, true)
+    }
+
+    /// Store into cdr. Same barrier as [`Self::store_car`].
+    #[allow(dead_code)]
+    pub fn store_cdr(
+        &mut self,
+        cell: &SliceRoot<'brand>,
+        value: &SliceRoot<'brand>,
+    ) -> Result<(), RegistrationError> {
+        self.store_field(cell, value, false)
+    }
+
+    #[allow(dead_code)]
+    fn store_field(
+        &mut self,
+        cell: &SliceRoot<'brand>,
+        value: &SliceRoot<'brand>,
+        car: bool,
+    ) -> Result<(), RegistrationError> {
+        let owner = slot_value(cell);
+        let stored = slot_value(value);
+        let ptr = cons_ptr(owner)?;
+        if car {
+            unsafe { (*ptr).set_car(stored) };
+        } else {
+            unsafe { (*ptr).set_cdr(stored) };
+        }
+        if !stored.is_fixnum() {
+            self.allocation
+                .registry
+                .cons_catalog
+                .mark_published_cons_card(ptr as usize);
+            self.allocation.hot.major_cons_writes.push(owner);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn word_bits_for_test(&self, root: &SliceRoot<'brand>) -> usize {
+        slot_value(root).bits()
+    }
+
+    #[cfg(test)]
+    pub(super) fn plant_word_for_test(&mut self, result: &mut SliceRoot<'brand>, bits: usize) {
+        write_slot(result, TaggedValue::from_bits(bits));
     }
 
     // Commit before any potentially failing/caught operation, and invalidate
