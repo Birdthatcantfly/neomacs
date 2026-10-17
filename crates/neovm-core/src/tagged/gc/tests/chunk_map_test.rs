@@ -139,6 +139,109 @@ fn the_radix_answers_none_until_set_and_after_clear() {
     assert_eq!(map.get(0x10_0000_0000), ChunkEntry::NONE);
 }
 
+/// Both setters must observe the missing leaf and allocate their candidates
+/// before either installs one. Distinct granules in the same L1 slot must not
+/// lose an entry when those candidates race to publish.
+#[test]
+fn concurrent_first_setters_in_one_l1_slot_keep_both_entries() {
+    use std::sync::{Arc, Barrier};
+
+    let map = Arc::new(ChunkMap::new());
+    let install = Arc::new(Barrier::new(2));
+    let base = 0x5555_0001_0000usize;
+    std::thread::scope(|scope| {
+        for index in 0..2 {
+            let map = Arc::clone(&map);
+            let install = Arc::clone(&install);
+            scope.spawn(move || {
+                chunk_map::BEFORE_LEAF_INSTALL.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move || {
+                        install.wait();
+                    }));
+                });
+                map.set(
+                    base + index * OBJECT_PAGE_ALIGN,
+                    ChunkEntry::new(ChunkClass::Cons, index),
+                );
+                chunk_map::BEFORE_LEAF_INSTALL.with(|slot| assert!(slot.borrow().is_none()));
+            });
+        }
+    });
+    for index in 0..2 {
+        assert_eq!(
+            map.get(base + index * OBJECT_PAGE_ALIGN),
+            ChunkEntry::new(ChunkClass::Cons, index),
+            "setter {index}'s entry was lost during leaf installation"
+        );
+    }
+}
+
+/// TSan surface: concurrent first-leaf candidates, independent entry writers
+/// (including clears), and both lookup implementations reading live slots.
+/// No heap/Context is shared: this exercises ChunkMap's own Send + Sync API.
+#[test]
+fn concurrent_chunk_map_setters_and_readers_stress() {
+    use std::sync::{Arc, Barrier};
+
+    const WRITERS: usize = 4;
+    const READERS: usize = 2;
+    const ENTRIES: usize = 256;
+    const ROUNDS: usize = 16;
+    let base = 0x5555_0001_0000usize;
+    for round in 0..ROUNDS {
+        let map = Arc::new(ChunkMap::new());
+        let start = Arc::new(Barrier::new(WRITERS + READERS));
+        let install = Arc::new(Barrier::new(WRITERS));
+        std::thread::scope(|scope| {
+            for writer in 0..WRITERS {
+                let map = Arc::clone(&map);
+                let start = Arc::clone(&start);
+                let install = Arc::clone(&install);
+                scope.spawn(move || {
+                    chunk_map::BEFORE_LEAF_INSTALL.with(|slot| {
+                        *slot.borrow_mut() = Some(Box::new(move || {
+                            install.wait();
+                        }));
+                    });
+                    start.wait();
+                    for local in 0..ENTRIES {
+                        let index = writer * ENTRIES + local;
+                        let addr = base + index * OBJECT_PAGE_ALIGN;
+                        let entry = ChunkEntry::new(ChunkClass::Vector, round * 1024 + index);
+                        map.set(addr, entry);
+                        map.set(addr, ChunkEntry::NONE);
+                        map.set(addr, entry);
+                        assert_eq!(map.get(addr), entry);
+                    }
+                    chunk_map::BEFORE_LEAF_INSTALL.with(|slot| assert!(slot.borrow().is_none()));
+                });
+            }
+            for reader in 0..READERS {
+                let map = Arc::clone(&map);
+                let start = Arc::clone(&start);
+                scope.spawn(move || {
+                    let handle = HeapChunkMap::new(Arc::clone(&map));
+                    start.wait();
+                    for sample in 0..8 * WRITERS * ENTRIES {
+                        let index = (sample * 17 + reader) % (WRITERS * ENTRIES);
+                        let addr = base + index * OBJECT_PAGE_ALIGN;
+                        let expected = ChunkEntry::new(ChunkClass::Vector, round * 1024 + index);
+                        for observed in [map.get(addr), handle.get(addr + 0xffff)] {
+                            assert!(observed == ChunkEntry::NONE || observed == expected);
+                        }
+                    }
+                });
+            }
+        });
+        for index in 0..WRITERS * ENTRIES {
+            assert_eq!(
+                map.get(base + index * OBJECT_PAGE_ALIGN),
+                ChunkEntry::new(ChunkClass::Vector, round * 1024 + index)
+            );
+        }
+    }
+}
+
 /// The heap's handle (`HeapChunkMap`, which skips the `Arc` hop) answers
 /// exactly as the shared map it wraps, before and after writes through the
 /// shared map, for every address shape the oracles ask about.

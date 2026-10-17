@@ -16,8 +16,8 @@
 //! `ChunkClass::None` means "no heap block or page": a boxed object,
 //! the mapped image, a static, or not the heap at all.
 //!
-//! **Writers** (mutator only; `Release` stores): a new cons block or arena
-//! page, and the release passes at the end of a sweep, which clear the
+//! **Writers** (`Release` entry stores): a new cons block or arena page,
+//! and the release passes at the end of a sweep, which clear the
 //! released granules and rewrite the moved indices. Blocks and pages are
 //! only ever appended while a mark runs, and released only after the sweep,
 //! which a new mark never overlaps, so during a mark every entry of a block
@@ -25,6 +25,9 @@
 //! since has an index at or above that class's count then — which is how
 //! the GC thread tells snapshot pages from mid-cycle ones
 //! ([`PageSnapshot::ChunkMap`]).
+//! Leaf installation uses CAS so concurrent setters of distinct granules in
+//! the same 4 GiB region share one leaf. Callers still coordinate conflicting
+//! updates to the same granule and the lifetime/indices of its backing storage.
 //!
 //! **Readers.** The mutator's ownership oracles (`owns_*_object`,
 //! `mark_cons_slow`, `is_value_marked`) and the GC thread's claim
@@ -129,6 +132,15 @@ const _: () = assert!(1 << GRANULE_SHIFT == CONS_BLOCK_ALIGN);
 #[repr(transparent)]
 struct ChunkLeaf([AtomicU32; LEAF_LEN]);
 
+// Only dedicated test setters install this one-shot hook. It forces two
+// setters past the null observation before either publishes its candidate.
+#[cfg(test)]
+thread_local! {
+    pub(super) static BEFORE_LEAF_INSTALL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 /// The two-level page directory (see the module doc).
 pub(crate) struct ChunkMap {
     /// `L1_LEN` leaf pointers, null until a granule of that region is set.
@@ -177,8 +189,9 @@ impl ChunkMap {
         ChunkEntry(word.load(Ordering::Acquire))
     }
 
-    /// Set the entry of the granule at `base` (64 KiB-aligned). Mutator
-    /// only: there is exactly one writer.
+    /// Set the entry of the granule at `base` (64 KiB-aligned). Concurrent
+    /// setters share the installed leaf; same-granule updates are atomic,
+    /// with backing lifetime and conflicting updates coordinated by callers.
     pub(crate) fn set(&self, base: usize, entry: ChunkEntry) {
         debug_assert_eq!(base & ((1 << GRANULE_SHIFT) - 1), 0, "unaligned granule");
         let hi = base >> L1_SHIFT;
@@ -200,7 +213,28 @@ impl ChunkMap {
             if leaf.is_null() {
                 alloc::handle_alloc_error(layout);
             }
-            slot.store(leaf, Ordering::Release);
+            #[cfg(test)]
+            BEFORE_LEAF_INSTALL.with(|slot| {
+                let hook = slot.borrow_mut().take();
+                if let Some(hook) = hook {
+                    hook();
+                }
+            });
+            match slot.compare_exchange(
+                std::ptr::null_mut(),
+                leaf,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {}
+                Err(installed) => {
+                    // SAFETY: our losing candidate was never published, so
+                    // no other thread can hold it. Acquire observes the
+                    // winner's initialized leaf, which lives until map Drop.
+                    unsafe { alloc::dealloc(leaf.cast::<u8>(), layout) };
+                    leaf = installed;
+                }
+            }
         }
         // SAFETY: a published leaf; the index is masked to its length.
         unsafe { &(*leaf).0[(base >> GRANULE_SHIFT) & (LEAF_LEN - 1)] }
