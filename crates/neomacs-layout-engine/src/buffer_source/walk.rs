@@ -30,7 +30,7 @@ use crate::display_source_walk::DisplaySourcePositionConsumption;
 use crate::frame_face_arena::FrameFaceAttempt;
 use crate::neovm_bridge::{LayoutBufferView, ResolvedFace};
 use neomacs_display_protocol::types::FaceId;
-use neovm_core::buffer::BufferId;
+use neovm_core::buffer::{BufferId, CharLen};
 
 pub(crate) struct BufferSourceWalk<'request, B: LayoutBufferView> {
     producer: BufferElementProducer<'request, B>,
@@ -150,6 +150,16 @@ impl<'request, B: LayoutBufferView> BufferSourceWalk<'request, B> {
             ),
             append_state: DisplaySourceRowAppendState::default(),
         }
+    }
+
+    /// Bound each ordinary text-run scan to `budget` characters past its own
+    /// start, the per-row allowance of GNU `get_narrowed_width`
+    /// (src/xdisp.c:3717-3735). The live window walk sets this so a
+    /// newline-less tail cannot make a visible row walk the remaining buffer;
+    /// query walks keep their absolute acquisition horizon instead.
+    pub(crate) fn with_ordinary_run_scan_budget(mut self, budget: CharLen) -> Self {
+        self.producer.set_ordinary_run_scan_budget(budget);
+        self
     }
 
     pub(crate) fn append_state(&mut self) -> &mut DisplaySourceRowAppendState {

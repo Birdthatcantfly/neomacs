@@ -475,6 +475,27 @@ impl WindowParams {
         )
     }
 
+    /// The character allowance one display row's source work may need, the
+    /// engine's mirror of GNU `get_narrowed_width` (src/xdisp.c:3717-3735):
+    /// `fact * max (1, width)` columns, with `fact` 3 on window-system frames
+    /// and 2 on character-only terminals (a GUI row can need more characters
+    /// than columns across font sizes; a uniform-cell terminal cannot). GNU
+    /// uses exactly this allowance to bound long-line work around the window
+    /// because its iterator stops at the row edge
+    /// (`move_it_in_display_line_to`, src/xdisp.c:10109, stopping against
+    /// `it->last_visible_x` at src/xdisp.c:10422-10451); the layout engine
+    /// uses it to bound per-row ordinary-run scans and route probes so a
+    /// newline-less tail cannot make a visible row walk the remaining buffer.
+    ///
+    /// Larger values are always correct and merely scan more; the factor
+    /// exists so the bound never under-covers a row and forces extra scans.
+    #[must_use]
+    pub fn narrowed_width_chars(&self) -> usize {
+        let fact: usize = if self.window_system { 3 } else { 2 };
+        let cols = ((self.text_bounds.width / self.char_width.max(1.0)).ceil() as usize).max(1);
+        fact.saturating_mul(cols)
+    }
+
     pub fn window_start_charpos(&self) -> LayoutCharPos0 {
         LayoutCharPos0::new(self.window_start)
     }

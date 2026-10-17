@@ -1,6 +1,7 @@
 use super::*;
 use crate::display_source::DisplaySourceContext;
 use crate::neovm_bridge::LayoutBufferSnapshot;
+use neovm_core::buffer::CharLen;
 use neovm_core::emacs_core::Context;
 
 /// One consumed element plus the walk position it left behind: the pair the
@@ -146,5 +147,42 @@ fn producer_snapshot_restore_matches_rewind_on_a_word_wrap_candidate() {
     assert_snapshot_restore_matches_rewind(
         "hello world wrapping line of text\ntail\n",
         DisplaySourceTextPosition::new(11, 11),
+    );
+}
+
+#[test]
+fn ordinary_run_scan_budget_bounds_each_run_on_a_newline_less_buffer() {
+    // GNU's iterator never walks a whole long line for one row: it stops at
+    // the row edge (move_it_in_display_line_to against it->last_visible_x,
+    // src/xdisp.c:10422-10451), and bounds long-line work with the
+    // get_narrowed_width allowance (src/xdisp.c:3717-3735). The scan budget
+    // gives the batched producer the same per-row bound without changing the
+    // stream: the runs only re-chunk, and the walk still covers every char.
+    let text = "a".repeat(4096);
+    let (buffer_id, snapshot) = buffer_snapshot(&text);
+    let mut producer = producer(buffer_id, &snapshot);
+    producer.set_ordinary_run_scan_budget(CharLen::new(96));
+    let mut position = DisplaySourceTextPosition::new(0, 0);
+    let mut covered: i64 = 0;
+    let mut runs = 0usize;
+    while let Some(item) = consume_one(&mut producer, &mut position) {
+        let BufferSourceConsumedItem::Renderable(step) = item else {
+            continue;
+        };
+        let start = step.source_step_char().start_charpos();
+        let end = step.end_charpos();
+        assert_eq!(start, covered, "runs stay contiguous from the row start");
+        assert!(
+            (end - start) <= 96,
+            "run of {} chars exceeds the 96-char budget",
+            end - start
+        );
+        covered = end;
+        runs += 1;
+    }
+    assert_eq!(covered, text.chars().count() as i64);
+    assert!(
+        runs > 1,
+        "the budget must actually chunk the newline-less tail"
     );
 }

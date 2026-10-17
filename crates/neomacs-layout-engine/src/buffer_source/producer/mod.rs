@@ -35,7 +35,7 @@ use crate::display_source_resolver::{
 use crate::frame_face_arena::FrameFaceAttempt;
 use crate::neovm_bridge::{LayoutBufferView, ResolvedFace};
 use neomacs_display_protocol::types::FaceId;
-use neovm_core::buffer::{BufferId, CharPos0};
+use neovm_core::buffer::{BufferId, CharLen, CharPos0};
 
 /// An opaque save of the producer's whole seating. Restoring one reinstates the
 /// producer exactly, which a bare position rewind cannot express. Harness and
@@ -153,6 +153,15 @@ impl<'request, B: LayoutBufferView> BufferElementProducer<'request, B> {
             .source_cursor
             .set_ordinary_run_horizon(acquisition_end);
         producer
+    }
+
+    /// Bound each ordinary text-run scan to `budget` characters past its own
+    /// start — the live window walk's per-row allowance
+    /// (`WindowParams::narrowed_width_chars`, GNU `get_narrowed_width`,
+    /// src/xdisp.c:3717-3735). See
+    /// [`BufferTextSourceCursor::set_ordinary_run_scan_budget`].
+    pub(crate) fn set_ordinary_run_scan_budget(&mut self, budget: CharLen) {
+        self.source_cursor.set_ordinary_run_scan_budget(budget);
     }
 
     /// The buffer view the producer walks, for callers that must consult

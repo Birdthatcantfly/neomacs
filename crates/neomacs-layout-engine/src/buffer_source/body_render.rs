@@ -46,6 +46,7 @@ use crate::types::{LineWrapMode, WindowParams, WindowSourceExtent};
 use crate::window_output::{
     TextWindowOutputTarget, TextWindowRedisplayPositions, WindowOutputEmitter,
 };
+use neovm_core::buffer::CharLen;
 use neovm_core::emacs_core::image_catalog::ImageScaleEnvironment;
 
 /// Owned by one exclusively borrowed window-render attempt. This result
@@ -374,7 +375,13 @@ impl BufferSourceWalkSetup {
                 Some(params.window_id as u64),
                 self.charpos,
                 loop_context.text_start_byte(),
-            ),
+            )
+            // The live viewport walk owns no retry machinery, so its bound is
+            // the per-scan allowance instead of an absolute horizon: every
+            // row's run production, slicing and measurement stays proportional
+            // to the row (GNU `get_narrowed_width`, src/xdisp.c:3717-3735),
+            // and progress never depends on the bound.
+            .with_ordinary_run_scan_budget(CharLen::new(params.narrowed_width_chars())),
         };
 
         BufferSourceLoopMutableState::new(
