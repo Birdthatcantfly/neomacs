@@ -399,8 +399,19 @@ impl<'rows, 'emit, 'surface>
                     .clone()
                     .unwrap_or_else(|| active_face_state.clone())
             } else {
-                let (face_id, resolved) =
+                let (_, mut resolved) =
                     face_resolution_context.resolve_routed_position_face(self.face_ids, *seg_start);
+                if !self
+                    .source_render
+                    .realize_cached_face_for_display(&mut resolved)
+                {
+                    note_route_refusal(RouteRefusal::UnrealizedFace);
+                    return PlainRowRouteOutcome::NotRouted;
+                }
+                let face_id = crate::display_row::face_state::stable_face_id_for_resolved(
+                    self.face_ids,
+                    &resolved,
+                );
                 face_resolution_context.probe_measured_active_face(
                     &mut self.source_render.reborrow(),
                     face_id,
@@ -422,11 +433,15 @@ impl<'rows, 'emit, 'surface>
             // SESSION's base-face resolution instead — the run chain never
             // applies there.
             if matches!(part.kind, RoutedRowPartKind::Text)
-                && face_resolution_context.routed_segment_item_face_diverges(
-                    self.face_ids,
-                    *seg_start,
-                    active.face_id(),
-                )
+                && self.source_render.with_cached_face_realizer(|realize| {
+                    face_resolution_context
+                        .with_face_realizer(realize)
+                        .routed_segment_item_face_diverges(
+                            self.face_ids,
+                            *seg_start,
+                            active.face_id(),
+                        )
+                })
             {
                 note_route_refusal(RouteRefusal::ProbeFaceDiverges);
                 return PlainRowRouteOutcome::NotRouted;

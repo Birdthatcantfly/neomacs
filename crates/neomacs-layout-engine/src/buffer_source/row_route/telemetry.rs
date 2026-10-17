@@ -90,6 +90,7 @@ impl RouteRefusal {
             | RouteRefusal::Boundary
             | RouteRefusal::ComposedSeam
             | RouteRefusal::ProbeFaceDiverges
+            | RouteRefusal::UnrealizedFace
             | RouteRefusal::CommitRefused => RouteRefusalClass::Other,
         }
     }

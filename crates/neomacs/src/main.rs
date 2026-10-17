@@ -4688,6 +4688,17 @@ pub fn run(mode: RuntimeMode) {
             secondary_quit_requested,
         )));
         install_diagnostics_eval_hooks(&mut evaluator);
+    } else if neovm_core::face::realization::enabled() {
+        // GNU allows an explicit make-terminal-frame even in --batch
+        // (frame.c:1754-1823). Install the deferred auxiliary-device factory
+        // without initializing a primary terminal or a keyboard receiver.
+        let (auxiliary_input_tx, _auxiliary_input_rx) = crossbeam_channel::unbounded();
+        evaluator.set_tty_frame_host_factory(Box::new(secondary_tty::SecondaryTtyFactory::new(
+            secondary_ttys.clone(),
+            auxiliary_input_tx,
+            evaluator.wait_notifier(),
+            evaluator.quit_requested.clone(),
+        )));
     }
 
     // 8. Set up redisplay callback (layout engine + TTY RIF render).
@@ -5534,6 +5545,9 @@ fn configure_gnu_startup_state(eval: &mut Context, frame_id: FrameId, startup: &
             "failed to realize initial-frame faces from defface specs"
         );
     }
+    // GNU init_frame_faces realizes the basic display faces before an
+    // interactive frame reaches its first iterator (xfaces.c:671-688).
+    eval.initialize_display_faces_for_frame(frame_id);
     // Skip the splash screen — its fill-region is extremely slow through
     // with_mirrored_evaluator.  Users who want it can set this to nil in
     // their init file.

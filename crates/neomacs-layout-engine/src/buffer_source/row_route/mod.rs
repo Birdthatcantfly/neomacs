@@ -300,6 +300,9 @@ pub(crate) enum RouteRefusal {
     ProbeBoxFace,
     /// Probe: the per-run face chain diverges from the checkpoint chain.
     ProbeFaceDiverges,
+    /// A speculative row encountered a face whose Lisp color callbacks have
+    /// not run. The canonical iterator must realize it at its display stop.
+    UnrealizedFace,
     /// The single render pass refused the row: the natural append of a part
     /// was clipped at the right edge, a replacement session refused the whole
     /// element, or the row's measured end missed the classifier's strict fit.

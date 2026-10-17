@@ -7,33 +7,81 @@ use crate::face::{Color, Face, FaceDecoration, SpecifiedColor, UnderlineColorOpe
 use crate::gc_trace::GcTrace;
 use strum::IntoEnumIterator;
 
-/// GNU xfaces.c:5952-5983, deliberately independent of Lisp face IDs and the
-/// renderer's older basic-face ID enum. Enum iteration derives count and order.
-#[derive(Clone, Copy, Debug, strum::EnumIter, strum::IntoStaticStr)]
-#[strum(serialize_all = "kebab-case")]
-enum BasicFace {
-    Default,
-    ModeLineActive,
-    ModeLineInactive,
-    ToolBar,
-    Fringe,
-    HeaderLineActive,
-    HeaderLineInactive,
-    ScrollBar,
-    Border,
-    Cursor,
-    Mouse,
-    Menu,
-    VerticalBorder,
-    WindowDivider,
-    WindowDividerFirstPixel,
-    WindowDividerLastPixel,
-    InternalBorder,
-    ChildFrameBorder,
-    TabBar,
-    TabLineActive,
-    TabLineInactive,
-    Margin,
+pub(crate) use crate::face::realization::{BasicFace, FaceChangeScope};
+
+/// Faces such as `cursor` are marked `face-no-inherit`: changing them does
+/// not dirty realized dependents (GNU xfaces.c:3104,3194,3774-3780).
+pub(crate) fn named_face_change_scope<'a>(
+    context: &super::super::eval::Context,
+    face: &str,
+    scope: FaceChangeScope<'a>,
+) -> FaceChangeScope<'a> {
+    if context
+        .obarray()
+        .get_property(face, "face-no-inherit")
+        .is_some_and(|value| value.is_truthy())
+    {
+        match scope {
+            FaceChangeScope::AllFrames => FaceChangeScope::Frames(&[]),
+            FaceChangeScope::Frames(frames) | FaceChangeScope::DefinitionsOnly(frames) => {
+                FaceChangeScope::DefinitionsOnly(frames)
+            }
+        }
+    } else {
+        scope
+    }
+}
+
+pub(crate) fn record_named_face_change(
+    context: &mut super::super::eval::Context,
+    face: &str,
+    scope: FaceChangeScope<'_>,
+) {
+    let scope = if crate::face::realization::enabled() {
+        named_face_change_scope(context, face, scope)
+    } else {
+        scope
+    };
+    record_face_change(context, scope);
+}
+
+/// Preserve GNU's frame-local realization invalidation while keeping the
+/// existing global counter for layout freshness. One exclusive Context
+/// mutator updates its own frame caches; no new shared state is introduced.
+pub(crate) fn record_face_change(
+    context: &mut super::super::eval::Context,
+    scope: FaceChangeScope<'_>,
+) {
+    let previous = context.face_change_count;
+    context.face_change_count += 1;
+    let current = context.face_change_count;
+    if !crate::face::realization::enabled() {
+        return;
+    }
+    for frame_id in context.frames.frame_list() {
+        let Some(frame) = context.frames.get_mut(frame_id) else {
+            continue;
+        };
+        match scope {
+            FaceChangeScope::AllFrames => {}
+            FaceChangeScope::Frames(affected) if affected.contains(&frame_id) => {}
+            FaceChangeScope::Frames(_) => {
+                frame
+                    .face_realization
+                    .preserve_across_change(previous, current);
+            }
+            FaceChangeScope::DefinitionsOnly(affected) if affected.contains(&frame_id) => {
+                frame
+                    .face_realization
+                    .definitions_changed(previous, current);
+            }
+            FaceChangeScope::DefinitionsOnly(_) => {
+                frame
+                    .face_realization
+                    .preserve_across_change(previous, current);
+            }
+        }
+    }
 }
 
 /// Temporary roots use the existing current-mutator root stack, rather than
@@ -212,7 +260,7 @@ impl Drop for RealizationBinding<'_> {
 #[derive(Clone, Copy, Debug)]
 enum RealizationLookup {
     Demand,
-    Basic,
+    Basic(BasicFace),
 }
 
 impl super::super::eval::Context {
@@ -221,12 +269,83 @@ impl super::super::eval::Context {
         initialize_frame_faces(self, frame);
     }
 
+    /// Whether a layout resolver still holds this frame's current source
+    /// definitions. A callback that changes the same frame makes the old
+    /// resolver ineligible for further callbacks until layout retries.
+    pub fn display_face_source_table_is_current(
+        &self,
+        frame: FrameId,
+        source: &crate::face::FaceTable,
+    ) -> bool {
+        self.frames
+            .get(frame)
+            .and_then(|owner| owner.face_realization.table(self.face_change_count))
+            .is_some_and(|table| table.shares_definitions_with(source))
+    }
+
+    /// Independently root one raw definition snapshot for layout. A current
+    /// frame snapshot shares its cached lease; a retained older snapshot gets
+    /// an uncached lease while its caller still owns the existing source roots.
+    /// Admission belongs to this heap's current mutator and runs no Lisp.
+    pub fn display_face_table_root_lease(
+        &mut self,
+        frame: FrameId,
+        source: &crate::face::FaceTable,
+    ) -> Result<
+        std::sync::Arc<[crate::tagged::transport::SharedRoot]>,
+        crate::tagged::transport::SharedRootError,
+    > {
+        let current = self.display_face_source_table_is_current(frame, source);
+        if current
+            && let Some(lease) = self
+                .frames
+                .get(frame)
+                .and_then(|owner| owner.face_realization.root_lease())
+        {
+            return Ok(lease);
+        }
+        let mut values = Vec::new();
+        source.trace_roots(&mut values);
+        // SAFETY: binding runs on the installed Context's heap mutator. A
+        // current snapshot is rooted by its frame cache and Context; a retained
+        // older snapshot is admitted while the caller still owns its previous
+        // layout roots. No callback or collection occurs between tracing these
+        // live same-heap definitions and batch admission, whose private vector
+        // allocation invokes neither Lisp nor GC. Every collector of this heap
+        // traces its shared-root table while the resulting lease is retained.
+        let leases =
+            unsafe { crate::tagged::transport::SharedRoot::batch_from_current_heap(&values) }?;
+        let lease: std::sync::Arc<[crate::tagged::transport::SharedRoot]> = leases.into();
+        if current && let Some(owner) = self.frames.get_mut(frame) {
+            owner
+                .face_realization
+                .set_root_lease(std::sync::Arc::clone(&lease));
+        }
+        Ok(lease)
+    }
+
     /// Read a complete cached realization without evaluating Lisp.
     pub fn cached_display_face_for_frame(&self, frame: FrameId, attributes: &Face) -> Option<Face> {
         let cache = &self.frames.get(frame)?.face_realization;
         cache
             .generation_matches(self.face_change_count)
             .then(|| cache.lookup(attributes))
+            .flatten()
+            .cloned()
+    }
+
+    /// Import one fixed GNU basic role without evaluating Lisp. Equal source
+    /// attributes do not make separate role results interchangeable.
+    pub fn cached_basic_display_face_for_frame(
+        &self,
+        frame: FrameId,
+        name: &str,
+    ) -> Option<(Face, Face)> {
+        let role = name.parse::<BasicFace>().ok()?;
+        let cache = &self.frames.get(frame)?.face_realization;
+        cache
+            .generation_matches(self.face_change_count)
+            .then(|| cache.basic(role))
             .flatten()
             .cloned()
     }
@@ -273,8 +392,33 @@ impl super::super::eval::Context {
         {
             return Ok(realized.clone());
         }
+        // Keep the full default lface before invoking user Lisp. Snapshot
+        // publication shares the role result's epoch/generation guard below.
+        let default_lface = if matches!(lookup, RealizationLookup::Basic(BasicFace::Default)) {
+            lookup_frame_lisp_face_vector(self, frame, "default").and_then(|vector| {
+                vector
+                    .as_vector_data()
+                    .map(|slots| Value::vector(slots.clone()))
+            })
+        } else {
+            None
+        };
+        let _default_source_root = RealizationRoots::from_values(default_lface);
+        let realization_epoch = self
+            .frames
+            .get(frame)
+            .and_then(|owner| owner.face_realization.realization_epoch());
+        let source_table = self
+            .frames
+            .get(frame)
+            .and_then(|owner| owner.face_realization.table(self.face_change_count))
+            .cloned();
+        let mut source_roots = Vec::new();
+        if let Some(table) = &source_table {
+            table.trace_roots(&mut source_roots);
+        }
+        let _source_roots = RealizationRoots::from_values(source_roots);
         let _roots = RealizationRoots::new(attributes);
-        let generation = self.face_change_count;
         let mut realized = attributes.clone();
         // GNU realize_tty_face:6731-6803: underline BEFORE foreground/background.
         if let FaceDecoration::Enabled(underline) = &mut realized.underline {
@@ -297,12 +441,25 @@ impl super::super::eval::Context {
         if let Some(spec) = &attributes.color_specifications.background {
             realized.background = map_color(self, frame, spec)?;
         }
-        if self.face_change_count == generation
-            && let Some(frame) = self.frames.get_mut(frame)
+        let current = self.face_change_count;
+        if let Some(epoch) = &realization_epoch
+            && let Some(owner) = self.frames.get_mut(frame)
+            && owner.face_realization.generation_matches(current)
+            && owner.face_realization.retains_epoch(epoch)
         {
-            frame
-                .face_realization
-                .insert(attributes.clone(), realized.clone());
+            match lookup {
+                RealizationLookup::Demand => owner
+                    .face_realization
+                    .insert(attributes.clone(), realized.clone()),
+                RealizationLookup::Basic(role) => {
+                    owner
+                        .face_realization
+                        .insert_basic(role, attributes.clone(), realized.clone());
+                    if let Some(source) = default_lface {
+                        owner.face_realization.retain_default_lface(source);
+                    }
+                }
+            }
         }
         Ok(realized)
     }
@@ -340,12 +497,25 @@ pub(crate) fn prepare_runtime_faces_result(
         *eval.face_table = table;
         return Ok(false);
     }
+    // A no-purge mutation keeps the valid realization generation while
+    // retiring just its raw source table. Refresh it without forcing basics.
+    let definitions_only = eval
+        .frames
+        .get(frame)
+        .is_some_and(|owner| owner.face_realization.generation_matches(generation));
     realize_default_lisp_face_for_frame(eval, frame);
     let table = runtime_face_table_from_frame_lisp_faces(eval, frame, false);
     if let Some(owner) = eval.frames.get_mut(frame) {
-        owner.face_realization.prepare(generation, table.clone());
+        if definitions_only {
+            owner.face_realization.replace_definitions(table.clone());
+        } else {
+            owner.face_realization.prepare(generation, table.clone());
+        }
     }
     *eval.face_table = table;
+    if definitions_only {
+        return Ok(true);
+    }
     if let Err(flow) = realize_basic_faces(eval, frame) {
         if let Some(owner) = eval.frames.get_mut(frame) {
             owner.face_realization.invalidate();
@@ -371,10 +541,11 @@ pub(crate) fn realize_basic_faces(
     // GNU realize_default_face inhibits redisplay while the default cache slot
     // is incomplete (xfaces.c:6105-6111). Advice may request redisplay here.
     let mut scope = RealizationBinding::enter(eval, "inhibit-redisplay", Value::T)?;
-    let result =
-        scope
-            .context()
-            .realize_display_face_with_lookup(frame, &default, RealizationLookup::Basic);
+    let result = scope.context().realize_display_face_with_lookup(
+        frame,
+        &default,
+        RealizationLookup::Basic(BasicFace::Default),
+    );
     scope.finish(result)?;
 
     // GNU's remaining basics are canonical even when the current displayed
@@ -390,12 +561,189 @@ pub(crate) fn realize_basic_faces(
             scope.context().realize_display_face_with_lookup(
                 frame,
                 &attributes,
-                RealizationLookup::Basic,
+                RealizationLookup::Basic(basic),
             )?;
         }
         Ok(())
     })();
     scope.finish(result)
+}
+
+/// Merge the raw attributes needed by GNU's TTY default-face refresh. Keeping
+/// Lisp values preserves original color/plist/fontset specifications; named
+/// inheritance is merged before direct attributes, with earlier list members
+/// taking precedence (GNU xfaces.c:2298-2335).
+fn merge_default_lface_source(
+    eval: &mut super::super::eval::Context,
+    frame: FrameId,
+    from: Value,
+    into: Value,
+    active: &[usize],
+) {
+    if active.contains(&from.bits()) || active.len() > 80 {
+        return;
+    }
+    let mut active = active.to_vec();
+    active.push(from.bits());
+    let _roots = RealizationRoots::from_values([from, into]);
+    if let Some(inherit) = lisp_face_vector_attr(from, LFaceAttr::Inherit)
+        && !inherit.is_nil()
+        && !is_reset_like_face_attr_value(&inherit)
+    {
+        merge_default_inheritance(eval, frame, inherit, into, &active);
+    }
+    for attr in LFACE_ATTRS {
+        let Some(value) = lisp_face_vector_attr(from, attr) else {
+            continue;
+        };
+        if is_reset_like_face_attr_value(&value) {
+            continue;
+        }
+        let value = if attr == LFaceAttr::Height && !value.is_fixnum() {
+            let previous = lisp_face_vector_attr(into, attr).unwrap_or(Value::fixnum(1));
+            merge_face_height_value(Some(eval), value, previous, previous)
+        } else {
+            value
+        };
+        set_lisp_face_vector_attr(into, attr, value);
+    }
+}
+
+fn merge_default_inheritance(
+    eval: &mut super::super::eval::Context,
+    frame: FrameId,
+    reference: Value,
+    into: Value,
+    active: &[usize],
+) {
+    if reference.is_nil() || active.contains(&reference.bits()) || active.len() > 80 {
+        return;
+    }
+    let mut active = active.to_vec();
+    active.push(reference.bits());
+    let _roots = RealizationRoots::from_values([reference, into]);
+    if !reference.is_cons() {
+        if let Ok(resolved) =
+            resolve_face_designator(eval, reference, FaceAliasCyclePolicy::UseDefault)
+            && let Some(name) = resolved.name()
+            && let Some(vector) = lookup_frame_lisp_face_vector(eval, frame, name.name())
+        {
+            merge_default_lface_source(eval, frame, vector, into, &active);
+        }
+        return;
+    }
+    let Some(items) = list_to_vec(&reference) else {
+        return;
+    };
+    // A height callback may destructively detach later inherited references
+    // before collecting. Root the copied work list independently of its spine.
+    let _items_roots = RealizationRoots::from_values(items.iter().copied());
+    if reference
+        .cons_car()
+        .as_bare_symbol_name()
+        .is_some_and(|name| name.starts_with(':'))
+    {
+        let vector = make_lisp_face_vector();
+        let _vector_root = RealizationRoots::from_values([vector]);
+        for pair in items.chunks_exact(2) {
+            if let Some(attr) = pair[0]
+                .as_bare_symbol_name()
+                .and_then(LFaceAttr::from_keyword)
+            {
+                set_lisp_face_vector_attr(vector, attr, pair[1]);
+            }
+        }
+        merge_default_lface_source(eval, frame, vector, into, &active);
+    } else {
+        for reference in items.into_iter().rev() {
+            merge_default_inheritance(eval, frame, reference, into, &active);
+        }
+    }
+}
+
+/// GNU internal-merge-in-global-face refreshes only an existing cached default
+/// immediately. It does not create a face cache, nor purge unrelated roles or
+/// ordinary lookup entries (xfaces.c:4353-4412). The graphical font-opening
+/// branch is intentionally outside this TTY lifecycle helper.
+pub(crate) fn realize_default_after_global_merge(
+    eval: &mut super::super::eval::Context,
+    frame: FrameId,
+    global: Value,
+    local: Value,
+) -> Result<(), Flow> {
+    let cached_source = eval
+        .frames
+        .get(frame)
+        .and_then(|owner| owner.face_realization.default_lface());
+    let _roots = RealizationRoots::from_values(
+        [Some(global), Some(local), cached_source]
+            .into_iter()
+            .flatten(),
+    );
+    record_face_change(eval, FaceChangeScope::DefinitionsOnly(&[frame]));
+    let Some(cached_source) = cached_source else {
+        return Ok(());
+    };
+    let mut scope = RealizationBinding::enter(eval, "inhibit-redisplay", Value::T)?;
+    let result = (|| {
+        let complete = Value::vector(
+            cached_source
+                .as_vector_data()
+                .expect("cached default lface")
+                .clone(),
+        );
+        let _complete_root = RealizationRoots::from_values([complete]);
+        merge_default_lface_source(scope.context(), frame, local, complete, &[]);
+        copy_lisp_face_vector_slots(complete, local);
+        sync_face_overrides_from_lisp_face_vector("default", local, false);
+
+        // Rebuild raw definitions without realize_default_lisp_face_for_frame:
+        // GNU uses the merged absolute lface here, not TTY default normalization.
+        let table = runtime_face_table_from_frame_lisp_faces(scope.context(), frame, false);
+        if let Some(owner) = scope.context().frames.get_mut(frame) {
+            owner.face_realization.replace_definitions(table.clone());
+        }
+        *scope.context().face_table = table.clone();
+        let mut attributes = table.resolve("default");
+        attributes.inherit = None;
+        attributes.doc = None;
+        if let Some(owner) = scope.context().frames.get_mut(frame) {
+            owner.face_realization.retire_default();
+        }
+        scope.context().realize_display_face_with_lookup(
+            frame,
+            &attributes,
+            RealizationLookup::Basic(BasicFace::Default),
+        )?;
+
+        // Read the rooted global vector after callbacks, as GNU does. Only its
+        // string fg/bg attributes enter the existing primitive parameter seam.
+        for (attr, parameter) in [
+            (LFaceAttr::Foreground, FrameParam::ForegroundColor),
+            (LFaceAttr::Background, FrameParam::BackgroundColor),
+        ] {
+            if let Some(value) =
+                lisp_face_vector_attr(global, attr).filter(|value| value.is_string())
+            {
+                publish_face_attribute_to_frame_parameter(
+                    scope.context(),
+                    frame,
+                    parameter,
+                    value,
+                )?;
+            }
+        }
+        Ok(())
+    })();
+    let result = scope.finish(result);
+    if result.is_err()
+        && let Some(owner) = eval.frames.get_mut(frame)
+    {
+        // The old default was retired before Lisp. Retry realization on the
+        // next display after a failed callback instead of using an empty slot.
+        owner.face_realization.invalidate();
+    }
+    result
 }
 
 /// Eager frame-creation boundary (GNU init_frame_faces). Batch creation leaves

@@ -19,6 +19,7 @@ freetype-bundled = [
 
 [dependencies]
 static_assertions.workspace = true
+enum-map.workspace = true
 memchr.workspace = true
 rustc-hash.workspace = true
 neomacs-display-protocol = { workspace = true }

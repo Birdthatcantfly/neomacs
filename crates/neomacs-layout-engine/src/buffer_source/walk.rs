@@ -232,12 +232,23 @@ impl<'request, B: LayoutBufferView> BufferSourceWalk<'request, B> {
         active_face_state: &DisplayRowActiveFaceState,
         output: &mut ProducedStep,
     ) {
-        self.producer.produce_step_into(
-            progress.source_position(),
-            face_resolution_context,
-            face_ids,
-            output,
-        );
+        if neovm_core::face::realization::enabled() {
+            source_render.with_face_realizer(|realize| {
+                self.producer.produce_step_into(
+                    progress.source_position(),
+                    face_resolution_context.with_face_realizer(realize),
+                    face_ids,
+                    output,
+                );
+            });
+        } else {
+            self.producer.produce_step_into(
+                progress.source_position(),
+                face_resolution_context,
+                face_ids,
+                output,
+            );
+        }
         apply_produced_step_to_render_progress(
             output,
             progress,

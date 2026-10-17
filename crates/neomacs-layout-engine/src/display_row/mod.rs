@@ -894,6 +894,7 @@ pub(crate) struct DisplayRowRenderContext<'a, 'ids> {
     face_resolver: &'a FaceResolver,
     display_host: Option<&'a dyn DisplayHost>,
     face_ids: &'ids mut FrameFaceAttempt,
+    face_realizer: Option<&'a dyn Fn(&mut ResolvedFace)>,
 }
 
 impl<'a, 'ids> DisplayRowRenderContext<'a, 'ids> {
@@ -914,7 +915,16 @@ impl<'a, 'ids> DisplayRowRenderContext<'a, 'ids> {
             face_resolver,
             display_host,
             face_ids,
+            face_realizer: None,
         }
+    }
+
+    pub(crate) fn with_face_realizer(
+        mut self,
+        realizer: Option<&'a dyn Fn(&mut ResolvedFace)>,
+    ) -> Self {
+        self.face_realizer = realizer;
+        self
     }
 
     pub(crate) fn source_resolve_params<'b>(
@@ -928,7 +938,8 @@ impl<'a, 'ids> DisplayRowRenderContext<'a, 'ids> {
         'a: 'b,
     {
         DisplaySourceResolveParams::new(
-            DisplaySourceFaceBasis::new(self.face_resolver, base_face_id, base_face, fallback),
+            DisplaySourceFaceBasis::new(self.face_resolver, base_face_id, base_face, fallback)
+                .with_face_realizer(self.face_realizer),
             self.display_host.map(|host| host as &'b dyn DisplayHost),
             image_scale_environment,
         )
@@ -951,6 +962,14 @@ pub(crate) struct DisplayRowRenderExecutor<'metrics, 'context, 'ids> {
 }
 
 impl<'metrics, 'context, 'ids> DisplayRowRenderExecutor<'metrics, 'context, 'ids> {
+    pub(crate) fn with_face_realizer(
+        mut self,
+        realizer: Option<&'context dyn Fn(&mut ResolvedFace)>,
+    ) -> Self {
+        self.context = self.context.with_face_realizer(realizer);
+        self
+    }
+
     pub(crate) fn with_automatic_composition(
         mut self,
         rules: Option<neovm_core::emacs_core::composite::AutomaticCompositionRules>,

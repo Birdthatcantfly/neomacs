@@ -19,7 +19,7 @@ use crate::display_source::{is_escape_glyph_octal, nonascii_hyphen_p, nonascii_s
 use crate::display_source_resolver::{
     ActiveDisplayStringBaseFace, DisplayDefaultFaceInstallPolicy, DisplaySourceFaceBasis,
     DisplaySourceResolveParams, DisplayStringBaseFace, PendingDisplaySourceFace,
-    resolve_display_string_base_face,
+    resolve_display_string_base_face_with_realizer,
 };
 use crate::frame_face_arena::FrameFaceAttempt;
 use crate::neovm_bridge::{FaceResolver, LayoutBufferView, ResolvedFace};
@@ -37,6 +37,7 @@ pub(crate) struct BufferSourceFaceResolutionContext<'a, B: LayoutBufferView> {
     default_face_metrics: DisplayRowFallbackMetrics,
     window_metrics: DisplayRowFallbackMetrics,
     image_scale_environment: ImageScaleEnvironment,
+    face_realizer: Option<&'a dyn Fn(&mut ResolvedFace)>,
 }
 
 #[derive(Clone, Copy)]
@@ -92,6 +93,24 @@ impl<'a, B: LayoutBufferView> BufferSourceFaceResolutionContext<'a, B> {
             default_face_metrics,
             window_metrics,
             image_scale_environment,
+            face_realizer: None,
+        }
+    }
+
+    pub(crate) fn with_face_realizer<'r>(
+        &'r self,
+        realize: &'r dyn Fn(&mut ResolvedFace),
+    ) -> BufferSourceFaceResolutionContext<'r, B> {
+        BufferSourceFaceResolutionContext {
+            buffer: self.buffer,
+            face_resolver: self.face_resolver,
+            measurement_policy: self.measurement_policy,
+            default_resolved: self.default_resolved,
+            default_face_id: self.default_face_id,
+            default_face_metrics: self.default_face_metrics,
+            window_metrics: self.window_metrics,
+            image_scale_environment: self.image_scale_environment,
+            face_realizer: Some(realize),
         }
     }
 
@@ -118,7 +137,7 @@ impl<'a, B: LayoutBufferView> BufferSourceFaceResolutionContext<'a, B> {
         pos: neovm_core::buffer::CharPos0,
         expected_face_id: FaceId,
     ) -> bool {
-        crate::buffer_source::row_route::routed_segment_item_face_diverges(
+        crate::buffer_source::row_route::routed_segment_item_face_diverges_with_realizer(
             self.buffer,
             self.face_resolver,
             face_ids,
@@ -126,6 +145,7 @@ impl<'a, B: LayoutBufferView> BufferSourceFaceResolutionContext<'a, B> {
             self.default_face_id,
             pos,
             expected_face_id,
+            self.face_realizer,
         )
     }
 
@@ -137,7 +157,7 @@ impl<'a, B: LayoutBufferView> BufferSourceFaceResolutionContext<'a, B> {
         default_install_policy: DisplayDefaultFaceInstallPolicy,
         face_ids: &mut FrameFaceAttempt,
     ) -> DisplayStringBaseFace {
-        resolve_display_string_base_face(
+        resolve_display_string_base_face_with_realizer(
             self.buffer,
             self.face_resolver,
             origin,
@@ -145,6 +165,7 @@ impl<'a, B: LayoutBufferView> BufferSourceFaceResolutionContext<'a, B> {
             active_base_face,
             default_install_policy,
             face_ids,
+            self.face_realizer,
         )
     }
 
@@ -181,11 +202,12 @@ impl<'a, B: LayoutBufferView> BufferSourceFaceResolutionContext<'a, B> {
         let origin = DisplayOrigin::BufferText {
             charpos: neovm_core::buffer::CharPos0::new(charpos as usize),
         };
-        let resolved = self.face_resolver.default_base_face_for_origin(
+        let mut resolved = self.face_resolver.default_base_face_for_origin(
             Some(self.buffer),
             &origin,
             state.face_scan.next_check_mut(),
         );
+        state.source_render.realize_face_for_display(&mut resolved);
         let face_id = stable_face_id_for_resolved(state.face_ids, &resolved);
         let resolved_box_type = resolved.box_type;
         *state.active_face_state = {
@@ -252,7 +274,8 @@ impl<'a, B: LayoutBufferView> BufferSourceFaceResolutionContext<'a, B> {
                 self.default_face_id,
                 self.default_resolved,
                 self.default_face_metrics,
-            ),
+            )
+            .with_face_realizer(self.face_realizer),
             display_host,
             self.image_scale_environment,
         )
@@ -269,7 +292,8 @@ impl<'a, B: LayoutBufferView> BufferSourceFaceResolutionContext<'a, B> {
                 base.face_id(),
                 base.face(),
                 self.default_face_metrics,
-            ),
+            )
+            .with_face_realizer(self.face_realizer),
             None,
             self.image_scale_environment,
         )

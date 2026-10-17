@@ -13,6 +13,7 @@
 //! and creates no buffer-specific or Lisp-state cache.
 
 use neovm_core::emacs_core::eval::VariableView;
+use neovm_core::face::realization::BasicFace;
 use std::cmp::Ordering;
 
 mod borrowed_buffer;
@@ -38,6 +39,8 @@ use property_keys::PropertyKeyOrder;
 
 mod face_colors;
 use face_colors::{FaceColorAttributes, FaceColorState};
+mod face_sources;
+use face_sources::{FaceTableRoots, RootedFace};
 
 use neovm_core::buffer::{
     Buffer, CharPos0, CharRange, EmacsByteLen, EmacsBytePos, EmacsByteRange, LispCharPos1,
@@ -1460,6 +1463,14 @@ pub fn window_params_from_neovm_with_font_sizing(
         mode_line_active,
         is_minibuffer,
     } = display_role;
+    // GNU uses the same activity predicate for mode, header and tab lines:
+    // selected/minibuffer-caller windows, or every window when this option is
+    // nil (dispextern.h:1541-1558,1582-1599,1617-1633).
+    let mode_line_active = mode_line_active
+        || (neovm_core::face::realization::enabled()
+            && vars
+                .value_by_name("mode-line-in-non-selected-windows")
+                .is_some_and(Value::is_nil));
     // Only leaf windows can be laid out.
     let effective_window_system = frame.effective_window_system();
     let is_window_system = effective_window_system.is_some();
@@ -1682,7 +1693,10 @@ pub fn window_params_from_neovm_with_font_sizing(
 
     let tab_line_height = if wants_tab_line {
         chrome_face_pixel_height(
-            &resolve_window_chrome_face(DisplayOrigin::TabLine),
+            &face_resolver.resolve_buffer_tab_line_face(
+                buffer,
+                crate::display_face_policy::TabLineFaceRole::from(mode_line_active),
+            ),
             char_height,
             device_scale,
         )
@@ -3487,6 +3501,13 @@ pub struct ResolvedFace {
     /// Original color attributes retained across merges; paint colors are
     /// intentionally not reversible (inverse defaults and distant colors).
     color_state: FaceColorState,
+    /// Fully merged logical attributes, before terminal color callbacks.
+    /// The owning frame/layout attempt confines this immutable snapshot to its
+    /// mutator; Arc shares strings and attributes without sharing Lisp mutation.
+    source_attributes: Option<std::sync::Arc<RootedFace>>,
+    /// Canonical forced basic realization, distinct even when its logical
+    /// attributes equal another basic role's. Every logical merge clears it.
+    canonical_tty_role: Option<BasicFace>,
     /// Per-face measured character advance width (from FontMetricsService, 0.0 = use default).
     font_char_width: f32,
     /// Per-face font ascent (from FontMetricsService, 0.0 = use default).
@@ -3534,6 +3555,8 @@ impl Default for ResolvedFace {
             overstrike: false,
             terminal_inverse_video: false,
             color_state: FaceColorState::Seed,
+            source_attributes: None,
+            canonical_tty_role: None,
             font_char_width: 0.0,
             font_ascent: 0.0,
             font_line_height: 0.0,
@@ -3545,6 +3568,61 @@ impl Default for ResolvedFace {
 }
 
 impl ResolvedFace {
+    /// Resolve one complete lface at the iterator boundary. Never realize its
+    /// individual inheritance/plist contributions: GNU lookup_face hashes the
+    /// merged vector and realizes it once (xfaces.c:5064-5093).
+    pub(crate) fn realize_for_frame(&mut self, evaluator: &mut Context, frame_id: FrameId) {
+        let Some(attributes) = self.source_attributes.as_ref() else {
+            return;
+        };
+        let realized = evaluator.realize_display_face_for_frame(frame_id, attributes.attributes());
+        self.install_realized_tty_colors(&realized);
+    }
+
+    fn install_realized_tty_colors(&mut self, realized: &NeoFace) {
+        // Read the retained pre-inverse channel state, never reverse-engineer
+        // source colors from this face's already-inverted paint.
+        FaceColorAttributes::from_base(self)
+            .merge_terminal_realization(realized)
+            .realize()
+            .install(self);
+        self.terminal_underline_color = realized
+            .underline
+            .enabled()
+            .and_then(|underline| underline.color.as_ref())
+            .and_then(|color| color.terminal);
+        if let Some(underline) = realized.underline.enabled() {
+            self.underline_color = underline
+                .color
+                .as_ref()
+                .map(color_to_pixel)
+                .unwrap_or(self.fg);
+        }
+    }
+
+    fn retain_source_over(&mut self, base: &ResolvedFace, overlay: &NeoFace) {
+        self.canonical_tty_role = None;
+        let Some(source) = base.source_attributes.as_deref() else {
+            return;
+        };
+        let mut merged = source.attributes().merge(overlay);
+        merged.inherit = None;
+        merged.doc = None;
+        self.source_attributes =
+            match RootedFace::with_base(merged, base.source_attributes.as_deref()) {
+                Ok(attributes) => Some(std::sync::Arc::new(attributes)),
+                Err(error) => {
+                    if base.source_attributes.is_some() {
+                        tracing::error!(
+                            ?error,
+                            "bound face composition lost its installed mutator heap"
+                        );
+                    }
+                    None
+                }
+            };
+    }
+
     pub(crate) fn has_same_color_source(&self, other: &Self) -> bool {
         FaceColorAttributes::from_base(self) == FaceColorAttributes::from_base(other)
     }
@@ -3576,6 +3654,7 @@ impl ResolvedFace {
     /// together and never separately -- a site that set one and forgot the
     /// other would put the writer back to guessing an index from RGB.
     fn set_foreground(&mut self, color: &NeoColor) {
+        self.canonical_tty_role = None;
         self.fg = color_to_pixel(color);
         self.terminal_fg = color.terminal;
         self.use_default_foreground = false;
@@ -3583,6 +3662,7 @@ impl ResolvedFace {
 
     /// Assign GNU's whole realized background from one realized colour.
     fn set_background(&mut self, color: &NeoColor) {
+        self.canonical_tty_role = None;
         self.bg = color_to_pixel(color);
         self.terminal_bg = color.terminal;
         self.use_default_background = false;
@@ -3593,6 +3673,7 @@ impl ResolvedFace {
     /// colour: GNU's `FACE_TTY_DEFAULT_FG_COLOR`, which `turn_on_face` emits
     /// no colour for at all.
     fn set_frame_default_foreground(&mut self, pixel: u32) {
+        self.canonical_tty_role = None;
         self.fg = pixel;
         self.terminal_fg = None;
         self.use_default_foreground = true;
@@ -3601,6 +3682,7 @@ impl ResolvedFace {
     /// The frame's fallback background; see
     /// [`Self::set_frame_default_foreground`].
     fn set_frame_default_background(&mut self, pixel: u32) {
+        self.canonical_tty_role = None;
         self.bg = pixel;
         self.terminal_bg = None;
         self.use_default_background = true;
@@ -3726,6 +3808,30 @@ impl UnresolvedFaceComposition {
     }
 }
 
+/// One real-TTY source snapshot, captured only after core initialized its
+/// frame cache. Every face-source invalidation advances the global counter;
+/// equal generations therefore need no frame-table identity lookup. A change
+/// on another frame may retag this source without invalidating its identity.
+/// This immutable token belongs to the resolver's exclusive owning mutator.
+#[derive(Clone, Copy)]
+struct BoundTtyFaceSource {
+    frame_id: FrameId,
+    generation: u64,
+}
+
+impl BoundTtyFaceSource {
+    #[inline]
+    fn is_current(self, evaluator: &Context, table: &FaceTable) -> bool {
+        self.generation == evaluator.face_change_count()
+            || evaluator.display_face_source_table_is_current(self.frame_id, table)
+    }
+}
+
+enum FaceRealizationSource {
+    MergeOverDefault,
+    Complete(std::sync::Arc<RootedFace>),
+}
+
 /// Resolves face attributes at buffer positions using the neovm-core
 /// `FaceTable`, text properties, and overlays.
 ///
@@ -3733,7 +3839,17 @@ impl UnresolvedFaceComposition {
 /// backend.
 pub struct FaceResolver {
     face_table: FaceTable,
+    /// The bound TTY snapshot may inspect any definition after a color callback
+    /// replaces the live table and collects. Root the whole snapshot once.
+    face_table_roots: Option<FaceTableRoots>,
     default_face: ResolvedFace,
+    /// Frame ownership is supplied by production layout. Unit resolvers have
+    /// no evaluator capability and remain pure. No evaluator or Lisp state is
+    /// retained here or in thread-local storage.
+    tty_face_source: Option<BoundTtyFaceSource>,
+    /// Only real TTY bindings need the large enum-indexed basic projection.
+    /// Unbound/default-off/GUI resolvers retain one empty pointer-sized option.
+    realized_basic_faces: Option<Box<enum_map::EnumMap<BasicFace, Option<ResolvedFace>>>>,
     /// Window system in use: `None` for TTY, `Some("x")` for X11,
     /// `Some("wayland")` for Wayland, etc.  Used to evaluate
     /// `:filtered` face spec predicates.
@@ -3906,7 +4022,10 @@ impl FaceResolver {
 
         Self {
             face_table: face_table.clone(),
+            face_table_roots: None,
             default_face: df,
+            tty_face_source: None,
+            realized_basic_faces: None,
             window_system,
             current_window_parameters: std::cell::RefCell::new(Vec::new()),
             current_window_id: std::cell::Cell::new(None),
@@ -3916,17 +4035,155 @@ impl FaceResolver {
         }
     }
 
-    /// The terminal palette an ANONYMOUS attribute plist realizes against, or
-    /// `None` on a GUI frame.
-    ///
-    /// Named faces are realized in neovm-core, which calls `tty-color-desc`
-    /// itself, as GNU does.  A plist -- a `face` text property, an overlay, a
-    /// `face-remapping-alist` entry -- is realized HERE, and this crate calls no
-    /// Lisp function anywhere, so it runs GNU's own search over the terminal's
-    /// own palette instead.  It comes off the face table so it cannot be a
-    /// different palette from the one the named faces used.
+    /// Bind the pure resolver to the real terminal frame. Basic-face colors
+    /// were realized by core's GNU lifecycle; importing them is read-only and
+    /// must not demand synthetic or missing basic names (notably tab-line).
+    pub(crate) fn prepare_tty_realization(&mut self, frame_id: FrameId, evaluator: &mut Context) {
+        if !neovm_core::face::realization::enabled()
+            || self.window_system.is_some()
+            || evaluator
+                .frame_manager()
+                .get(frame_id)
+                .is_none_or(|frame| frame.initial)
+        {
+            return;
+        }
+        if self.face_table_roots.is_none() {
+            match evaluator.display_face_table_root_lease(frame_id, &self.face_table) {
+                Ok(roots) => self.face_table_roots = Some(FaceTableRoots::from(roots)),
+                Err(error) => {
+                    tracing::error!(
+                        ?error,
+                        "terminal face definitions require an installed mutator heap"
+                    );
+                    return;
+                }
+            }
+        }
+        let Some((default_source, default_paint)) =
+            evaluator.cached_basic_display_face_for_frame(frame_id, BasicFace::Default.name())
+        else {
+            return;
+        };
+        let rooted_default = match RootedFace::new(default_source.clone()) {
+            Ok(source) => std::sync::Arc::new(source),
+            Err(error) => {
+                tracing::error!(
+                    ?error,
+                    "terminal face binding requires an installed mutator heap"
+                );
+                return;
+            }
+        };
+        let mut default = self.realize_face_with_source(
+            &default_source,
+            FaceRealizationSource::Complete(rooted_default),
+        );
+        default.install_realized_tty_colors(&default_paint);
+        default.canonical_tty_role = Some(BasicFace::Default);
+        self.default_face = default;
+        self.tty_face_source = Some(BoundTtyFaceSource {
+            frame_id,
+            generation: evaluator.face_change_count(),
+        });
+        let mut named_default = self.default_face.clone();
+        named_default.lisp_name = Some(BasicFace::Default.name().to_owned());
+        let mut basic_faces = Box::new(enum_map::EnumMap::default());
+        basic_faces[BasicFace::Default] = Some(named_default);
+        for name in neovm_core::face::realization::basic_face_names() {
+            let Some(role) = BasicFace::from_name(name) else {
+                continue;
+            };
+            if role == BasicFace::Default {
+                continue;
+            }
+            let Some((source, paint)) =
+                evaluator.cached_basic_display_face_for_frame(frame_id, name)
+            else {
+                continue;
+            };
+            let rooted_source = match RootedFace::with_base(
+                source.clone(),
+                self.default_face.source_attributes.as_deref(),
+            ) {
+                Ok(source) => std::sync::Arc::new(source),
+                Err(error) => {
+                    tracing::error!(
+                        ?error,
+                        "basic face source requires an installed mutator heap"
+                    );
+                    continue;
+                }
+            };
+            let mut resolved = self
+                .realize_face_with_source(&source, FaceRealizationSource::Complete(rooted_source));
+            resolved.install_realized_tty_colors(&paint);
+            resolved.canonical_tty_role = Some(role);
+            resolved.lisp_name = Some(name.to_owned());
+            resolved.face_id =
+                BasicFaceId::from_name(name).map_or(BasicFaceId::SENTINEL, u32::from);
+            basic_faces[role] = Some(resolved);
+        }
+        self.realized_basic_faces = Some(basic_faces);
+    }
+
+    pub(crate) fn has_tty_realization(&self) -> bool {
+        self.tty_face_source.is_some()
+    }
+
+    /// A speculative row probe may consume an existing realization, but must
+    /// never enter Lisp for a face the iterator has not reached yet.
+    pub(crate) fn realize_cached_for_display(
+        &self,
+        face: &mut ResolvedFace,
+        evaluator: &Context,
+    ) -> bool {
+        let Some(source) = self.tty_face_source else {
+            return true;
+        };
+        if !source.is_current(evaluator, &self.face_table) {
+            return false;
+        }
+        if face.canonical_tty_role.is_some() {
+            return true;
+        }
+        let frame_id = source.frame_id;
+        let Some(attributes) = face.source_attributes.as_deref() else {
+            return true;
+        };
+        let Some(realized) =
+            evaluator.cached_display_face_for_frame(frame_id, attributes.attributes())
+        else {
+            return false;
+        };
+        face.install_realized_tty_colors(&realized);
+        true
+    }
+
+    pub(crate) fn realize_for_display(&self, face: &mut ResolvedFace, evaluator: &mut Context) {
+        if let Some(source) = self.tty_face_source
+            && source.is_current(evaluator, &self.face_table)
+        {
+            if face.canonical_tty_role.is_some() {
+                return;
+            }
+            // A prior color callback may have replaced this frame's source
+            // definitions, including through nested redisplay. Leave temporary
+            // paint alone until the transaction rejects/restarts; entering Lisp
+            // here would realize a later glyph from obsolete source attributes.
+            face.realize_for_frame(evaluator, source.frame_id);
+        }
+    }
+
+    /// The legacy native palette is used only when the lifecycle knob is off.
+    /// A demand-realized plist retains its strings until the complete lface
+    /// reaches the evaluator; no palette approximation can replace a callback.
     fn plist_palette(&self) -> Option<&neomacs_display_protocol::TtyPalette> {
-        self.face_table.tty_palette()
+        if neovm_core::face::realization::enabled() {
+            None
+        } else {
+            self.face_table.tty_palette()
+        }
     }
 
     /// Discard diagnostics from a speculative frame-layout attempt.
@@ -3978,6 +4235,12 @@ impl FaceResolver {
     /// [`BasicFaceId::SENTINEL`] (20).
     pub fn resolve_named_face(&self, name: &str) -> ResolvedFace {
         use neomacs_display_protocol::face::BasicFaceId;
+        if let Some(role) = BasicFace::from_name(name)
+            && let Some(faces) = &self.realized_basic_faces
+            && let Some(face) = &faces[role]
+        {
+            return face.clone();
+        }
         let face = self.face_table.resolve(name);
         let mut resolved = self.realize_face(&face);
         resolved.lisp_name = Some(name.to_string());
@@ -4021,6 +4284,7 @@ impl FaceResolver {
 
     fn apply_specified_face_over(&self, base: &ResolvedFace, face: &NeoFace) -> ResolvedFace {
         let mut rf = base.clone();
+        rf.retain_source_over(base, face);
         FaceColorAttributes::from_base(base)
             .merge(face)
             .realize()
@@ -4415,6 +4679,7 @@ impl FaceResolver {
                 // dynamic slot; a remapped basic face cannot occupy its fixed
                 // frame slot.
                 resolved.face_id = 0;
+                resolved.canonical_tty_role = None;
                 resolved.lisp_name = Some(face_id.name().to_string());
                 resolved
             }
@@ -4615,7 +4880,30 @@ impl FaceResolver {
             .resolve_remapped_face_value_over(remapping, &base, &Value::symbol(name))
             .unwrap_or(base);
         resolved.face_id = BasicFaceId::SENTINEL;
+        resolved.canonical_tty_role = None;
         resolved.lisp_name = Some(name.to_string());
+        resolved
+    }
+
+    /// GNU display_mode_line initializes its iterator with the selected
+    /// active/inactive tab-line basic source, then lookup_basic_face applies
+    /// buffer remapping (xdisp.c:3257-3290,28145; xfaces.c:5198-5199).
+    pub(crate) fn resolve_buffer_tab_line_face<B: LayoutBufferView>(
+        &self,
+        buffer: &B,
+        role: crate::display_face_policy::TabLineFaceRole,
+    ) -> ResolvedFace {
+        let remapping = BufferFaceRemapping::capture(buffer);
+        if !neovm_core::face::realization::enabled() {
+            return self.resolve_remapped_basic_face(remapping, BasicFaceId::TabLine);
+        }
+        let mut resolved = self.resolve_remapped_named_face(remapping, role.name());
+        // Keep every protocol basic ID unchanged. Both GNU tab-line roles can
+        // coexist in one frame, so they cannot share the renderer's old slot
+        // 19. The row request API explicitly uses zero to allocate a content-
+        // addressed ID (display_row/mod.rs DisplayRowSourceRenderRequest::from_base_face);
+        // its ordinary nonbasic SENTINEL would be treated as an assigned ID.
+        resolved.face_id = 0;
         resolved
     }
 
@@ -4940,11 +5228,29 @@ impl FaceResolver {
     /// Unset fields fall back to the default face.  Handles `inverse_video`,
     /// `FaceHeight` (absolute/relative), underline, overline, strike-through,
     /// box, overstrike, and extend.
+    #[inline]
     pub fn realize_face(&self, face: &NeoFace) -> ResolvedFace {
+        self.realize_face_with_source(face, FaceRealizationSource::MergeOverDefault)
+    }
+
+    fn realize_face_with_source(
+        &self,
+        face: &NeoFace,
+        source: FaceRealizationSource,
+    ) -> ResolvedFace {
         let mut rf = self.default_face.clone();
         // The clone starts from the default face; an anonymous face must not
         // inherit its *name*. Named resolvers overwrite this after realizing.
         rf.lisp_name = None;
+        match source {
+            FaceRealizationSource::MergeOverDefault => {
+                rf.retain_source_over(&self.default_face, face)
+            }
+            FaceRealizationSource::Complete(source) => {
+                rf.source_attributes = Some(source);
+                rf.canonical_tty_role = None;
+            }
+        }
 
         FaceColorAttributes::from_base(&self.default_face)
             .merge(face)

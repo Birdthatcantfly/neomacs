@@ -60,6 +60,28 @@ impl EffectiveWindowDefaultFace {
     }
 }
 
+/// GNU keeps separate active/inactive tab-line sources (dispextern.h:1617-1633)
+/// while the renderer's older protocol has only one canonical TabLine slot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
+pub(crate) enum TabLineFaceRole {
+    #[strum(serialize = "tab-line-active")]
+    Active,
+    #[strum(serialize = "tab-line-inactive")]
+    Inactive,
+}
+
+impl From<bool> for TabLineFaceRole {
+    fn from(active: bool) -> Self {
+        if active { Self::Active } else { Self::Inactive }
+    }
+}
+
+impl TabLineFaceRole {
+    pub(crate) fn name(self) -> &'static str {
+        self.into()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BaseFacePolicy {
     BufferFaceIncludingOverlays,

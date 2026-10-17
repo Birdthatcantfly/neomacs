@@ -3781,6 +3781,18 @@ fn cursor_only_fast_path_places_cursor_on_the_row_glyph_advances() {
     assert_eq!(replayed.row, reference.row);
 }
 
+/// Bare contexts do not load tty-colors.el. These window-fill tests need
+/// successful terminal descriptors so an explicit background remains paint
+/// instead of GNU's terminal-default fallback for an unresolved color.
+fn install_window_fill_test_tty_palette(eval: &mut Context) {
+    eval.eval_str(
+        r##"(defun tty-color-desc (color &optional frame)
+              (assoc color '(("#ffffff" 7 65535 65535 65535)
+                             ("#000000" 0 0 0 0))))"##,
+    )
+    .expect("install window-fill test terminal color descriptors");
+}
+
 /// GNU `init_iterator` resolves the displayed buffer's remapped default face
 /// for every window redisplay, including the blank cells owned by that window.
 /// Reusing body rows must therefore retain the same background-fill contract as
@@ -3790,6 +3802,7 @@ fn cursor_only_fast_path_places_cursor_on_the_row_glyph_advances() {
 fn cursor_only_replay_republishes_buffer_default_face_fill() {
     let (mut eval, frame_id, buf_id, window_id) =
         incr_editing_frame("remapped body\nsecond line\n", 800, 600);
+    install_window_fill_test_tty_palette(&mut eval);
     {
         let buffer = eval.buffer_manager_mut().get_mut(buf_id).expect("buffer");
         buffer.set_buffer_local(
@@ -3853,6 +3866,7 @@ fn cursor_only_replay_republishes_buffer_default_face_fill() {
 #[test]
 fn tty_split_preserves_remapped_default_face_across_padding_and_blank_tail() {
     let (mut eval, frame_id, buf_id, left_window) = incr_editing_frame("X\n", 160, 50);
+    install_window_fill_test_tty_palette(&mut eval);
     eval.buffer_manager_mut()
         .get_mut(buf_id)
         .expect("buffer")

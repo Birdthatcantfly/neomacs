@@ -453,6 +453,28 @@ pub(crate) fn routed_segment_item_face_diverges<B: LayoutBufferView>(
     pos: CharPos0,
     expected_face_id: FaceId,
 ) -> bool {
+    routed_segment_item_face_diverges_with_realizer(
+        buffer,
+        face_resolver,
+        face_ids,
+        default_resolved,
+        default_face_id,
+        pos,
+        expected_face_id,
+        None,
+    )
+}
+
+pub(crate) fn routed_segment_item_face_diverges_with_realizer<B: LayoutBufferView>(
+    buffer: &B,
+    face_resolver: &FaceResolver,
+    face_ids: &mut FrameFaceAttempt,
+    default_resolved: &ResolvedFace,
+    default_face_id: FaceId,
+    pos: CharPos0,
+    expected_face_id: FaceId,
+    realize: Option<&dyn Fn(&mut ResolvedFace)>,
+) -> bool {
     let bytepos = buffer.layout_char_pos_to_emacs_byte_pos(pos);
     let text_face =
         LayoutCharPropertyLookup::new(buffer, Value::symbol("face")).text_value_at(buffer, bytepos);
@@ -468,13 +490,16 @@ pub(crate) fn routed_segment_item_face_diverges<B: LayoutBufferView>(
         // (checkpoint) face id, which IS `expected_face_id`.
         return false;
     }
-    let Some(resolved) =
+    let Some(mut resolved) =
         face_resolver.resolve_buffer_face_sources_over(buffer, default_resolved, &sources)
     else {
         // Every source contributed nothing: the ref stays `Inherit` ->
         // active (checkpoint) face id.
         return false;
     };
+    if let Some(realize) = realize {
+        realize(&mut resolved);
+    }
     let current_id =
         if crate::display_source_resolver::same_resolved_face(&resolved, default_resolved) {
             default_face_id

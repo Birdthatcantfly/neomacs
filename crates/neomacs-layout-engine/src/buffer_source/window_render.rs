@@ -423,7 +423,7 @@ where
         let window_metrics = DisplayRowFallbackMetrics::from_window_defaults(params);
         let local_display_policy = BufferWindowLocalDisplayPolicy::from_window(buffer, params);
 
-        let default_face = state.with_face_services(|face_resolver, font_metrics| {
+        let mut default_face = state.with_face_services(|face_resolver, font_metrics| {
             BufferSourceDefaultFacePlan::new(
                 face_resolver,
                 buffer,
@@ -432,6 +432,7 @@ where
                 window_metrics,
             )
         });
+        state.realize_face_for_display(default_face.face_mut());
         let default_resolved = default_face.face();
 
         // GNU derives `lnum_pixel_width` from glyphs produced with the

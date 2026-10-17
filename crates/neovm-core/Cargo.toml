@@ -37,6 +37,7 @@ md-5.workspace = true
 getrandom.workspace = true
 base64.workspace = true
 num_enum.workspace = true
+enum-map.workspace = true
 typed-index-collections.workspace = true
 thiserror.workspace = true
 static_assertions.workspace = true

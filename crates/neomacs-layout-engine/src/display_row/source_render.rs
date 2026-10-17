@@ -51,7 +51,7 @@ use crate::display_source::{
 };
 use crate::display_source_resolver::{
     ActiveDisplayStringBaseFace, DisplayDefaultFaceInstallPolicy, DisplayStringBaseFace,
-    resolve_display_string_base_face,
+    resolve_display_string_base_face_with_realizer,
 };
 use crate::display_spec::DisplayFringeSide;
 use crate::display_text_output_install::TextWindowRowDecorationRequest;
@@ -411,7 +411,7 @@ struct DisplayRowCurrentSourceFragmentRenderState<'face, 'emit> {
     font_metrics: &'emit mut Option<FontMetricsService>,
     measurement_mode: DisplayRowMeasurementMode,
     face_resolver: &'face FaceResolver,
-    display_host: Option<&'emit dyn DisplayHost>,
+    evaluator: &'emit mut Context,
     face_ids: &'emit mut FrameFaceAttempt,
 }
 
@@ -551,17 +551,33 @@ impl<'face, 'emit> DisplayRowCurrentTextSourceState<'face, 'emit> {
         S: DisplayItemSource,
         P: DisplayRowRenderPolicy,
     {
+        // The terminal iterator needs Lisp for complete-lface realization.
+        // DisplayHost supplies graphic image/font services to this renderer;
+        // terminal images are replacement text, so no host borrow is needed.
+        // Keep the host on Context itself: advised Lisp callbacks still see it.
+        let (display_host, evaluator) = if self.face_resolver.has_tty_realization() {
+            (None, Some(&mut *self.evaluator))
+        } else {
+            (self.evaluator.display_host.as_deref(), None)
+        };
+        let evaluator = std::cell::RefCell::new(evaluator);
+        let realize = |face: &mut ResolvedFace| {
+            if let Some(evaluator) = evaluator.borrow_mut().as_deref_mut() {
+                self.face_resolver.realize_for_display(face, evaluator);
+            }
+        };
+        let realizer = self
+            .face_resolver
+            .has_tty_realization()
+            .then_some(&realize as &dyn Fn(&mut ResolvedFace));
         let mutation = DisplayRowCurrentSourceStepMutation {
             row_request,
             renderer: DisplayRowRenderer::new(self.font_metrics, self.measurement_mode),
             source,
             source_state,
-            context: DisplayRowRenderContext::new(
-                self.face_resolver,
-                self.evaluator.display_host.as_deref(),
-                self.face_ids,
-            )
-            .with_automatic_composition(self.automatic_composition),
+            context: DisplayRowRenderContext::new(self.face_resolver, display_host, self.face_ids)
+                .with_face_realizer(realizer)
+                .with_automatic_composition(self.automatic_composition),
             render_policy,
         };
         let (result, row_height_px, row_ascent_px) =
@@ -583,17 +599,35 @@ impl<'face, 'emit> DisplayRowCurrentTextSourceState<'face, 'emit> {
         S: DisplayItemSource,
         P: DisplayRowRenderPolicy,
     {
+        // The terminal iterator needs Lisp for complete-lface realization.
+        // DisplayHost supplies graphic image/font services to this renderer;
+        // terminal images are replacement text, so no host borrow is needed.
+        // Keep the host on Context itself: advised Lisp callbacks still see it.
+        let (display_host, evaluator) = if self.face_resolver.has_tty_realization() {
+            (None, Some(&mut *self.evaluator))
+        } else {
+            (self.evaluator.display_host.as_deref(), None)
+        };
+        let evaluator = std::cell::RefCell::new(evaluator);
+        let realize = |face: &mut ResolvedFace| {
+            if let Some(evaluator) = evaluator.borrow_mut().as_deref_mut() {
+                let _ = self
+                    .face_resolver
+                    .realize_cached_for_display(face, evaluator);
+            }
+        };
+        let realizer = self
+            .face_resolver
+            .has_tty_realization()
+            .then_some(&realize as &dyn Fn(&mut ResolvedFace));
         let mutation = DisplayRowCurrentSourceStepMutation {
             row_request,
             renderer: DisplayRowRenderer::new(self.font_metrics, self.measurement_mode),
             source,
             source_state,
-            context: DisplayRowRenderContext::new(
-                self.face_resolver,
-                self.evaluator.display_host.as_deref(),
-                self.face_ids,
-            )
-            .with_automatic_composition(self.automatic_composition),
+            context: DisplayRowRenderContext::new(self.face_resolver, display_host, self.face_ids)
+                .with_face_realizer(realizer)
+                .with_automatic_composition(self.automatic_composition),
             render_policy,
         };
         let (result, row_height_px, row_ascent_px) = self
@@ -613,7 +647,7 @@ impl<'face, 'emit> DisplayRowCurrentSourceFragmentRenderState<'face, 'emit> {
         font_metrics: &'emit mut Option<FontMetricsService>,
         measurement_mode: DisplayRowMeasurementMode,
         face_resolver: &'face FaceResolver,
-        display_host: Option<&'emit dyn DisplayHost>,
+        evaluator: &'emit mut Context,
         face_ids: &'emit mut FrameFaceAttempt,
         automatic_composition: Option<neovm_core::emacs_core::composite::AutomaticCompositionRules>,
     ) -> Self {
@@ -623,7 +657,7 @@ impl<'face, 'emit> DisplayRowCurrentSourceFragmentRenderState<'face, 'emit> {
             font_metrics,
             measurement_mode,
             face_resolver,
-            display_host,
+            evaluator,
             face_ids,
         }
     }
@@ -634,13 +668,29 @@ impl<'face, 'emit> DisplayRowCurrentSourceFragmentRenderState<'face, 'emit> {
         source: &mut S,
         source_state: &mut DisplayRowSourceState,
     ) -> Option<DisplayRowRenderIntoRowResult> {
+        let (display_host, evaluator) = if self.face_resolver.has_tty_realization() {
+            (None, Some(&mut *self.evaluator))
+        } else {
+            (self.evaluator.display_host.as_deref(), None)
+        };
+        let evaluator = std::cell::RefCell::new(evaluator);
+        let realize = |face: &mut ResolvedFace| {
+            if let Some(evaluator) = evaluator.borrow_mut().as_deref_mut() {
+                self.face_resolver.realize_for_display(face, evaluator);
+            }
+        };
+        let realizer = self
+            .face_resolver
+            .has_tty_realization()
+            .then_some(&realize as &dyn Fn(&mut ResolvedFace));
         let mut render_executor = DisplayRowRenderExecutor::new(
             self.font_metrics,
             self.measurement_mode,
             self.face_resolver,
-            self.display_host,
+            display_host,
             self.face_ids,
         )
+        .with_face_realizer(realizer)
         .with_automatic_composition(self.automatic_composition);
         let result = self.row_output.apply_current_row_mutation(
             DisplayRowNaturalSourceFragmentMutation {
@@ -850,7 +900,7 @@ impl<'a> TextRowOutputRenderState<'a> {
             font_metrics,
             measurement_mode,
             face_resolver,
-            self.evaluator.display_host.as_deref(),
+            self.evaluator,
             face_ids,
             self.automatic_composition,
         )
@@ -1213,8 +1263,49 @@ impl<'a> TextRowSourceRenderState<'a> {
             .install_resolved_face(bound, metrics);
     }
 
-    pub(crate) fn resolve_named_face(&self, face_name: &str) -> ResolvedFace {
-        self.faces.resolve_named_face(face_name)
+    /// Lend the evaluator only for this synchronous iterator step. The
+    /// capability cannot outlive the exclusive render-state borrow and is
+    /// neither stored on a frame nor shared with another mutator.
+    pub(crate) fn with_face_realizer<R>(
+        &mut self,
+        f: impl FnOnce(&dyn Fn(&mut ResolvedFace)) -> R,
+    ) -> R {
+        let resolver = self.faces.pipeline_resolver();
+        let evaluator = std::cell::RefCell::new(&mut *self.output_render.evaluator);
+        let realize = |face: &mut ResolvedFace| {
+            resolver.realize_for_display(face, &mut evaluator.borrow_mut());
+        };
+        f(&realize)
+    }
+
+    pub(crate) fn realize_cached_face_for_display(&mut self, face: &mut ResolvedFace) -> bool {
+        self.faces
+            .pipeline_resolver()
+            .realize_cached_for_display(face, self.output_render.evaluator)
+    }
+
+    pub(crate) fn with_cached_face_realizer<R>(
+        &mut self,
+        f: impl FnOnce(&dyn Fn(&mut ResolvedFace)) -> R,
+    ) -> R {
+        let resolver = self.faces.pipeline_resolver();
+        let evaluator = &*self.output_render.evaluator;
+        let realize = |face: &mut ResolvedFace| {
+            let _ = resolver.realize_cached_for_display(face, evaluator);
+        };
+        f(&realize)
+    }
+
+    pub(crate) fn realize_face_for_display(&mut self, face: &mut ResolvedFace) {
+        self.faces
+            .pipeline_resolver()
+            .realize_for_display(face, self.output_render.evaluator);
+    }
+
+    pub(crate) fn resolve_named_face(&mut self, face_name: &str) -> ResolvedFace {
+        let mut face = self.faces.resolve_named_face(face_name);
+        self.realize_face_for_display(&mut face);
+        face
     }
 
     /// Merge a named face over a base resolved face, GNU
@@ -1223,11 +1314,13 @@ impl<'a> TextRowSourceRenderState<'a> {
     /// (resolving its `:inherit` chain), and return the realized face. Returns
     /// `base` unchanged when the named face contributes nothing.
     pub(crate) fn merge_named_face_over(
-        &self,
+        &mut self,
         base: &ResolvedFace,
         face_name: &str,
     ) -> ResolvedFace {
-        self.faces.merge_named_face_over(base, face_name)
+        let mut face = self.faces.merge_named_face_over(base, face_name);
+        self.realize_face_for_display(&mut face);
+        face
     }
 
     pub(crate) fn effective_default_face(
@@ -1248,15 +1341,19 @@ impl<'a> TextRowSourceRenderState<'a> {
         policy: BaseFacePolicy,
         face_ids: &mut FrameFaceAttempt,
     ) -> DisplayStringBaseFace {
-        let base_face = resolve_display_string_base_face(
-            buffer,
-            self.faces.pipeline_resolver(),
-            origin,
-            policy,
-            None,
-            DisplayDefaultFaceInstallPolicy::InstallDefaultFace,
-            face_ids,
-        );
+        let resolver = self.faces.pipeline_resolver();
+        let base_face = self.with_face_realizer(|realize| {
+            resolve_display_string_base_face_with_realizer(
+                buffer,
+                resolver,
+                origin,
+                policy,
+                None,
+                DisplayDefaultFaceInstallPolicy::InstallDefaultFace,
+                face_ids,
+                Some(realize),
+            )
+        });
         self.install_pending_display_string_base_face(&base_face);
         base_face
     }
@@ -1278,18 +1375,22 @@ impl<'a> TextRowSourceRenderState<'a> {
         active_face_state: &DisplayRowActiveFaceState,
         face_ids: &mut FrameFaceAttempt,
     ) -> DisplayStringBaseFace {
-        let base_face = resolve_display_string_base_face(
-            buffer,
-            self.faces.pipeline_resolver(),
-            origin,
-            policy,
-            Some(ActiveDisplayStringBaseFace::new(
-                active_face_state.face_id(),
-                active_face_state.resolved_face(),
-            )),
-            DisplayDefaultFaceInstallPolicy::ReuseInstalledDefaultFace,
-            face_ids,
-        );
+        let resolver = self.faces.pipeline_resolver();
+        let base_face = self.with_face_realizer(|realize| {
+            resolve_display_string_base_face_with_realizer(
+                buffer,
+                resolver,
+                origin,
+                policy,
+                Some(ActiveDisplayStringBaseFace::new(
+                    active_face_state.face_id(),
+                    active_face_state.resolved_face(),
+                )),
+                DisplayDefaultFaceInstallPolicy::ReuseInstalledDefaultFace,
+                face_ids,
+                Some(realize),
+            )
+        });
         self.install_pending_display_string_base_face(&base_face);
         base_face
     }

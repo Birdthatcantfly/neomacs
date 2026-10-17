@@ -666,6 +666,11 @@ pub(crate) fn install_opened_tty(
         );
         terminal.host = Some(opened.host);
     });
+    if crate::face::realization::enabled() {
+        // Color callbacks can reactivate the Context. Publish the opened
+        // terminal before registry reconciliation can treat it as absent.
+        terminal_handle_for_id(request.terminal_id);
+    }
     size
 }
 

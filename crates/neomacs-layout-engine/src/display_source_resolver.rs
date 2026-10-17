@@ -53,6 +53,7 @@ pub(crate) struct DisplaySourceFaceBasis<'a> {
     base_face: &'a ResolvedFace,
     canonical_face: &'a ResolvedFace,
     fallback_metrics: DisplayRowFallbackMetrics,
+    face_realizer: Option<&'a dyn Fn(&mut ResolvedFace)>,
 }
 
 impl<'a> DisplaySourceFaceBasis<'a> {
@@ -68,6 +69,21 @@ impl<'a> DisplaySourceFaceBasis<'a> {
             base_face,
             canonical_face: face_resolver.default_face(),
             fallback_metrics,
+            face_realizer: None,
+        }
+    }
+
+    pub(crate) fn with_face_realizer(
+        mut self,
+        realizer: Option<&'a dyn Fn(&mut ResolvedFace)>,
+    ) -> Self {
+        self.face_realizer = realizer;
+        self
+    }
+
+    fn realize(self, face: &mut ResolvedFace) {
+        if let Some(realize) = self.face_realizer {
+            realize(face);
         }
     }
 
@@ -330,8 +346,34 @@ pub(crate) fn resolve_display_string_base_face<B: LayoutBufferView>(
     default_install_policy: DisplayDefaultFaceInstallPolicy,
     face_ids: &mut FrameFaceAttempt,
 ) -> DisplayStringBaseFace {
+    resolve_display_string_base_face_with_realizer(
+        buffer,
+        face_resolver,
+        origin,
+        policy,
+        active_base_face,
+        default_install_policy,
+        face_ids,
+        None,
+    )
+}
+
+pub(crate) fn resolve_display_string_base_face_with_realizer<B: LayoutBufferView>(
+    buffer: &B,
+    face_resolver: &FaceResolver,
+    origin: DisplayOrigin,
+    policy: BaseFacePolicy,
+    active_base_face: Option<ActiveDisplayStringBaseFace<'_>>,
+    default_install_policy: DisplayDefaultFaceInstallPolicy,
+    face_ids: &mut FrameFaceAttempt,
+    realize: Option<&dyn Fn(&mut ResolvedFace)>,
+) -> DisplayStringBaseFace {
     let mut next_check = buffer.layout_point_max_char_pos().get();
-    let face = face_resolver.base_face_for_origin(Some(buffer), &origin, policy, &mut next_check);
+    let mut face =
+        face_resolver.base_face_for_origin(Some(buffer), &origin, policy, &mut next_check);
+    if let Some(realize) = realize {
+        realize(&mut face);
+    }
 
     let (face_id, pending_face) = if let Some(active_base_face) = active_base_face
         && same_resolved_face(&face, active_base_face.resolved)
@@ -884,9 +926,10 @@ fn resolve_source_face_ref(
     }
 
     let base_resolved = state.resolved_face_for(base, face_basis.base_face());
-    let Some(resolved) = resolve(&base_resolved, &face_value) else {
+    let Some(mut resolved) = resolve(&base_resolved, &face_value) else {
         return base;
     };
+    face_basis.realize(&mut resolved);
 
     if same_resolved_face(&resolved, &base_resolved) {
         let base_resolved = base_resolved.clone();
@@ -954,9 +997,10 @@ fn resolve_source_face_sources(
         return cached;
     }
     let base_resolved = state.resolved_face_for(base, face_basis.base_face());
-    let Some(resolved) = resolve(&base_resolved, sources) else {
+    let Some(mut resolved) = resolve(&base_resolved, sources) else {
         return base;
     };
+    face_basis.realize(&mut resolved);
 
     if same_resolved_face(&resolved, &base_resolved) {
         let base_resolved = base_resolved.clone();

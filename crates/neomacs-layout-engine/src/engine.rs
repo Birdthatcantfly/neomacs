@@ -1753,7 +1753,7 @@ impl LayoutEngine {
             return FrameLayoutAttempt::Aborted;
         }
         self.layout_frame_rust_for_purpose_inner(evaluator, frame_id, purpose);
-        if evaluator.has_mode_line_display_flow() {
+        if evaluator.has_mode_line_display_flow() || evaluator.redisplay_hook_flow_pending() {
             self.last_frame_display_state = None;
             return FrameLayoutAttempt::Aborted;
         }
@@ -1897,6 +1897,13 @@ impl LayoutEngine {
             window_system.clone(),
             self.font_sizing,
         );
+        face_resolver.prepare_tty_realization(frame_id, evaluator);
+        let mut resolver_face_change_count = evaluator.face_change_count();
+        enum FaceResolverRefresh {
+            Current,
+            Required,
+        }
+        let mut resolver_refresh = FaceResolverRefresh::Current;
         let default_resolved = face_resolver.default_face();
         let frame_font_domain =
             FrameFontDomain::for_frame(window_system.is_some(), bootstrap_font_size);
@@ -2006,6 +2013,55 @@ impl LayoutEngine {
             // was rejected. Restore every leaf publication before collecting
             // the next attempt's canonical previous-viewport evidence.
             frame_window_end_attempts.reject_all(evaluator);
+            if face_resolver.has_tty_realization() {
+                // A color callback may mutate face definitions while a prior
+                // leaf is being rendered. Recollect the immutable resolver at
+                // the transaction restart, before any cached row is admitted.
+                let before_sync = evaluator.face_change_count();
+                let refreshed = evaluator.sync_runtime_faces_for_frame(frame_id);
+                let after_sync = evaluator.face_change_count();
+                if matches!(resolver_refresh, FaceResolverRefresh::Required)
+                    || refreshed
+                    || resolver_face_change_count != after_sync
+                {
+                    let Some(frame) = evaluator.frame_manager().get(frame_id) else {
+                        evaluator.retire_interaction_presentation(presentation_id);
+                        return None;
+                    };
+                    let bootstrap = super::neovm_bridge::frame_params_from_neovm(
+                        frame,
+                        evaluator.face_table(),
+                        evaluator.variables(),
+                    );
+                    face_resolver = super::neovm_bridge::FaceResolver::new_with_font_sizing(
+                        evaluator.face_table(),
+                        0x00FFFFFF,
+                        bootstrap.background,
+                        frame.font_pixel_size,
+                        None,
+                        self.font_sizing,
+                    );
+                    face_resolver.prepare_tty_realization(frame_id, evaluator);
+                    resolver_face_change_count = after_sync;
+                    resolver_refresh = FaceResolverRefresh::Current;
+                }
+                if before_sync != after_sync {
+                    let request = FrameRelayoutRequest::FaceRealizationInputsChanged {
+                        before: before_sync,
+                        after: after_sync,
+                    };
+                    if !Self::accept_frame_relayout_request(
+                        &mut layout_coordinator,
+                        evaluator,
+                        &mut frame_window_end_attempts,
+                        presentation_id,
+                        request,
+                    ) {
+                        return None;
+                    }
+                    continue 'frame_layout;
+                }
+            }
             // Layout retries are speculative. GNU logs invalid face references
             // observed by the accepted redisplay, not once per discarded
             // geometry attempt.
@@ -2653,6 +2709,28 @@ impl LayoutEngine {
                 };
                 let mut viewport_retry_phase = ViewportResolutionPhase::Resolve;
                 let window_layout = loop {
+                    // A leaf hook/visibility continuation can re-enter this
+                    // loop without visiting the outer transaction restart.
+                    // Reject before rendering any stale logical face sources.
+                    let current_face_change_count = evaluator.face_change_count();
+                    if face_resolver.has_tty_realization()
+                        && current_face_change_count != resolver_face_change_count
+                    {
+                        let request = FrameRelayoutRequest::FaceRealizationInputsChanged {
+                            before: resolver_face_change_count,
+                            after: current_face_change_count,
+                        };
+                        if !Self::accept_frame_relayout_request(
+                            &mut layout_coordinator,
+                            evaluator,
+                            &mut frame_window_end_attempts,
+                            presentation_id,
+                            request,
+                        ) {
+                            return None;
+                        }
+                        continue 'frame_layout;
+                    }
                     match self.layout_window_rust(
                         evaluator,
                         frame_id,
@@ -3094,6 +3172,39 @@ impl LayoutEngine {
                 .and_then(|direction| {
                     pending_frame_navigation.filter(|intent| intent.direction() == direction)
                 });
+
+            // Color advice may signal after a row has already produced fallback
+            // paint. Preserve the original pending flow and reject speculative
+            // rows before they can seal matrices, faces, or unchanged regions.
+            if evaluator.has_mode_line_display_flow() || evaluator.redisplay_hook_flow_pending() {
+                frame_window_end_attempts.reject_all(evaluator);
+                evaluator.retire_interaction_presentation(presentation_id);
+                self.last_frame_display_state = None;
+                self.reset_frame_attempt_state();
+                return None;
+            }
+
+            if face_resolver.has_tty_realization() {
+                let refreshed = evaluator.sync_runtime_faces_for_frame(frame_id);
+                let after = evaluator.face_change_count();
+                if refreshed || after != resolver_face_change_count {
+                    resolver_refresh = FaceResolverRefresh::Required;
+                    let request = FrameRelayoutRequest::FaceRealizationInputsChanged {
+                        before: resolver_face_change_count,
+                        after,
+                    };
+                    if !Self::accept_frame_relayout_request(
+                        &mut layout_coordinator,
+                        evaluator,
+                        &mut frame_window_end_attempts,
+                        presentation_id,
+                        request,
+                    ) {
+                        return None;
+                    }
+                    continue 'frame_layout;
+                }
+            }
 
             let current_topology_generation =
                 evaluator.frame_manager().window_topology_generation();
@@ -5415,31 +5526,49 @@ impl LayoutEngine {
         face_attempt: &FrameFaceAttempt,
     ) -> Option<f32> {
         let width = frame_params.width;
-        let tab_bar_face =
+        let mut tab_bar_face =
             face_resolver.default_base_face_for_origin_without_buffer(&DisplayOrigin::TabBar);
+        face_resolver.realize_for_display(&mut tab_bar_face, evaluator);
         let tab_bar_ascent = frame_params.char_height * 0.8;
         let fallback_metrics =
             DisplayRowFallbackMetrics::from_frame_defaults(frame_params, tab_bar_ascent);
         let metrics = DisplayRowFaceRealizer::new(&mut self.font_metrics)
             .row_metrics_for_face(&tab_bar_face, fallback_metrics);
         let mut face_ids = face_attempt.clone();
-        let rendered_tab_bar = self.frame_output.render_frame_tab_bar_row(
-            FrameTabBarDisplayRowRequest {
-                row_index: 0,
-                y: 0.0,
-                width,
-                height: tab_bar_height,
-                metrics,
-                base_face: &tab_bar_face,
-                text: tab_bar.text,
-                image_scale_environment: frame_params.image_scale_environment,
-            },
-            ChromeRowRenderServices::new(&mut self.font_metrics, face_resolver, &mut face_ids)
-                .with_automatic_composition(crate::neovm_bridge::current_string_composition_rules(
-                    evaluator,
-                )),
-            evaluator.display_host.as_deref(),
-        )?;
+        let automatic_composition =
+            crate::neovm_bridge::current_string_composition_rules(evaluator);
+        let rendered_tab_bar = {
+            let (display_host, evaluator) = if face_resolver.has_tty_realization() {
+                (None, Some(&mut *evaluator))
+            } else {
+                (evaluator.display_host.as_deref(), None)
+            };
+            let evaluator = std::cell::RefCell::new(evaluator);
+            let realize = |face: &mut super::neovm_bridge::ResolvedFace| {
+                if let Some(evaluator) = evaluator.borrow_mut().as_deref_mut() {
+                    face_resolver.realize_for_display(face, evaluator);
+                }
+            };
+            let realizer = face_resolver
+                .has_tty_realization()
+                .then_some(&realize as &dyn Fn(&mut super::neovm_bridge::ResolvedFace));
+            self.frame_output.render_frame_tab_bar_row(
+                FrameTabBarDisplayRowRequest {
+                    row_index: 0,
+                    y: 0.0,
+                    width,
+                    height: tab_bar_height,
+                    metrics,
+                    base_face: &tab_bar_face,
+                    text: tab_bar.text,
+                    image_scale_environment: frame_params.image_scale_environment,
+                },
+                ChromeRowRenderServices::new(&mut self.font_metrics, face_resolver, &mut face_ids)
+                    .with_face_realizer(realizer)
+                    .with_automatic_composition(automatic_composition),
+                display_host,
+            )
+        }?;
         let FrameTabBarDisplayRowRender::Measured(measured) = rendered_tab_bar else {
             return None;
         };

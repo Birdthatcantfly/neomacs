@@ -1683,6 +1683,14 @@ impl FaceTable {
         table
     }
 
+    /// Whether both immutable snapshots still refer to the same definitions.
+    /// Used across Lisp callbacks to distinguish harmless changes in another
+    /// frame from replacement of this frame's authoritative derived snapshot.
+    pub(crate) fn shares_definitions_with(&self, other: &Self) -> bool {
+        std::rc::Rc::ptr_eq(&self.faces, &other.faces)
+            && std::rc::Rc::ptr_eq(&self.lisp_face_refs, &other.lisp_face_refs)
+    }
+
     /// The palette this table's faces were realized against, or `None` on a
     /// GUI frame -- where a realized colour IS the pixel and no palette exists.
     #[must_use]

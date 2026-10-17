@@ -1697,8 +1697,10 @@ impl Context {
         // triggered by a window-change hook is a no-op. Without this check
         // a hook that indirectly calls `redisplay` infinitely recurses.
         let inhibit_redisplay = self.variable_value_by_name("inhibit-redisplay");
-        if (!force || crate::emacs_core::xdisp::mode_line_flow_enabled())
-            && inhibit_redisplay.as_ref().is_some_and(|v| v.is_truthy())
+        if inhibit_redisplay.as_ref().is_some_and(|v| v.is_truthy())
+            && (!force
+                || crate::emacs_core::xdisp::mode_line_flow_enabled()
+                || crate::face::realization::enabled())
         {
             tracing::debug!(
                 "redisplay inhibited by inhibit-redisplay={}",
@@ -1817,6 +1819,16 @@ impl Context {
             // the command boundary, not on every `redisplay_window`.
             self.echo_area_resize_exact_pending = false;
             if let Some(flow) = self.take_mode_line_display_flow() {
+                self.buffers.restore_outermost_restrictions(saved);
+                self.redisplay_fn = Some(f);
+                return Err(flow);
+            }
+            // Face realization also runs with the legacy hook policy. Its
+            // callback flow belongs to this restored transaction boundary,
+            // otherwise one failed lookup poisons subsequent redisplays.
+            if crate::face::realization::enabled()
+                && let Some(flow) = self.take_deferred_redisplay_layout_flow()
+            {
                 self.buffers.restore_outermost_restrictions(saved);
                 self.redisplay_fn = Some(f);
                 return Err(flow);

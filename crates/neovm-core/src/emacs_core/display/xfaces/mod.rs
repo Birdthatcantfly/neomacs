@@ -3054,7 +3054,17 @@ pub(crate) fn builtin_internal_make_lisp_face(
         vector
     };
     eval.face_table.ensure_face(&face_name);
-    eval.face_change_count += 1;
+    let local_frame = args
+        .get(1)
+        .filter(|frame| !frame.is_nil())
+        .and_then(frame_id_from_designator);
+    let frames: Vec<FrameId> = local_frame.into_iter().collect();
+    let scope = if frames.is_empty() {
+        realization::FaceChangeScope::AllFrames
+    } else {
+        realization::FaceChangeScope::Frames(&frames)
+    };
+    realization::record_named_face_change(eval, &face_name, scope);
     Ok(result)
 }
 
@@ -3126,7 +3136,18 @@ pub(crate) fn builtin_internal_copy_lisp_face(
 
     let result = args[1];
 
-    eval.face_change_count += 1;
+    let local_frame = if copy_defaults_domain {
+        None
+    } else {
+        frame_id_from_designator(if args[3].is_nil() { &args[2] } else { &args[3] })
+    };
+    let frames: Vec<FrameId> = local_frame.into_iter().collect();
+    let scope = if copy_defaults_domain {
+        realization::FaceChangeScope::AllFrames
+    } else {
+        realization::FaceChangeScope::Frames(&frames)
+    };
+    realization::record_named_face_change(eval, &to_name, scope);
 
     Ok(result)
 }
@@ -3387,7 +3408,13 @@ pub(crate) fn builtin_internal_set_lisp_face_attribute(
         }
     }
 
-    eval.face_change_count += 1;
+    // GNU xfaces.c:3774-3780 marks only the live frames whose attribute
+    // changed. FRAME=t mutates new-frame defaults and affects no live cache.
+    realization::record_named_face_change(
+        eval,
+        &face_name,
+        realization::FaceChangeScope::Frames(&changed_live_frames),
+    );
 
     Ok(result)
 }
@@ -3784,6 +3811,7 @@ pub(crate) fn builtin_internal_merge_in_global_face(
     merge_defaults_overrides_into_selected(&face_name);
     let frame_id = frame_id_from_designator(&args[1])
         .expect("validated frame designator should decode to frame id");
+    let local_existed = lookup_frame_lisp_face_vector(eval, frame_id, &face_name).is_some();
     if let (Some(global_vector), Some(local_vector)) = (
         ensure_global_lisp_face_vector(eval, &face_name),
         ensure_frame_lisp_face_vector(eval, frame_id, &face_name, FrameFaceInitial::Empty),
@@ -3799,9 +3827,32 @@ pub(crate) fn builtin_internal_merge_in_global_face(
             }
         }
         sync_face_overrides_from_lisp_face_vector(&face_name, local_vector, false);
+        if crate::face::realization::enabled()
+            && face_name == "default"
+            && eval
+                .frames
+                .get(frame_id)
+                .is_some_and(|owner| owner.effective_window_system().is_none())
+        {
+            realization::realize_default_after_global_merge(
+                eval,
+                frame_id,
+                global_vector,
+                local_vector,
+            )?;
+            return Ok(Value::NIL);
+        }
     }
 
-    eval.face_change_count += 1;
+    let affected = [frame_id];
+    let scope = if crate::face::realization::enabled() && local_existed && face_name != "default" {
+        // GNU xfaces.c:4336-4351 merges existing nondefault definitions without
+        // freeing realizations. New demands must still read the new lface.
+        realization::FaceChangeScope::DefinitionsOnly(&affected)
+    } else {
+        realization::FaceChangeScope::Frames(&affected)
+    };
+    realization::record_named_face_change(eval, &face_name, scope);
     Ok(Value::NIL)
 }
 

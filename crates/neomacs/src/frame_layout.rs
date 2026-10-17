@@ -81,7 +81,7 @@ pub fn collect_snapshot_states(
         }
         let prepared =
             layout_frame_display_state(evaluator, node.frame_id, FrameLayoutPurpose::Snapshot);
-        if evaluator.has_mode_line_display_flow() {
+        if evaluator.has_mode_line_display_flow() || evaluator.redisplay_hook_flow_pending() {
             // This callback carries String errors. Keep the original Flow in
             // Context for run_frame_snapshot to return after reinstalling it.
             return Err("frame snapshot: mode-line evaluation exited nonlocally".to_string());
@@ -99,7 +99,7 @@ pub fn collect_snapshot_states(
     {
         let prepared =
             layout_frame_display_state(evaluator, FrameId(*id), FrameLayoutPurpose::Snapshot);
-        if evaluator.has_mode_line_display_flow() {
+        if evaluator.has_mode_line_display_flow() || evaluator.redisplay_hook_flow_pending() {
             // The core drains the Context-owned Flow after this callback.
             return Err("frame snapshot: mode-line evaluation exited nonlocally".to_string());
         }
@@ -224,7 +224,9 @@ pub fn run_tty_layout_tree(
         .frame_manager()
         .frames_in_reverse_z_order(root_id, RenderFrameVisibility::VisibleOnly);
 
-    if neovm_core::emacs_core::xdisp::mode_line_flow_enabled() {
+    if neovm_core::emacs_core::xdisp::mode_line_flow_enabled()
+        || neovm_core::face::realization::enabled()
+    {
         return prepare_tty_tree_before_activation(evaluator, root_id, frame_order);
     }
 
@@ -239,7 +241,7 @@ pub fn run_tty_layout_tree(
         }
         let prepared =
             layout_frame_display_state(evaluator, frame_id, FrameLayoutPurpose::Redisplay);
-        if evaluator.has_mode_line_display_flow() {
+        if evaluator.has_mode_line_display_flow() || evaluator.redisplay_hook_flow_pending() {
             // The redisplay driver returns the Context-owned exit. Neither
             // primary nor auxiliary TTY may rasterize a partial frame tree.
             return None;
@@ -271,7 +273,7 @@ fn prepare_tty_tree_before_activation(
             continue;
         }
         let child = layout_frame_display_state(evaluator, frame_id, FrameLayoutPurpose::Redisplay);
-        if evaluator.has_mode_line_display_flow() {
+        if evaluator.has_mode_line_display_flow() || evaluator.redisplay_hook_flow_pending() {
             // Discard all tickets before the driver returns the original Flow.
             // Both primary and auxiliary TTYs use this tree producer.
             root.discard(evaluator);
@@ -356,8 +358,10 @@ pub fn install_tty_redisplay_callback_with_popup_redraw(
     force_full_redraw: Option<Arc<AtomicBool>>,
     mut try_render_selected_auxiliary: Option<TryRenderSelectedTerminal>,
 ) {
-    if startup.daemon.is_some() {
-        // No primary terminal exists. Attached client TTYs own their renderers
+    if startup.daemon.is_some()
+        || (startup.noninteractive && neovm_core::face::realization::enabled())
+    {
+        // No primary terminal exists. Explicit/attached TTYs own their renderers
         // and are the only valid destination for daemon redisplay.
         REDISPLAY_RUNTIME.with(RedisplayRuntime::disable_cosmic_metrics);
         evaluator.redisplay_fn = Some(Box::new(move |eval: &mut Context| {

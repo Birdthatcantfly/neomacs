@@ -615,6 +615,10 @@ impl BufferSourceDefaultFacePlan {
         &self.face
     }
 
+    pub(crate) fn face_mut(&mut self) -> &mut ResolvedFace {
+        &mut self.face
+    }
+
     /// Reserve the effective display identity of this buffer's default face.
     ///
     /// The basic `default` face owns the canonical frame ID only while buffer

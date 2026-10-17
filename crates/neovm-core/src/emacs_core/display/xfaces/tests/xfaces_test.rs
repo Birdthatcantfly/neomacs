@@ -86,7 +86,14 @@ fn lisp_value_to_face_attr_realizes_at_the_boundary() {
     // frame-class policy (GNU map_tty_color covers exactly fg, bg, and
     // underline).
     let expect_color = |got: Option<FaceAttrValue>, want: Color| match got {
-        Some(FaceAttrValue::Color(c)) => assert_eq!(c, want),
+        Some(FaceAttrValue::SpecifiedColor {
+            specification,
+            realized,
+        }) => {
+            assert_eq!(specification, crate::face::SpecifiedColor::parse("white"));
+            assert_eq!(realized, Some(want));
+        }
+        Some(FaceAttrValue::Color(color)) => assert_eq!(color, want),
         other => panic!("expected color, got {other:?}"),
     };
     for attr in [
@@ -100,8 +107,9 @@ fn lisp_value_to_face_attr_realizes_at_the_boundary() {
         );
     }
     match lisp_value_to_face_attr_resolved(LFaceAttr::Underline, Value::string("white"), tty) {
-        Some(FaceAttrValue::Underline(u)) => {
-            assert_eq!(u.color, Some(Color::rgb(229, 229, 229)))
+        Some(FaceAttrValue::SpecifiedUnderline { underline, color }) => {
+            assert_eq!(color, Some(crate::face::SpecifiedColor::parse("white")));
+            assert_eq!(underline.color, Some(Color::rgb(229, 229, 229)));
         }
         other => panic!("expected underline, got {other:?}"),
     }
@@ -117,24 +125,27 @@ fn lisp_value_to_face_attr_realizes_at_the_boundary() {
         Some(FaceAttrValue::Box(b)) => assert_eq!(b.color, Some(Color::rgb(255, 255, 255))),
         other => panic!("expected box, got {other:?}"),
     }
-    // The unspecified-fg/-bg frame-default tokens stay unrealized at this
-    // boundary (the attribute is skipped; frame defaults apply downstream).
-    assert!(
-        lisp_value_to_face_attr_resolved(
-            LFaceAttr::Foreground,
-            Value::string("unspecified-fg"),
-            tty
-        )
-        .is_none()
-    );
-    assert!(
-        lisp_value_to_face_attr_resolved(
+    // Frame-default tokens retain their source without painting a color at
+    // this boundary; the frame-specific realization applies them later.
+    for (attr, token, resolver) in [
+        (LFaceAttr::Foreground, "unspecified-fg", tty),
+        (
             LFaceAttr::Background,
-            Value::string("unspecified-bg"),
-            FaceColorResolver::Standard
-        )
-        .is_none()
-    );
+            "unspecified-bg",
+            FaceColorResolver::Standard,
+        ),
+    ] {
+        match lisp_value_to_face_attr_resolved(attr, Value::string(token), resolver) {
+            Some(FaceAttrValue::SpecifiedColor {
+                specification,
+                realized,
+            }) => {
+                assert_eq!(specification, crate::face::SpecifiedColor::parse(token));
+                assert_eq!(realized, None);
+            }
+            other => panic!("expected retained frame-default source, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -154,7 +165,12 @@ fn underline_position_t_preserves_gnu_descent_line_semantics() {
         underline,
         FaceColorResolver::Standard,
     ) {
-        Some(FaceAttrValue::Underline(underline)) => {
+        Some(FaceAttrValue::SpecifiedUnderline { underline, color }) => {
+            assert_eq!(color, Some(crate::face::SpecifiedColor::parse("white")));
+            assert_eq!(
+                underline.color,
+                Some(crate::face::Color::rgb(255, 255, 255))
+            );
             assert_eq!(
                 underline.position,
                 UnderlinePosition::DescentLine { pixels_above: 0 },

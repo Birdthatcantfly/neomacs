@@ -760,6 +760,10 @@ impl Context {
         self.gnu_redisplay_hooks.layout_flow.is_some()
     }
 
+    pub(super) fn take_deferred_redisplay_layout_flow(&mut self) -> Option<Flow> {
+        self.gnu_redisplay_hooks.layout_flow.take()
+    }
+
     fn gnu_mini_geometry_request(&mut self) -> Option<RedisplayMiniGeometryRequest> {
         let selected = self.frames.selected_frame()?;
         let mini = selected.minibuffer_window?;

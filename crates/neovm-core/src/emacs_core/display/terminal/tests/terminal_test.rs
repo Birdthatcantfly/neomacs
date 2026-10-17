@@ -794,6 +794,41 @@ fn make_terminal_frame_opens_and_owns_an_explicit_secondary_tty() {
 }
 
 #[test]
+fn explicit_secondary_tty_survives_context_reactivation_without_handle_query() {
+    if !crate::face::realization::enabled() {
+        return;
+    }
+    crate::test_utils::init_test_tracing();
+    reset_terminal_thread_locals();
+    let mut eval = Context::new();
+    let scratch = eval.buffers.create_buffer("*scratch*");
+    eval.buffers.set_current(scratch);
+    eval.set_tty_frame_host_factory(Box::new(RecordingTtyFrameHostFactory {
+        requests: Rc::new(RefCell::new(Vec::new())),
+        lifecycle: Rc::new(RefCell::new(Vec::new())),
+    }));
+    let params = Value::list(vec![
+        Value::cons(Value::symbol("tty"), Value::string("/dev/pts/42")),
+        Value::cons(Value::symbol("tty-type"), Value::string("xterm-256color")),
+    ]);
+    let frame = crate::emacs_core::frame::builtin_make_terminal_frame(&mut eval, vec![params])
+        .expect("open the secondary TTY");
+
+    // A frame-terminal query would publish its Lisp handle and mask the bug.
+    // Reactivation must retain the native host before any such query occurs.
+    // Invoke its reconciliation hook explicitly even if the same-Context
+    // activation below takes the already-active fast path.
+    let registry = current_terminal_registry_handle();
+    install_terminal_registry_handle(&registry);
+    eval.setup_thread_locals();
+    assert_eq!(
+        builtin_tty_display_color_cells(&mut eval, vec![frame])
+            .expect("a newly opened terminal remains live after Context activation"),
+        Value::fixnum(256)
+    );
+}
+
+#[test]
 fn make_terminal_frame_without_a_device_reuses_the_selected_secondary_terminal() {
     crate::test_utils::init_test_tracing();
     reset_terminal_thread_locals();

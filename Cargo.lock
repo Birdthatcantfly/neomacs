@@ -4032,6 +4032,7 @@ version = "0.0.19"
 dependencies = [
  "cosmic-text",
  "dwrote",
+ "enum-map",
  "fontconfig",
  "fontdb",
  "freetype-rs",
@@ -4287,6 +4288,7 @@ dependencies = [
  "dbus",
  "dns-lookup",
  "encoding_rs",
+ "enum-map",
  "enumflags2",
  "errno",
  "expect-test",

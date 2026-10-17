@@ -358,6 +358,14 @@ impl<'a, 'face> BufferSourceRenderAttemptContext<'a, 'face> {
         &mut self.output
     }
 
+    pub(crate) fn realize_face_for_display(
+        &mut self,
+        face: &mut crate::neovm_bridge::ResolvedFace,
+    ) {
+        self.face_resolver
+            .realize_for_display(face, self.output.evaluator());
+    }
+
     pub(crate) fn with_face_services<R>(
         &mut self,
         f: impl FnOnce(&FaceResolver, &mut Option<FontMetricsService>) -> R,

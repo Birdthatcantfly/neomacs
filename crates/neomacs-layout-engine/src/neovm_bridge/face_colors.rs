@@ -72,6 +72,46 @@ impl FaceColorAttributes {
         self
     }
 
+    /// Only the terminal callback boundary may default a failed explicit
+    /// source channel. Pure composition and GUI rendering retain their own
+    /// ordinary inheritance policy.
+    pub(super) fn merge_terminal_realization(self, face: &NeoFace) -> Self {
+        let mut attributes = self.merge(face);
+        if face.foreground.is_none() && face.color_specifications.foreground.is_some() {
+            attributes.foreground = TerminalFaceColor::TerminalDefault {
+                slot: match face.color_specifications.foreground.as_deref() {
+                    Some(neovm_core::face::SpecifiedColor::FrameBackground) => {
+                        FaceColorSlot::Background
+                    }
+                    _ => FaceColorSlot::Foreground,
+                },
+                fallback_pixel: match face.color_specifications.foreground.as_deref() {
+                    Some(neovm_core::face::SpecifiedColor::FrameBackground) => {
+                        attributes.background.pixel()
+                    }
+                    _ => attributes.foreground.pixel(),
+                },
+            };
+        }
+        if face.background.is_none() && face.color_specifications.background.is_some() {
+            attributes.background = TerminalFaceColor::TerminalDefault {
+                slot: match face.color_specifications.background.as_deref() {
+                    Some(neovm_core::face::SpecifiedColor::FrameForeground) => {
+                        FaceColorSlot::Foreground
+                    }
+                    _ => FaceColorSlot::Background,
+                },
+                fallback_pixel: match face.color_specifications.background.as_deref() {
+                    Some(neovm_core::face::SpecifiedColor::FrameForeground) => {
+                        attributes.foreground.pixel()
+                    }
+                    _ => attributes.background.pixel(),
+                },
+            };
+        }
+        attributes
+    }
+
     pub(super) fn realize(self) -> RealizedFaceColors {
         let (mut foreground, mut background, terminal_inverse) = match self.video {
             FaceVideo::Normal => (self.foreground, self.background, false),
