@@ -280,5 +280,5 @@ impl Context {
 }
 
 #[cfg(test)]
-#[path = "parallel_roots_tests.rs"]
+#[path = "tests/parallel_roots_test.rs"]
 mod tests;
