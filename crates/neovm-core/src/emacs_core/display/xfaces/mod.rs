@@ -1539,6 +1539,22 @@ fn unspecified_face_symbol() -> Value {
     Value::from_sym_id(*ID.get_or_init(|| intern("unspecified")))
 }
 
+/// Present a stored lface slot the way `internal-get-lisp-face-attribute` does.
+///
+/// `:ignore-defface` stays in the defaults vector. `Finternal_set_lisp_face_attribute`
+/// writes it only when FRAME is t and the caller passed `unspecified`
+/// (`src/xfaces.c:3256-3263`). `Finternal_copy_lisp_face` copies that slot
+/// unchanged (`src/xfaces.c:3183`). The getter is what turns the sentinel
+/// back into `unspecified` (`src/xfaces.c:4288-4289`). Merge still sees the
+/// stored sentinel (`src/xfaces.c:4340-4343`). `reset` is not rewritten.
+fn present_stored_lisp_face_attribute(value: Value) -> Value {
+    if value.is_bare_symbol_named(":ignore-defface") {
+        unspecified_face_symbol()
+    } else {
+        value
+    }
+}
+
 /// The leading `face' tag symbol stored in slot 0 of a Lisp face vector.
 fn face_tag_symbol() -> Value {
     static ID: OnceLock<SymId> = OnceLock::new();
@@ -3131,6 +3147,9 @@ pub(crate) fn builtin_internal_copy_lisp_face(
                 .unwrap_or_else(make_lisp_face_vector);
         (src_vector, dst_vector, false)
     };
+    // GNU vcopy (`src/xfaces.c:3183`) keeps `:ignore-defface` in the defaults
+    // vector. The public getter, not the copy, presents that slot as
+    // `unspecified` (`src/xfaces.c:4288-4289`).
     copy_lisp_face_vector_slots(src_vector, dst_vector);
     sync_face_overrides_from_lisp_face_vector(&to_name, dst_vector, defaults_frame);
 
@@ -3682,9 +3701,11 @@ pub(crate) fn builtin_internal_get_lisp_face_attribute(
         if let Some(vector) = ensure_global_lisp_face_vector(eval, &face_name)
             && let Some(value) = lisp_face_vector_attr(vector, attr_name)
         {
-            return Ok(value);
+            return Ok(present_stored_lisp_face_attribute(value));
         }
-        return Ok(lisp_face_attribute_value(&face_name, attr_name, true));
+        return Ok(present_stored_lisp_face_attribute(
+            lisp_face_attribute_value(&face_name, attr_name, true),
+        ));
     }
 
     let frame_id = match args.get(2) {
@@ -3725,16 +3746,17 @@ pub(crate) fn builtin_internal_get_lisp_face_attribute(
         })
         .and_then(|vector| lisp_face_vector_attr(vector, attr_name))
         .unwrap_or_else(|| lisp_face_attribute_value(&face_name, attr_name, false));
-    // GNU `internal-get-lisp-face-attribute` (xfaces.c) returns the LISP face
-    // attribute (`LFACE_*` of `lface_from_face_name`), never the *realized*
-    // face. Do NOT fall back to the runtime realized face here: the realized
-    // face on this batch/mono frame still carries colors realized for a
-    // color-capable display during the bootstrap image build (e.g. `error`
+    // GNU `internal-get-lisp-face-attribute` (xfaces.c:4230-4291) returns the
+    // LISP face attribute (`LFACE_*` of `lface_from_face_name`), never the
+    // *realized* face. Do NOT fall back to the runtime realized face here: the
+    // realized face on this batch/mono frame still carries colors realized for
+    // a color-capable display during the bootstrap image build (e.g. `error`
     // :foreground "#ff0000"), whereas GNU returns `unspecified` because no
     // display clause of the defface spec matched a mono terminal. The lisp face
     // value above (frame lisp vector slot, falling back to the base/override
-    // value) is the GNU-faithful answer.
-    Ok(lisp_value)
+    // value) is the GNU-faithful answer. A stored `:ignore-defface` is
+    // presented as `unspecified` (`src/xfaces.c:4288-4289`).
+    Ok(present_stored_lisp_face_attribute(lisp_value))
 }
 
 /// `(internal-lisp-face-attribute-values ATTR)` -- return valid discrete values

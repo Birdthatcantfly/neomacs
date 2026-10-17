@@ -741,6 +741,129 @@ fn internal_set_lisp_face_attribute_mutates_live_global_lface_vector() {
 }
 
 #[test]
+fn copy_to_defaults_keeps_ignore_defface_stored_and_get_returns_unspecified() {
+    crate::test_utils::init_test_tracing();
+    clear_font_cache_state();
+
+    let mut eval = Context::new();
+    let source = "__neovm_copy_defaults_source";
+    let target = "__neovm_copy_defaults_target";
+    builtin_internal_make_lisp_face(&mut eval, vec![Value::symbol(source)]).unwrap();
+    builtin_internal_set_lisp_face_attribute(
+        &mut eval,
+        vec![
+            Value::symbol(source),
+            Value::keyword(":underline"),
+            Value::symbol("unspecified"),
+            Value::T,
+        ],
+    )
+    .unwrap();
+    builtin_internal_set_lisp_face_attribute(
+        &mut eval,
+        vec![
+            Value::symbol(source),
+            Value::keyword(":inherit"),
+            Value::symbol("unspecified"),
+            Value::T,
+        ],
+    )
+    .unwrap();
+    builtin_internal_set_lisp_face_attribute(
+        &mut eval,
+        vec![
+            Value::symbol(source),
+            Value::keyword(":weight"),
+            Value::symbol("normal"),
+            Value::T,
+        ],
+    )
+    .unwrap();
+
+    builtin_internal_copy_lisp_face(
+        &mut eval,
+        vec![
+            Value::symbol(source),
+            Value::symbol(target),
+            Value::T,
+            Value::NIL,
+        ],
+    )
+    .unwrap();
+
+    let stored = builtin_internal_lisp_face_p(&mut eval, vec![Value::symbol(target)]).unwrap();
+    let slots = stored.as_vector_data().unwrap();
+    assert_eq!(
+        slots[crate::face::LFaceAttr::Underline as usize].as_bare_symbol_name(),
+        Some(":ignore-defface"),
+        "the defaults vector keeps the sentinel GNU stores"
+    );
+    assert_eq!(
+        slots[crate::face::LFaceAttr::Inherit as usize].as_bare_symbol_name(),
+        Some(":ignore-defface")
+    );
+    assert_eq!(
+        slots[crate::face::LFaceAttr::Weight as usize].as_bare_symbol_name(),
+        Some("normal")
+    );
+
+    for attr in [":underline", ":inherit"] {
+        let presented = builtin_internal_get_lisp_face_attribute(
+            &mut eval,
+            vec![Value::symbol(target), Value::keyword(attr), Value::T],
+        )
+        .unwrap();
+        assert_eq!(
+            presented.as_bare_symbol_name(),
+            Some("unspecified"),
+            "{attr} is presented as unspecified"
+        );
+    }
+
+    let frame =
+        Value::make_frame(crate::emacs_core::window_cmds::ensure_selected_frame_id(&mut eval).0);
+    builtin_internal_set_lisp_face_attribute(
+        &mut eval,
+        vec![
+            Value::symbol(source),
+            Value::keyword(":underline"),
+            Value::symbol("unspecified"),
+            frame,
+        ],
+    )
+    .unwrap();
+    let frame_target = "__neovm_copy_frame_target";
+    builtin_internal_copy_lisp_face(
+        &mut eval,
+        vec![
+            Value::symbol(source),
+            Value::symbol(frame_target),
+            frame,
+            Value::NIL,
+        ],
+    )
+    .unwrap();
+    let frame_stored =
+        builtin_internal_lisp_face_p(&mut eval, vec![Value::symbol(frame_target), frame]).unwrap();
+    assert_eq!(
+        frame_stored.as_vector_data().unwrap()[crate::face::LFaceAttr::Underline as usize]
+            .as_bare_symbol_name(),
+        Some("unspecified"),
+        "a live frame does not gain :ignore-defface from an unspecified copy"
+    );
+    let frame_presented = builtin_internal_get_lisp_face_attribute(
+        &mut eval,
+        vec![
+            Value::symbol(frame_target),
+            Value::keyword(":underline"),
+            frame,
+        ],
+    )
+    .unwrap();
+    assert_eq!(frame_presented.as_bare_symbol_name(), Some("unspecified"));
+}
+
+#[test]
 fn internal_copy_lisp_face_keeps_global_and_frame_domains_separate() {
     crate::test_utils::init_test_tracing();
     clear_font_cache_state();
