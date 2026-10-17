@@ -134,50 +134,199 @@
 
 use super::{Value, process_status_exit_value};
 use crate::emacs_core::callproc::SpawnedChild;
+use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
-/// GNU's deleted_pid_list (process.c:7700-7715). Each entry owns the only
-/// handle permitted to reap its child, and contains no Lisp state. Native exit
-/// watchers collect independently of the evaluator; failed native sources fall
-/// back to existing child-status safe points. The mutex serializes
-/// transfers and nonblocking probes across mutators and watchers. The acquire/release flag
-/// publishes queue membership. Ordinary waits inspect only the fallback flag,
-/// so native-managed deleted children add no locks or syscalls to Lisp polls.
-static DEFERRED_CHILDREN: Mutex<Vec<DeferredChild>> = Mutex::new(Vec::new());
-static HAS_DEFERRED_CHILDREN: AtomicBool = AtomicBool::new(false);
+/// GNU's deleted_pid_list (process.c:7700-7715), containing native state only.
+/// One mutex serializes transfers and WNOHANG collection across mutators and
+/// the single native collector. Ordinary waits inspect only the fallback flag,
+/// so healthy native registrations add no locks or syscalls to Lisp polls.
+static DEFERRED_CHILDREN: Mutex<DeferredRegistry> = Mutex::new(DeferredRegistry::new());
 static HAS_SAFE_POINT_FALLBACK: AtomicBool = AtomicBool::new(false);
+static NEXT_DEFERRED_ID: AtomicUsize = AtomicUsize::new(1);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Never reused, even after its entry or completion Arc has been freed. Native
+/// event batches can therefore never complete a later child after PID or
+/// allocator-address reuse. Zero belongs exclusively to the native wakeup.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct DeferredChildId(NonZeroUsize);
+
+impl DeferredChildId {
+    fn next() -> Option<Self> {
+        // Identity allocation alone needs no publication ordering. The mutex
+        // publishes each initialized owner/completion before event collection.
+        NEXT_DEFERRED_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .ok()
+            .and_then(NonZeroUsize::new)
+            .map(Self)
+    }
+
+    fn from_native(token: usize) -> Option<Self> {
+        NonZeroUsize::new(token).map(Self)
+    }
+    fn as_native(self) -> usize {
+        self.0.get()
+    }
+}
+
+/// Process-wide native collector state, serialized by the ownership mutex.
+/// A failed source cannot accidentally spawn a second collector while the first
+/// unwinds: it permanently selects safe-point fallback in production.
+#[derive(Debug)]
+enum NativeReaper {
+    Dormant,
+    Active(Arc<super::sys::ChildExitEvent>),
+    Failed,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+enum TestReaperLifecycle {
+    Serving,
+    Finishing,
+}
+
+#[derive(Debug)]
+struct DeferredRegistry {
+    children: Option<HashMap<DeferredChildId, DeferredChild>>,
+    fallback: Vec<DeferredChild>,
+    native: NativeReaper,
+    newly_registered: Vec<DeferredChildId>,
+    awaiting_zombie: Option<HashSet<DeferredChildId>>,
+    #[cfg(test)]
+    watcher: Option<std::thread::JoinHandle<()>>,
+    #[cfg(test)]
+    lifecycle: TestReaperLifecycle,
+}
+
+impl DeferredRegistry {
+    const fn new() -> Self {
+        Self {
+            children: None,
+            fallback: Vec::new(),
+            native: NativeReaper::Dormant,
+            newly_registered: Vec::new(),
+            awaiting_zombie: None,
+            #[cfg(test)]
+            watcher: None,
+            #[cfg(test)]
+            lifecycle: TestReaperLifecycle::Serving,
+        }
+    }
+
+    fn children(&mut self) -> &mut HashMap<DeferredChildId, DeferredChild> {
+        self.children.get_or_insert_with(HashMap::new)
+    }
+
+    fn publish(
+        &mut self,
+        owner: ReapableChild,
+        driver: DeferredReapDriver,
+    ) -> (Arc<AtomicBool>, Option<DeferredChildId>) {
+        let completed = Arc::new(AtomicBool::new(false));
+        let child = DeferredChild {
+            owner,
+            completed: Arc::clone(&completed),
+        };
+        let id = match driver {
+            DeferredReapDriver::NativeExit => DeferredChildId::next(),
+            #[cfg(test)]
+            DeferredReapDriver::WaitSafePointFallback => None,
+        };
+        match id {
+            Some(id) => {
+                self.children().insert(id, child);
+            }
+            None => {
+                self.fallback.push(child);
+                self.refresh_fallback_flag();
+            }
+        }
+        (completed, id)
+    }
+
+    fn refresh_fallback_flag(&self) {
+        HAS_SAFE_POINT_FALLBACK.store(!self.fallback.is_empty(), Ordering::Release);
+    }
+
+    fn use_fallback(&mut self, id: DeferredChildId) {
+        if let Some(child) = self.children().remove(&id) {
+            if let NativeReaper::Active(native) = &self.native {
+                native.remove(id.as_native(), child.owner.pid);
+            }
+            if let Some(awaiting) = &mut self.awaiting_zombie {
+                awaiting.remove(&id);
+            }
+            self.fallback.push(child);
+            self.refresh_fallback_flag();
+        }
+    }
+
+    fn collect_one(&mut self, id: DeferredChildId) {
+        let Some(child) = self.children().get_mut(&id) else {
+            return;
+        };
+        if !child.owner.try_reap_deleted() {
+            return;
+        }
+        let Some(child) = self.children().remove(&id) else {
+            return;
+        };
+        if let NativeReaper::Active(native) = &self.native {
+            native.remove(id.as_native(), child.owner.pid);
+        }
+        if let Some(awaiting) = &mut self.awaiting_zombie {
+            awaiting.remove(&id);
+        }
+        child.completed.store(true, Ordering::Release);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 enum DeferredReapDriver {
     NativeExit,
+    #[cfg(test)]
     WaitSafePointFallback,
 }
 
 #[derive(Clone, Copy, Debug)]
 enum DeferredReapSweep {
+    #[cfg(test)]
     NativeExit,
     WaitSafePoint,
 }
 
-/// Native ownership plus a completion identity that cannot be confused with
-/// a later child reusing the same pid. Registry and watcher share only this
-/// atomic completion flag, never the child handle or Lisp state.
+/// The registry retains sole child ownership; observers share only completion,
+/// never a handle or numeric authority to wait or signal. Release publishes the
+/// completed reap, and scoped observers acquire it before checking resources.
 struct DeferredChild {
     owner: ReapableChild,
     completed: Arc<AtomicBool>,
-    driver: DeferredReapDriver,
+}
+
+impl std::fmt::Debug for DeferredChild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeferredChild")
+            .field("pid", &self.owner.pid)
+            .field("completed", &self.completed)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]
-static DEFERRED_WATCHERS: Mutex<Option<Vec<std::thread::JoinHandle<()>>>> = Mutex::new(None);
+static DEFERRED_WATCHER_SCOPE: AtomicBool = AtomicBool::new(false);
 
-/// Explicit, process-wide test opt-in to retaining native watcher handles.
-/// Ordinary tests detach just like production. One scope owns retention across
-/// all mutators in its test process; it must outlive the process I/O being
-/// dropped. The guard stays on its creating test thread and joins on unwind.
+/// Process-wide test ownership of the shared worker's explicit shutdown/join.
+/// The scope must outlive all process I/O and mutators belonging to its test.
+/// Default tests keep the persistent worker just like production; scopes stop
+/// it after native completion, leaving no finished unjoined worker.
 #[cfg(test)]
 #[must_use]
 #[derive(Debug)]
@@ -191,162 +340,248 @@ static_assertions::assert_not_impl_any!(DeferredWatcherTestScope: Send, Sync);
 #[cfg(test)]
 impl DeferredWatcherTestScope {
     pub(super) fn new() -> Self {
-        let mut watchers = DEFERRED_WATCHERS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
         assert!(
-            watchers.is_none(),
+            !DEFERRED_WATCHER_SCOPE.swap(true, Ordering::AcqRel),
             "native watcher test scopes cannot overlap"
         );
-        *watchers = Some(Vec::new());
         Self {
             _thread_bound: std::marker::PhantomData,
         }
     }
 
-    /// Join native exit watchers explicitly, after the test has closed its I/O.
-    /// This does not drive a child-status sweep or reap on the test's behalf.
-    pub(super) fn finish(self) {
-        let handles = DEFERRED_WATCHERS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .as_mut()
-            .map(std::mem::take)
-            .unwrap_or_default();
-        // Join every handle before propagating any watcher panic. Drop also
-        // joins handles registered while these joins were in progress.
-        let panicked = handles
-            .into_iter()
-            .filter_map(|handle| handle.join().err())
-            .count();
-        assert_eq!(panicked, 0, "native deleted-child watcher panicked");
+    /// Test-only startup count, independent of native thread scheduling.
+    pub(super) fn worker_count_for_test(&self) -> usize {
+        usize::from(
+            DEFERRED_CHILDREN
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .watcher
+                .is_some(),
+        )
     }
+
+    /// Stop and join the collector after it completes all native entries. This
+    /// never drives a child-status sweep on the test's behalf.
+    pub(super) fn finish(self) {
+        assert!(
+            stop_test_reaper().is_ok(),
+            "native deleted-child collector panicked"
+        );
+    }
+}
+
+#[cfg(test)]
+fn stop_test_reaper() -> std::thread::Result<()> {
+    let handle = {
+        let mut registry = DEFERRED_CHILDREN
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        registry.lifecycle = TestReaperLifecycle::Finishing;
+        if let NativeReaper::Active(native) = &registry.native {
+            let _ = native.wake();
+        }
+        registry.watcher.take()
+    };
+    let result = handle.map_or(Ok(()), std::thread::JoinHandle::join);
+    let mut registry = DEFERRED_CHILDREN
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    registry.native = NativeReaper::Dormant;
+    registry.lifecycle = TestReaperLifecycle::Serving;
+    result
 }
 
 #[cfg(test)]
 impl Drop for DeferredWatcherTestScope {
     fn drop(&mut self) {
-        let handles = DEFERRED_WATCHERS
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take()
-            .unwrap_or_default();
-        for handle in handles {
-            // Do not panic during unwinding. Explicit finish reports failures;
-            // the worker's own panic has already been reported by Rust.
-            let _ = handle.join();
-        }
+        let _ = stop_test_reaper();
+        DEFERRED_WATCHER_SCOPE.store(false, Ordering::Release);
     }
 }
 
 #[cfg(test)]
 pub(super) fn deferred_child_is_owned_for_test(pid: u32) -> bool {
+    let mut registry = DEFERRED_CHILDREN
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    registry
+        .children()
+        .values()
+        .any(|child| child.owner.pid == pid)
+        || registry.fallback.iter().any(|child| child.owner.pid == pid)
+}
+
+#[cfg(test)]
+fn publish_deferred_child(child: ReapableChild, driver: DeferredReapDriver) -> Arc<AtomicBool> {
     DEFERRED_CHILDREN
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .iter()
-        .any(|child| child.owner.pid == pid)
+        .publish(child, driver)
+        .0
 }
 
-fn publish_deferred_child(child: ReapableChild, driver: DeferredReapDriver) -> Arc<AtomicBool> {
-    let completed = Arc::new(AtomicBool::new(false));
-    let mut children = DEFERRED_CHILDREN
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    children.push(DeferredChild {
-        owner: child,
-        completed: Arc::clone(&completed),
-        driver,
-    });
-    HAS_DEFERRED_CHILDREN.store(true, Ordering::Release);
-    if driver == DeferredReapDriver::WaitSafePointFallback {
-        HAS_SAFE_POINT_FALLBACK.store(true, Ordering::Release);
+fn start_shared_reaper(
+    registry: &mut DeferredRegistry,
+) -> std::io::Result<Arc<super::sys::ChildExitEvent>> {
+    match &registry.native {
+        NativeReaper::Active(native) => return Ok(Arc::clone(native)),
+        NativeReaper::Failed => {
+            return Err(std::io::Error::other(
+                "shared deleted-child native source failed",
+            ));
+        }
+        NativeReaper::Dormant => {}
     }
-    completed
-}
-
-fn use_safe_point_fallback(completed: &Arc<AtomicBool>) {
-    let mut children = DEFERRED_CHILDREN
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    if let Some(child) = children
-        .iter_mut()
-        .find(|child| Arc::ptr_eq(&child.completed, completed))
+    let native = Arc::new(super::sys::ChildExitEvent::open()?);
+    let worker_native = Arc::clone(&native);
+    let handle = std::thread::Builder::new()
+        .name("neovm-child-reap".into())
+        .spawn(move || shared_reaper(worker_native))?;
+    registry.native = NativeReaper::Active(Arc::clone(&native));
+    #[cfg(test)]
     {
-        child.driver = DeferredReapDriver::WaitSafePointFallback;
-        HAS_SAFE_POINT_FALLBACK.store(true, Ordering::Release);
+        registry.watcher = Some(handle);
     }
+    #[cfg(not(test))]
+    drop(handle);
+    Ok(native)
 }
 
-fn start_deferred_child_watcher(
-    event: std::io::Result<super::sys::ChildExitEvent>,
-    completed: Arc<AtomicBool>,
-) {
-    let event = match event {
-        Ok(event) => event,
-        Err(error) => {
-            use_safe_point_fallback(&completed);
-            tracing::warn!(%error, "deleted-child native exit registration failed; retaining deferred ownership");
+fn shared_reaper(native: Arc<super::sys::ChildExitEvent>) {
+    loop {
+        let events = match native.wait() {
+            Ok(events) => events,
+            Err(error) => {
+                let mut registry = DEFERRED_CHILDREN
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let ids: Vec<_> = registry.children().keys().copied().collect();
+                for id in ids {
+                    registry.use_fallback(id);
+                }
+                registry.native = NativeReaper::Failed;
+                #[cfg(test)]
+                if !DEFERRED_WATCHER_SCOPE.load(Ordering::Acquire) {
+                    // The worker is about to finish. Default tests detach this
+                    // handle rather than retaining a finished unjoined thread;
+                    // an active scope retains it for its explicit finish/join.
+                    drop(registry.watcher.take());
+                }
+                tracing::warn!(%error, "shared deleted-child native wait failed; retaining deferred ownership");
+                return;
+            }
+        };
+        let mut registry = DEFERRED_CHILDREN
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        collect_native_notifications(&mut registry, events);
+        #[cfg(test)]
+        if matches!(registry.lifecycle, TestReaperLifecycle::Finishing)
+            && registry.children().is_empty()
+        {
             return;
         }
-    };
-    let watcher_completed = Arc::clone(&completed);
-    match std::thread::Builder::new().name("neovm-child-reap".into()).spawn(move || {
-        loop {
-            // Registration may have raced an exit that is already waitable.
-            // Sweep before sleeping, and after each actual native event.
-            collect_deferred_children(DeferredReapSweep::NativeExit);
-            if watcher_completed.load(Ordering::Acquire) { break; }
-            if let Err(error) = event.wait() {
-                use_safe_point_fallback(&watcher_completed);
-                tracing::warn!(%error, "deleted-child native exit wait failed; retaining deferred ownership");
-                break;
+    }
+}
+
+fn collect_native_notifications(
+    registry: &mut DeferredRegistry,
+    events: Vec<super::sys::ChildExitNotification>,
+) {
+    let mut ready = std::mem::take(&mut registry.newly_registered)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let mut retry_zombies = false;
+    for event in events {
+        match event {
+            super::sys::ChildExitNotification::Exited(token) => {
+                if let Some(id) = DeferredChildId::from_native(token)
+                    && registry.children().contains_key(&id)
+                {
+                    ready.insert(id);
+                    registry
+                        .awaiting_zombie
+                        .get_or_insert_with(HashSet::new)
+                        .insert(id);
+                }
             }
+            super::sys::ChildExitNotification::ChildSignal => retry_zombies = true,
+            super::sys::ChildExitNotification::Wake => {}
         }
-    }) {
-        Ok(handle) => {
-            #[cfg(test)]
-            match DEFERRED_WATCHERS.lock().unwrap_or_else(|error| error.into_inner()).as_mut() {
-                Some(watchers) => watchers.push(handle),
-                None => drop(handle),
+    }
+    // Darwin NOTE_EXIT precedes SZOMB. Retry only entries whose exit edge has
+    // happened, once per SIGCHLD batch; running registrations are never swept.
+    if retry_zombies {
+        ready.extend(registry.awaiting_zombie.iter().flatten().copied());
+    }
+    for id in ready {
+        registry.collect_one(id);
+    }
+}
+
+fn defer_child(child: ReapableChild) {
+    let mut registry = DEFERRED_CHILDREN
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    // Publish and register while holding one ownership lock. The worker cannot
+    // reap/recycle this pid until the source and completion identity both exist.
+    let (_, id) = registry.publish(child, DeferredReapDriver::NativeExit);
+    let Some(id) = id else {
+        return;
+    }; // Checked identity exhaustion uses fallback.
+    let result = start_shared_reaper(&mut registry).and_then(|native| {
+        let Some(child) = registry.children().get(&id) else {
+            return Err(std::io::Error::other("missing deferred child registration"));
+        };
+        native.register(child.owner.pid, id.as_native())
+    });
+    match result {
+        Ok(notification) => {
+            registry.newly_registered.push(id);
+            match notification {
+                super::sys::ChildExitNotification::Exited(_) => {
+                    registry
+                        .awaiting_zombie
+                        .get_or_insert_with(HashSet::new)
+                        .insert(id);
+                }
+                super::sys::ChildExitNotification::ChildSignal
+                | super::sys::ChildExitNotification::Wake => {}
             }
-            #[cfg(not(test))]
-            drop(handle);
         }
         Err(error) => {
-            use_safe_point_fallback(&completed);
-            tracing::warn!(%error, "deleted-child watcher creation failed; retaining deferred ownership");
+            registry.use_fallback(id);
+            tracing::warn!(%error, "shared deleted-child native registration failed; retaining deferred ownership");
         }
     }
 }
 
 /// Only native-source failures need the ordinary wait's WNOHANG fallback.
-/// Native-managed pending children never add a lock or syscall to zero-timeout
-/// accept-process-output or input-pending-p polls.
+/// Native-managed children add no locks or syscalls to zero-timeout Lisp polls.
 pub(super) fn collect_deferred_child_status_changes() {
     collect_deferred_children(DeferredReapSweep::WaitSafePoint);
 }
 
 fn collect_deferred_children(sweep: DeferredReapSweep) {
-    let pending = match sweep {
-        DeferredReapSweep::NativeExit => &HAS_DEFERRED_CHILDREN,
-        DeferredReapSweep::WaitSafePoint => &HAS_SAFE_POINT_FALLBACK,
-    };
-    if !pending.load(Ordering::Acquire) {
-        return;
+    match sweep {
+        DeferredReapSweep::WaitSafePoint if !HAS_SAFE_POINT_FALLBACK.load(Ordering::Acquire) => {
+            return;
+        }
+        DeferredReapSweep::WaitSafePoint => {}
+        #[cfg(test)]
+        DeferredReapSweep::NativeExit => {}
     }
-    let mut children = DEFERRED_CHILDREN
+    let mut registry = DEFERRED_CHILDREN
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    children.retain_mut(|child| {
-        match (sweep, child.driver) {
-            (DeferredReapSweep::WaitSafePoint, DeferredReapDriver::NativeExit) => return true,
-            (
-                DeferredReapSweep::NativeExit,
-                DeferredReapDriver::NativeExit | DeferredReapDriver::WaitSafePointFallback,
-            )
-            | (DeferredReapSweep::WaitSafePoint, DeferredReapDriver::WaitSafePointFallback) => {}
+    #[cfg(test)]
+    if matches!(sweep, DeferredReapSweep::NativeExit) {
+        let ids: Vec<_> = registry.children().keys().copied().collect();
+        for id in ids {
+            registry.collect_one(id);
         }
+    }
+    registry.fallback.retain_mut(|child| {
         if child.owner.try_reap_deleted() {
             child.completed.store(true, Ordering::Release);
             false
@@ -354,13 +589,7 @@ fn collect_deferred_children(sweep: DeferredReapSweep) {
             true
         }
     });
-    HAS_DEFERRED_CHILDREN.store(!children.is_empty(), Ordering::Release);
-    HAS_SAFE_POINT_FALLBACK.store(
-        children
-            .iter()
-            .any(|child| child.driver == DeferredReapDriver::WaitSafePointFallback),
-        Ordering::Release,
-    );
+    registry.refresh_fallback_flag();
 }
 
 /// A child this port spawned and has **not** reaped: GNU's `p->alive == 1`,
@@ -451,7 +680,7 @@ pub(crate) enum ChildOwnership {
     /// `p->raw_status` rather than in `p->alive`.
     Reaped,
     /// The sole unreaped handle belongs to the deferred registry. This process
-    /// cannot signal or wait for it again; a later safe point performs the reap.
+    /// cannot signal or wait for it again; native completion performs the reap.
     Deferred,
 }
 
@@ -610,16 +839,7 @@ impl ChildOwnership {
     /// during exit, so blocking here before closing the master can deadlock.
     pub(crate) fn defer_reaping(&mut self) {
         if let Some(child) = self.take_unreaped_for_transfer() {
-            // Register while the pid still belongs exclusively to this owner.
-            // Publishing first would allow another mutator to reap/recycle it.
-            let event = super::sys::ChildExitEvent::open(child.pid);
-            let driver = match &event {
-                Ok(_) => DeferredReapDriver::NativeExit,
-                Err(_) => DeferredReapDriver::WaitSafePointFallback,
-            };
-            let completed = publish_deferred_child(child, driver);
-            // An early exit remains recorded by the already-open native source.
-            start_deferred_child_watcher(event, completed);
+            defer_child(child);
         }
     }
 

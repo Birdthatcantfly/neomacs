@@ -29,7 +29,7 @@ mod process_status;
 pub use process_status::process_is_alive;
 
 mod child_exit_event;
-pub use child_exit_event::ChildExitEvent;
+pub use child_exit_event::{ChildExitEvent, ChildExitNotification};
 
 mod process_attributes;
 pub use process_attributes::{
