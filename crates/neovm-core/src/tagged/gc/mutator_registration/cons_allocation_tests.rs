@@ -206,7 +206,7 @@ fn two_owner_cons_allocator_stress() {
                         let Some(allocated) = allocated else { return };
                         all_roots.extend(allocated.iter().cloned());
                         results.send((index, phase, allocated)).unwrap();
-                        let epoch = owner.wait_request().unwrap();
+                        let epoch = retry(|| owner.wait_request());
                         retry(|| owner.acknowledge(epoch, &all_roots));
                         apply(owner.begin_restore_retry(false).unwrap());
                     }
