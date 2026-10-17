@@ -451,7 +451,12 @@ fn emit_cons_arm(
     let tag = lowering::band_imm_p(fb, v, TAG_MASK as i64);
     let is_cons = lowering::icmp_imm_p(fb, IntCC::Equal, tag, TAG_CONS as i64);
     let cons = fb.create_block();
-    fb.ins().brif(is_cons, cons, &[], no_key, &[]);
+    let branch = fb.ins().brif(is_cons, cons, &[], no_key, &[]);
+    super::code_placement::anchors::mark_instruction(
+        fb.func,
+        branch,
+        super::code_placement::anchors::PlacementAnchor::SwitchConsGuard,
+    );
     fb.switch_to_block(cons);
     fb.seal_block(cons);
     let cell = lowering::band_imm_p(fb, v, !(TAG_MASK as i64));
@@ -525,3 +530,7 @@ impl SwitchLandings for BaselineSwitchLandings<'_> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "switch_dispatch/tests/placement_anchor_test.rs"]
+mod placement_anchor_tests;

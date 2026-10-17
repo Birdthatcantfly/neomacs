@@ -153,9 +153,11 @@ impl LeafModule for cranelift_jit::JITModule {
             })?;
             let selected = match configuration {
                 PlacementConfig::Policy(PlacementPolicy::Off) => false,
-                PlacementConfig::Policy(PlacementPolicy::Function64 | PlacementPolicy::Loop64) => {
-                    true
-                }
+                PlacementConfig::Policy(
+                    PlacementPolicy::Function64
+                    | PlacementPolicy::Loop64
+                    | PlacementPolicy::Switch64,
+                ) => true,
                 PlacementConfig::Offset(_) => super::code_placement::diagnostic_function_matches(
                     self.declarations().get_function_decl(fid).name.as_deref(),
                 ),

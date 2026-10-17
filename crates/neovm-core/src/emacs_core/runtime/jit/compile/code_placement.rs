@@ -14,6 +14,10 @@ use cranelift_module::{FuncId, Module, ModuleReloc};
 use super::CompileError;
 use crate::emacs_core::jit::backend::BackendError;
 
+pub(crate) mod anchors;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod replay;
+
 /// One cache-line-relative function entry position, validated at construction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PlacementOffset(u8);
@@ -55,6 +59,8 @@ pub(crate) enum PlacementPolicy {
     Function64,
     #[strum(serialize = "loop64")]
     Loop64,
+    #[strum(serialize = "switch64")]
+    Switch64,
 }
 
 /// Process configuration; an exact diagnostic offset excludes a policy.
@@ -78,6 +84,9 @@ pub(crate) enum PlacementError {
     IncompatibleAlignment { offset: u8, alignment: u64 },
     #[error("code placement requires the JIT arena memory provider")]
     UnsupportedProvider,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[error("diagnostic code replay refused: {0}")]
+    Replay(#[from] replay::ReplayError),
 }
 
 pub(crate) fn parse_config(
@@ -194,6 +203,9 @@ pub(crate) fn placement_for(
         PlacementConfig::Policy(policy) => match policy {
             PlacementPolicy::Off => return Ok(None),
             PlacementPolicy::Function64 => 0,
+            PlacementPolicy::Switch64 => {
+                return anchors::placement_for_anchor(alignment, None).map(Some);
+            }
             PlacementPolicy::Loop64 => edges
                 .iter()
                 .filter(|(from, to)| to <= from)
@@ -256,17 +268,42 @@ pub(crate) fn define_placed_function<M: Module>(
         tracing::error!(target: "neovm_jit", %error, "JIT code placement failed");
         CompileError::Backend(BackendError::Define(error))
     };
+    if let PlacementConfig::Offset(_) = configuration {
+        // Exact byte-offset replay validates every instruction in trusted
+        // Cranelift VCode before relaxing constant-pool buffer alignment.
+        ctx.set_disasm(true);
+    }
     ctx.compile(module.isa(), &mut Default::default())
         .map_err(|error| failure(error.inner.to_string()))?;
     let code = ctx
         .compiled_code()
         .ok_or_else(|| failure("Cranelift returned no compiled code".to_owned()))?;
-    let alignment = u64::from(code.buffer.alignment)
-        .max(u64::from(module.isa().function_alignment().minimum))
-        .max(module.isa().symbol_alignment());
-    let offset = placement_for(configuration, alignment, &code.bb_edges)
-        .map_err(|error| failure(error.to_string()))?
-        .ok_or_else(|| failure("code placement requested with the off policy".to_owned()))?;
+    let validated_replay = match configuration {
+        PlacementConfig::Offset(_) => Some(
+            replay::ValidatedReplay::validate(code, module.isa())
+                .map_err(|error| failure(PlacementError::from(error).to_string()))?,
+        ),
+        PlacementConfig::Policy(_) => None,
+    };
+    let alignment = match &validated_replay {
+        Some(replay) => replay.allocation_alignment(),
+        None => u64::from(code.buffer.alignment)
+            .max(u64::from(module.isa().function_alignment().minimum))
+            .max(module.isa().symbol_alignment()),
+    };
+    let offset = match configuration {
+        PlacementConfig::Policy(PlacementPolicy::Switch64) => anchors::placement_for_anchor(
+            alignment,
+            anchors::first_anchor_offset(code, anchors::PlacementAnchor::SwitchConsGuard),
+        )
+        .map_err(|error| failure(error.to_string()))?,
+        PlacementConfig::Policy(
+            PlacementPolicy::Off | PlacementPolicy::Function64 | PlacementPolicy::Loop64,
+        )
+        | PlacementConfig::Offset(_) => placement_for(configuration, alignment, &code.bb_edges)
+            .map_err(|error| failure(error.to_string()))?
+            .ok_or_else(|| failure("code placement requested with the off policy".to_owned()))?,
+    };
     let relocations: Vec<_> = code
         .buffer
         .relocs()
@@ -274,8 +311,12 @@ pub(crate) fn define_placed_function<M: Module>(
         .map(|reloc| ModuleReloc::from_mach_reloc(reloc, &ctx.func, fid))
         .collect();
     let scope = PlacementScope::stage(offset);
+    let bytes = match &validated_replay {
+        Some(replay) => replay.code_buffer(),
+        None => code.code_buffer(),
+    };
     module
-        .define_function_bytes(fid, alignment, code.code_buffer(), &relocations)
+        .define_function_bytes(fid, alignment, bytes, &relocations)
         .map_err(|error| failure(error.to_string()))?;
     if !scope.consumed() {
         match configuration {

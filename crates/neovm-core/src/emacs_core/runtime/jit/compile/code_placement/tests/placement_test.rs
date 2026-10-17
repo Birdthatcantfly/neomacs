@@ -254,6 +254,116 @@ mod native {
     }
 
     #[test]
+    fn placement_switch64_keeps_marked_guards_aligned_after_different_packed_predecessors() {
+        use crate::emacs_core::jit::compile::code_placement::anchors::{
+            PlacementAnchor, first_anchor_offset,
+        };
+        use cranelift_codegen::ir::Opcode;
+
+        let _scope = config_scope_for_test(PlacementConfig::Policy(PlacementPolicy::Off));
+        let mut module = module();
+        let mut reference_ctx = fixture(&mut module);
+        let reference_id = module
+            .declare_anonymous_function(&reference_ctx.func.signature)
+            .unwrap();
+        module
+            .define_function(reference_id, &mut reference_ctx)
+            .unwrap();
+        let reference = reference_ctx
+            .compiled_code()
+            .unwrap()
+            .code_buffer()
+            .to_vec();
+        assert_eq!(reference_ctx.compiled_code().unwrap().buffer.alignment, 1);
+        let mut predecessor_lengths = Vec::new();
+        let mut marked_entries = Vec::new();
+        for additions in [0, 1, 7, 31] {
+            let mut predecessor = module.make_context();
+            predecessor
+                .func
+                .signature
+                .params
+                .push(AbiParam::new(types::I64));
+            predecessor
+                .func
+                .signature
+                .returns
+                .push(AbiParam::new(types::I64));
+            let mut scratch = FunctionBuilderContext::new();
+            let mut fb = FunctionBuilder::new(&mut predecessor.func, &mut scratch);
+            let entry = fb.create_block();
+            fb.append_block_params_for_function_params(entry);
+            fb.switch_to_block(entry);
+            let argument = fb.block_params(entry)[0];
+            let mut result = argument;
+            for _ in 0..additions {
+                result = fb.ins().iadd(result, argument);
+            }
+            fb.ins().return_(&[result]);
+            fb.seal_all_blocks();
+            fb.finalize(module.target_config());
+            let predecessor_id = module
+                .declare_anonymous_function(&predecessor.func.signature)
+                .unwrap();
+            module
+                .define_function(predecessor_id, &mut predecessor)
+                .unwrap();
+            predecessor_lengths.push(predecessor.compiled_code().unwrap().code_buffer().len());
+
+            let mut marked = fixture(&mut module);
+            let branch = marked
+                .func
+                .layout
+                .blocks()
+                .flat_map(|block| marked.func.layout.block_insts(block))
+                .find(|&inst| marked.func.dfg.insts[inst].opcode() == Opcode::Brif)
+                .expect("fixture has an actual loop condition");
+            marked
+                .func
+                .set_srcloc(branch, PlacementAnchor::SwitchConsGuard.location());
+            let id = module
+                .declare_anonymous_function(&marked.func.signature)
+                .unwrap();
+            define_placed_function(
+                &mut module,
+                id,
+                &mut marked,
+                PlacementConfig::Policy(PlacementPolicy::Switch64),
+            )
+            .unwrap();
+            let code = marked.compiled_code().unwrap();
+            assert_eq!(code.code_buffer(), &reference);
+            assert_eq!(code.buffer.alignment, 1);
+            let anchor = first_anchor_offset(code, PlacementAnchor::SwitchConsGuard)
+                .expect("marked condition survives into native metadata");
+            marked_entries.push((id, anchor, code.buffer.alignment));
+        }
+        assert!(
+            predecessor_lengths
+                .windows(2)
+                .all(|pair| pair[0] != pair[1])
+        );
+        // Seal only once: every predecessor and marked function was packed
+        // into writable arena capacity without page-boundary resets between it.
+        module.finalize_definitions().unwrap();
+        let mut previous_residue = None;
+        for (id, anchor, alignment) in marked_entries {
+            let entry = module.get_finalized_function(id);
+            let residue = (entry as usize + anchor as usize) % 64;
+            assert!(residue < alignment as usize);
+            if let Some(previous) = previous_residue {
+                assert_eq!(residue, previous);
+            }
+            previous_residue = Some(residue);
+            // SAFETY: fixture emits exactly this C ABI and its helper symbol
+            // is relocated; the owning module remains alive after sealing.
+            let run: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(entry) };
+            assert_eq!(run(100), 5057);
+            assert_eq!(run(0), 7);
+        }
+    }
+
+    #[test]
     fn placement_function64_aligns_every_function_in_an_unsealed_batch() {
         let mut module = module();
         let mut ids = Vec::new();
