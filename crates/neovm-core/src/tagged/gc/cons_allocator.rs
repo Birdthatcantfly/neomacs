@@ -1573,6 +1573,9 @@ impl ConsStopAll<'_> {
 
     /// One-way admission commits at the stop-all boundary. Consuming this
     /// capability prevents using its former unlocked state after publication.
+    // Keep this small phase transition in its stopped caller. Adding a cold
+    // catalog caller must not outline another serial admission entry point.
+    #[inline(always)]
     pub(super) fn admit_threads(mut self) {
         let StoppedAllocatorState::Owner { storage, .. } = &mut self.state else {
             panic!("admission requires the sole-owner stop-all capability");
