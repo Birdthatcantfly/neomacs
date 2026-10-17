@@ -3786,9 +3786,10 @@ fn cursor_only_fast_path_places_cursor_on_the_row_glyph_advances() {
 /// instead of GNU's terminal-default fallback for an unresolved color.
 fn install_window_fill_test_tty_palette(eval: &mut Context) {
     eval.eval_str(
-        r##"(defun tty-color-desc (color &optional frame)
-              (assoc color '(("#ffffff" 7 65535 65535 65535)
-                             ("#000000" 0 0 0 0))))"##,
+        r##"(fset 'tty-color-desc
+              (lambda (color &optional frame)
+                (assoc color '(("#ffffff" 7 65535 65535 65535)
+                               ("#000000" 0 0 0 0)))))"##,
     )
     .expect("install window-fill test terminal color descriptors");
 }

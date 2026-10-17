@@ -711,7 +711,7 @@ impl<'face, 'params> WindowChromeRowsRenderRequest<'face, 'params> {
                     WindowChromeDisplayRowRequest {
                         window_id: params.window_id as u64,
                         kind: WindowChromeKind::TabLine,
-                        selected: if neovm_core::face::realization::enabled() {
+                        selected: if state.render_services.face_resolver.has_tty_realization() {
                             params.mode_line_active
                         } else {
                             params.selected

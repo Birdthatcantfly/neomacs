@@ -1041,6 +1041,18 @@ fn terminal_output_method_for_id(id: u64) -> Option<TerminalOutputMethod> {
     with_terminal_manager(|slot| slot.borrow().get(id).map(|terminal| terminal.output_method))
 }
 
+/// The output kind of an existing live terminal. Face realization must use
+/// this discriminator, not activity: bootstrap terminals may be considered
+/// active and suspended termcap terminals keep their display class.
+pub(crate) fn live_terminal_output_method_for_id(id: u64) -> Option<TerminalOutputMethod> {
+    with_terminal_manager(|slot| {
+        slot.borrow()
+            .get(id)
+            .filter(|terminal| terminal.is_live())
+            .map(|terminal| terminal.output_method)
+    })
+}
+
 /// GNU `Fsend_string_to_terminal`'s terminal dispatch
 /// (src/dispnew.c:6819-6843): route STRING's bytes to the terminal's output
 /// stream, unaltered.  The Lisp-visible argument decoding lives with the

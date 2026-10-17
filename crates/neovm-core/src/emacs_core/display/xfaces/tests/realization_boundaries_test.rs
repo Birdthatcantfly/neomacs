@@ -256,3 +256,73 @@ fn face_no_inherit_property_preserves_all_realization_scopes() {
         FaceChangeScope::AllFrames
     );
 }
+
+#[test]
+fn face_frame_class_uses_live_terminal_output_kind() {
+    use crate::emacs_core::terminal::pure::{self, TerminalHost, TerminalRuntimeConfig};
+    use crate::face::realization::{FrameFaceClass, frame_face_class};
+    struct Host;
+    impl TerminalHost for Host {
+        fn suspend_tty(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn resume_tty(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            pure::reset_terminal_host();
+            pure::reset_terminal_runtime();
+        }
+    }
+    let mut context = crate::emacs_core::Context::new();
+    let _restore = Restore;
+    pure::reset_terminal_runtime();
+    let initial = crate::emacs_core::window_cmds::ensure_selected_frame_id(&mut context);
+    let buffer = context.buffers.current_buffer_id().unwrap();
+    let bare = context.frames.create_frame("bare-frame", 80, 25, buffer);
+    assert!(!context.frames.get(bare).unwrap().initial);
+    assert_eq!(
+        frame_face_class(context.frames.get(initial).unwrap()),
+        Some(FrameFaceClass::Initial)
+    );
+    assert_eq!(
+        frame_face_class(context.frames.get(bare).unwrap()),
+        Some(FrameFaceClass::Initial)
+    );
+    assert!(!context.frame_is_tty_face_target(bare));
+
+    let config = || {
+        TerminalRuntimeConfig::interactive(Some("xterm-256color".to_owned()), neomacs_display_protocol::tty_capabilities::TtyAttributeCapabilities::full_with_color_cells(256))
+    };
+    pure::configure_terminal_runtime(config());
+    // Primary setup redescribes native terminal0 in place; neither the id nor
+    // an old bootstrap frame.initial flag can override the installed kind.
+    assert!(context.frame_is_tty_face_target(initial));
+    assert!(context.frame_is_tty_face_target(bare));
+    pure::set_terminal_host(Box::new(Host));
+    pure::builtin_suspend_tty(&mut context, vec![Value::make_frame(bare.0)])
+        .expect("suspend configured primary tty");
+    assert!(context.frame_is_tty_face_target(bare));
+
+    let secondary_id = 27;
+    pure::ensure_terminal_runtime_owner(secondary_id, "secondary-tty", config());
+    let secondary =
+        context
+            .frames
+            .create_frame_on_terminal("secondary-frame", secondary_id, 80, 25, buffer);
+    assert!(context.frame_is_tty_face_target(secondary));
+    context
+        .frames
+        .get_mut(bare)
+        .unwrap()
+        .set_window_system(Some(Value::symbol("neo")));
+    assert_eq!(
+        frame_face_class(context.frames.get(bare).unwrap()),
+        Some(FrameFaceClass::WindowSystem)
+    );
+    assert!(!context.frame_is_tty_face_target(bare));
+    assert!(context.frame_is_tty_face_target(secondary));
+}

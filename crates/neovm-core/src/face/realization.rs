@@ -72,6 +72,39 @@ impl BasicFace {
     }
 }
 
+/// GNU classifies faces by frame output method (frame.h:932-933), and
+/// is_tty_frame accepts termcap/MSDOS rather than the initial output kind
+/// (dispnew.c:3491-3494). NeoVM's primary native record is redescribed in
+/// place during display setup, so its current output kind is authoritative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FrameFaceClass {
+    Initial,
+    Termcap,
+    WindowSystem,
+}
+
+pub(crate) fn frame_face_class(frame: &crate::window::Frame) -> Option<FrameFaceClass> {
+    use crate::emacs_core::terminal::pure::{
+        TerminalOutputMethod, live_terminal_output_method_for_id,
+    };
+    if frame.effective_window_system().is_some() {
+        return Some(FrameFaceClass::WindowSystem);
+    }
+    live_terminal_output_method_for_id(frame.terminal_id).map(|method| match method {
+        TerminalOutputMethod::Initial => FrameFaceClass::Initial,
+        TerminalOutputMethod::Termcap => FrameFaceClass::Termcap,
+        TerminalOutputMethod::WindowSystem => FrameFaceClass::WindowSystem,
+    })
+}
+
+/// Whether this frame belongs to an actual termcap face target. Call on the
+/// installed owning mutator. The immutable campaign knob is checked separately.
+/// Bare frame fixtures and batch frames on output_initial retain dummy faces;
+/// primary/secondary and suspended real TTYs retain termcap realization.
+pub fn frame_is_tty_target(frame: &crate::window::Frame) -> bool {
+    frame_face_class(frame) == Some(FrameFaceClass::Termcap)
+}
+
 /// Which existing frame definitions a mutation can affect. The display
 /// freshness counter is global, while GNU realization invalidation is scoped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

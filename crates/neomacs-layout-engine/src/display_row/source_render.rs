@@ -1263,6 +1263,10 @@ impl<'a> TextRowSourceRenderState<'a> {
             .install_resolved_face(bound, metrics);
     }
 
+    pub(crate) fn has_tty_realization(&self) -> bool {
+        self.faces.pipeline_resolver().has_tty_realization()
+    }
+
     /// Lend the evaluator only for this synchronous iterator step. The
     /// capability cannot outlive the exclusive render-state borrow and is
     /// neither stored on a frame nor shared with another mutator.

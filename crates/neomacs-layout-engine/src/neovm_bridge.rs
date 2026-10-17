@@ -1468,6 +1468,7 @@ pub fn window_params_from_neovm_with_font_sizing(
     // nil (dispextern.h:1541-1558,1582-1599,1617-1633).
     let mode_line_active = mode_line_active
         || (neovm_core::face::realization::enabled()
+            && neovm_core::face::realization::frame_is_tty_target(frame)
             && vars
                 .value_by_name("mode-line-in-non-selected-windows")
                 .is_some_and(Value::is_nil));
@@ -4041,10 +4042,7 @@ impl FaceResolver {
     pub(crate) fn prepare_tty_realization(&mut self, frame_id: FrameId, evaluator: &mut Context) {
         if !neovm_core::face::realization::enabled()
             || self.window_system.is_some()
-            || evaluator
-                .frame_manager()
-                .get(frame_id)
-                .is_none_or(|frame| frame.initial)
+            || !evaluator.frame_is_tty_face_target(frame_id)
         {
             return;
         }
@@ -4175,11 +4173,10 @@ impl FaceResolver {
         }
     }
 
-    /// The legacy native palette is used only when the lifecycle knob is off.
-    /// A demand-realized plist retains its strings until the complete lface
+    /// A bound TTY lifecycle retains plist strings until the complete lface
     /// reaches the evaluator; no palette approximation can replace a callback.
     fn plist_palette(&self) -> Option<&neomacs_display_protocol::TtyPalette> {
-        if neovm_core::face::realization::enabled() {
+        if self.has_tty_realization() {
             None
         } else {
             self.face_table.tty_palette()
@@ -4894,7 +4891,7 @@ impl FaceResolver {
         role: crate::display_face_policy::TabLineFaceRole,
     ) -> ResolvedFace {
         let remapping = BufferFaceRemapping::capture(buffer);
-        if !neovm_core::face::realization::enabled() {
+        if !self.has_tty_realization() {
             return self.resolve_remapped_basic_face(remapping, BasicFaceId::TabLine);
         }
         let mut resolved = self.resolve_remapped_named_face(remapping, role.name());

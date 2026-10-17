@@ -3829,10 +3829,7 @@ pub(crate) fn builtin_internal_merge_in_global_face(
         sync_face_overrides_from_lisp_face_vector(&face_name, local_vector, false);
         if crate::face::realization::enabled()
             && face_name == "default"
-            && eval
-                .frames
-                .get(frame_id)
-                .is_some_and(|owner| owner.effective_window_system().is_none())
+            && eval.frame_is_tty_face_target(frame_id)
         {
             realization::realize_default_after_global_merge(
                 eval,

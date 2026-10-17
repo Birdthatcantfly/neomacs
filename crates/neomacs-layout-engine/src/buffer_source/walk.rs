@@ -232,7 +232,7 @@ impl<'request, B: LayoutBufferView> BufferSourceWalk<'request, B> {
         active_face_state: &DisplayRowActiveFaceState,
         output: &mut ProducedStep,
     ) {
-        if neovm_core::face::realization::enabled() {
+        if source_render.has_tty_realization() {
             source_render.with_face_realizer(|realize| {
                 self.producer.produce_step_into(
                     progress.source_position(),

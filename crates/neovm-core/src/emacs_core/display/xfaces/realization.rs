@@ -264,6 +264,14 @@ enum RealizationLookup {
 }
 
 impl super::super::eval::Context {
+    /// Frame face classification shared with pure layout adapters. GNU's
+    /// initial terminal is not a termcap face target (xfaces.c:6201-6209).
+    pub fn frame_is_tty_face_target(&self, frame: FrameId) -> bool {
+        self.frames
+            .get(frame)
+            .is_some_and(crate::face::realization::frame_is_tty_target)
+    }
+
     /// Initialize the frame cache and basic faces at the creation boundary.
     pub fn initialize_display_faces_for_frame(&mut self, frame: FrameId) {
         initialize_frame_faces(self, frame);
@@ -373,12 +381,7 @@ impl super::super::eval::Context {
         attributes: &Face,
         lookup: RealizationLookup,
     ) -> Result<Face, Flow> {
-        if !crate::face::realization::enabled()
-            || self
-                .frames
-                .get(frame)
-                .is_none_or(|frame| frame.initial || frame.effective_window_system().is_some())
-        {
+        if !crate::face::realization::enabled() || !self.frame_is_tty_face_target(frame) {
             return Ok(attributes.clone());
         }
         if matches!(lookup, RealizationLookup::Demand)
@@ -513,7 +516,7 @@ pub(crate) fn prepare_runtime_faces_result(
         }
     }
     *eval.face_table = table;
-    if definitions_only {
+    if definitions_only || !eval.frame_is_tty_face_target(frame) {
         return Ok(true);
     }
     if let Err(flow) = realize_basic_faces(eval, frame) {
@@ -529,6 +532,9 @@ pub(crate) fn realize_basic_faces(
     eval: &mut super::super::eval::Context,
     frame: FrameId,
 ) -> Result<(), Flow> {
+    if !eval.frame_is_tty_face_target(frame) {
+        return Ok(());
+    }
     let table = eval.face_table.clone();
     // Advice can invalidate or replace both runtime owners. Keep every source
     // in this local snapshot alive until all later basic faces have been read.
@@ -749,7 +755,10 @@ pub(crate) fn realize_default_after_global_merge(
 /// Eager frame-creation boundary (GNU init_frame_faces). Batch creation leaves
 /// the cache uninitialized until the first iterator, frame.c:1822-1823.
 pub(crate) fn initialize_frame_faces(eval: &mut super::super::eval::Context, frame: FrameId) {
-    if crate::face::realization::enabled() && !eval.noninteractive() {
+    if crate::face::realization::enabled()
+        && !eval.noninteractive()
+        && eval.frame_is_tty_face_target(frame)
+    {
         prepare_runtime_faces(eval, frame);
     }
 }
@@ -844,7 +853,7 @@ pub(crate) fn initialize_new_terminal_frame_faces(
     frame: FrameId,
     parameters: Value,
 ) -> Result<(), Flow> {
-    if !crate::face::realization::enabled() {
+    if !crate::face::realization::enabled() || !context.frame_is_tty_face_target(frame) {
         return Ok(());
     }
     let _roots = RealizationRoots::from_values([parameters]);

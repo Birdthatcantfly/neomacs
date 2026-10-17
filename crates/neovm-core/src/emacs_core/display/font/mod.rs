@@ -995,7 +995,7 @@ pub(crate) fn update_face_from_frame_parameter(
             eval,
             super::xfaces::realization::FaceChangeScope::Frames(&[frame_id]),
         );
-        if crate::face::realization::enabled() {
+        if crate::face::realization::enabled() && eval.frame_is_tty_face_target(frame_id) {
             // GNU update_face_from_frame_parameter realizes basics immediately,
             // then sets f->face_change: xfaces.c:3894,3910,3936-3945. The next
             // display iterator therefore rebuilds them once more.
