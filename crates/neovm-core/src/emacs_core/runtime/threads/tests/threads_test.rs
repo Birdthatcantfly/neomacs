@@ -1,6 +1,7 @@
 use super::super::eval::Context;
 use super::*;
 use crate::emacs_core::error::{FlowKind, FlowRef, FlowResultExt};
+use crate::gc_trace::GcTrace;
 use crate::heap_types::LispString;
 
 fn retained_name_survives_gc(factory: &str, getter: &str) {
@@ -58,6 +59,39 @@ fn gc_preserves_condition_variable_name_interval_plists() {
         "(make-condition-variable (make-mutex) (propertize \"condition name\" 'face '(retained-face)))",
         "condition-name",
     );
+}
+
+#[test]
+fn thread_current_buffer_survives_gc_through_registry_seed() {
+    let mut ctx = Context::new();
+    let buffer_id = ctx.buffers.create_buffer("thread-current-buffer-root");
+    let canonical = Value::make_buffer(buffer_id);
+    let thread_id = ctx.threads.current_thread_id();
+    assert!(
+        ctx.threads
+            .set_thread_current_buffer(thread_id, Some(buffer_id))
+    );
+
+    let mut roots = Vec::new();
+    ctx.threads.trace_roots(&mut roots);
+    assert!(
+        roots.iter().all(|root| root.bits() != canonical.bits()),
+        "thread root walk must not re-root or allocate the current buffer"
+    );
+
+    assert_eq!(
+        ctx.threads.thread_current_buffer(thread_id),
+        Some(buffer_id)
+    );
+
+    ctx.gc_collect_exact();
+
+    let seeded = ctx
+        .tagged_heap
+        .buffer_value(buffer_id)
+        .expect("buffer registry seed keeps the canonical object");
+    assert_eq!(seeded.bits(), canonical.bits());
+    assert!(ctx.tagged_heap.owns_heap_value_for_test(seeded));
 }
 
 // -- ThreadManager unit tests -------------------------------------------

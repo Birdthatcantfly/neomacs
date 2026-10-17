@@ -819,9 +819,13 @@ impl GcTrace for ThreadManager {
             roots.push(thread.error_symbol);
             roots.push(thread.error_data);
             roots.push(thread.blocked_remaining_forms);
-            if let Some(buffer_id) = thread.current_buffer {
-                roots.push(Value::make_buffer(buffer_id));
-            }
+            // `current_buffer` is a buffer id, not a heap edge. The canonical
+            // Lisp object is `TaggedHeap::buffer_registry`, and
+            // `seed_internal_runtime_roots` seeds every registry value on
+            // every collection. `Value::make_buffer` returns that object or
+            // allocates and registers one when the id is absent, so pushing
+            // it from here is redundant when the object exists and wrong
+            // when it does not.
             if let Some(ref err) = thread.last_error {
                 roots.push(*err);
             }
