@@ -232,11 +232,12 @@ impl SharedRoot {
         self.heap
     }
 
-    /// Copy an opaque, already-rooted word for a sealed owner publication.
-    /// This neither dereferences Lisp storage nor materializes a LocalRoot.
+    /// Copy an opaque, already-rooted word for a sealed owner publication or
+    /// a native-safe extent's retained-handle table. This neither
+    /// dereferences Lisp storage nor materializes a LocalRoot.
     #[cold]
     #[inline(never)]
-    pub(super) fn parallel_word(&self) -> usize {
+    pub(crate) fn parallel_word(&self) -> usize {
         self.word()
     }
 

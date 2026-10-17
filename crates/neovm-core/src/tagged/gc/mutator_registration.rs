@@ -15,6 +15,7 @@ mod cons_allocation;
 mod cons_catalog;
 mod gate;
 mod image;
+mod native_extent;
 mod root_slot;
 mod run_slice;
 pub use collection::{CollectionError, CollectionReport};
@@ -24,6 +25,10 @@ pub use run_slice::{RunSlice, SliceRoot};
 mod rendezvous;
 mod summaries;
 mod token;
+// The extent API ships ahead of its first production call site (the Green
+// mutex/condition release points); the re-export is for that integration.
+#[allow(unused_imports)]
+pub use native_extent::{NativeReturn, NativeRoots};
 pub use rendezvous::{
     AllStopped, AllStoppedFailure, Mode, Phase, Rendezvous, RendezvousError, Request,
     ResumeGcImage, ResumeGcImageFailure, RootedRetireFailure, Snapshot,
@@ -756,5 +761,7 @@ mod root_slot_tests;
 #[cfg(test)]
 mod slice_tests;
 
+#[cfg(test)]
+mod native_extent_tests;
 #[cfg(test)]
 mod restricted_lisp;
