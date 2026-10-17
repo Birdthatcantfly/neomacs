@@ -355,6 +355,13 @@ impl ConcurrentMarkCapture<'_> {
 }
 
 impl QuiescentCollector<'_> {
+    /// Cold registration admission keeps this exclusive heap loan in its era.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn registration_heap_mut(&mut self) -> &mut TaggedHeap {
+        self.heap
+    }
+
     pub fn heap_identity(&self) -> HeapIdentity {
         self.heap.heap_identity()
     }

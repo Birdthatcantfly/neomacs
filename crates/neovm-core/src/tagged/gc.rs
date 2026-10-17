@@ -2781,6 +2781,7 @@ use chunk_map::{CHUNK_CLASS_COUNT, ChunkClass, ChunkEntry, ChunkMap, HeapChunkMa
 mod census;
 mod cold_gc;
 mod facade_mark;
+mod mutator_registration;
 #[cfg(test)]
 use census::CensusRecord;
 use census::{CensusCycleKind, GenCensus, census_remset_probe_on};
@@ -2788,6 +2789,11 @@ pub use facade_mark::{
     CollectorQuiescenceError, ConcurrentMarkAdmissionError, ConcurrentMarkCapture,
     ConcurrentMarkPermit, FacadeEpochRetention, FacadeMarkExclusion, FacadeMarkExclusionError,
     QuiescentCollector,
+};
+pub use mutator_registration::{
+    Mutator, MutatorEntry, MutatorFinishFailure, MutatorKey, MutatorPermit, MutatorStartFailure,
+    OwnerPublication, ParallelHeapEra, RegistrationCensus, RegistrationError, RunAccess,
+    StoppedSummaries, YoungWorkerLoan,
 };
 
 mod alloc_region;
