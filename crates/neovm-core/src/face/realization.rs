@@ -2,7 +2,7 @@
 //!
 //! | Knob | Default | Meaning |
 //! | --- | --- | --- |
-//! | `NEOVM_FACE_REALIZATION_LIFECYCLE` | off | GNU basic/demand realization through Lisp TTY color callbacks. |
+//! | `NEOVM_FACE_REALIZATION_LIFECYCLE` | on | GNU basic/demand realization through Lisp TTY color callbacks. Set to `0` for the previous path. |
 
 use super::{Face, FaceTable};
 use crate::emacs_core::value::Value;
@@ -16,8 +16,11 @@ use std::sync::OnceLock;
 /// Process-wide immutable campaign selector. No mutable Lisp state is shared.
 pub fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("NEOVM_FACE_REALIZATION_LIFECYCLE").is_ok_and(|value| value == "1")
+    // Unset is on. An explicit value other than "1", including "0", stays off
+    // so a measurement can still select the previous path.
+    *ENABLED.get_or_init(|| match std::env::var("NEOVM_FACE_REALIZATION_LIFECYCLE") {
+        Ok(value) => value == "1",
+        Err(_) => true,
     })
 }
 
