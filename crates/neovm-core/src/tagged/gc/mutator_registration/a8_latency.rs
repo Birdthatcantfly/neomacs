@@ -14,10 +14,7 @@
 #![cfg(not(feature = "gc-memory-telemetry"))]
 
 use super::a8_probes::{self, ProbeEvent};
-use super::{
-    AllStopped, HeapIdentity, Mutator, MutatorPermit, ParallelHeapEra, RegistrationError,
-    RendezvousError,
-};
+use super::{AllStopped, HeapIdentity, Mutator, MutatorPermit, RegistrationError, RendezvousError};
 use crate::emacs_core::eval::Context;
 use crate::tagged::gc::cons_storage::CATALOG_WAITS;
 use crate::tagged::transport::SharedRoot;
@@ -69,6 +66,44 @@ fn with_run<'era, R>(
                 return result;
             }
             Err(RegistrationError::Busy) if Instant::now() < deadline => thread::yield_now(),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// `with_run` for an allocating owner that must also serve signals:
+/// `run_access` refuses while a round is open, and the round cannot close
+/// without this owner, so a blind Busy-spin between churn batches would
+/// deadlock the rendezvous. The channel is the owner's safe point: a Busy
+/// retry that finds a pending signal abandons the churn batch and hands it
+/// back, letting the caller run the acknowledge (or finish) path — exactly
+/// what a real allocating loop does at its next safe point.
+enum ChurnOutcome<R> {
+    Ran(R),
+    Serve(OwnerSignal),
+}
+
+fn with_run_or_collect<'era, R>(
+    owner: &mut Mutator<'era>,
+    rx: &Receiver<OwnerSignal>,
+    body: impl FnOnce(&mut super::RunAccess<'_, 'era>) -> Result<R, RegistrationError>,
+) -> Result<ChurnOutcome<R>, RegistrationError> {
+    let deadline = Instant::now() + SPIN_WAIT;
+    loop {
+        match owner.run_access() {
+            Ok(mut run) => {
+                let result = body(&mut run);
+                run.close_cons_region()?;
+                return result.map(ChurnOutcome::Ran);
+            }
+            Err(RegistrationError::Busy) if Instant::now() < deadline => {
+                // A signal published while we retry: serve it instead of
+                // spinning. An empty channel is plain gate contention.
+                if let Ok(signal) = rx.try_recv() {
+                    return Ok(ChurnOutcome::Serve(signal));
+                }
+                thread::yield_now();
+            }
             Err(error) => return Err(error),
         }
     }
@@ -214,13 +249,16 @@ fn acking_owner<'era>(
                     Ok(signal) => break signal,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         let mut garbage = nil.clone();
-                        with_run(&mut owner, |run| {
+                        match with_run_or_collect(&mut owner, &rx, |run| {
                             for _ in 0..kind.churn {
                                 garbage = run.cons(one, &garbage)?;
                             }
                             Ok(())
-                        })
-                        .unwrap_or_else(|error| panic!("owner {id} churn: {error:?}"));
+                        }) {
+                            Ok(ChurnOutcome::Ran(())) => {}
+                            Ok(ChurnOutcome::Serve(signal)) => break signal,
+                            Err(error) => panic!("owner {id} churn: {error:?}"),
+                        }
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                         panic!("owner {id} channel closed")
@@ -233,11 +271,12 @@ fn acking_owner<'era>(
                 let epoch = retry_rv(|| owner.wait_request());
                 retry_rv(|| owner.acknowledge(epoch, &[head.clone(), one.clone()]));
                 restore(&mut owner);
-                resumed
-                    .send(())
-                    .unwrap_or_else(|_| panic!("owner {id} resumed channel closed"));
-                // Rebuild the retained chain: the previous round's becomes
-                // garbage, so the live set stays constant across the run.
+                // Rebuild the retained chain BEFORE reporting `resumed`: the
+                // previous round's chain is now garbage, so the live set stays
+                // constant, and the driver must not open the next round while
+                // this owner is inside a `with_run` — `run_access` refuses
+                // while a round is open and the round cannot close without
+                // every owner, so the reverse order deadlocks the rendezvous.
                 with_run(&mut owner, |run| {
                     head = nil.clone();
                     for _ in 0..kind.retained {
@@ -246,6 +285,9 @@ fn acking_owner<'era>(
                     Ok(())
                 })
                 .unwrap_or_else(|error| panic!("owner {id} rebuild: {error:?}"));
+                resumed
+                    .send(())
+                    .unwrap_or_else(|_| panic!("owner {id} resumed channel closed"));
             }
             OwnerSignal::Finish => break,
         }
@@ -331,9 +373,10 @@ fn native_round_owner<'era>(
                 recv(&wake);
             })
             .unwrap_or_else(|error| panic!("racer owner {id} extent: {error:?}"));
-        returned
-            .send(())
-            .unwrap_or_else(|_| panic!("racer owner {id} returned closed"));
+        // Rebuild before reporting `returned`: the driver's next round (and
+        // the closing round after the last one) must not publish a request
+        // while this owner is inside a `with_run` — see the acking owner's
+        // note; a stopped round cannot complete without this owner either.
         with_run(&mut owner, |run| {
             head = nil.clone();
             for _ in 0..retained {
@@ -342,6 +385,9 @@ fn native_round_owner<'era>(
             Ok(())
         })
         .unwrap_or_else(|error| panic!("racer owner {id} rebuild: {error:?}"));
+        returned
+            .send(())
+            .unwrap_or_else(|_| panic!("racer owner {id} returned closed"));
     }
     retry_rv(|| owner.enter_native(&[]));
     retire(owner);
@@ -1014,9 +1060,11 @@ fn a8_latency_native_owner_shape() {
                 s.events.iter().any(|e| {
                     e.kind == a8_probes::NATIVE_ACK
                         && e.owner == native_owner
-                        && e.epoch == last_round
+                        && (e.epoch == last_round || e.epoch == last_round + 1)
                 }),
-                "teardown native commit after the last round"
+                "teardown native commit after the last round ( Idle stamps \
+                 the last completed epoch; racing the closing round's request \
+                 stamps that round's epoch — both are valid retire paths)"
             );
             for epoch in &s.rounds {
                 assert_eq!(
