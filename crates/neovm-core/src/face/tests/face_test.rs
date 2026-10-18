@@ -1009,3 +1009,50 @@ fn an_anonymous_plist_realizes_its_underline_color_through_the_palette() {
     let underline = face.underline.enabled().expect("underline enabled");
     assert_eq!(underline.color.and_then(|color| color.terminal), None);
 }
+
+// --- FaceTable root memo ---
+
+#[test]
+fn face_table_trace_roots_serve_stable_and_follow_definition_writes() {
+    crate::test_utils::init_test_tracing();
+    use crate::gc_trace::GcTrace;
+    let mut table = FaceTable::new();
+    let mut rooted = Face::new("memo-face");
+    rooted.family = Some(Value::string("memo-family"));
+    table.define("memo-face", rooted);
+    let mut first = Vec::new();
+    table.trace_roots(&mut first); // builds the memo
+    let mut second = Vec::new();
+    table.trace_roots(&mut second); // serves from the memo
+    assert_eq!(first, second);
+    assert!(first.iter().any(|v| *v == Value::string("memo-family")));
+
+    // A definition write publishes new storage; the memo must not keep
+    // serving the retired snapshot's root list for it.
+    table.define("after-write", Face::new("after-write"));
+    let mut after = Vec::new();
+    table.trace_roots(&mut after);
+    let written = face_symbol_value("after-write");
+    assert!(after.iter().any(|v| *v == written));
+    assert!(!first.iter().any(|v| *v == written));
+}
+
+#[test]
+fn face_table_trace_roots_clone_keeps_the_previous_snapshot() {
+    crate::test_utils::init_test_tracing();
+    use crate::gc_trace::GcTrace;
+    let mut table = FaceTable::new();
+    let shared = table.clone();
+    table.define("clone-only", Face::new("clone-only"));
+    let mut stale = Vec::new();
+    shared.trace_roots(&mut stale);
+    let key = face_symbol_value("clone-only");
+    assert!(
+        !stale.iter().any(|v| *v == key),
+        "a clone keeps its immutable snapshot; writes never reach it in place"
+    );
+    assert!(!shared.same_snapshot(&table));
+    let mut fresh = Vec::new();
+    table.trace_roots(&mut fresh);
+    assert!(fresh.iter().any(|v| *v == key));
+}

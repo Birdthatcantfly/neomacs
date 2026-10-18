@@ -1783,6 +1783,21 @@ pub struct FaceTable {
     /// named faces used, and GNU guarantees that by realizing all of them
     /// through one `map_tty_color` (src/xfaces.c:6620-6694).
     tty_palette: std::rc::Rc<neomacs_display_protocol::TtyPalette>,
+    /// Memoized GC root list for the current immutable `faces` snapshot,
+    /// rebuilt only when a definition write publishes new storage. Keyed on
+    /// storage identity: writes always reallocate (see `update_faces`), and
+    /// the memo holds the snapshot it describes, so `Rc::ptr_eq` both proves
+    /// freshness and pins the address against reuse. GNU pays no equivalent
+    /// walk — lface definitions live on symbol plists the obarray already
+    /// roots (`Finternal_set_lisp_face_plist`, src/xfaces.c:1262-1280).
+    roots_memo: std::cell::RefCell<Option<FaceRootsMemo>>,
+}
+
+/// The traced-root memo for one immutable `faces` snapshot.
+#[derive(Clone)]
+struct FaceRootsMemo {
+    snapshot: std::rc::Rc<HashMap<Value, Face>>,
+    roots: std::rc::Rc<[Value]>,
 }
 
 impl FaceTable {
@@ -1791,6 +1806,7 @@ impl FaceTable {
             faces: std::rc::Rc::new(HashMap::new()),
             lisp_face_refs: std::rc::Rc::new(HashMap::new()),
             tty_palette: std::rc::Rc::new(neomacs_display_protocol::TtyPalette::default()),
+            roots_memo: std::cell::RefCell::new(None),
         };
         table.register_standard_faces();
         table
@@ -1819,6 +1835,32 @@ impl FaceTable {
     pub fn same_snapshot(&self, other: &Self) -> bool {
         self.shares_definitions_with(other)
             && std::rc::Rc::ptr_eq(&self.tty_palette, &other.tty_palette)
+    }
+
+    /// The root list for the current immutable `faces` snapshot, rebuilt only
+    /// when a definition write replaced the storage since it was last
+    /// derived. Keyed on storage identity rather than a counter: a write can
+    /// never change a shared allocation in place (`update_faces`), so a live
+    /// snapshot pinned inside the memo whose pointer still matches `faces`
+    /// was never superseded.
+    fn traced_roots(&self) -> std::rc::Rc<[Value]> {
+        let mut memo = self.roots_memo.borrow_mut();
+        if let Some(m) = memo.as_ref()
+            && std::rc::Rc::ptr_eq(&m.snapshot, &self.faces)
+        {
+            return std::rc::Rc::clone(&m.roots);
+        }
+        let mut roots = Vec::new();
+        roots.extend(self.faces.keys().copied());
+        for face in self.faces.values() {
+            face.trace_roots(&mut roots);
+        }
+        let roots: std::rc::Rc<[Value]> = roots.into();
+        *memo = Some(FaceRootsMemo {
+            snapshot: std::rc::Rc::clone(&self.faces),
+            roots: std::rc::Rc::clone(&roots),
+        });
+        roots
     }
 
     /// The palette this table's faces were realized against, or `None` on a
@@ -2148,15 +2190,33 @@ impl FaceTable {
         self.define(name, face);
     }
 
+    /// Apply `edit` to a private copy of the definitions and publish it as
+    /// fresh immutable storage. Every write reallocates rather than mutating
+    /// shared cells in place: holders of the previous snapshot keep their
+    /// content, and storage identity (`same_snapshot`, the roots memo) stays
+    /// a proof of content equality unconditionally, not only while a
+    /// resolver pins the old table. Definition writes are rare — a handful
+    /// per editing session plus load-time `defface`s — so the copy is
+    /// amortized to noise next to the per-collection walks it removes.
+    fn update_faces(&mut self, edit: impl FnOnce(&mut HashMap<Value, Face>)) {
+        let mut faces = (*self.faces).clone();
+        edit(&mut faces);
+        self.faces = std::rc::Rc::new(faces);
+    }
+
     /// Define or update a face.
     pub fn define(&mut self, name: &str, face: Face) {
-        std::rc::Rc::make_mut(&mut self.faces).insert(face_symbol_value(name), face);
+        self.update_faces(|faces| {
+            faces.insert(face_symbol_value(name), face);
+        });
     }
 
     /// Define a runtime face together with its frame-local GNU Lisp face id.
     pub fn define_lisp_face(&mut self, id: LispFaceId, name: &str, face: Face) {
         let face_ref = face_symbol_value(name);
-        std::rc::Rc::make_mut(&mut self.faces).insert(face_ref, face);
+        self.update_faces(|faces| {
+            faces.insert(face_ref, face);
+        });
         std::rc::Rc::make_mut(&mut self.lisp_face_refs).insert(id, face_ref);
     }
 
@@ -2167,10 +2227,11 @@ impl FaceTable {
 
     /// Ensure a face exists (create empty if not present).
     pub fn ensure_face(&mut self, name: &str) {
-        let key = face_symbol_value(name);
-        std::rc::Rc::make_mut(&mut self.faces)
-            .entry(key)
-            .or_insert_with(|| Face::new(name));
+        self.update_faces(|faces| {
+            faces
+                .entry(face_symbol_value(name))
+                .or_insert_with(|| Face::new(name));
+        });
     }
 
     /// Update a single attribute on a face.
@@ -2179,10 +2240,11 @@ impl FaceTable {
     pub fn set_attribute(&mut self, name: &str, attr: LFaceAttr, value: FaceAttrValue) -> bool {
         self.ensure_face(name);
         let key = face_symbol_value(name);
-        let face = std::rc::Rc::make_mut(&mut self.faces)
-            .get_mut(&key)
-            .unwrap();
-        face.set_attribute(attr, value)
+        let mut modified = false;
+        self.update_faces(|faces| {
+            modified = faces.get_mut(&key).unwrap().set_attribute(attr, value);
+        });
+        modified
     }
 
     /// Look up a face by name.
@@ -2353,6 +2415,7 @@ impl FaceTable {
                     .map(|(name, face)| (face_symbol_value(&name), face))
                     .collect(),
             ),
+            roots_memo: std::cell::RefCell::new(None),
         }
     }
 
@@ -2366,6 +2429,7 @@ impl FaceTable {
                     .map(|(name, face)| (Value::from_sym_id(name), face))
                     .collect(),
             ),
+            roots_memo: std::cell::RefCell::new(None),
         }
     }
 }
@@ -2407,9 +2471,14 @@ impl GcTrace for Face {
 
 impl GcTrace for FaceTable {
     fn trace_roots(&self, roots: &mut Vec<Value>) {
-        roots.extend(self.faces.keys().copied());
-        for face in self.faces.values() {
-            face.trace_roots(roots);
+        roots.extend_from_slice(&self.traced_roots());
+    }
+
+    /// Serve the collector directly from the memo; the derived default would
+    /// materialize a throwaway vector for the same values every collection.
+    fn trace_roots_with(&self, visit: &mut dyn FnMut(Value)) {
+        for root in self.traced_roots().iter() {
+            visit(*root);
         }
     }
 }
