@@ -96,6 +96,7 @@ impl RunAccess<'_, '_> {
             cold: &mut local.cold,
             stats: &mut local.region_stats,
             region: &mut local.catalog_region,
+            tails: &mut local.cons_tails,
         }
     }
 
@@ -107,6 +108,58 @@ impl RunAccess<'_, '_> {
             .catalog_region
             .as_ref()
             .map(|r| r.bounds_for_test())
+    }
+
+    /// The front carving tail's `(cursor, limit)` cell indexes, if the owner
+    /// currently holds an unexhausted tail.
+    #[cfg(test)]
+    pub(crate) fn cons_tail_bounds_for_test(&self) -> Option<(u16, u16)> {
+        self.owner
+            .local
+            .as_ref()?
+            .cons_tails
+            .iter()
+            .find(|tail| !tail.exhausted())
+            .map(|tail| tail.bounds())
+    }
+
+    /// Bases of the blocks recorded in this owner's canonical young log.
+    #[cfg(test)]
+    pub(crate) fn cons_young_blocks_for_test(&self) -> Vec<usize> {
+        self.owner
+            .local
+            .as_ref()
+            .expect("resident owner state")
+            .cold
+            .young
+            .resident()
+            .expect("resident young log")
+            .blocks()
+            .iter()
+            .map(|base| base.addr())
+            .collect()
+    }
+
+    /// One cold batch grant attempt, for protocol tests.
+    #[cfg(test)]
+    pub(crate) fn cons_probe_tail_batch_for_test(&mut self) -> Result<(), RegistrationError> {
+        let state = self.cons_state();
+        state.check_boundary()?;
+        let mut tails = state.registry.cons_catalog.grant_tail_batch(
+            state.entry.key,
+            state.cold.young.resident_mut()?,
+            super::super::cons_storage::TAIL_BATCH_CELLS,
+        )?;
+        state.tails.append(&mut tails);
+        Ok(())
+    }
+
+    /// Drop every held tail without publishing: the failure path a lost or
+    /// panicked owner takes. The catalog must refuse to serve afterwards.
+    #[cfg(test)]
+    pub(crate) fn cons_drop_tails_for_test(&mut self) {
+        let local = self.owner.local.as_mut().expect("resident owner state");
+        local.cons_tails.clear();
     }
 
     /// Per-owner refill accounting for the A8 contention rows.
@@ -121,6 +174,26 @@ impl RunAccess<'_, '_> {
     }
 }
 
+impl Mutator<'_> {
+    /// Hand every held cons tail suffix back under the catalog gate before an
+    /// image publication. Only publication paths call this, after their loan
+    /// checks proved no run borrow can hold a tail; the steady single-thread
+    /// state holds none and takes no lock at all.
+    pub(super) fn publish_cons_tails(&mut self) -> Result<(), RegistrationError> {
+        let Some(local) = self.local.as_mut() else {
+            return Err(RegistrationError::Publication);
+        };
+        if local.cons_tails.is_empty() {
+            return Ok(());
+        }
+        let tails = std::mem::take(&mut local.cons_tails);
+        self.registry
+            .cons_catalog
+            .publish_tails(self.entry.key, tails)?;
+        Ok(())
+    }
+}
+
 /// Disjoint allocator loans: cold refill never reborrows the root bank or a
 /// whole OwnerGcState/heap while branded root pointers are live.
 pub(super) struct ConsRunState<'run> {
@@ -131,6 +204,7 @@ pub(super) struct ConsRunState<'run> {
     pub(super) cold: &'run mut super::super::mutator_gc::SatbMutatorState,
     pub(super) stats: &'run mut super::super::alloc_region::RegionStats,
     pub(super) region: &'run mut Option<super::super::cons_storage::CatalogRegion>,
+    pub(super) tails: &'run mut Vec<super::super::cons_storage::OwnedConsTail>,
 }
 impl ConsRunState<'_> {
     pub(super) fn check_boundary(&self) -> Result<(), RegistrationError> {
@@ -162,11 +236,28 @@ impl ConsRunState<'_> {
         if self.cold.young.id() != self.entry.young {
             return Err(RegistrationError::StaleRegistration);
         }
-        let region = self.registry.cons_catalog.grant(
-            self.entry.key,
-            self.cold.young.resident_mut()?,
-            MAX,
-        )?;
+        // Spent tails stay in the list until publication: only the ACK-side
+        // gate may decrement the catalog's lent-range charge, so dropping one
+        // early would strand active_regions above zero forever. Carving just
+        // skips them; one list drains fully at the next publish.
+        if self
+            .tails
+            .iter()
+            .all(super::super::cons_storage::OwnedConsTail::exhausted)
+        {
+            let granted = self.registry.cons_catalog.grant_tail_batch(
+                self.entry.key,
+                self.cold.young.resident_mut()?,
+                super::super::cons_storage::TAIL_BATCH_CELLS,
+            )?;
+            self.tails.extend(granted);
+        }
+        let tail = self
+            .tails
+            .iter_mut()
+            .find(|tail| !tail.exhausted())
+            .expect("granted tail");
+        let region = tail.carve(self.entry.key, MAX);
         let n = region.total();
         self.hot.allocated_count += n;
         let slot = MemoryUseCountSlot::ConsCells.index();
@@ -188,9 +279,20 @@ impl ConsRunState<'_> {
     #[inline(never)]
     pub(super) fn close(&mut self) -> Result<(), RegistrationError> {
         self.check_boundary()?;
-        let Some(region) = self.region.take() else {
+        let Some(mut region) = self.region.take() else {
             return Ok(());
         };
+        // Fast local path: the region was carved from one of this owner's
+        // exclusive tails, so the rewind only moves that tail's cursor.
+        for tail in self.tails.iter_mut() {
+            if let Some(unused) = tail.rewind_region(&region) {
+                region.retire();
+                self.refund(unused);
+                return Ok(());
+            }
+        }
+        // A region no owned tail can claim is a protocol violation: the
+        // gated close fails loudly (and poisons) instead of refunding.
         let unused = match self.registry.cons_catalog.close(self.entry.key, region) {
             Ok(unused) => unused,
             Err((error, region)) => {
@@ -199,13 +301,17 @@ impl ConsRunState<'_> {
                 return Err(error);
             }
         };
+        self.refund(unused);
+        Ok(())
+    }
+
+    fn refund(&mut self, unused: usize) {
         self.hot.allocated_count -= unused;
         self.hot.bytes_since_gc -= unused * size_of::<ConsCell>();
         let slot = MemoryUseCountSlot::ConsCells.index();
         self.hot.memory_use_counts[slot] =
             self.hot.memory_use_counts[slot].wrapping_sub(unused as u64);
         self.stats.cons_tail_closes += u64::from(unused != 0);
-        Ok(())
     }
 }
 

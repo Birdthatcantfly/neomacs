@@ -91,6 +91,21 @@ impl ConsBlock {
         Self::ptr_offset(ptr) / size_of::<ConsCell>()
     }
 
+    /// The cell at `index` of the block whose storage begins at `base`.
+    ///
+    /// # Safety
+    /// `base` is a live registered block base of this heap era and `index`
+    /// is within `[0, CONS_BLOCK_SIZE)`; the caller owns the returned cell
+    /// range exclusively.
+    #[inline]
+    pub(super) unsafe fn cell_ptr_at(base: usize, index: usize) -> *mut ConsCell {
+        debug_assert!(index < CONS_BLOCK_SIZE);
+        debug_assert!(Self::ptr_is_cell_aligned(
+            (base + index * size_of::<ConsCell>()) as *const ConsCell
+        ));
+        (base + index * size_of::<ConsCell>()) as *mut ConsCell
+    }
+
     #[inline]
     pub(super) fn mark_bit(index: usize) -> ConsMarkBit {
         ConsBlockTrailer::mark_bit(index)

@@ -282,6 +282,7 @@ impl RunAccess<'_, '_> {
             cold: &mut local.cold,
             stats: &mut local.region_stats,
             region: &mut local.catalog_region,
+            tails: &mut local.cons_tails,
         };
         allocation.check_boundary()?;
         allocation

@@ -187,6 +187,10 @@ impl<'era> Mutator<'era> {
                 .map_err(|_| RendezvousError::Capacity)?;
             (generation, epoch)
         };
+        // Held cons tails are owner-exclusive storage: every unhanded suffix
+        // returns under the catalog gate before this image can publish. The
+        // loan checks above prove no run borrow can hold a tail right now.
+        self.publish_cons_tails()?;
         self.local
             .as_ref()
             .ok_or(RendezvousError::Publication)?

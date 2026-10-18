@@ -8,6 +8,7 @@
 use super::card_table::CardSlots;
 use super::chunk_map::{ChunkClass, ChunkEntry, ChunkMap};
 use super::cons_allocator::{ConsAllocatorOwner, ConsBlockBase};
+use super::cons_block_trailer::CONS_BLOCK_SIZE;
 use super::cons_blocks::ConsBlock;
 use super::mutator_registration::{MutatorKey, RegistrationError};
 use super::young_registry::YoungBlockLog;
@@ -20,6 +21,16 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 const MAX_GRANT: usize = 128;
+
+/// Whole-tail batch lending target: two cons blocks per catalog acquisition.
+/// Publication at ACK/native stop returns the unhanded suffix, so a batch is
+/// handed back at the latest at the next stop; between stops a batch only
+/// refills when its owner actually exhausted every lent tail.
+pub(super) const TAIL_BATCH_CELLS: usize = 2 * CONS_BLOCK_SIZE;
+
+/// Free-list fragmentation bound: one batch gate takes at most this many
+/// runs, bounding the critical section on a fragmented heap.
+const TAIL_BATCH_MAX_RUNS: usize = 64;
 
 struct CatalogIdentity {
     abandoned: AtomicBool,
@@ -69,6 +80,7 @@ impl CatalogRegion {
     pub(super) fn source(&self) -> CatalogSource {
         self.source
     }
+
     #[cfg(test)]
     pub(super) fn bounds_for_test(&self) -> (usize, usize, usize) {
         // SAFETY: the exclusive run includes every cell through total.
@@ -108,6 +120,13 @@ impl CatalogRegion {
         debug_assert!(used >= self.used && used <= self.total);
         self.used = used;
     }
+
+    /// Retire a region closed through its owner's local tail rewind: the
+    /// lending tail already owns the unused suffix, so dropping the region
+    /// must not mark the catalog abandoned.
+    pub(super) fn retire(&mut self) {
+        self.active = false;
+    }
 }
 impl Drop for CatalogRegion {
     fn drop(&mut self) {
@@ -117,6 +136,98 @@ impl Drop for CatalogRegion {
     }
 }
 static_assertions::assert_not_impl_any!(CatalogRegion: Send, Sync, Clone, Copy);
+
+/// One whole block tail or free-list run lent to a single owner for lock-free
+/// local region carving. Only the owning thread moves `cursor`; the unhanded
+/// suffix `[cursor, limit)` returns under the catalog gate at publication
+/// (ACK/native stop/retirement). Cells below `cursor` stay exclusively the
+/// owner's until then, so no other grant can overlap them.
+#[must_use = "publish every tail through its original catalog before stopping"]
+pub(super) struct OwnedConsTail {
+    identity: Arc<CatalogIdentity>,
+    /// Base address of the lending block; the lent range never spans blocks.
+    base: usize,
+    /// First index of the lent range.
+    start: u16,
+    /// First index never handed to a region.
+    cursor: u16,
+    /// End of the lent range (exclusive).
+    limit: u16,
+    /// The range came from the block's bump top: publication may rewind
+    /// `next_index` over the suffix instead of free-listing it.
+    from_tail: bool,
+    source: CatalogSource,
+    /// Only the owning thread moves `cursor`; this keeps the auto traits
+    /// from claiming otherwise, exactly like an open region.
+    _thread: PhantomData<Rc<()>>,
+}
+impl OwnedConsTail {
+    pub(super) fn exhausted(&self) -> bool {
+        self.cursor == self.limit
+    }
+
+    pub(super) fn source(&self) -> CatalogSource {
+        self.source
+    }
+
+    /// The front carving position and the exclusive end, in cell indexes.
+    pub(super) fn bounds(&self) -> (u16, u16) {
+        (self.cursor, self.limit)
+    }
+
+    /// Carve up to `want` cells as one exclusive region, advancing the local
+    /// cursor. No shared lock is taken: the caller owns this tail.
+    pub(super) fn carve(&mut self, owner: MutatorKey, want: usize) -> CatalogRegion {
+        let avail = self.limit - self.cursor;
+        let count = want.min(avail as usize);
+        debug_assert_ne!(count, 0, "caller refills on exhaustion");
+        let start = self.cursor;
+        self.cursor = start + count as u16;
+        // SAFETY: this tail's block is registered and live for this era, and
+        // the carved range is exclusively this owner's until publication.
+        let first = unsafe { ConsBlock::cell_ptr_at(self.base, start as usize) };
+        CatalogRegion {
+            identity: Arc::clone(&self.identity),
+            owner,
+            first: NonNull::new(first).expect("nonempty cons run"),
+            total: count,
+            used: 0,
+            source: self.source,
+            active: true,
+            _thread: PhantomData,
+        }
+    }
+
+    /// Match a region carved from this tail and rewind the cursor over its
+    /// unused suffix, answering that suffix's cell count. The match is exact:
+    /// the region's range must end at this tail's cursor and begin at or
+    /// after this tail's start, which only the carving tail satisfies
+    /// because lent ranges of one block are disjoint.
+    pub(super) fn rewind_region(&mut self, region: &CatalogRegion) -> Option<usize> {
+        let base = ConsBlock::block_base_for_ptr(region.first.as_ptr());
+        if self.base != base {
+            return None;
+        }
+        let start = ConsBlock::index_of_ptr(region.first.as_ptr());
+        let end = start + region.total;
+        if self.cursor as usize != end || start < self.start as usize {
+            return None;
+        }
+        let unused = region.unused();
+        self.cursor = (start + region.used) as u16;
+        Some(unused)
+    }
+}
+impl Drop for OwnedConsTail {
+    fn drop(&mut self) {
+        if !self.exhausted() {
+            // An un-published tail leaves the catalog's bump tops and free
+            // lists incoherent; only abandonment retains a sound picture.
+            self.identity.abandoned.store(true, Ordering::Release);
+        }
+    }
+}
+static_assertions::assert_not_impl_any!(OwnedConsTail: Send, Sync, Clone, Copy);
 
 struct CatalogState {
     allocator: ConsAllocatorOwner,
@@ -146,6 +257,11 @@ pub(super) struct ConsCatalog {
     heap: HeapIdentity,
     identity: Arc<CatalogIdentity>,
     state: Mutex<Option<CatalogState>>,
+    /// Installation flag for slice admission, set under the gate at install
+    /// and cleared under the gate at restore. A live RunAccess loan excludes
+    /// stopped restoration of this catalog, so an acquire load inside a slice
+    /// can never observe a torn install/restore transition: no mutex needed.
+    installed: AtomicBool,
     /// Card-table base snapshotted at install. Outside the catalog mutex so a
     /// cons field store can mark a card without the heap loan or the gate.
     /// Zero means this era has no generational table. Not cleared on restore:
@@ -223,6 +339,7 @@ impl ConsCatalog {
                 abandoned: AtomicBool::new(false),
             }),
             state: Mutex::new(None),
+            installed: AtomicBool::new(false),
             card_base: AtomicUsize::new(0),
         }
     }
@@ -253,18 +370,18 @@ impl ConsCatalog {
     }
 
     /// Cold admission confirms installation before a slice callback can run.
-    /// The live RunAccess loan excludes stopped restoration of this catalog.
+    /// The live RunAccess loan excludes stopped restoration of this catalog,
+    /// so the installed flag load needs no mutex.
     #[cold]
     #[inline(never)]
     pub(super) fn admit_slice(&self, owner: MutatorKey) -> Result<(), RegistrationError> {
         if owner.heap_identity() != self.heap {
             return Err(RegistrationError::WrongHeap);
         }
-        let gate = self.lock()?;
-        if gate.is_none() {
+        if !self.installed.load(Ordering::Acquire) {
             return Err(RegistrationError::Publication);
         }
-        Ok(())
+        self.check_live()
     }
 
     pub(super) fn check_live(&self) -> Result<(), RegistrationError> {
@@ -350,6 +467,7 @@ impl ConsCatalog {
             source_grants: [0; 3],
         };
         *gate = Some(state);
+        self.installed.store(true, Ordering::Release);
         self.publish_card_base(heap);
         Ok(())
     }
@@ -392,6 +510,7 @@ impl ConsCatalog {
             return Err(RegistrationError::Publication);
         }
         let state = gate.take().expect("validated installed catalog");
+        self.installed.store(false, Ordering::Release);
         heap.cons_allocator = state.allocator;
         heap.cons_blocks = state.blocks;
         heap.cons_block_index_by_base = state.by_base;
@@ -575,6 +694,284 @@ impl ConsCatalog {
         })();
         result.map_err(|error| (error, region))
     }
+
+    fn note_batch_carve(
+        state: &mut CatalogState,
+        base: usize,
+        young: &mut YoungBlockLog,
+    ) -> Result<(), crate::tagged::gc::young_registry::YoungRegistryError> {
+        // Non-generational eras keep every owner young log empty exactly as
+        // the per-region grant did: capture_young refuses a nonempty GEN0 log.
+        if !state.generational {
+            return Ok(());
+        }
+        let index = *state
+            .by_base
+            .get(&base)
+            .expect("batch grant has canonical base index");
+        state
+            .allocator
+            .note_carve(ConsBlockBase::of(&state.blocks[index]), young)
+    }
+
+    /// Unwind a partially built batch after a failed young recording: every
+    /// lent run is still exclusively ours, so the same close semantics return
+    /// each range before the error escapes.
+    fn unwind_batch(state: &mut CatalogState, tails: &mut [OwnedConsTail]) {
+        for tail in tails.iter_mut() {
+            let unused = (tail.limit - tail.cursor) as usize;
+            if tail.from_tail {
+                let index = *state
+                    .by_base
+                    .get(&tail.base)
+                    .expect("granted block base index");
+                let block = &mut state.blocks[index];
+                debug_assert_eq!(block.next_index as usize, tail.limit as usize);
+                // Bits above the rewound top were never set.
+                block.rewind_tail(tail.start as usize);
+            } else {
+                ConsBlock::mark_run_at(tail.base, tail.cursor as usize, unused, false);
+                // SAFETY: these exact unhanded cells are absent from every
+                // free list and exclusively owned by this batch.
+                unsafe {
+                    state.allocator.return_unused(
+                        // SAFETY: the tail names a registered live block.
+                        unsafe { ConsBlock::cell_ptr_at(tail.base, tail.cursor as usize) },
+                        unused,
+                    )
+                };
+            }
+            tail.cursor = tail.limit;
+        }
+    }
+
+    /// Lend whole tails — free-list runs, the last block's remaining bump
+    /// top, and freshly installed blocks — until `want` cells are exclusive
+    /// to this owner. One catalog acquisition serves a whole batch; the
+    /// per-region carve from a held tail takes no shared lock.
+    ///
+    /// The caller's canonical registry has validated the full key and its
+    /// uniquely borrowed resident young payload, exactly as for `grant`.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn grant_tail_batch(
+        &self,
+        owner: MutatorKey,
+        young: &mut YoungBlockLog,
+        want: usize,
+    ) -> Result<Vec<OwnedConsTail>, RegistrationError> {
+        if owner.heap_identity() != self.heap || young.id().heap_identity() != self.heap {
+            return Err(RegistrationError::WrongHeap);
+        }
+        if !(1..=TAIL_BATCH_CELLS).contains(&want) {
+            return Err(RegistrationError::Capacity);
+        }
+        #[cfg(test)]
+        let catalog_wait = std::time::Instant::now();
+        let mut gate = self.lock()?;
+        #[cfg(test)]
+        test_catalog_wait(catalog_wait, CatalogOp::Grant);
+        let state = gate.as_mut().ok_or(RegistrationError::Publication)?;
+        state
+            .live_count
+            .checked_add(want)
+            .ok_or(RegistrationError::Exhausted)?;
+        let mut tails: Vec<OwnedConsTail> = Vec::new();
+        let mut remaining = want;
+        let carve_result: Result<(), crate::tagged::gc::young_registry::YoungRegistryError> = 'batch: {
+            loop {
+                if remaining == 0 || tails.len() == TAIL_BATCH_MAX_RUNS {
+                    break 'batch Ok(());
+                }
+                // (a) A free-list run of previously used cells.
+                // SAFETY: this catalog owns every registered block, no sweep
+                // overlaps, and the admitted allocator removes an exclusive
+                // free run.
+                if let Some((first, count)) = unsafe { state.allocator.reserve_run(remaining) } {
+                    let base = ConsBlock::block_base_for_ptr(first);
+                    if let Err(error) = Self::note_batch_carve(state, base, young) {
+                        break 'batch Err(error);
+                    }
+                    let start = ConsBlock::index_of_ptr(first) as u16;
+                    tails.push(OwnedConsTail {
+                        identity: Arc::clone(&self.identity),
+                        base,
+                        start,
+                        cursor: start,
+                        limit: start + count as u16,
+                        from_tail: false,
+                        source: CatalogSource::FreeList,
+                        _thread: PhantomData,
+                    });
+                    remaining -= count;
+                    continue;
+                }
+                // (b) The whole remaining bump top of the last ready block.
+                let tail = state
+                    .blocks
+                    .last_mut()
+                    .filter(|block| state.allocator.is_ready(ConsBlockBase::of(block)))
+                    .and_then(|block| {
+                        let (start, count) = block.reserve_tail(remaining);
+                        (count != 0).then_some((start, count))
+                    });
+                if let Some((start, count)) = tail {
+                    let base = state.blocks.last().expect("just reserved").base_addr();
+                    if let Err(error) = Self::note_batch_carve(state, base, young) {
+                        break 'batch Err(error);
+                    }
+                    tails.push(OwnedConsTail {
+                        identity: Arc::clone(&self.identity),
+                        base,
+                        start: start as u16,
+                        cursor: start as u16,
+                        limit: (start + count) as u16,
+                        from_tail: true,
+                        source: CatalogSource::BlockTail,
+                        _thread: PhantomData,
+                    });
+                    remaining -= count;
+                    continue;
+                }
+                // (c) Install retained storage ownership before metadata
+                // can name it. Any unwind after this point poisons the
+                // gate; Drop keeps the entire installed catalog, including
+                // this backing, alive.
+                {
+                    let mut block = ConsBlock::new();
+                    let (start, count) = block.reserve_tail(remaining);
+                    let base = block.base_addr();
+                    state.blocks.push(block);
+                    let index = state.blocks.len() - 1;
+                    state.allocator.register(&state.blocks[index]);
+                    assert!(
+                        state.by_base.insert(base, index).is_none(),
+                        "duplicate cons base"
+                    );
+                    if state.generational {
+                        if let Some(cards) = &mut state.cards {
+                            cards.insert_block(base);
+                        }
+                    }
+                    // Release publication is LAST: a reader must never
+                    // discover a chunk entry before allocator/vector/base/
+                    // card registration.
+                    if let Some(map) = &state.chunk_map {
+                        map.set(base, ChunkEntry::new(ChunkClass::Cons, index));
+                    }
+                    if let Err(error) = Self::note_batch_carve(state, base, young) {
+                        break 'batch Err(error);
+                    }
+                    tails.push(OwnedConsTail {
+                        identity: Arc::clone(&self.identity),
+                        base,
+                        start: start as u16,
+                        cursor: start as u16,
+                        limit: (start + count) as u16,
+                        from_tail: true,
+                        source: CatalogSource::FreshBlock,
+                        _thread: PhantomData,
+                    });
+                    remaining -= count;
+                }
+            }
+        };
+        if let Err(error) = carve_result {
+            Self::unwind_batch(state, &mut tails);
+            return Err(error.into());
+        }
+        let handed = want - remaining;
+        state
+            .live_count
+            .checked_add(handed)
+            .ok_or(RegistrationError::Exhausted)?;
+        state
+            .active_regions
+            .checked_add(tails.len())
+            .ok_or(RegistrationError::Exhausted)?;
+        state.live_count += handed;
+        state.active_regions += tails.len();
+        #[cfg(test)]
+        {
+            for tail in &tails {
+                let source_index = match tail.source {
+                    CatalogSource::FreeList => 0,
+                    CatalogSource::BlockTail => 1,
+                    CatalogSource::FreshBlock => 2,
+                };
+                state.source_grants[source_index] += 1;
+            }
+        }
+        Ok(tails)
+    }
+
+    /// The ACK-side publication: return every unhanded tail suffix under one
+    /// gate acquisition. A `from_tail` suffix rewinds the block's bump top
+    /// only while this tail still owns it; every other suffix returns through
+    /// the free list with the defensive mark clear. After this call the
+    /// catalog sees exactly the handed cells as live.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn publish_tails(
+        &self,
+        owner: MutatorKey,
+        tails: Vec<OwnedConsTail>,
+    ) -> Result<usize, RegistrationError> {
+        if owner.heap_identity() != self.heap {
+            return Err(RegistrationError::WrongHeap);
+        }
+        #[cfg(test)]
+        let catalog_wait = std::time::Instant::now();
+        let mut gate = self.lock()?;
+        #[cfg(test)]
+        test_catalog_wait(catalog_wait, CatalogOp::Close);
+        let state = gate.as_mut().ok_or(RegistrationError::Publication)?;
+        let mut refunded = 0;
+        for mut tail in tails {
+            if !Arc::ptr_eq(&self.identity, &tail.identity) {
+                return Err(RegistrationError::StaleRegistration);
+            }
+            if state.active_regions == 0 {
+                return Err(RegistrationError::OutstandingLoan);
+            }
+            let unused = (tail.limit - tail.cursor) as usize;
+            if unused != 0 {
+                let index = *state
+                    .by_base
+                    .get(&tail.base)
+                    .ok_or(RegistrationError::Publication)?;
+                let block = &mut state.blocks[index];
+                if block.base_addr() != tail.base || state.live_count < unused {
+                    return Err(RegistrationError::Publication);
+                }
+                // Mirror `close`: rewind the bump top only while this tail
+                // still ends at it — a later grant may own the cells above
+                // our limit, and then the suffix returns through the free
+                // list with the defensive mark clear instead.
+                if tail.from_tail && block.next_index as usize == tail.limit as usize {
+                    // Bits above the rewound top were never set.
+                    block.rewind_tail(tail.cursor as usize);
+                } else {
+                    ConsBlock::mark_run_at(tail.base, tail.cursor as usize, unused, false);
+                    // SAFETY: the unhanded suffix is exclusively owned here
+                    // and absent from every free list until this publication.
+                    unsafe {
+                        state.allocator.return_unused(
+                            // SAFETY: the tail names a registered live block.
+                            unsafe { ConsBlock::cell_ptr_at(tail.base, tail.cursor as usize) },
+                            unused,
+                        )
+                    };
+                }
+                state.live_count -= unused;
+                refunded += unused;
+            }
+            state.active_regions -= 1;
+            // Fully published: dropping the spent tail must not abandon.
+            tail.cursor = tail.limit;
+        }
+        Ok(refunded)
+    }
 }
 /// Counts/addresses only; never an unlocked storage borrow.
 #[cfg(test)]
@@ -588,6 +985,8 @@ pub(super) struct CatalogSnapshot {
     pub(super) live_count: usize,
     /// Free-list, existing-tail, fresh-block grants, respectively.
     pub(super) source_grants: [usize; 3],
+    /// Whether young-log carving records for this installed catalog.
+    pub(super) generational: bool,
 }
 #[cfg(test)]
 impl ConsCatalog {
@@ -602,6 +1001,7 @@ impl ConsCatalog {
                 active_regions: 0,
                 live_count: 0,
                 source_grants: [0; 3],
+                generational: false,
             });
         };
         let free = state.allocator.free_counts();
@@ -637,6 +1037,7 @@ impl ConsCatalog {
             active_regions: state.active_regions,
             live_count: state.live_count,
             source_grants: state.source_grants,
+            generational: state.generational,
         })
     }
 }

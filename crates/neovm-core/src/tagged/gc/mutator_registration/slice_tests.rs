@@ -136,11 +136,14 @@ fn forgetting_callback_reference_still_closes_slice_and_roots_the_alias_chain() 
             head.word_for_test(run)
         });
         assert!(!era.registry().poisoned.load(Ordering::Acquire));
+        // The closed slice left its tail lent to this owner: the charge is
+        // exactly what the ACK below must publish back.
+        assert!(era.cons_catalog_snapshot_for_test().unwrap().active_regions >= 1);
+        owner.enter_native(&[]).unwrap();
         assert_eq!(
             era.cons_catalog_snapshot_for_test().unwrap().active_regions,
             0
         );
-        owner.enter_native(&[]).unwrap();
         let mut stopped = era.stop().unwrap();
         era.return_cons_storage(&stopped).unwrap();
         assert!(era.collect_stopped(&mut stopped).unwrap().major);
@@ -244,7 +247,7 @@ fn abandoned_slice_retains_committed_cursor(panic_body: bool) {
                 "Drop/failed finish committed the last initialized cell"
             );
             let before = era.cons_catalog_snapshot_for_test().unwrap();
-            assert_eq!(before.active_regions, 1);
+            assert!(before.active_regions >= 1);
             assert_eq!(run.close_cons_region(), Err(RegistrationError::Poisoned));
             assert_eq!(era.cons_catalog_snapshot_for_test().unwrap(), before);
         }

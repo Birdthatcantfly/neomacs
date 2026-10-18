@@ -291,6 +291,8 @@ impl<'era> Mutator<'era> {
             .and_then(NonZeroU64::new)
             .ok_or(RegistrationError::Exhausted)?;
         // Every fallible identity/loan/phase check precedes moving any log.
+        // Held cons tails publish back to the catalog before the image does.
+        self.publish_cons_tails()?;
         let image = self
             .local
             .as_mut()

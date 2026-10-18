@@ -170,6 +170,7 @@ fn two_owner_cons_allocator_stress() {
         let active = Arc::new(AtomicUsize::new(0));
         let (ready_tx, ready_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
+        let (acked_tx, acked_rx) = mpsc::channel();
         thread::scope(|scope| {
             let _abort = PoisonOnUnwind(era.registry());
             // Senders are inside the scope closure: coordinator unwind
@@ -180,6 +181,7 @@ fn two_owner_cons_allocator_stress() {
                 commands.push(go_tx);
                 let ready = ready_tx.clone();
                 let results = result_tx.clone();
+                let acked = acked_tx.clone();
                 let active = Arc::clone(&active);
                 let nil = nil.clone();
                 scope.spawn(move || {
@@ -208,6 +210,9 @@ fn two_owner_cons_allocator_stress() {
                         results.send((index, phase, allocated)).unwrap();
                         let epoch = retry(|| owner.wait_request());
                         retry(|| owner.acknowledge(epoch, &all_roots));
+                        // Owner-exclusive tails return at the ACK, not at the
+                        // run close: signal only once the catalog is coherent.
+                        acked.send(()).unwrap();
                         apply(owner.begin_restore_retry(false).unwrap());
                     }
                     drop(all_roots);
@@ -216,6 +221,7 @@ fn two_owner_cons_allocator_stress() {
             }
             drop(ready_tx);
             drop(result_tx);
+            drop(acked_tx);
             let mut addresses = HashSet::new();
             for phase in 0..PHASES {
                 let first = receive(&ready_rx);
@@ -227,6 +233,14 @@ fn two_owner_cons_allocator_stress() {
                     go.send(()).unwrap();
                 }
                 let responses = [receive(&result_rx), receive(&result_rx)];
+                // Owners park in wait_request until the keeper requests the
+                // epoch; the ACK barrier can only drain after that request.
+                retry(|| era.rendezvous().request());
+                // Both ACKs publish every held tail suffix before this
+                // snapshot can observe a coherent zero-charge catalog.
+                for _ in 0..2 {
+                    receive(&acked_rx);
+                }
                 let catalog = era.cons_catalog_snapshot_for_test().unwrap();
                 assert!(catalog.installed && catalog.metadata_coherent);
                 assert_eq!(catalog.active_regions, 0);
@@ -234,7 +248,6 @@ fn two_owner_cons_allocator_stress() {
                     catalog.source_grants[2] > 0,
                     "stress installs real fresh blocks"
                 );
-                retry(|| era.rendezvous().request());
                 let mut stopped = retry(|| era.stop());
                 retry_registration(|| era.return_cons_storage(&stopped));
                 retry(|| {
@@ -488,7 +501,9 @@ fn earlier_tail_close_never_rewinds_through_another_owners_live_region() {
         });
         let before = era.cons_catalog_snapshot_for_test().unwrap();
         assert!(before.metadata_coherent);
-        assert_eq!(before.active_regions, 0);
+        // The seeding owner still holds its exclusive tail credit: closed
+        // regions no longer return storage until the owner ACKs.
+        assert!(before.active_regions >= 1);
         let mut a = first.run_access().unwrap();
         let a_root = a.cons(&cars[0], &nil).unwrap();
         let a_bounds = a.cons_region_for_test().unwrap();
@@ -496,34 +511,53 @@ fn earlier_tail_close_never_rewinds_through_another_owners_live_region() {
         let b_root = b.cons(&cars[1], &nil).unwrap();
         let b_bounds = b.cons_region_for_test().unwrap();
         let during = era.cons_catalog_snapshot_for_test().unwrap();
-        assert_eq!(during.active_regions, 2);
-        assert_eq!(during.source_grants[1], before.source_grants[1] + 2);
-        assert_eq!(
-            a_bounds.1, b_bounds.0,
-            "successive grants from the same tail"
+        assert!(during.active_regions >= 2, "each owner holds a tail");
+        assert!(
+            (during.source_grants[0] + during.source_grants[1] + during.source_grants[2])
+                >= (before.source_grants[0] + before.source_grants[1] + before.source_grants[2])
+                    + 2,
+            "both owners carved from newly lent tails"
         );
-        assert!(a_bounds.2 > 0 && b_bounds.2 > 0);
+        // Owners never share a tail any more: their exclusive ranges are
+        // disjoint by construction instead of by grant ordering.
+        assert!(
+            a_bounds.1 <= b_bounds.0 || b_bounds.1 <= a_bounds.0,
+            "owner tails are disjoint"
+        );
+        // A bootstrap free fragment may hand a whole one-cell run, so an
+        // open region can already be empty after its first cons; only the
+        // handed ranges and their disjointness are protocol invariants.
         a.close_cons_region().unwrap();
         let after_a = era.cons_catalog_snapshot_for_test().unwrap();
-        assert_eq!(after_a.active_regions, 1);
-        assert_eq!(after_a.free_count, during.free_count + a_bounds.2);
+        assert!(after_a.active_regions >= 1);
+        // The local rewind returns nothing through the shared gate.
+        assert_eq!(after_a.free_count, during.free_count);
+        assert!(a.cons_region_for_test().is_none());
         // The earlier suffix is reusable while B still retains its own live
-        // region; no cell may overlap B or either initialized prefix.
+        // region: A's next cell is the immediate tail successor of its own
+        // initialized prefix, never a cell of B or the free list.
         let reused = a.cons(&cars[0], &nil).unwrap();
         let reused_word = reused.cons_word_for_test();
-        assert_ne!(reused_word, a_root.cons_word_for_test());
+        if a_bounds.2 >= 1 {
+            assert_eq!(
+                reused_word,
+                a_root.cons_word_for_test() + std::mem::size_of::<crate::tagged::gc::ConsCell>(),
+                "the closed region's suffix serves the next local carve"
+            );
+        }
+        // Whatever the fragment geometry, the next local carve never serves
+        // a cell inside B's live exclusive region.
         assert!(reused_word < b_bounds.0 || reused_word >= b_bounds.1);
         a.close_cons_region().unwrap();
         b.close_cons_region().unwrap();
+        assert!(a.cons_region_for_test().is_none() && b.cons_region_for_test().is_none());
         drop((a, b));
-        assert_eq!(
-            era.cons_catalog_snapshot_for_test().unwrap().active_regions,
-            0
-        );
         let mut first_roots = seeds;
         first_roots.extend([a_root.clone(), reused.clone()]);
         first.enter_native(&first_roots).unwrap();
         second.enter_native(std::slice::from_ref(&b_root)).unwrap();
+        let acked = era.cons_catalog_snapshot_for_test().unwrap();
+        assert_eq!(acked.active_regions, 0, "both ACKs published every tail");
         let mut stopped = era.stop().unwrap();
         era.return_cons_storage(&stopped).unwrap();
         era.collect_stopped(&mut stopped).unwrap();
@@ -656,7 +690,9 @@ fn forgotten_open_cons_run_refuses_publication_native_and_finish_without_waiting
         assert!(!era.registry().poisoned.load(Ordering::Acquire));
         let before = era.cons_catalog_snapshot_for_test().unwrap();
         assert!(before.installed && before.metadata_coherent);
-        assert_eq!(before.active_regions, 1);
+        // One lent tail (or a multi-run batch) stays charged until the owner
+        // publishes; the forgotten run loan blocks that publication.
+        assert!(before.active_regions >= 1);
         let epoch = std::num::NonZeroU64::MIN;
         assert_eq!(
             owner.begin_publication(epoch).unwrap().publish(),
@@ -730,8 +766,9 @@ fn partial_cons_grant_refunds_owner_and_global_credits_then_merges_history_once(
                 assert_eq!(hot.pacing, Default::default());
             }
             let during = era.cons_catalog_snapshot_for_test().unwrap();
-            assert_eq!(during.active_regions, 1);
-            assert_eq!(during.live_count, base_live + charged);
+            // The whole lent tail batch is charged globally until the ACK.
+            assert!(during.active_regions >= 1);
+            assert!(during.live_count >= base_live + charged);
             run.close_cons_region().unwrap();
             {
                 let hot = &run.state().hot;
@@ -743,13 +780,22 @@ fn partial_cons_grant_refunds_owner_and_global_credits_then_merges_history_once(
             }
             assert!(run.cons_region_for_test().is_none());
             let closed = era.cons_catalog_snapshot_for_test().unwrap();
-            assert_eq!(closed.active_regions, 0);
-            assert_eq!(closed.live_count, base_live + handed);
+            // A local close moves no global credit: the suffix stays in the
+            // owner's exclusive tail until publication.
+            assert!(closed.active_regions >= 1);
+            assert_eq!(closed.live_count, during.live_count);
             drop(run);
             let mut expected_memory = base_memory;
             expected_memory[slot] = expected_memory[slot].wrapping_add(handed as u64);
             let expected_bytes = base_bytes + (handed * size_of::<ConsCell>()) as u64;
             owner.enter_native(&allocated).unwrap();
+            let acked = era.cons_catalog_snapshot_for_test().unwrap();
+            assert_eq!(acked.active_regions, 0, "the ACK published the tail");
+            assert_eq!(
+                acked.live_count,
+                base_live + handed,
+                "publication refunds exactly the unhanded suffix"
+            );
             let mut stopped = era.stop().unwrap();
             era.return_cons_storage(&stopped).unwrap();
             let report = era.collect_stopped(&mut stopped).unwrap();
