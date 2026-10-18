@@ -624,3 +624,79 @@ fn unnamed_face_change_retires_every_reusable_definition() {
         full.get("incremental-unnamed-face")
     );
 }
+
+#[test]
+fn realization_miss_roots_the_source_table_through_the_frame_lease() {
+    use crate::emacs_core::terminal::pure::{self, TerminalHost, TerminalRuntimeConfig};
+    struct Host;
+    impl TerminalHost for Host {
+        fn suspend_tty(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn resume_tty(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            pure::reset_terminal_host();
+            pure::reset_terminal_runtime();
+        }
+    }
+    let mut context = crate::emacs_core::Context::new();
+    let _restore = Restore;
+    pure::reset_terminal_runtime();
+    let frame = crate::emacs_core::window_cmds::ensure_selected_frame_id(&mut context);
+    pure::configure_terminal_runtime(TerminalRuntimeConfig::interactive(
+        Some("xterm-256color".to_owned()),
+        neomacs_display_protocol::tty_capabilities::TtyAttributeCapabilities::full_with_color_cells(
+            256,
+        ),
+    ));
+    assert!(context.frame_is_tty_face_target(frame));
+    let generation = context.face_change_count;
+    let mut table = crate::face::FaceTable::new();
+    let mut rooted = Face::new("lease-rooted-family");
+    rooted.family = Some(Value::string("lease-rooted"));
+    table.define("lease-rooted-family", rooted);
+    context
+        .frames
+        .get_mut(frame)
+        .expect("selected frame")
+        .face_realization
+        .prepare(generation, table);
+    assert!(
+        context
+            .frames
+            .get(frame)
+            .unwrap()
+            .face_realization
+            .root_lease()
+            .is_none(),
+        "prepare retires the lease; the first miss must install it"
+    );
+    // Two distinct attribute sets force two lookup misses. Each used to
+    // re-walk every definition and push it on the scratch root stack; both
+    // now share the frame cache's retained batch lease instead.
+    let first = context.realize_display_face_for_frame(frame, &Face::new("first-miss"));
+    let installed = context
+        .frames
+        .get(frame)
+        .unwrap()
+        .face_realization
+        .root_lease()
+        .expect("realization miss installed the frame lease");
+    let second = context.realize_display_face_for_frame(frame, &Face::new("second-miss"));
+    let warm = context
+        .frames
+        .get(frame)
+        .unwrap()
+        .face_realization
+        .root_lease()
+        .expect("warm miss keeps the frame lease");
+    assert!(std::sync::Arc::ptr_eq(&installed, &warm));
+    // No color specifications: realization returns the merged source as-is.
+    assert_eq!(first, Face::new("first-miss"));
+    assert_eq!(second, Face::new("second-miss"));
+}

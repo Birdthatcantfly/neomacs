@@ -174,6 +174,42 @@ impl Drop for RealizationRoots {
     }
 }
 
+/// Rooting for one full source-table snapshot across a realization's Lisp
+/// callbacks. The warm path shares the frame cache's retained batch lease —
+/// an Arc bump for values the lease already pins for every collector —
+/// instead of re-walking and re-admitting every definition on each cache
+/// miss. GNU's per-realization code touches one lface vector at a time while
+/// the frame's face cache and the symbol plists hold the definitions
+/// (`realize_tty_face`, src/xfaces.c:6731-6803); only lease admission
+/// failure (no installed mutator heap) falls back to scratch roots.
+enum SourceTableRoots {
+    Lease {
+        _lease: std::sync::Arc<[crate::tagged::transport::SharedRoot]>,
+    },
+    Scratch {
+        _scope: RealizationRoots,
+    },
+}
+
+impl SourceTableRoots {
+    fn new(
+        context: &mut super::super::eval::Context,
+        frame: FrameId,
+        table: &crate::face::FaceTable,
+    ) -> Self {
+        match context.display_face_table_root_lease(frame, table) {
+            Ok(lease) => Self::Lease { _lease: lease },
+            Err(_) => {
+                let mut roots = Vec::new();
+                table.trace_roots(&mut roots);
+                Self::Scratch {
+                    _scope: RealizationRoots::from_values(roots),
+                }
+            }
+        }
+    }
+}
+
 fn descriptor_color(desc: Value, color_cells: i64) -> Option<Color> {
     let items = list_to_vec(&desc)?;
     let index = items.get(1)?.as_fixnum()?;
@@ -473,11 +509,9 @@ impl super::super::eval::Context {
             .get(frame)
             .and_then(|owner| owner.face_realization.table(self.face_change_count))
             .cloned();
-        let mut source_roots = Vec::new();
-        if let Some(table) = &source_table {
-            table.trace_roots(&mut source_roots);
-        }
-        let _source_roots = RealizationRoots::from_values(source_roots);
+        let _source_roots = source_table
+            .as_ref()
+            .map(|table| SourceTableRoots::new(self, frame, table));
         let _roots = RealizationRoots::new(attributes);
         let mut realized = attributes.clone();
         // GNU realize_tty_face:6731-6803: underline BEFORE foreground/background.
