@@ -404,7 +404,7 @@ fn scheduler_finishes_residual_major_and_skips_minor() {
         assert!(context.tagged_heap.should_run_minor(false, false));
         let before = counts(&context);
         let heap_collections = context.tagged_heap.gc_collections();
-        let heap_ptr: *mut crate::tagged::gc::TaggedHeap = &mut *context.tagged_heap;
+        let heap_ptr: *mut crate::tagged::gc::TaggedHeap = context.tagged_heap.heap_root().as_ptr();
         // SAFETY: this Context owns the installed heap and every runtime root.
         // Its mutator is stopped through admission, root capture and optional
         // worker publication. Root enumeration only seeds collector work and

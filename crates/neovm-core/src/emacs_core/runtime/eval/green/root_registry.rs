@@ -53,7 +53,7 @@ impl super::Context {
         if self.with_green_runtime(|runtime| runtime.parked.borrow().is_empty()) {
             return;
         }
-        let heap: *mut crate::tagged::gc::TaggedHeap = &mut *self.tagged_heap;
+        let heap: *mut crate::tagged::gc::TaggedHeap = self.tagged_heap.heap_root().as_ptr();
         // SAFETY: main holds the Baton after all joins, with no callback or
         // collection extent active. The full registered census remains rooted
         // until mark and sweep finish and every lease has explicitly retired.

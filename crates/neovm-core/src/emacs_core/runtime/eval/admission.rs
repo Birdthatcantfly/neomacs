@@ -127,7 +127,7 @@ impl<'owner> CollectorClosedPhase<'owner> {
         let next = saved_inhibit
             .checked_add(1)
             .ok_or(AdmissionError::InhibitDepthOverflow)?;
-        let heap: *mut TaggedHeap = &mut *context.tagged_heap;
+        let heap: *mut TaggedHeap = context.tagged_heap.heap_root().as_ptr();
         // SAFETY: admission owns the stopped, sole owner of this heap and
         // runs no Lisp, callback or finalizer-reentrant code; no shared
         // manager loan is live. The reseed enumerates the complete

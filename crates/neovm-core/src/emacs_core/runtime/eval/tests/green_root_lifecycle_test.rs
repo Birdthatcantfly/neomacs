@@ -56,7 +56,7 @@ fn restored_owner_retirement_leaves_cooperative_sweep_pending() {
     } else {
         owner.tagged_heap.begin_stw_collection();
     }
-    let heap: *mut crate::tagged::gc::TaggedHeap = &mut *owner.tagged_heap;
+    let heap: *mut crate::tagged::gc::TaggedHeap = owner.tagged_heap.heap_root().as_ptr();
     // SAFETY: this fixture owns the Baton without any other owner, callback,
     // collector or handoff. Enumerate the complete current Context, symbol
     // cells and publication table before finishing this stopped mark extent.

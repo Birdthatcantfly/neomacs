@@ -222,7 +222,7 @@ impl Context {
         let frozen = context
             .capture_parallel_legacy_roots(&keeper)
             .expect("collection fixture frozen legacy roots");
-        let heap: *mut crate::tagged::gc::TaggedHeap = &mut *context.tagged_heap;
+        let heap: *mut crate::tagged::gc::TaggedHeap = context.tagged_heap.heap_root().as_ptr();
         // SAFETY: the original Context is serial and suspended, has no live
         // manager loan/callback, and captured its private roots before this
         // exclusive heap loan. The retained keeper excludes concurrent mark.
@@ -260,7 +260,7 @@ impl Context {
             .expect("collection fixture frozen legacy roots");
         let expected_heap = keeper.parallel_heap_identity();
         let expected_world = Arc::clone(&keeper.world);
-        let heap: *mut crate::tagged::gc::TaggedHeap = &mut *context.tagged_heap;
+        let heap: *mut crate::tagged::gc::TaggedHeap = context.tagged_heap.heap_root().as_ptr();
         // SAFETY: same sole-owner/capture-before-loan proof as the fixture above.
         let collector = unsafe {
             (*heap).drain_to_quiescent(|heap| {

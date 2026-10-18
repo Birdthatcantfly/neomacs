@@ -54,7 +54,7 @@ fn rooted_admission_rejects_real_capture_from_another_heap_and_returns_capabilit
     let keeper = second.issue_green_baton().unwrap();
     let second_heap = keeper.parallel_heap_identity();
     assert_ne!(first_heap, second_heap);
-    let heap: *mut crate::tagged::gc::TaggedHeap = &mut *second.tagged_heap;
+    let heap: *mut crate::tagged::gc::TaggedHeap = second.tagged_heap.heap_root().as_ptr();
     // SAFETY: this fresh Context is the sole serial owner; enumeration only
     // seeds its roots, and all capture/identity reads precede the heap loan.
     let collector = unsafe {
@@ -92,7 +92,7 @@ fn assert_fixture_refuses_before_registration(
     let keeper = context.issue_green_baton().unwrap();
     let expected = keeper.parallel_heap_identity();
     let frozen = context.capture_parallel_legacy_roots(&keeper).unwrap();
-    let heap: *mut crate::tagged::gc::TaggedHeap = &mut *context.tagged_heap;
+    let heap: *mut crate::tagged::gc::TaggedHeap = context.tagged_heap.heap_root().as_ptr();
     // SAFETY: sole serial Context, no callback/manager loan, private capture
     // completed before this heap loan, and keeper excludes concurrent mark.
     let collector = unsafe {

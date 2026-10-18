@@ -631,7 +631,7 @@ impl Context {
             // supplies its roots to every later collection in the usual way.
             return Ok(());
         }
-        let heap: *mut crate::tagged::gc::TaggedHeap = &mut *self.tagged_heap;
+        let heap: *mut crate::tagged::gc::TaggedHeap = self.tagged_heap.heap_root().as_ptr();
         // SAFETY: the Baton holder has restored its owner; no Lisp, callback
         // or handoff runs until retirement. Reseeding uses the full registered
         // census, including every still-published owner and symbol cell.

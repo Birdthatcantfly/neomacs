@@ -2169,7 +2169,7 @@ impl Context {
         // Per-slice sweep budget in cons blocks (each ~4096 cells); the slice
         // reclaims proportionally more non-cons objects internally.
         const INCREMENTAL_SWEEP_BUDGET: usize = 8;
-        let heap_ptr: *mut crate::tagged::gc::TaggedHeap = &mut *self.tagged_heap;
+        let heap_ptr: *mut crate::tagged::gc::TaggedHeap = self.tagged_heap.heap_root().as_ptr();
         // True only when a whole mark+sweep cycle finishes in this call, gating
         // the once-per-collection bookkeeping below.
         let cycle_completed;

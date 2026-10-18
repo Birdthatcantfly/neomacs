@@ -175,7 +175,7 @@ impl Context {
         let keeper = context
             .issue_green_baton()
             .expect("fresh fixture World issues its keeper");
-        let heap: *mut crate::tagged::gc::TaggedHeap = &mut *context.tagged_heap;
+        let heap: *mut crate::tagged::gc::TaggedHeap = context.tagged_heap.heap_root().as_ptr();
         // SAFETY: this fresh Context is the sole running owner and holds the
         // keeper. No manager loan, callback, safepoint or collection extent
         // survives keeper issuance. Reseeding only enumerates the complete
@@ -215,7 +215,7 @@ impl Context {
             });
         }
         let keeper = context.issue_green_baton().expect("rooted fixture keeper");
-        let heap: *mut crate::tagged::gc::TaggedHeap = &mut *context.tagged_heap;
+        let heap: *mut crate::tagged::gc::TaggedHeap = context.tagged_heap.heap_root().as_ptr();
         // SAFETY: same complete frozen-World census as with_test_mutator_era.
         // SharedRoot table entries keep every synthetic input live as well.
         let collector = unsafe {
@@ -237,7 +237,7 @@ impl Context {
     pub(in crate::emacs_core::eval) fn issue_green_baton(
         &mut self,
     ) -> Result<Baton, super::super::green::GreenStartError> {
-        let heap: *mut crate::tagged::gc::TaggedHeap = &mut *self.tagged_heap;
+        let heap: *mut crate::tagged::gc::TaggedHeap = self.tagged_heap.heap_root().as_ptr();
         // SAFETY: the sole running owner, at a safe point, with no manager
         // loan or callback live; the reseed enumerates the registered root
         // census and only adds mark roots (as admission's collector-closed

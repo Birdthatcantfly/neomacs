@@ -172,6 +172,16 @@ impl<T> DerefMut for WorldView<T> {
     }
 }
 impl WorldView<crate::tagged::gc::TaggedHeap> {
+    /// The heap's provenance root.
+    ///
+    /// Raw-pointer users that keep a heap pointer across other heap accesses
+    /// must start here, not at a `&mut *view` reborrow: a reference-derived
+    /// pointer is a child tag that the next sibling reborrow freezes or pops
+    /// (Tree/Stacked Borrows respectively).
+    pub(crate) fn heap_root(&self) -> NonNull<crate::tagged::gc::TaggedHeap> {
+        self.ptr
+    }
+
     /// Install this view's heap in the calling thread's allocation slot.
     ///
     /// The slot is set from the view's provenance root, which is the same
