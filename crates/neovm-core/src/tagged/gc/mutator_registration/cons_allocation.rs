@@ -108,6 +108,17 @@ impl RunAccess<'_, '_> {
             .as_ref()
             .map(|r| r.bounds_for_test())
     }
+
+    /// Per-owner refill accounting for the A8 contention rows.
+    #[cfg(test)]
+    pub(crate) fn cons_stats_for_test(&self) -> super::super::alloc_region::RegionStats {
+        self.owner
+            .local
+            .as_ref()
+            .expect("resident owner state")
+            .region_stats
+            .clone()
+    }
 }
 
 /// Disjoint allocator loans: cold refill never reborrows the root bank or a

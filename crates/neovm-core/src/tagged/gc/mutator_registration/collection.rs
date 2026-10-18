@@ -224,7 +224,9 @@ impl<'heap> ParallelHeapEra<'heap> {
             crate::tagged::transport::collect_shared_root_gc_roots(heap, &mut roots);
         }
         let root_count = roots.len() + words.len();
-        stopped.trace(|guard, proof| {
+        #[cfg(test)]
+        super::a8_probes::mark(super::a8_probes::ROOT_CENSUS_DONE, stopped.epoch().get(), 0);
+        let traced = stopped.trace(|guard, proof| {
             let mut slot = self
                 .collector
                 .try_borrow_mut()
@@ -241,7 +243,10 @@ impl<'heap> ParallelHeapEra<'heap> {
             // run consumes the scoped heap job before the final metadata gate.
             images.restore()?;
             Ok(report)
-        })
+        });
+        #[cfg(test)]
+        super::a8_probes::mark(super::a8_probes::MARK_SWEEP_DONE, stopped.epoch().get(), 0);
+        traced
     }
 }
 

@@ -243,6 +243,8 @@ pub(super) fn request(registry: &Registry) -> Result<Request, RendezvousError> {
         registry
             .request_epoch
             .store(gate.rendezvous.epoch, Ordering::Release);
+        #[cfg(test)]
+        a8_probes::mark(a8_probes::REQUEST_PUBLISHED, gate.rendezvous.epoch, 0);
     }
     registry.wake.notify_all();
     Ok(request)

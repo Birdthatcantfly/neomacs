@@ -166,6 +166,53 @@ impl std::fmt::Debug for ConsCatalog {
 static_assertions::assert_impl_all!(ConsCatalog: Send, Sync);
 static_assertions::assert_not_impl_any!(ConsCatalog: Clone, Copy);
 
+/// Test-only accounting of catalog-mutex wait time on the cold grant/close
+/// refill paths, for the A8 contention rows. Never compiled into images.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct CatalogWaits {
+    pub(crate) grant_calls: std::sync::atomic::AtomicU64,
+    pub(crate) grant_ns: std::sync::atomic::AtomicU64,
+    pub(crate) grant_max_ns: std::sync::atomic::AtomicU64,
+    pub(crate) close_calls: std::sync::atomic::AtomicU64,
+    pub(crate) close_ns: std::sync::atomic::AtomicU64,
+    pub(crate) close_max_ns: std::sync::atomic::AtomicU64,
+}
+
+#[cfg(test)]
+pub(crate) static CATALOG_WAITS: CatalogWaits = CatalogWaits {
+    grant_calls: std::sync::atomic::AtomicU64::new(0),
+    grant_ns: std::sync::atomic::AtomicU64::new(0),
+    grant_max_ns: std::sync::atomic::AtomicU64::new(0),
+    close_calls: std::sync::atomic::AtomicU64::new(0),
+    close_ns: std::sync::atomic::AtomicU64::new(0),
+    close_max_ns: std::sync::atomic::AtomicU64::new(0),
+};
+
+#[cfg(test)]
+pub(crate) enum CatalogOp {
+    Grant,
+    Close,
+}
+
+#[cfg(test)]
+fn test_catalog_wait(start: std::time::Instant, op: CatalogOp) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let nanos = start.elapsed().as_nanos() as u64;
+    match op {
+        CatalogOp::Grant => {
+            CATALOG_WAITS.grant_calls.fetch_add(1, Relaxed);
+            CATALOG_WAITS.grant_ns.fetch_add(nanos, Relaxed);
+            CATALOG_WAITS.grant_max_ns.fetch_max(nanos, Relaxed);
+        }
+        CatalogOp::Close => {
+            CATALOG_WAITS.close_calls.fetch_add(1, Relaxed);
+            CATALOG_WAITS.close_ns.fetch_add(nanos, Relaxed);
+            CATALOG_WAITS.close_max_ns.fetch_max(nanos, Relaxed);
+        }
+    }
+}
+
 impl ConsCatalog {
     #[cold]
     #[inline(never)]
@@ -372,7 +419,11 @@ impl ConsCatalog {
         if !(1..=MAX_GRANT).contains(&want) {
             return Err(RegistrationError::Capacity);
         }
+        #[cfg(test)]
+        let catalog_wait = std::time::Instant::now();
         let mut gate = self.lock()?;
+        #[cfg(test)]
+        test_catalog_wait(catalog_wait, CatalogOp::Grant);
         let state = gate.as_mut().ok_or(RegistrationError::Publication)?;
         state
             .live_count
@@ -482,7 +533,11 @@ impl ConsCatalog {
             if owner != region.owner {
                 return Err(RegistrationError::WrongOwner);
             }
+            #[cfg(test)]
+            let catalog_wait = std::time::Instant::now();
             let mut gate = self.lock()?;
+            #[cfg(test)]
+            test_catalog_wait(catalog_wait, CatalogOp::Close);
             let state = gate.as_mut().ok_or(RegistrationError::Publication)?;
             if !region.active || state.active_regions == 0 {
                 return Err(RegistrationError::OutstandingLoan);

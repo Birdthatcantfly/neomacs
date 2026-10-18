@@ -140,11 +140,19 @@ impl<'era> Mutator<'era> {
                 Err(error) => return Err(error),
             }
         }
+        #[cfg(test)]
+        let native_seq = super::a8_probes::native_seq();
         let result = body(&NativeRoots {
             heap,
             words: &handles,
             _thread: PhantomData,
         });
+        #[cfg(test)]
+        super::a8_probes::mark(
+            super::a8_probes::NATIVE_RETURNED,
+            native_seq,
+            self.key().owner(),
+        );
         // Syscall return: this gate-checked transition is the first protocol
         // step after the body, and an active stop keeps the owner
         // NativeStopped at its predicate until the keeper completes.
@@ -158,6 +166,12 @@ impl<'era> Mutator<'era> {
                 Err(error) => return Err(error),
             }
         };
+        #[cfg(test)]
+        super::a8_probes::mark(
+            super::a8_probes::NATIVE_PERMITTED,
+            native_seq,
+            self.key().owner(),
+        );
         Ok(NativeReturn { result, epoch })
     }
 }

@@ -762,6 +762,10 @@ mod root_slot_tests;
 mod slice_tests;
 
 #[cfg(test)]
+mod a8_latency;
+#[cfg(test)]
+mod a8_probes;
+#[cfg(test)]
 mod native_extent_tests;
 #[cfg(test)]
 mod restricted_lisp;

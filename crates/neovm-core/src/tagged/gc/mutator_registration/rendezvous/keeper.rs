@@ -7,6 +7,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+#[cfg(test)]
+use super::super::a8_probes;
 use super::super::image::PublishedGcImage;
 use super::super::{
     MutatorEntry, MutatorKey, ParallelHeapEra, RegistrationError, Registry, RegistryState,
@@ -352,6 +354,10 @@ impl<'era> AllStopped<'era> {
             // predicate mutex; no owner may observe a partial image update.
             gate.rendezvous.poison();
             self.registry.poison();
+        }
+        #[cfg(test)]
+        if completion.is_ok() {
+            a8_probes::mark(a8_probes::KEEPER_COMPLETED, gate.rendezvous.completed, 0);
         }
         self.registry.wake.notify_all();
         completion

@@ -1,4 +1,6 @@
 //! Exact-root publication, then owner-side parking. No heap or World access.
+#[cfg(test)]
+use super::super::a8_probes;
 use super::*;
 use crate::tagged::transport::PreparedParallelRootBatch;
 
@@ -136,6 +138,12 @@ impl<'era> Mutator<'era> {
         roots: &[SharedRoot],
     ) -> Result<(), RendezvousError> {
         self.check_thread()?;
+        #[cfg(test)]
+        a8_probes::mark(
+            a8_probes::PUBLISH_ENTERED,
+            wanted.map(NonZeroU64::get).unwrap_or(0),
+            self.entry.key.owner,
+        );
         for root in roots {
             if root.heap_identity() != self.entry.key.heap {
                 return Err(RendezvousError::Identity);
@@ -184,6 +192,8 @@ impl<'era> Mutator<'era> {
             .ok_or(RendezvousError::Publication)?
             .validate_publication()
             .map_err(RegistrationError::from)?;
+        #[cfg(test)]
+        a8_probes::mark(a8_probes::REGION_CLOSED, epoch, self.entry.key.owner);
         let identity = ParallelRootIdentity::new(self.entry.key, generation, epoch);
         let retention = self
             .registry
@@ -245,6 +255,8 @@ impl<'era> Mutator<'era> {
                 return Err(RegistrationError::from(error).into());
             }
         };
+        #[cfg(test)]
+        a8_probes::mark(a8_probes::HOSTALLOC_DONE, epoch, self.entry.key.owner);
         // From this point a failure must retain BOTH payloads. Their Drop cannot
         // release the root lease, but the GC image must be retained explicitly.
         let commit = loop {
@@ -299,6 +311,16 @@ impl<'era> Mutator<'era> {
             Mode::Stopped
         };
         self.protocol.participating = true;
+        #[cfg(test)]
+        a8_probes::mark(
+            if native {
+                a8_probes::NATIVE_ACK
+            } else {
+                a8_probes::ACK_COMMITTED
+            },
+            epoch,
+            self.entry.key.owner,
+        );
         drop(e);
         drop(gate);
         self.registry.wake.notify_all();
