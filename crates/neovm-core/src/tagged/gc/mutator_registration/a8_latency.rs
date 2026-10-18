@@ -906,9 +906,15 @@ fn full_rounds() -> usize {
 /// Probe self-cost, for the report: one disabled load and one recording call.
 #[test]
 fn a8_probe_overhead() {
-    let (disabled, enabled) = a8_probes::overhead_ns(100_000);
+    // Miri's interpreted clock makes ns/call meaningless; there we only
+    // exercise the code paths (UB check), not the timing contract.
+    let iterations = if cfg!(miri) { 1_000 } else { 100_000 };
+    let (disabled, enabled) = a8_probes::overhead_ns(iterations);
     println!("probe disabled: {disabled:.2} ns/call; recording: {enabled:.2} ns/call");
+    #[cfg(not(miri))]
     assert!(disabled < 50.0, "disabled probe must be a relaxed load");
+    #[cfg(miri)]
+    println!("miri: timing assertion skipped (interpreted clock)");
 }
 
 /// Event invariants on a few rounds: ordering and per-round coverage.
