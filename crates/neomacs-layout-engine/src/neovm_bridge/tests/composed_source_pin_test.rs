@@ -13,7 +13,7 @@ fn composed_pin_adopts_the_cache_across_a_definitions_refresh() {
     let _context = neovm_core::emacs_core::Context::new();
     let table = pin_table_with_named_face();
 
-    let mut resolver = FaceResolver::new(&table, 0x00FFFFFF, 0x00000000, 14.0, None);
+    let resolver = FaceResolver::new(&table, 0x00FFFFFF, 0x00000000, 14.0, None);
     // A named fold and an anonymous composition, so both cache halves are
     // populated before the pin is taken.
     resolver.resolve_named_face_overlay_spec(

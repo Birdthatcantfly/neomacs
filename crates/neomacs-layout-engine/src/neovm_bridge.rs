@@ -4013,9 +4013,15 @@ struct ComposedSourceCache {
     /// (`lookup_face`, src/xfaces.c:5064-5093); this is the paint half of
     /// that reuse, stamped by frame and `face_change_count` so a definition
     /// change retires it with the rest of the cache. Entries hold their
-    /// source allocation, so a key address cannot be recycled under a live
-    /// entry.
-    tty_paint: std::collections::HashMap<TtyPaintKey, TtyPaintEntry>,
+    /// source allocation, so an address cannot be recycled under a live
+    /// entry. Realization order re-visits the same handful of sources far
+    /// more often than it meets new ones, so a fixed slot ring beats a hash
+    /// table here: probing is a few pointer and generation compares, and
+    /// hashing the merged-attribute key costs more instruction budget than
+    /// the installs a hit saves.
+    tty_paint: [Option<TtyPaintEntry>; TTY_PAINT_MEMO_SLOTS],
+    /// Round-robin write cursor into `tty_paint`.
+    tty_paint_next: usize,
     len: usize,
 }
 
@@ -4026,9 +4032,13 @@ struct ComposedSourceCache {
 struct TtyPaintEntry {
     frame: FrameId,
     face_change_count: u64,
+    key: TtyPaintKey,
     source: std::sync::Arc<RootedFace>,
     paint: TtyPaint,
 }
+
+/// Slots in the terminal-paint memo ring.
+const TTY_PAINT_MEMO_SLOTS: usize = 4;
 
 /// One folded named-face specification plus the buffer-local
 /// `face-remapping-alist` object it was folded against.
@@ -4073,7 +4083,8 @@ impl ComposedSourceCache {
         self.compositions.clear();
         self.identity_compositions.clear();
         self.named_specs.clear();
-        self.tty_paint.clear();
+        self.tty_paint = [None, None, None, None];
+        self.tty_paint_next = 0;
         self.len = 0;
     }
 }
@@ -4748,14 +4759,22 @@ impl FaceResolver {
         frame: FrameId,
         face_change_count: u64,
     ) -> Option<TtyPaint> {
-        let key = TtyPaintKey::new(face, std::sync::Arc::as_ptr(source) as usize);
         let cache = self.composed_sources.borrow();
-        let entry = cache.tty_paint.get(&key)?;
-        (entry.frame == frame && entry.face_change_count == face_change_count).then(|| entry.paint)
+        cache
+            .tty_paint
+            .iter()
+            .flatten()
+            .find(|entry| {
+                entry.frame == frame
+                    && entry.face_change_count == face_change_count
+                    && std::sync::Arc::ptr_eq(&entry.source, source)
+                    && entry.key.matches(face)
+            })
+            .map(|entry| entry.paint)
     }
 
     /// Retain one realized terminal paint for reuse, holding the source
-    /// allocation so its address cannot be recycled under the key.
+    /// allocation so its address cannot be recycled under an entry.
     fn record_tty_paint(
         &self,
         face: &ResolvedFace,
@@ -4763,21 +4782,16 @@ impl FaceResolver {
         frame: FrameId,
         face_change_count: u64,
     ) {
-        let key = TtyPaintKey::new(face, std::sync::Arc::as_ptr(&source) as usize);
         let mut cache = self.composed_sources.borrow_mut();
-        if cache.len >= COMPOSED_SOURCE_CACHE_LIMIT {
-            cache.clear();
-        }
-        cache.tty_paint.insert(
-            key,
-            TtyPaintEntry {
-                frame,
-                face_change_count,
-                source,
-                paint: TtyPaint::snapshot(face),
-            },
-        );
-        cache.len += 1;
+        let next = cache.tty_paint_next;
+        cache.tty_paint_next = (next + 1) % TTY_PAINT_MEMO_SLOTS;
+        cache.tty_paint[next] = Some(TtyPaintEntry {
+            frame,
+            face_change_count,
+            key: TtyPaintKey::of(face),
+            source,
+            paint: TtyPaint::snapshot(face),
+        });
     }
 
     /// The previously merged source for `overlay` over `base`, when this exact

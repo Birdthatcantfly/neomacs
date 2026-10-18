@@ -6,7 +6,7 @@
 
 use super::{NeoColor, NeoFace, ResolvedFace, TerminalColor, color_to_pixel, colors_close};
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum FaceVideo {
     #[default]
     Normal,
@@ -21,7 +21,7 @@ pub(super) enum FaceColorState {
     Realized(FaceColorAttributes),
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct FaceColorAttributes {
     foreground: TerminalFaceColor,
     background: TerminalFaceColor,
@@ -165,7 +165,7 @@ impl RealizedFaceColors {
 /// ANSI has distinct "default foreground" and "default background" values;
 /// a boolean attached to the destination slot cannot represent one after
 /// inverse-video moves it to the other slot.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FaceColorSlot {
     Foreground,
     Background,
@@ -178,7 +178,7 @@ enum FaceColorSlot {
 /// colours through `map_tty_color` and then swaps the results
 /// (src/xfaces.c:6800-6810), so whatever the writer emits for the foreground
 /// must be exactly what was realized for the background.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TerminalFaceColor {
     Concrete {
         pixel: u32,
@@ -304,20 +304,26 @@ impl TtyPaint {
 /// attributes the merge/realize pipeline read — and the entry underline
 /// slot, which the install keeps when the realized underline is disabled.
 /// The source enters by allocation identity: the memo holds the allocation,
-/// so an equal key is the same rooted source by construction.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+/// so an equal key is the same rooted source by construction. Keys are
+/// compared, never hashed — this is a probe-side equality on a handful of
+/// copies, not a bucket index.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct TtyPaintKey {
     attributes: FaceColorAttributes,
     underline_color: u32,
-    source: usize,
 }
 
 impl TtyPaintKey {
-    pub(super) fn new(face: &ResolvedFace, source_address: usize) -> Self {
+    pub(super) fn of(face: &ResolvedFace) -> Self {
         Self {
             attributes: FaceColorAttributes::from_base(face),
             underline_color: face.underline_color,
-            source: source_address,
         }
+    }
+
+    /// Whether `face` is in the same realization state this key recorded.
+    pub(super) fn matches(self, face: &ResolvedFace) -> bool {
+        self.attributes == FaceColorAttributes::from_base(face)
+            && self.underline_color == face.underline_color
     }
 }
