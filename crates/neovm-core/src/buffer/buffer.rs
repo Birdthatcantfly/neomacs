@@ -1985,6 +1985,29 @@ impl PartialEq for BufferStateMarkers {
 }
 impl Eq for BufferStateMarkers {}
 
+/// Whether a line count may build the text line index when none exists.
+///
+/// The index is a whole-buffer structure: building it costs a pass over the
+/// text. A query decides both halves of that trade-off: whether the question
+/// is one of the index's own line queries (a count the redisplay or Lisp will
+/// ask again) or a one-off region scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LineIndexBuild {
+    /// Serve the count only from an index that already exists; otherwise
+    /// `None`, and the caller scans the range.
+    ///
+    /// A count over a changed region is proportional to the change, not to
+    /// the buffer: GNU counts it with `find_newline` over the changed area
+    /// (src/search.c:675), and its newline cache (src/search.c:595) only ever
+    /// covers regions something scanned. Such a count must never turn into a
+    /// whole-buffer build.
+    ExistingOnly,
+    /// Build the index when the text and the queried range are large enough:
+    /// a repeated line query the index is about to serve again (the
+    /// line-number gutter, `line-number-at-pos`, a long `forward-line`).
+    IfLarge,
+}
+
 /// Read-only snapshot of buffer text for layout and rendering.
 ///
 /// A snapshot is intentionally separate from [`BufferText`]: callers can read
@@ -2032,9 +2055,15 @@ impl BufferTextSnapshot {
 
     /// `\n`s in RANGE from the text line index the snapshot shares with its
     /// buffer, or `None` when the index does not serve this count and the
-    /// caller scans.  See [`BufferText::indexed_newline_count`].
-    pub fn indexed_newline_count(&self, range: EmacsByteRange) -> Option<usize> {
-        self.text.indexed_newline_count(range.start(), range.end())
+    /// caller scans.  See [`BufferText::indexed_newline_count`]. BUILD says
+    /// whether a missing index may be built for this query.
+    pub fn indexed_newline_count(
+        &self,
+        range: EmacsByteRange,
+        build: LineIndexBuild,
+    ) -> Option<usize> {
+        self.text
+            .indexed_newline_count(range.start(), range.end(), build)
     }
 
     pub fn text_prop_at_emacs_byte_pos(&self, pos: EmacsBytePos, name: Value) -> Option<Value> {
@@ -3785,9 +3814,15 @@ impl Buffer {
 
     /// `\n`s in RANGE from the text line index, or `None` when the index
     /// does not serve this count and the caller scans.  See
-    /// [`BufferText::indexed_newline_count`].
-    pub fn indexed_newline_count(&self, range: EmacsByteRange) -> Option<usize> {
-        self.text.indexed_newline_count(range.start(), range.end())
+    /// [`BufferText::indexed_newline_count`]. BUILD says whether a missing
+    /// index may be built for this query.
+    pub fn indexed_newline_count(
+        &self,
+        range: EmacsByteRange,
+        build: LineIndexBuild,
+    ) -> Option<usize> {
+        self.text
+            .indexed_newline_count(range.start(), range.end(), build)
     }
 
     /// Last `\n` in logical emacs-byte range `[floor, from)`, scanned in

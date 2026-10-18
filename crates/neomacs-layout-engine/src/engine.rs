@@ -4190,7 +4190,7 @@ impl LayoutEngine {
         current: &RetainedWindowKey,
         evaluator: &neovm_core::emacs_core::Context,
     ) -> bool {
-        use neovm_core::buffer::{BufferId, CharPos0, EmacsByteRange};
+        use neovm_core::buffer::{BufferId, CharPos0, EmacsByteRange, LineIndexBuild};
         let Some(buffer) = evaluator.buffer_manager().get(BufferId(current.buffer_id)) else {
             return false;
         };
@@ -4211,7 +4211,10 @@ impl LayoutEngine {
             .filter(|row| row.enabled && !RetainedWindowMatrix::is_chrome_role(row.role))
             .count()
             / 2;
-        if let Some(lines) = buffer.indexed_newline_count(range) {
+        // An estimate that only picks an optimization: an existing index may
+        // answer it, but it must not build one (the bounded scan below is the
+        // documented fallback).
+        if let Some(lines) = buffer.indexed_newline_count(range, LineIndexBuild::ExistingOnly) {
             return lines <= limit;
         }
         let mut lines = 0;
@@ -4225,8 +4228,8 @@ impl LayoutEngine {
 
     /// Source newlines in a dirty span, the mirror of GNU `find_newline` over
     /// a changed region (backed by the buffer's newline cache; the line delta
-    /// `try_window_id` scrolls its matrix by, src/xdisp.c). The text index
-    /// answers without touching bytes; only an uncovered range falls back to
+    /// `try_window_id` scrolls its matrix by, src/xdisp.c). An existing text
+    /// index answers without touching bytes; an uncovered range falls back to
     /// a chunked `\n` count. This replaces a per-character
     /// `char_at_emacs_byte_pos` walk that cost ~77 Ir per inserted character
     /// on the first redisplay after a bulk insert — the dominant linear term
@@ -4236,18 +4239,23 @@ impl LayoutEngine {
         dirty_start: i64,
         dirty_end: i64,
     ) -> usize {
-        use neovm_core::buffer::{CharPos0, EmacsByteRange};
+        use neovm_core::buffer::{CharPos0, EmacsByteRange, LineIndexBuild};
         let start = CharPos0::new(dirty_start.max(0) as usize);
         let end = CharPos0::new(dirty_end.max(0) as usize);
         let from = buffer.char_pos_to_emacs_byte_pos_clamped(start);
         let to = buffer.char_pos_to_emacs_byte_pos_clamped(end.max(start));
         let range = EmacsByteRange::new(from, to);
-        if let Some(count) = buffer.indexed_newline_count(range) {
+        // This is a scan of the CHANGED region, so its cost is the edit's,
+        // never the buffer's: an existing index may answer it, but it must
+        // not build one. GNU counts the same newlines with `find_newline`
+        // over the changed area (src/search.c:675), whose newline cache only
+        // covers regions something scanned (src/search.c:595).
+        if let Some(count) = buffer.indexed_newline_count(range, LineIndexBuild::ExistingOnly) {
             return count;
         }
         let mut count = 0;
         let _ = buffer.try_for_each_emacs_byte_range_chunk(range, |chunk| {
-            count += chunk.iter().filter(|byte| **byte == b'\n').count();
+            count += memchr::memchr_iter(b'\n', chunk).count();
             Ok::<(), std::convert::Infallible>(())
         });
         count

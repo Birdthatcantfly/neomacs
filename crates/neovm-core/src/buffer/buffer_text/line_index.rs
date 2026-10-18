@@ -8,14 +8,19 @@
 //!   text's next edit goes through `Rc::make_mut`, which copies only while a
 //!   snapshot still holds the index (`TextLineIndexEvent::CowCopy`).
 //! - **When.** Only live text builds, on the first query the index would
-//!   serve, once the text reaches `min_buffer_bytes`. The build borrows only
-//!   the index slot, never the storage mutably, so it is safe under a read
-//!   borrow redisplay holds (the trap of the ASCII-prefix attempt). A
-//!   snapshot that would have used an index sets the shared demand flag
-//!   instead, and the live text builds at the next snapshot. Small-buffer
-//!   snapshots need neither an index nor a shared demand allocation.
-//!   A medium line move uses an existing index but does not build one;
-//!   building requires more than `min_build_lines` lines.
+//!   serve, once the text reaches `min_buffer_bytes`. The query decides
+//!   whether it may build at all: a count over a changed region passes
+//!   [`LineIndexBuild::ExistingOnly`] and only ever uses an index that
+//!   already exists, because its cost must stay proportional to the region
+//!   (GNU counts changed text with `find_newline`, src/search.c:675, and its
+//!   newline cache covers only what something scanned, src/search.c:595).
+//!   The build borrows only the index slot, never the storage mutably, so it
+//!   is safe under a read borrow redisplay holds (the trap of the
+//!   ASCII-prefix attempt). A snapshot that would have used an index sets
+//!   the shared demand flag instead, and the live text builds at the next
+//!   snapshot. Small-buffer snapshots need neither an index nor a shared
+//!   demand allocation. A medium line move uses an existing index but does
+//!   not build one; building requires more than `min_build_lines` lines.
 //! - **Edits.** The four measured mutators update the index: a deletion
 //!   before the backend loses the bytes (they are counted), an insertion
 //!   after. An edit larger than `max(256 KiB, text / 4)` and every wholesale
@@ -25,6 +30,7 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 
 use super::{BufferText, BufferTextStorage, LineEnd};
+use crate::buffer::LineIndexBuild;
 use crate::buffer::position::{EmacsBytePos, EmacsByteRange};
 use crate::buffer::text_index::{
     IndexedText, TextLineIndex, TextLineIndexConfig, TextLineIndexEvent, note_event,
@@ -39,26 +45,17 @@ pub(super) enum LineIndexRole {
     Snapshot,
 }
 
-/// Whether a query that finds no index may build one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum IndexBuild {
-    /// Use an index only if one exists: the query is too short to pay for
-    /// a build (a count over less than `min_buffer_bytes`, or a move of at
-    /// most `min_build_lines` lines).
-    Never,
-    /// Build one if the text is large enough.
-    IfLarge,
-}
-
-impl IndexBuild {
-    /// A count over RANGE_BYTES builds only when the range alone is as long
-    /// as the smallest text worth indexing: the build then costs a small
-    /// multiple of the scan it replaces (P3.4 §6.4).
-    fn for_count(range_bytes: usize, config: TextLineIndexConfig) -> Self {
-        if range_bytes >= config.min_buffer_bytes {
-            Self::IfLarge
-        } else {
-            Self::Never
+impl LineIndexBuild {
+    /// The policy of a count over RANGE_BYTES: a caller's
+    /// [`LineIndexBuild::ExistingOnly`] is a barrier and stays one; an
+    /// [`LineIndexBuild::IfLarge`] caller builds only when the range alone is
+    /// as long as the smallest text worth indexing, since the build then
+    /// costs a small multiple of the scan it replaces (P3.4 §6.4).
+    fn for_count(self, range_bytes: usize, config: TextLineIndexConfig) -> Self {
+        match self {
+            Self::ExistingOnly => Self::ExistingOnly,
+            Self::IfLarge if range_bytes >= config.min_buffer_bytes => Self::IfLarge,
+            Self::IfLarge => Self::ExistingOnly,
         }
     }
 
@@ -69,7 +66,7 @@ impl IndexBuild {
         if lines > config.min_build_lines {
             Self::IfLarge
         } else {
-            Self::Never
+            Self::ExistingOnly
         }
     }
 }
@@ -99,12 +96,12 @@ impl BufferTextStorage {
     fn line_index(
         &self,
         config: TextLineIndexConfig,
-        build: IndexBuild,
+        build: LineIndexBuild,
     ) -> Option<Rc<TextLineIndex>> {
         if let Some(index) = self.text_index.try_borrow().ok()?.as_ref() {
             return Some(Rc::clone(index));
         }
-        if build == IndexBuild::Never
+        if build == LineIndexBuild::ExistingOnly
             || self.metrics.emacs_byte_len().get() < config.min_buffer_bytes
         {
             return None;
@@ -151,7 +148,7 @@ impl BufferTextStorage {
         );
         if demand.get() && self.line_index_role == LineIndexRole::Live {
             demand.set(false);
-            let _ = self.line_index(config, IndexBuild::IfLarge);
+            let _ = self.line_index(config, LineIndexBuild::IfLarge);
         }
         let index = self
             .text_index
@@ -265,19 +262,22 @@ impl BufferText {
     }
 
     /// Line ends in the clamped, non-empty `[from, limit)` from the index, or
-    /// `None` to scan.
+    /// `None` to scan. BUILD is the caller's build policy; a caller that must
+    /// not turn a bounded region scan into a whole-buffer build passes
+    /// [`LineIndexBuild::ExistingOnly`].
     #[inline]
     pub(super) fn line_index_count(
         &self,
         from: EmacsBytePos,
         limit: EmacsBytePos,
         line_end: LineEnd,
+        build: LineIndexBuild,
     ) -> Option<usize> {
         let config = text_line_index_config();
         if limit.get() - from.get() < config.min_query_bytes || !config.enabled() {
             return None;
         }
-        self.indexed_line_end_count(config, from, limit, line_end)
+        self.indexed_line_end_count(config, from, limit, line_end, build)
     }
 
     #[inline(never)]
@@ -287,10 +287,11 @@ impl BufferText {
         from: EmacsBytePos,
         limit: EmacsBytePos,
         line_end: LineEnd,
+        build: LineIndexBuild,
     ) -> Option<usize> {
         let count = {
             let storage = self.storage.borrow();
-            let build = IndexBuild::for_count(limit.get() - from.get(), config);
+            let build = build.for_count(limit.get() - from.get(), config);
             let index = storage.line_index(config, build)?;
             let text = &*storage.backend;
             (index.line_ends_before(text, limit.get(), line_end)
@@ -312,11 +313,15 @@ impl BufferText {
     /// `\n`s in `[from, limit)` from the index, or `None` when the index
     /// does not serve this count (the knob is off, the range is short, the
     /// text is small, or this snapshot has no index yet) and the caller
-    /// scans. For the layout engine's line-number gutter.
+    /// scans. BUILD is the caller's build policy: the layout engine's
+    /// line-number gutter is a repeated query and may build
+    /// ([`LineIndexBuild::IfLarge`]); a changed-region damage count must not
+    /// ([`LineIndexBuild::ExistingOnly`]).
     pub(crate) fn indexed_newline_count(
         &self,
         from: EmacsBytePos,
         limit: EmacsBytePos,
+        build: LineIndexBuild,
     ) -> Option<usize> {
         let total = self.emacs_byte_end_pos();
         let from = from.min(total);
@@ -324,7 +329,7 @@ impl BufferText {
         if from >= limit {
             return None;
         }
-        self.line_index_count(from, limit, LineEnd::Newline)
+        self.line_index_count(from, limit, LineEnd::Newline, build)
     }
 
     /// `nth_newline_emacs_byte` from the index for the clamped, non-empty
@@ -353,7 +358,7 @@ impl BufferText {
     ) -> Option<(EmacsBytePos, usize)> {
         let found = {
             let storage = self.storage.borrow();
-            let index = storage.line_index(config, IndexBuild::for_line_move(n, config))?;
+            let index = storage.line_index(config, LineIndexBuild::for_line_move(n, config))?;
             let text = &*storage.backend;
             let base = index.line_ends_before(text, from.get(), LineEnd::Newline);
             match index.newline_position(text, base + n as u64) {
@@ -415,7 +420,7 @@ impl BufferText {
         let floor = floor.min(from);
         let found = {
             let storage = self.storage.borrow();
-            let index = storage.line_index(config, IndexBuild::for_line_move(n, config))?;
+            let index = storage.line_index(config, LineIndexBuild::for_line_move(n, config))?;
             let text = &*storage.backend;
             let base = index.line_ends_before(text, floor.get(), LineEnd::Newline);
             // The newlines in [floor, from): the lines above FROM's line.

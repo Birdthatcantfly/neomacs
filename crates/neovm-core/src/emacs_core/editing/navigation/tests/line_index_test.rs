@@ -152,12 +152,10 @@ fn line_motion_and_counting_agree_with_the_index_on_and_off() {
     let served = with_text_line_index_config(eager(TextLineIndexMode::Verify), || {
         let buffer = ev.buffers.current_buffer().unwrap();
         let end = buffer.total_emacs_byte_end_pos();
-        buffer
-            .text_snapshot()
-            .indexed_newline_count(crate::buffer::EmacsByteRange::new(
-                crate::buffer::EmacsBytePos::ZERO,
-                end,
-            ))
+        buffer.text_snapshot().indexed_newline_count(
+            crate::buffer::EmacsByteRange::new(crate::buffer::EmacsBytePos::ZERO, end),
+            crate::buffer::LineIndexBuild::IfLarge,
+        )
     });
     assert!(
         served.is_some(),

@@ -1284,7 +1284,12 @@ impl BufferText {
         if from >= limit {
             return 0;
         }
-        if let Some(count) = self.line_index_count(from, limit, line_end) {
+        if let Some(count) = self.line_index_count(
+            from,
+            limit,
+            line_end,
+            crate::buffer::LineIndexBuild::IfLarge,
+        ) {
             return count;
         }
         self.scan_line_ends_emacs_byte(from, limit, line_end)

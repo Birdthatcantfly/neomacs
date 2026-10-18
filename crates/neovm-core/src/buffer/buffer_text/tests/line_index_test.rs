@@ -3,6 +3,7 @@
 //! answers, snapshots share it, and it builds safely under a held borrow.
 
 use super::*;
+use crate::buffer::LineIndexBuild;
 use crate::buffer::text::TextReplacement;
 use crate::buffer::text_index::tests::{Rng, boundaries, random_bytes};
 use crate::buffer::text_index::{
@@ -283,7 +284,11 @@ fn small_texts_short_ranges_and_short_moves_scan() {
         );
         assert!(text.has_line_index_for_test(), "an 11-line move builds it");
         assert_eq!(
-            text.indexed_newline_count(EmacsBytePos::ZERO, emacs_byte_pos(999)),
+            text.indexed_newline_count(
+                EmacsBytePos::ZERO,
+                emacs_byte_pos(999),
+                LineIndexBuild::IfLarge
+            ),
             Some(333),
             "and a 999-byte count then uses it"
         );
@@ -376,13 +381,21 @@ fn small_snapshots_skip_demand_until_the_live_text_grows() {
         assert!(text.storage.borrow().text_index_demand.get().is_none());
         assert!(small.storage.borrow().text_index_demand.get().is_none());
         assert_eq!(
-            small.indexed_newline_count(EmacsBytePos::ZERO, small.emacs_byte_end_pos()),
+            small.indexed_newline_count(
+                EmacsBytePos::ZERO,
+                small.emacs_byte_end_pos(),
+                LineIndexBuild::IfLarge
+            ),
             None
         );
         insert_storage_string(&mut text, EmacsBytePos::ZERO, &"ab\n".repeat(300));
         let first_large = text.clone();
         assert_eq!(
-            first_large.indexed_newline_count(EmacsBytePos::ZERO, first_large.emacs_byte_end_pos()),
+            first_large.indexed_newline_count(
+                EmacsBytePos::ZERO,
+                first_large.emacs_byte_end_pos(),
+                LineIndexBuild::IfLarge
+            ),
             None
         );
         assert!(!text.has_line_index_for_test());
@@ -390,8 +403,11 @@ fn small_snapshots_skip_demand_until_the_live_text_grows() {
         assert!(text.has_line_index_for_test());
         assert!(second_large.shares_line_index_with_for_test(&text));
         assert_eq!(
-            second_large
-                .indexed_newline_count(EmacsBytePos::ZERO, second_large.emacs_byte_end_pos()),
+            second_large.indexed_newline_count(
+                EmacsBytePos::ZERO,
+                second_large.emacs_byte_end_pos(),
+                LineIndexBuild::IfLarge
+            ),
             Some(400)
         );
         assert!(!small.has_line_index_for_test());
@@ -485,7 +501,7 @@ fn snapshots_share_the_index_and_an_edit_copies_it_only_while_shared() {
             let snapshot = text.clone();
             assert!(snapshot.shares_line_index_with_for_test(&text), "{mode:?}");
             assert_eq!(
-                snapshot.indexed_newline_count(EmacsBytePos::ZERO, end),
+                snapshot.indexed_newline_count(EmacsBytePos::ZERO, end, LineIndexBuild::IfLarge),
                 Some(100),
                 "{mode:?}: the snapshot's count uses the shared index"
             );
@@ -493,11 +509,15 @@ fn snapshots_share_the_index_and_an_edit_copies_it_only_while_shared() {
             insert_storage_string(&mut text, EmacsBytePos::ZERO, "\n\n");
             assert!(!snapshot.shares_line_index_with_for_test(&text));
             assert_eq!(
-                snapshot.indexed_newline_count(EmacsBytePos::ZERO, end),
+                snapshot.indexed_newline_count(EmacsBytePos::ZERO, end, LineIndexBuild::IfLarge),
                 Some(100)
             );
             assert_eq!(
-                text.indexed_newline_count(EmacsBytePos::ZERO, text.emacs_byte_end_pos()),
+                text.indexed_newline_count(
+                    EmacsBytePos::ZERO,
+                    text.emacs_byte_end_pos(),
+                    LineIndexBuild::IfLarge
+                ),
                 Some(102)
             );
             drop(snapshot);
@@ -520,7 +540,10 @@ fn a_snapshot_query_makes_the_live_text_build_at_the_next_snapshot() {
         let text = BufferText::from_str(&"abc\n".repeat(100));
         let end = text.emacs_byte_end_pos();
         let first = text.clone();
-        assert_eq!(first.indexed_newline_count(EmacsBytePos::ZERO, end), None);
+        assert_eq!(
+            first.indexed_newline_count(EmacsBytePos::ZERO, end, LineIndexBuild::IfLarge),
+            None
+        );
         assert_eq!(
             first.count_newlines_emacs_byte(EmacsBytePos::ZERO, end),
             100
@@ -537,12 +560,70 @@ fn a_snapshot_query_makes_the_live_text_build_at_the_next_snapshot() {
         );
         assert!(second.shares_line_index_with_for_test(&text));
         assert_eq!(
-            second.indexed_newline_count(EmacsBytePos::ZERO, end),
+            second.indexed_newline_count(EmacsBytePos::ZERO, end, LineIndexBuild::IfLarge),
             Some(100)
         );
         // No further demand: the next snapshot just shares.
         let third = text.clone();
         assert!(third.shares_line_index_with_for_test(&text));
+    });
+}
+
+/// An `ExistingOnly` count is a region scan: an index that already exists
+/// answers it, but a missing index is never built -- not by live text and not
+/// through a snapshot's demand flag. This is the changed-region query a cold
+/// redisplay asks (`span_source_newline_count`): the count is proportional to
+/// the edit, so indexing the whole buffer for it is the wrong trade
+/// (GNU's newline cache covers only regions something scanned,
+/// src/search.c:595; find_newline counts the rest, src/search.c:675).
+#[test]
+fn existing_only_counts_never_build_the_index() {
+    crate::test_utils::init_test_tracing();
+    with_text_line_index_config(eager_verify(), || {
+        let text = BufferText::from_str(&"abc\n".repeat(100));
+        let end = text.emacs_byte_end_pos();
+        assert_eq!(
+            text.indexed_newline_count(EmacsBytePos::ZERO, end, LineIndexBuild::ExistingOnly),
+            None,
+            "there is no index yet"
+        );
+        assert!(
+            !text.has_line_index_for_test(),
+            "the live text did not build one"
+        );
+        // A snapshot neither builds nor asks the live text to: the demand
+        // flag would make the next clone build.
+        let snapshot = text.clone();
+        assert_eq!(
+            snapshot.indexed_newline_count(EmacsBytePos::ZERO, end, LineIndexBuild::ExistingOnly),
+            None
+        );
+        assert!(
+            !text.storage.borrow().text_index_demand.get().unwrap().get(),
+            "an ExistingOnly snapshot count raises no build demand"
+        );
+        let _next = text.clone();
+        assert!(
+            !text.has_line_index_for_test(),
+            "the demand was never raised, so the clone built nothing"
+        );
+        // The index's own build policy still builds, and the new index then
+        // serves ExistingOnly counts too.
+        assert_eq!(
+            text.indexed_newline_count(EmacsBytePos::ZERO, end, LineIndexBuild::IfLarge),
+            Some(100)
+        );
+        assert!(text.has_line_index_for_test());
+        assert_eq!(
+            snapshot.indexed_newline_count(EmacsBytePos::ZERO, end, LineIndexBuild::ExistingOnly),
+            None,
+            "this snapshot predates the build and shares nothing"
+        );
+        assert_eq!(
+            text.indexed_newline_count(EmacsBytePos::ZERO, end, LineIndexBuild::ExistingOnly),
+            Some(100),
+            "an existing index serves the count"
+        );
     });
 }
 

@@ -117,7 +117,8 @@ impl LayoutBufferView for BorrowedLayoutBuffer<'_> {
     }
 
     fn layout_indexed_newline_count(&self, range: EmacsByteRange) -> Option<usize> {
-        self.buffer.indexed_newline_count(range)
+        self.buffer
+            .indexed_newline_count(range, neovm_core::buffer::LineIndexBuild::IfLarge)
     }
 
     fn layout_text_prop_at_emacs_byte_pos(&self, pos: EmacsBytePos, name: Value) -> Option<Value> {

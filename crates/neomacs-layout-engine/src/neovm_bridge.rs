@@ -401,7 +401,9 @@ impl LayoutBufferView for Buffer {
     }
 
     fn layout_indexed_newline_count(&self, range: EmacsByteRange) -> Option<usize> {
-        self.indexed_newline_count(range)
+        // The layout's counts are the line-number gutter's, repeated for
+        // every redisplay: large enough ranges may build the index.
+        self.indexed_newline_count(range, neovm_core::buffer::LineIndexBuild::IfLarge)
     }
 
     fn layout_text_prop_at_emacs_byte_pos(&self, pos: EmacsBytePos, name: Value) -> Option<Value> {
