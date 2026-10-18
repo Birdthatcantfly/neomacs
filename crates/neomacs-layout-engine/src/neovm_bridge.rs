@@ -249,6 +249,11 @@ impl BufferFaceRemapping {
     pub(crate) fn empty() -> Self {
         Self { alist: None }
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_alist(alist: Option<Value>) -> Self {
+        Self { alist }
+    }
 }
 
 /// ADMITTED-WORK counters, read and reset once per accepted frame into
@@ -4009,13 +4014,37 @@ struct ComposedSourceCache {
     /// Fully folded overlay specifications per named face — GNU resolves a
     /// named face through the immutable `face_face` frame table every time
     /// (`get_lface_attributes`), which this resolver snapshots once, so the
-    /// folded result is a function of the name. Only names resolved without
-    /// any buffer-local remapping are memoized: a remapped fold also reads
-    /// the buffer's live `face-remapping-alist`, which a keyed memo could
-    /// serve stale after in-place mutation.
-    named_specs: std::collections::HashMap<Box<str>, std::sync::Arc<NeoFace>>,
+    /// folded result is a function of the name. Buffer folds carry the
+    /// identity of the `face-remapping-alist` object they ran against; see
+    /// [`NamedSpecEntry`].
+    named_specs: std::collections::HashMap<Box<str>, NamedSpecEntry>,
     len: usize,
 }
+
+/// One folded named-face specification plus the buffer-local
+/// `face-remapping-alist` object it was folded against.
+///
+/// GNU re-runs its live remapping check on every lookup
+/// (`merge_named_face`, src/xfaces.c:3269-3295): an `assq` for the face name
+/// against the current alist, then the cached definition fold. The memo
+/// keeps exactly that shape — the fold path re-runs the name's `assq` miss
+/// check per lookup (a hit takes the remapping branch before the memo is
+/// consulted), so the entry only has to record which alist OBJECT the fold
+/// saw. `setq`-replacing the alist (the only mutation `face-remap.el` and
+/// friends perform) produces a new list object, misses the recorded bits,
+/// and re-folds. In-place splicing an entry for one of the fold's
+/// *inherited* names is the one change an identity key cannot observe; the
+/// pin's table snapshot has the same identity-implies-content trust for
+/// `Rc::make_mut` storage. Pure table folds (`resolve_named_face_overlay_spec`)
+/// never read the alist and are recorded under [`ALIST_INDEPENDENT`].
+#[derive(Clone)]
+struct NamedSpecEntry {
+    shared: std::sync::Arc<NeoFace>,
+    alist_bits: usize,
+}
+
+/// Recorded for folds that never consulted a buffer-local remapping alist.
+const ALIST_INDEPENDENT: usize = usize::MAX;
 
 struct ComposedOverlayEntry {
     base: std::sync::Weak<RootedFace>,
@@ -4593,18 +4622,52 @@ impl FaceResolver {
             .borrow()
             .named_specs
             .get(name)
-            .map(std::sync::Arc::clone)
+            .filter(|entry| entry.alist_bits == ALIST_INDEPENDENT)
+            .map(|entry| std::sync::Arc::clone(&entry.shared))
     }
 
     fn record_named_overlay_spec(&self, name: &str, folded: NeoFace) -> std::sync::Arc<NeoFace> {
+        self.record_named_overlay_spec_for_alist(name, folded, ALIST_INDEPENDENT)
+    }
+
+    /// The fold for `name` under this buffer's remapping alist object, when
+    /// already folded against that same object (see [`NamedSpecEntry`]). A
+    /// buffer with no alist accepts pure table folds too: without an alist
+    /// there is nothing for the fold to consult, so the two coincide.
+    fn cached_buffer_named_overlay_spec(
+        &self,
+        name: &str,
+        alist_bits: usize,
+    ) -> Option<std::sync::Arc<NeoFace>> {
+        self.composed_sources
+            .borrow()
+            .named_specs
+            .get(name)
+            .filter(|entry| {
+                entry.alist_bits == alist_bits
+                    || (alist_bits == 0 && entry.alist_bits == ALIST_INDEPENDENT)
+            })
+            .map(|entry| std::sync::Arc::clone(&entry.shared))
+    }
+
+    fn record_named_overlay_spec_for_alist(
+        &self,
+        name: &str,
+        folded: NeoFace,
+        alist_bits: usize,
+    ) -> std::sync::Arc<NeoFace> {
         let shared = std::sync::Arc::new(folded);
         let mut cache = self.composed_sources.borrow_mut();
         if cache.len >= COMPOSED_SOURCE_CACHE_LIMIT {
             cache.clear();
         }
-        cache
-            .named_specs
-            .insert(name.into(), std::sync::Arc::clone(&shared));
+        cache.named_specs.insert(
+            name.into(),
+            NamedSpecEntry {
+                shared: std::sync::Arc::clone(&shared),
+                alist_bits,
+            },
+        );
         cache.len += 1;
         shared
     }
@@ -5191,12 +5254,13 @@ impl FaceResolver {
             return Some(FaceSpecContribution::anonymous(NeoFace::default()));
         }
 
-        // With no buffer-local remapping the fold is a pure function of the
-        // resolver's table snapshot, so it is shared per name. A live
-        // `face-remapping-alist` makes the fold read mutable buffer state and
-        // disqualifies sharing.
-        let shareable = remapping.alist().is_none();
-        if shareable && let Some(shared) = self.cached_named_overlay_spec(name) {
+        // Reaching here means the name's own remapping `assq` missed above,
+        // exactly GNU's per-lookup liveness check (merge_named_face,
+        // src/xfaces.c:3269-3295). The fold below is then shared per name and
+        // alist object identity; see [`NamedSpecEntry`] for the invalidation
+        // contract.
+        let alist_bits = remapping.alist().map_or(0, Value::bits);
+        if let Some(shared) = self.cached_buffer_named_overlay_spec(name, alist_bits) {
             return Some(FaceSpecContribution {
                 face: (*shared).clone(),
                 identity: Some(shared),
@@ -5224,15 +5288,11 @@ impl FaceResolver {
             Some(parent) => parent.face.merge(&face),
             None => face,
         };
-        if shareable {
-            let shared = self.record_named_overlay_spec(name, folded);
-            Some(FaceSpecContribution {
-                face: (*shared).clone(),
-                identity: Some(shared),
-            })
-        } else {
-            Some(FaceSpecContribution::anonymous(folded))
-        }
+        let shared = self.record_named_overlay_spec_for_alist(name, folded, alist_bits);
+        Some(FaceSpecContribution {
+            face: (*shared).clone(),
+            identity: Some(shared),
+        })
     }
 
     fn resolve_buffer_face_value_overlay_spec_inner(

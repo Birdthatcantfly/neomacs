@@ -4081,3 +4081,75 @@ fn named_overlay_specs_are_shared_by_identity() {
         "the same named overlay identity over the same base must reuse the merged source"
     );
 }
+
+#[test]
+fn unmatched_remapping_still_shares_named_specs() {
+    let _runtime = neovm_core::emacs_core::Context::new();
+    let mut table = FaceTable::new();
+    let mut face = NeoFace::new("unmatched-remap-face");
+    face.foreground = Some(NeoColor::rgb(10, 20, 30));
+    table.define("unmatched-remap-face", face);
+    let resolver = FaceResolver::new(&table, 0xFFFFFF, 0, 14.0, None);
+
+    // The buffer remaps a DIFFERENT face. GNU re-runs its live `assq` miss
+    // check per lookup (merge_named_face, src/xfaces.c:3269-3295) and then
+    // reuses the folded definition; the miss must still share one fold per
+    // alist object.
+    let alist = Value::list(vec![Value::cons(
+        Value::symbol("some-other-face"),
+        Value::list(vec![Value::symbol(":weight"), Value::symbol("bold")]),
+    )]);
+    let remapping = BufferFaceRemapping::for_alist(Some(alist));
+    let fold = |resolver: &FaceResolver| {
+        resolver
+            .resolve_buffer_named_face_overlay_spec_inner(
+                remapping,
+                "unmatched-remap-face",
+                &mut Vec::new(),
+                0,
+                FaceReferenceDiagnostics::Suppress,
+            )
+            .expect("named face resolves")
+    };
+    let first = fold(&resolver);
+    let second = fold(&resolver);
+    let (Some(first_id), Some(second_id)) = (first.identity.clone(), second.identity.clone())
+    else {
+        panic!("folds under an unmatched remapping alist must share one specification");
+    };
+    assert!(
+        std::sync::Arc::ptr_eq(&first_id, &second_id),
+        "repeated folds under the same alist object reuse the shared spec"
+    );
+
+    // Once the alist DOES map the face -- even as the same list object grown
+    // a new head entry -- the remapping branch must win over any memo.
+    let grown = Value::cons(
+        Value::cons(
+            Value::symbol("unmatched-remap-face"),
+            Value::list(vec![Value::symbol(":weight"), Value::symbol("bold")]),
+        ),
+        alist,
+    );
+    let remapped = resolver
+        .resolve_buffer_named_face_overlay_spec_inner(
+            BufferFaceRemapping::for_alist(Some(grown)),
+            "unmatched-remap-face",
+            &mut Vec::new(),
+            0,
+            FaceReferenceDiagnostics::Suppress,
+        )
+        .expect("named face resolves");
+    assert!(
+        remapped.face.weight.is_some_and(|weight| weight.is_bold()),
+        "a direct remapping entry applies its spec, got {:?}",
+        remapped.face.weight
+    );
+    assert!(
+        remapped
+            .identity
+            .as_ref()
+            .is_none_or(|identity| !std::sync::Arc::ptr_eq(identity, &first_id)),
+        "a remapped fold never serves the unmatched memo entry"
+    );
+}
