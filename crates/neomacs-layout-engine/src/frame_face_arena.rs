@@ -27,6 +27,13 @@ use std::sync::Arc;
 /// anything.
 const REALIZED_IDENTITY_CAP: usize = 4096;
 
+/// Entry budget for the persistent resolved-face memo, mirroring
+/// [`REALIZED_IDENTITY_CAP`]: past it, sealing keeps only the fresh entries.
+const RESOLVED_MEMO_CAP: usize = 4096;
+
+/// Route-hash keyed memo from a resolved face to its stable id.
+type ResolvedFaceMemo = HashMap<u64, Vec<(crate::neovm_bridge::ResolvedFace, FaceId)>>;
+
 /// The realization identity of a face: every field that participates in what
 /// the face LOOKS like, with enrichment stripped. Font realization may fill
 /// in metrics, the exact font file, and the resolved font handle after row
@@ -193,6 +200,13 @@ pub(crate) struct FrameFaceArena {
     /// analogue). Survives seals so the same content keeps the same id
     /// across frames regardless of realization order.
     realized: Arc<RealizedIdentityMap>,
+    /// Persistent resolved-face -> stable id memo (the resolved counterpart
+    /// of `realized`). Survives seals so rendering probes for the same
+    /// interned source skip the canonical projection and identity-map
+    /// lookup in every later attempt of this lineage -- GNU serves repeated
+    /// merged-lface lookups from the frame face cache the same way
+    /// (`lookup_face`, src/xfaces.c:5064-5093).
+    resolved_memo: Arc<ResolvedFaceMemo>,
     /// Persistent monotonic id allocator. Never rewinds within an arena
     /// lineage, so a stable id can never be re-minted for different content.
     next_face_id: u32,
@@ -285,15 +299,18 @@ struct FrameFaceAttemptState {
     /// seal. Also serves publish-time verification: an id handed out for an
     /// identity must only ever be published with that identity.
     fresh_realized: RealizedIdentityMap,
-    /// Attempt-local ResolvedFace -> id fast path in front of the canonical
-    /// identity map. Checkpoints re-resolve the same handful of faces
-    /// hundreds of times per pass; without this memo each hit re-built the
-    /// canonical protocol face just to look it up (+5% per keystroke,
-    /// measured). Full-struct equality OVER-discriminates relative to the
-    /// identity projection (face_id / metric fields differ), which is safe:
-    /// a memo miss falls through to the canonical path and still returns the
-    /// stable id — never a wrong one.
-    resolved_memo: HashMap<u64, Vec<(crate::neovm_bridge::ResolvedFace, FaceId)>>,
+    /// ResolvedFace -> id fast path in front of the canonical identity map.
+    /// Checkpoints re-resolve the same handful of faces hundreds of times
+    /// per pass; without this memo each hit re-built the canonical protocol
+    /// face just to look it up (+5% per keystroke, measured). The arena's
+    /// persistent memo answers probes for identities sealed in earlier
+    /// attempts; `fresh_resolved_memo` caches this attempt's own entries
+    /// until they fold at seal. Full-struct equality OVER-discriminates
+    /// relative to the identity projection (face_id / metric fields differ),
+    /// which is safe: a memo miss falls through to the canonical path and
+    /// still returns the stable id — never a wrong one.
+    resolved_memo: Arc<ResolvedFaceMemo>,
+    fresh_resolved_memo: ResolvedFaceMemo,
 }
 
 /// Allocation identity, deliberately independent of the presentation counter.
@@ -401,6 +418,7 @@ impl Default for FrameFaceArena {
             generation: FrameFaceGeneration(1),
             faces: Arc::new(HashMap::default()),
             realized: Arc::new(HashMap::default()),
+            resolved_memo: Arc::new(HashMap::default()),
             next_face_id: BasicFaceId::SENTINEL,
         }
     }
@@ -487,7 +505,8 @@ impl FrameFaceArena {
                 faces: HashMap::default(),
                 realized: Arc::clone(&self.realized),
                 fresh_realized: HashMap::default(),
-                resolved_memo: HashMap::default(),
+                resolved_memo: Arc::clone(&self.resolved_memo),
+                fresh_resolved_memo: HashMap::default(),
             })),
         }
     }
@@ -500,6 +519,7 @@ impl FrameFaceArena {
             generation: self.generation.next(),
             faces: Arc::new(HashMap::default()),
             realized: Arc::new(HashMap::default()),
+            resolved_memo: Arc::new(HashMap::default()),
             next_face_id: BasicFaceId::SENTINEL,
         }
     }
@@ -620,7 +640,8 @@ impl FrameFaceAttempt {
                 faces: HashMap::default(),
                 realized: Arc::new(HashMap::default()),
                 fresh_realized: HashMap::default(),
-                resolved_memo: HashMap::default(),
+                resolved_memo: Arc::new(HashMap::default()),
+                fresh_resolved_memo: HashMap::default(),
             })),
         }
     }
@@ -657,9 +678,10 @@ impl FrameFaceAttempt {
         face_id
     }
 
-    /// [`Self::stable_face_id`] with an attempt-local memo keyed by the
-    /// resolved face, so repeated checkpoints of the same face skip building
-    /// the canonical protocol face. A memo entry is matched first by interned
+    /// [`Self::stable_face_id`] with a memo keyed by the resolved face —
+    /// this attempt's entries plus the arena's persistent memo folded at
+    /// seal — so repeated checkpoints of the same face skip building the
+    /// canonical protocol face. A memo entry is matched first by interned
     /// source identity — the same key GNU's `lookup_face` uses
     /// (src/xfaces.c:5064-5075) — falling back to full equality for
     /// content-equal sources from distinct allocations. `canonical` is
@@ -673,18 +695,23 @@ impl FrameFaceAttempt {
         let route = resolved_face_route_hash(face);
         {
             let state = self.state.borrow();
-            if let Some(id) = state.resolved_memo.get(&route).and_then(|bucket| {
-                bucket.iter().find_map(|(memo_face, id)| {
-                    (face.shares_resolved_identity(memo_face) || memo_face == face).then_some(*id)
+            let hit = |memo: &ResolvedFaceMemo| {
+                memo.get(&route).and_then(|bucket| {
+                    bucket.iter().find_map(|(memo_face, id)| {
+                        (face.shares_resolved_identity(memo_face) || memo_face == face)
+                            .then_some(*id)
+                    })
                 })
-            }) {
+            };
+            if let Some(id) = hit(&state.resolved_memo).or_else(|| hit(&state.fresh_resolved_memo))
+            {
                 return id;
             }
         }
         let face_id = self.stable_face_id(canonical());
         self.state
             .borrow_mut()
-            .resolved_memo
+            .fresh_resolved_memo
             .entry(route)
             .or_default()
             .push((face.clone(), face_id));
@@ -851,6 +878,7 @@ impl FrameFaceAttempt {
             generation: state.generation.next(),
             faces: Arc::new(state.faces.clone()),
             realized: Self::fold_realized(&state),
+            resolved_memo: Self::fold_resolved_memo(&state),
             next_face_id: state.next_face_id,
         }
     }
@@ -868,6 +896,22 @@ impl FrameFaceAttempt {
         }
         if folded.values().map(Vec::len).sum::<usize>() > REALIZED_IDENTITY_CAP {
             folded = state.fresh_realized.clone();
+        }
+        Arc::new(folded)
+    }
+
+    /// The persistent resolved memo plus this attempt's fresh entries,
+    /// mirroring `fold_realized`. Steady state shares the existing Arc.
+    fn fold_resolved_memo(state: &FrameFaceAttemptState) -> Arc<ResolvedFaceMemo> {
+        if state.fresh_resolved_memo.is_empty() {
+            return Arc::clone(&state.resolved_memo);
+        }
+        let mut folded: ResolvedFaceMemo = (*state.resolved_memo).clone();
+        for (route, entries) in &state.fresh_resolved_memo {
+            folded.entry(*route).or_default().extend(entries.clone());
+        }
+        if folded.values().map(Vec::len).sum::<usize>() > RESOLVED_MEMO_CAP {
+            folded = state.fresh_resolved_memo.clone();
         }
         Arc::new(folded)
     }
@@ -921,6 +965,7 @@ impl FrameFaceAttempt {
             generation: state.generation.next(),
             faces: Arc::new(finalized_faces),
             realized: Self::fold_realized(&state),
+            resolved_memo: Self::fold_resolved_memo(&state),
             next_face_id: state.next_face_id,
         })
     }

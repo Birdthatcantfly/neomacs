@@ -24,6 +24,27 @@ fn resolved_binding_preserves_identity_through_measurement_without_publishing() 
 }
 
 #[test]
+fn resolved_identity_memo_survives_attempt_boundaries_without_canonical_rebuild() {
+    let arena = FrameFaceArena::default();
+    let resolved = crate::neovm_bridge::ResolvedFace::default();
+    let mut first = arena.begin_attempt();
+    let id = crate::display_row::face_state::stable_face_id_for_resolved(&mut first, &resolved);
+    let committed = first.commit();
+    let mut second = committed.begin_attempt();
+    let memo_id = second.face_id_for_resolved(&resolved, || {
+        panic!("memo hit must not rebuild the canonical face");
+    });
+    assert_eq!(id, memo_id);
+    // A distinct allocation with the same resolved identity must hit the
+    // same entry rather than allocating a second id for one identity.
+    let twin = resolved.clone();
+    let twin_id = second.face_id_for_resolved(&twin, || {
+        panic!("identity match must serve content-equal twins");
+    });
+    assert_eq!(id, twin_id);
+}
+
+#[test]
 fn discarded_row_preparation_does_not_publish_faces_or_replace_metrics() {
     let mut attempt = FrameFaceArena::default().begin_attempt();
     let mut face = Face::new(FaceId::new(0));
