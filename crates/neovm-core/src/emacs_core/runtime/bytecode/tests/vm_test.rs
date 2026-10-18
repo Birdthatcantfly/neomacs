@@ -7590,8 +7590,37 @@ fn vm_set_process_thread_builtin_uses_shared_runtime_state() {
 #[test]
 fn vm_non_child_process_creation_builtins_use_shared_runtime_state() {
     crate::test_utils::init_test_tracing();
+    // GNU's serial_configure reads the device with tcgetattr first and reports
+    // its failure (src/sysdep.c:3164-3166).  Linux initialises a pty master
+    // when it is opened, so /dev/ptmx configures there; Darwin initialises the
+    // tty only when its slave is first opened (measured by this tree's
+    // SerialTestPty fixture), so the same port signals
+    // (file-error "Failed tcgetattr" ...) under GNU and NeoVM alike on Darwin.
+    let serial_pty_probe = if cfg!(target_os = "macos") {
+        r#"(condition-case err
+                     (let ((p (make-serial-process :name "sp" :port "/dev/ptmx" :speed 9600)))
+                       (list (processp p)
+                             (eq (process-type p) 'serial)))
+                   (error err))"#
+    } else {
+        r#"(let ((p (make-serial-process :name "sp" :port "/dev/ptmx" :speed 9600)))
+                     (list (processp p)
+                           (eq (process-type p) 'serial)))"#
+    };
+    let serial_pty_row = if cfg!(target_os = "macos") {
+        // Darwin reports ENOTTY from tcgetattr on a pty master whose slave
+        // has never been opened.  GNU passes the host's strerror text through
+        // (report_file_errno, src/fileio.c:286-300), so build the row from the
+        // same host call rather than pinning one libc's words.
+        format!(
+            "(file-error \"Failed tcgetattr\" \"{}\")",
+            crate::emacs_core::errno::emacs_strerror(libc::ENOTTY)
+        )
+    } else {
+        "(t t)".to_owned()
+    };
     assert_eq!(
-        vm_eval_str(
+        vm_eval_str(&format!(
             r#"(list
                  (make-network-process)
                  (condition-case err (make-network-process :name "np") (error err))
@@ -7614,11 +7643,11 @@ fn vm_non_child_process_creation_builtins_use_shared_runtime_state() {
                  (condition-case err (make-serial-process :name "sp" :port 1 :speed 9600) (error err))
                  (condition-case err (make-serial-process :name "sp") (error err))
                  (condition-case err (make-serial-process :name "sp" :port "/tmp/no-port") (error err))
-                 (let ((p (make-serial-process :name "sp" :port "/dev/ptmx" :speed 9600)))
-                   (list (processp p)
-                         (eq (process-type p) 'serial))))"#
-        ),
-        "OK (nil (wrong-type-argument stringp nil) (error \":name value not a string\") (error \"Missing :name keyword parameter\") (t t t) nil (t t t t) (error \":name value not a string\") nil (wrong-type-argument stringp t) (wrong-type-argument stringp 1) (error \"No port specified\") (error \":speed not specified\") (t t))"
+                 {serial_pty_probe})"#
+        )),
+        format!(
+            "OK (nil (wrong-type-argument stringp nil) (error \":name value not a string\") (error \"Missing :name keyword parameter\") (t t t) nil (t t t t) (error \":name value not a string\") nil (wrong-type-argument stringp t) (wrong-type-argument stringp 1) (error \"No port specified\") (error \":speed not specified\") {serial_pty_row})"
+        )
     );
 }
 
