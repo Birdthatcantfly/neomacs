@@ -1804,6 +1804,23 @@ impl FaceTable {
             && std::rc::Rc::ptr_eq(&self.lisp_face_refs, &other.lisp_face_refs)
     }
 
+    /// Whether both tables alias the same immutable copy-on-write storage, so
+    /// every pure fold of one (a named face's merged specification, a composed
+    /// source) is valid for the other.
+    ///
+    /// Mutations replace storage through `Rc::make_mut`, which reallocates as
+    /// soon as a resolver pins the previous snapshot, so identity equality
+    /// implies content equality. GNU fills the same role with the `face_change`
+    /// stamps: a frame's face cache is reused across redisplays and freed only
+    /// when a definition changes (`bool face_change`, src/xfaces.c:349;
+    /// `f->face_change`, src/xfaces.c:746; the invalidation comment,
+    /// src/xfaces.c:3098-3105; the cache-empty rebuild in `init_iterator`,
+    /// src/xfaces.c:6958-6962).
+    pub fn same_snapshot(&self, other: &Self) -> bool {
+        self.shares_definitions_with(other)
+            && std::rc::Rc::ptr_eq(&self.tty_palette, &other.tty_palette)
+    }
+
     /// The palette this table's faces were realized against, or `None` on a
     /// GUI frame -- where a realized colour IS the pixel and no palette exists.
     #[must_use]

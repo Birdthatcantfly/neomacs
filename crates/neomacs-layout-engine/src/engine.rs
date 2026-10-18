@@ -945,6 +945,16 @@ pub struct LayoutEngine {
     /// retries discard that attempt, and only a sealed presentation replaces
     /// the committed arena.
     frame_face_arenas: rustc_hash::FxHashMap<neovm_core::window::FrameId, FrameFaceArena>,
+    /// The previous frame layout's composed-source cache and the face table
+    /// snapshot it was folded against.
+    ///
+    /// A [`super::neovm_bridge::FaceResolver`] lives for one redisplay
+    /// transaction; without this pin, every transaction refolded every named
+    /// face from the table and rebuilt its composed sources from scratch.
+    /// GNU keeps a frame's face cache across redisplays and frees it only when
+    /// a face definition changes (`face_change`, src/xfaces.c:349 and
+    /// src/xfaces.c:3098-3105) — the pinned snapshot plays that role here.
+    face_composed_sources: Option<super::neovm_bridge::ComposedSourcePin>,
     /// Last accepted layout per window, used by cursor, scroll, and edit
     /// replay. Speculative attempts never replace this state.
     retained_window_matrices: rustc_hash::FxHashMap<DisplayWindowId, RetainedWindowMatrix>,
@@ -1413,6 +1423,19 @@ impl Default for LayoutEngine {
 }
 
 impl LayoutEngine {
+    /// Attach the previous transaction's composed-source cache to this
+    /// transaction's resolver when the face table snapshot still matches, and
+    /// re-pin the result for the next transaction.
+    fn bind_face_composed_sources(
+        &mut self,
+        face_resolver: &mut super::neovm_bridge::FaceResolver,
+    ) {
+        if let Some(pin) = self.face_composed_sources.take() {
+            pin.apply_to(face_resolver);
+        }
+        self.face_composed_sources = Some(face_resolver.composed_source_pin());
+    }
+
     /// Invalidate every retained value whose geometry or identity was derived
     /// from old font-selection inputs. This is deliberately one exhaustive
     /// owner rather than a list of clears spread across redisplay fast paths.
@@ -1420,6 +1443,7 @@ impl LayoutEngine {
         self.query_cache.clear();
         self.frame_visual_histories = FrameVisualHistories::default();
         self.frame_face_arenas.clear();
+        self.face_composed_sources = None;
         self.retained_window_matrices.clear();
         self.prepared_viewports = PreparedViewports::default();
         self.scroll_coverage.cancel();
@@ -1598,6 +1622,7 @@ impl LayoutEngine {
             last_frame_display_state: None,
             scroll_preview_coverage: Vec::new(),
             frame_face_arenas: rustc_hash::FxHashMap::default(),
+            face_composed_sources: None,
             retained_window_matrices: rustc_hash::FxHashMap::default(),
             prepared_viewports: PreparedViewports::default(),
             scroll_coverage: scroll_coverage::ScrollCoverage::default(),
@@ -1640,6 +1665,7 @@ impl LayoutEngine {
             last_frame_display_state: None,
             scroll_preview_coverage: Vec::new(),
             frame_face_arenas: rustc_hash::FxHashMap::default(),
+            face_composed_sources: None,
             retained_window_matrices: rustc_hash::FxHashMap::default(),
             prepared_viewports: PreparedViewports::default(),
             scroll_coverage: scroll_coverage::ScrollCoverage::default(),
@@ -1897,6 +1923,7 @@ impl LayoutEngine {
             window_system.clone(),
             self.font_sizing,
         );
+        self.bind_face_composed_sources(&mut face_resolver);
         face_resolver.prepare_tty_realization(frame_id, evaluator);
         let mut resolver_face_change_count = evaluator.face_change_count();
         enum FaceResolverRefresh {
@@ -2041,6 +2068,7 @@ impl LayoutEngine {
                         None,
                         self.font_sizing,
                     );
+                    self.bind_face_composed_sources(&mut face_resolver);
                     face_resolver.prepare_tty_realization(frame_id, evaluator);
                     resolver_face_change_count = after_sync;
                     resolver_refresh = FaceResolverRefresh::Current;

@@ -3927,7 +3927,13 @@ pub struct FaceResolver {
     /// is a function of its merged attributes, never of their provenance, so
     /// the cache cannot go stale against this resolver's immutable table
     /// snapshot; the cap bounds churning inline-plist faces.
-    composed_sources: std::cell::RefCell<ComposedSourceCache>,
+    ///
+    /// Held behind an `Rc` shared with the engine: a resolver lives for one
+    /// redisplay transaction, but its folded named specifications and merged
+    /// sources stay valid for as long as the face table snapshot does — GNU
+    /// keeps a frame's whole face cache across redisplays and frees it only
+    /// when a definition changes (`face_change`, src/xfaces.c:3098-3105).
+    composed_sources: std::rc::Rc<std::cell::RefCell<ComposedSourceCache>>,
     font_sizing: FontSizing,
     frame_font_domain: FrameFontDomain,
 }
@@ -3984,6 +3990,37 @@ impl ComposedSourceCache {
 /// session composing thousands of distinct inline-plist faces keeps bounded
 /// memory, and steady workloads stay far under the cap.
 const COMPOSED_SOURCE_CACHE_LIMIT: usize = 4096;
+
+/// Engine-side carry of one resolver's [`ComposedSourceCache`] across redisplay
+/// transactions.
+///
+/// A resolver is rebuilt per transaction (twice when a TTY color callback
+/// forces a mid-transaction refresh), and with it every folded named-face
+/// specification and interned composed source used to be refolded from the
+/// table on every keystroke. GNU instead keeps each frame's face cache across
+/// redisplays and discards it only when a definition changes: `face_change` /
+/// `f->face_change` (src/xfaces.c:349, src/xfaces.c:746), set by the
+/// definition writers (src/xfaces.c:3098-3105). The pinned table snapshot is
+/// this cache's `face_change`: entries are keyed by merged content or by
+/// allocation identity, so only the folded named specifications can go stale,
+/// and a changed table is a different snapshot by construction — evaluation
+/// mutates through `Rc::make_mut`, which reallocates rather than disturb this
+/// pin.
+pub(crate) struct ComposedSourcePin {
+    table: FaceTable,
+    cache: std::rc::Rc<std::cell::RefCell<ComposedSourceCache>>,
+}
+
+impl ComposedSourcePin {
+    /// Hand the cache to `resolver` when its table snapshot still matches the
+    /// one this pin was folded against; otherwise the pin is dropped and the
+    /// resolver keeps its fresh cache.
+    pub(crate) fn apply_to(&self, resolver: &mut FaceResolver) {
+        if resolver.face_table.same_snapshot(&self.table) {
+            resolver.composed_sources = std::rc::Rc::clone(&self.cache);
+        }
+    }
+}
 
 /// GNU basic-face lookup has two realization outcomes.  A canonical lookup
 /// keeps the fixed `enum face_id` slot.  A window-named lookup starts from the
@@ -4136,7 +4173,7 @@ impl FaceResolver {
             current_window_parameters: std::cell::RefCell::new(Vec::new()),
             current_window_id: std::cell::Cell::new(None),
             invalid_face_references: std::cell::RefCell::new(Vec::new()),
-            composed_sources: std::cell::RefCell::default(),
+            composed_sources: std::rc::Rc::new(std::cell::RefCell::default()),
             font_sizing,
             frame_font_domain,
         }
@@ -4233,6 +4270,16 @@ impl FaceResolver {
 
     pub(crate) fn has_tty_realization(&self) -> bool {
         self.tty_face_source.is_some()
+    }
+
+    /// The composed-source cache together with the face table snapshot it was
+    /// folded against, so the engine can carry it to the next redisplay's
+    /// resolver (see [`ComposedSourcePin`]).
+    pub(crate) fn composed_source_pin(&self) -> ComposedSourcePin {
+        ComposedSourcePin {
+            table: self.face_table.clone(),
+            cache: std::rc::Rc::clone(&self.composed_sources),
+        }
     }
 
     /// A speculative row probe may consume an existing realization, but must
