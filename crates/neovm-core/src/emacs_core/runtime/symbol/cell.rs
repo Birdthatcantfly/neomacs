@@ -296,62 +296,83 @@ pub(crate) enum ValueCell {
 /// (an alias id is zero-extended), so a raw read of it never sees
 /// uninitialised bytes.
 #[repr(transparent)]
-#[derive(Clone, Copy)]
-struct CellWord(usize);
+struct CellWord(AtomicUsize);
+
+// The word is the concurrent GC obarray scan's read target while the mutator
+// publishes a new one, so it is an atomic interior-mutable word, not a plain
+// `usize` read through a shared-derived `AtomicUsize` cast (that retag is
+// invalid under Stacked Borrows and a plain store would race the scan).
+impl Clone for CellWord {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        Self::new(self.load())
+    }
+}
 
 impl CellWord {
     #[inline(always)]
+    fn new(bits: usize) -> Self {
+        Self(AtomicUsize::new(bits))
+    }
+
+    /// The whole word, as one Relaxed atomic load.
+    #[inline(always)]
+    fn load(&self) -> usize {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
     fn plain(value: Value) -> Self {
-        Self(value.bits())
+        Self::new(value.bits())
     }
 
     #[inline(always)]
     fn alias(target: SymId) -> Self {
-        Self(target.0 as usize)
+        Self::new(target.0 as usize)
     }
 
     #[inline(always)]
     fn localized(blv: BlvPtr) -> Self {
-        Self(blv.as_ptr() as usize)
+        Self::new(blv.as_ptr() as usize)
     }
 
     #[inline(always)]
     fn forwarded(fwd: FwdRef) -> Self {
-        Self(fwd.address())
+        Self::new(fwd.address())
     }
 
     /// The word stored under `Plainval` by [`Self::plain`].
     #[inline(always)]
-    fn read_plain(self) -> Value {
-        Value::from_bits(self.0)
+    fn read_plain(&self) -> Value {
+        Value::from_bits(self.load())
     }
 
     /// The word stored under `Varalias` by [`Self::alias`], which
     /// zero-extended it from a `u32`.
     #[inline(always)]
-    fn read_alias(self) -> SymId {
-        SymId(self.0 as u32)
+    fn read_alias(&self) -> SymId {
+        SymId(self.load() as u32)
     }
 
     /// The word stored under `Localized` by [`Self::localized`].
     #[inline(always)]
-    fn read_localized(self) -> BlvPtr {
+    fn read_localized(&self) -> BlvPtr {
         // SAFETY: only `CellWord::localized` stores under this tag, from a
         // `BlvPtr`, which is never null.
-        BlvPtr(unsafe { NonNull::new_unchecked(self.0 as *mut LispBufferLocalValue) })
+        BlvPtr(unsafe { NonNull::new_unchecked(self.load() as *mut LispBufferLocalValue) })
     }
 
     /// The word stored under `Forwarded` by [`Self::forwarded`].
     #[inline(always)]
-    fn read_forwarded(self) -> FwdRef {
+    fn read_forwarded(&self) -> FwdRef {
         // Only `CellWord::forwarded` stores under this tag, and it stores a
         // live descriptor's header address.
-        FwdRef::from_address(self.0)
+        FwdRef::from_address(self.load())
     }
 
     /// Decode under the tag the word was stored with.
     #[inline(always)]
-    fn decode(self, redirect: SymbolRedirect) -> ValueCell {
+    fn decode(&self, redirect: SymbolRedirect) -> ValueCell {
         match redirect {
             SymbolRedirect::Plainval => ValueCell::Plain(self.read_plain()),
             SymbolRedirect::Varalias => ValueCell::Alias(self.read_alias()),
@@ -460,7 +481,7 @@ impl Clone for LispSymbol {
         Self {
             name: AtomicU32::new(self.name.load(Ordering::Relaxed)),
             flags: self.flags.clone(),
-            val: self.val,
+            val: self.val.clone(),
             function: self.function,
             plist: self.plist,
             interned_global: self.interned_global,
@@ -589,7 +610,7 @@ impl LispSymbol {
     pub(super) fn publish_fill(&mut self, src: LispSymbol) {
         let published_name = src.name.load(Ordering::Relaxed);
         self.flags = src.flags.clone();
-        self.val = src.val;
+        self.val = src.val.clone();
         self.function = src.function;
         self.plist = src.plist;
         self.interned_global = src.interned_global;
@@ -679,16 +700,14 @@ impl LispSymbol {
     #[inline]
     pub(crate) fn value_cell_acquire(&self) -> ValueCell {
         let redirect = self.flags.load_redirect();
-        CellWord(self.load_word_acquire()).decode(redirect)
+        CellWord::new(self.load_word_acquire()).decode(redirect)
     }
 
     #[inline(always)]
     fn load_word_acquire(&self) -> usize {
-        let p = std::ptr::from_ref(&self.val.0).cast::<AtomicUsize>();
-        // SAFETY: `CellWord` is a `usize`, which `AtomicUsize` matches in
-        // size and alignment (asserted above); every store to it is atomic
-        // (`CellWrite::publish`) or happens before the slot is published.
-        unsafe { (*p).load(Ordering::Acquire) }
+        // `CellWord` is an `AtomicUsize`: the scan may race the mutator's
+        // publication store, and both sides are atomic.
+        self.val.0.load(Ordering::Acquire)
     }
 
     /// The value of a `Plainval` cell ([`Value::UNBOUND`] when void);
@@ -947,10 +966,7 @@ impl<'a> CellWrite<'a> {
         {
             crate::tagged::gc::note_root_overwrite_while_marking(old);
         }
-        let p = std::ptr::from_mut(&mut self.sym.val.0).cast::<AtomicUsize>();
-        // SAFETY: as in `LispSymbol::load_word_acquire`; `&mut` makes this
-        // the only writer.
-        unsafe { (*p).store(word.0, Ordering::Release) };
+        self.sym.val.0.store(word.load(), Ordering::Release);
         match tag {
             NewTag::Keep => {}
             NewTag::Set(redirect) => self.sym.flags.set_redirect(redirect),
@@ -1238,7 +1254,7 @@ pub(super) fn read_symbol_children<const MAJOR: bool>(
         }
         // Consistent snapshot. `is_heap_object()` excludes fixnums, nil, symbol
         // ids and UNBOUND, so the Plainval gate never traces a non-heap word.
-        if let ValueCell::Plain(plain) = CellWord(word).decode(redirect)
+        if let ValueCell::Plain(plain) = CellWord::new(word).decode(redirect)
             && (plain.is_heap_object()
                 || (MAJOR && matches!(plain.kind(), crate::tagged::value::ValueKind::Symbol(_))))
         {
