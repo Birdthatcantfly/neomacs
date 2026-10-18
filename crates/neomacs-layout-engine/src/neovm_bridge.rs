@@ -5569,6 +5569,16 @@ impl FaceResolver {
         &self,
         remapping: BufferFaceRemapping,
     ) -> ResolvedFace {
+        // With no buffer-local remapping entry for `default`, the merged
+        // result IS the frame default face: the fold below would apply an
+        // all-unspecified overlay (`FaceSpecContribution::anonymous`) over
+        // `self.default_face` — GNU's `merge_face_ref` over an un-remapped
+        // `default` returns the definition unchanged (`merge_named_face`
+        // assq miss, src/xfaces.c:3269-3295). Answer the common case with the
+        // assq alone and skip the anonymous composition probe entirely.
+        if Self::buffer_face_remapping_specs(remapping, "default").is_none() {
+            return self.default_face.clone();
+        }
         let mut remap_stack = Vec::new();
         self.resolve_buffer_face_value_overlay_spec_inner(
             remapping,
