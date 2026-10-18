@@ -3990,23 +3990,23 @@ pub struct FaceResolver {
 #[derive(Default)]
 struct ComposedSourceCache {
     /// Distinct merged sources by content digest.
-    entries: std::collections::HashMap<u64, Vec<std::sync::Arc<RootedFace>>>,
+    entries: rustc_hash::FxHashMap<u64, Vec<std::sync::Arc<RootedFace>>>,
     /// `base + overlay` compositions, so a repeated composition reuses its
     /// merged source without rebuilding it. The base is pinned by a weak
     /// reference: a freed base cannot match, and a live allocation cannot be
     /// confused with another face that later reuses its address.
-    compositions: std::collections::HashMap<(usize, u64), Vec<ComposedOverlayEntry>>,
+    compositions: rustc_hash::FxHashMap<(usize, u64), Vec<ComposedOverlayEntry>>,
     /// `base + overlay` compositions keyed by allocation identity, GNU's
     /// `EQ`-first bucket verification (src/xfaces.c:4483-4497): both keys are
     /// pinned by weak references, so a hit is two pointer comparisons.
-    identity_compositions: std::collections::HashMap<(usize, usize), Vec<IdentityComposedEntry>>,
+    identity_compositions: rustc_hash::FxHashMap<(usize, usize), Vec<IdentityComposedEntry>>,
     /// Fully folded overlay specifications per named face — GNU resolves a
     /// named face through the immutable `face_face` frame table every time
     /// (`get_lface_attributes`), which this resolver snapshots once, so the
     /// folded result is a function of the name. Buffer folds carry the
     /// identity of the `face-remapping-alist` object they ran against; see
     /// [`NamedSpecEntry`].
-    named_specs: std::collections::HashMap<Box<str>, NamedSpecEntry>,
+    named_specs: rustc_hash::FxHashMap<Box<str>, NamedSpecEntry>,
     /// Realized terminal paint per composed source, keyed by allocation
     /// identity (see [`TtyPaintKey`]). GNU serves a repeated merged-lface
     /// lookup from its frame face cache without re-realizing
