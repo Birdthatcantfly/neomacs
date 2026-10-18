@@ -215,11 +215,15 @@ fn char_table_set_char_direct(table: Value, c: i64, value: Value, mode: SymbolMo
 }
 
 fn sub_char_table_set_range(table: Value, from: i64, to: i64, value: Value, is_uniprop: bool) {
-    let Some(obj) = table.as_sub_char_table_obj() else {
-        return;
+    // Scalars only: every read of `contents` below re-derives its shared
+    // borrow. The write arms take `&mut` to this same object's backing, which
+    // invalidates any shared tag captured before them (Stacked Borrows pops
+    // the sibling), so a loop-long `obj` reference would be a stale tag on the
+    // next iteration.
+    let (depth, min_char) = match table.as_sub_char_table_obj() {
+        Some(obj) => (obj.depth as usize, obj.min_char as i64),
+        None => return,
     };
-    let depth = obj.depth as usize;
-    let min_char = obj.min_char as i64;
     let chars_in_block = GNU_CHARTAB_CHARS[depth];
     let mut i = chartab_idx(from.max(min_char), depth, min_char);
     let mut c = min_char + chars_in_block * i as i64;
@@ -230,7 +234,10 @@ fn sub_char_table_set_range(table: Value, from: i64, to: i64, value: Value, is_u
         if from <= c && c + chars_in_block - 1 <= to {
             sub_char_table_set_slot(table, i, value);
         } else {
-            let current = obj.contents.get(i).copied().unwrap_or(Value::NIL);
+            let current = table
+                .as_sub_char_table_obj()
+                .and_then(|obj| obj.contents.get(i).copied())
+                .unwrap_or(Value::NIL);
             let child = if is_sub_char_table(current) {
                 current
             } else if is_uniprop && uniprop_compressed_string(current).is_some() {
@@ -1749,13 +1756,21 @@ fn collect_sub_char_table_raw_entries_in_range(
     win_start: i64,
     win_end: i64,
 ) {
-    let Some(obj) = table.as_sub_char_table_obj() else {
-        return;
+    // Scalars only, like `sub_char_table_set_range`: the uncompress arm below
+    // can write this same table's backing, so each slot read re-derives its
+    // shared borrow instead of iterating through one captured reference.
+    let (depth, min_char) = match table.as_sub_char_table_obj() {
+        Some(obj) => (obj.depth as usize, obj.min_char as i64),
+        None => return,
     };
-    let depth = obj.depth as usize;
-    let min_char = obj.min_char as i64;
     let span = GNU_CHARTAB_CHARS[depth];
-    for (idx, mut value) in obj.contents.iter().copied().enumerate() {
+    for idx in 0..GNU_CHARTAB_SIZE[depth] {
+        let Some(mut value) = table
+            .as_sub_char_table_obj()
+            .and_then(|obj| obj.contents.get(idx).copied())
+        else {
+            break;
+        };
         let start = min_char + idx as i64 * span;
         let end = (start + span - 1).min(MAX_CHAR);
         if end < win_start || start > win_end {
