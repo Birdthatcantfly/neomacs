@@ -108,6 +108,14 @@ impl BufferSourceLoopRequestContext {
         self.read_boundary.acquisition_end()
     }
 
+    /// Whether the visible text slice can end INSIDE a physical line, i.e.
+    /// whether its end is a character horizon rather than a real line end.
+    /// The row and sync bounds always cut after a preserved newline, so only
+    /// a character horizon makes `text.len()` an unreliable line end.
+    pub(crate) fn source_is_character_horizon(self) -> bool {
+        self.read_boundary.is_character_horizon()
+    }
+
     pub(crate) fn exhausted_window_horizon(
         self,
         byte_idx: usize,

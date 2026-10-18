@@ -26,6 +26,12 @@ pub(crate) mod property_keys_budget_support;
 enum BufferWindowReadBudget {
     #[default]
     WindowRows,
+    /// The row budget with the geometry character allowance as a hard bound
+    /// on both the newline-existence search and the copy. Reaching the
+    /// allowance first makes the copied end a CHARACTER HORIZON (not EOB)
+    /// that the caller extends by re-acquiring; finding the rows first keeps
+    /// the plain [`Self::WindowRows`] semantics.
+    WindowRowsWithin(CharLen),
     WindowChars(CharLen),
     SyncStop(crate::types::LayoutCharPos0),
     AccessibleEnd,
@@ -49,6 +55,13 @@ impl BufferWindowReadBoundary {
             Self::WindowChars(end) => Some(end),
             Self::AccessibleEnd | Self::WindowRows | Self::SyncHorizon => None,
         }
+    }
+
+    /// Whether the copy can end INSIDE a physical line. The row and sync
+    /// bounds always cut after a real newline, and the accessible end is the
+    /// buffer's own last line, so only a character horizon can slice one.
+    pub(crate) const fn is_character_horizon(self) -> bool {
+        matches!(self, Self::WindowChars(_))
     }
 
     #[inline]
@@ -326,6 +339,18 @@ impl BufferWindowSourceRequest {
         self
     }
 
+    /// Bound a viewport read's ROW search by the geometry character
+    /// allowance (`(rows + 2) x columns`, the same allowance the query path
+    /// copies outright). The copy still ends after the Nth preserved newline
+    /// when that comes first — a newline-free or extremely long tail stops at
+    /// the allowance instead of walking and copying to ZV, and the copied end
+    /// becomes a `WindowChars` horizon the caller extends if the walk needs
+    /// more source.
+    pub(crate) fn with_window_rows_within(mut self, chars: CharLen) -> Self {
+        self.read_budget = BufferWindowReadBudget::WindowRowsWithin(chars);
+        self
+    }
+
     fn previous_viewport_point_relation(self) -> PreviousViewportPointRelation {
         let Some(previous) = self.previous_viewport else {
             return PreviousViewportPointRelation::Unknown;
@@ -430,56 +455,11 @@ impl BufferWindowSourceRequest {
         } else {
             let text_end = (window_start + read_chars).min(self.accessible_end);
             let byte_to = access.charpos_to_bytepos(text_end);
-            // Count only source newlines that no replacement or invisibility
-            // property can consume. Wrapping and inserted strings add rows;
-            // face-only overlays do not force a full-buffer copy. Selective
-            // display still needs the unrestricted source walk.
-            let bounded_to = if let BufferWindowReadBudget::WindowChars(chars) = self.read_budget {
-                let end = (window_start.max(0) as usize)
-                    .saturating_add(chars.get().max(1))
-                    .min(self.accessible_end.max(0) as usize);
-                if end < self.accessible_end.max(0) as usize {
-                    read_boundary = BufferWindowReadBoundary::WindowChars(CharPos0::new(end));
-                }
-                access.charpos_to_bytepos(end as i64)
-            } else if self.read_budget == BufferWindowReadBudget::AccessibleEnd {
-                byte_to
-            } else if crate::neovm_bridge::buffer_selective_display(access.view()) == 0 {
-                let (scan_from, newlines, boundary) = match self.read_budget {
-                    BufferWindowReadBudget::AccessibleEnd => {
-                        unreachable!("handled by full measurement")
-                    }
-                    BufferWindowReadBudget::WindowChars(_) => {
-                        unreachable!("handled by character acquisition")
-                    }
-                    BufferWindowReadBudget::WindowRows => (
-                        text_start_byte as i64,
-                        self.max_rows + 2,
-                        BufferWindowReadBoundary::WindowRows,
-                    ),
-                    BufferWindowReadBudget::SyncStop(stop) => (
-                        access.charpos_to_bytepos(
-                            (stop.get() as i64).clamp(window_start, self.accessible_end),
-                        ),
-                        2,
-                        BufferWindowReadBoundary::SyncHorizon,
-                    ),
-                };
-                // Keep two preserved physical newlines AFTER the stop, not
-                // just bytes through stop. Prefix/replacement/bidi lookahead
-                // still sees real source, and the exact row transition decides
-                // synchronization. Hazardous newlines are skipped by access.
-                let bounded_to = access
-                    .find_nth_preserved_newline_after(scan_from, newlines)
-                    .unwrap_or(byte_to)
-                    .min(byte_to);
-                if bounded_to < byte_to {
-                    read_boundary = boundary;
-                }
-                bounded_to
-            } else {
-                byte_to
-            };
+            let (bounded_to, boundary) =
+                self.bounded_read_end(window_start, text_start_byte, byte_to, access);
+            if let Some(boundary) = boundary {
+                read_boundary = boundary;
+            }
             access.copy_text(text_start_byte as i64, bounded_to, out);
             out.len()
         };
@@ -500,6 +480,95 @@ impl BufferWindowSourceRequest {
                 EmacsBytePos::new(access.zv().max(0) as usize),
             ),
             read_boundary,
+        }
+    }
+
+    /// Exclusive byte end this acquisition may copy, and the boundary that
+    /// end witnesses (`None` means the real accessible end).
+    ///
+    /// Count only source newlines that no replacement or invisibility
+    /// property can consume. Wrapping and inserted strings add rows;
+    /// face-only overlays do not force a full-buffer copy. Selective display
+    /// still needs the unrestricted source walk.
+    fn bounded_read_end<B: LayoutBufferView>(
+        self,
+        window_start: i64,
+        text_start_byte: usize,
+        byte_to: i64,
+        access: &RustBufferAccess<'_, B>,
+    ) -> (i64, Option<BufferWindowReadBoundary>) {
+        let accessible_end = self.accessible_end.max(0) as usize;
+        match self.read_budget {
+            BufferWindowReadBudget::AccessibleEnd => (byte_to, None),
+            BufferWindowReadBudget::WindowChars(chars) => {
+                let end = (window_start.max(0) as usize)
+                    .saturating_add(chars.get().max(1))
+                    .min(accessible_end);
+                (
+                    access.charpos_to_bytepos(end as i64),
+                    (end < accessible_end)
+                        .then(|| BufferWindowReadBoundary::WindowChars(CharPos0::new(end))),
+                )
+            }
+            BufferWindowReadBudget::WindowRows
+            | BufferWindowReadBudget::WindowRowsWithin(_)
+            | BufferWindowReadBudget::SyncStop(_) => {
+                if crate::neovm_bridge::buffer_selective_display(access.view()) != 0 {
+                    return (byte_to, None);
+                }
+                let (scan_from, newlines, row_boundary) = match self.read_budget {
+                    BufferWindowReadBudget::SyncStop(stop) => (
+                        access.charpos_to_bytepos(
+                            (stop.get() as i64).clamp(window_start, self.accessible_end),
+                        ),
+                        2,
+                        BufferWindowReadBoundary::SyncHorizon,
+                    ),
+                    _ => (
+                        text_start_byte as i64,
+                        self.max_rows + 2,
+                        BufferWindowReadBoundary::WindowRows,
+                    ),
+                };
+                // The geometry character allowance bounds the line-existence
+                // query AND the copy. Without one, the query runs to the
+                // accessible end, exactly as before.
+                let (scan_limit, allowance_end) = match self.read_budget {
+                    BufferWindowReadBudget::WindowRowsWithin(chars) => {
+                        let end = (window_start.max(0) as usize)
+                            .saturating_add(chars.get().max(1))
+                            .min(accessible_end);
+                        (
+                            access.charpos_to_bytepos(end as i64),
+                            (end < accessible_end).then_some(CharPos0::new(end)),
+                        )
+                    }
+                    _ => (byte_to, None),
+                };
+                // Keep two preserved physical newlines AFTER the stop, not
+                // just bytes through stop. Prefix/replacement/bidi lookahead
+                // still sees real source, and the exact row transition decides
+                // synchronization. Hazardous newlines are skipped by access.
+                match access.find_nth_preserved_newline_within(scan_from, scan_limit, newlines) {
+                    // The rows exist inside the bound: cut after the real
+                    // newline, the pre-existing row-budget semantics.
+                    Some(end) => {
+                        let end = end.min(byte_to);
+                        (end, (end < byte_to).then_some(row_boundary))
+                    }
+                    // Fewer preserved newlines than the rows need. With an
+                    // allowance this is a character horizon the caller
+                    // extends; without one, the whole accessible tail is the
+                    // bound, exactly as before.
+                    None => match allowance_end {
+                        Some(end) => (
+                            scan_limit.min(byte_to),
+                            Some(BufferWindowReadBoundary::WindowChars(end)),
+                        ),
+                        None => (byte_to, None),
+                    },
+                }
+            }
         }
     }
 

@@ -147,6 +147,7 @@ pub(crate) fn plan_plain_row_classified<B: LayoutBufferView>(
         fit,
         &display_scan.replacements,
         &overlay_strings,
+        policy.source_end,
     )?;
 
     // An anchor whose strings are not routable refuses only when the routed

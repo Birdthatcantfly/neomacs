@@ -211,6 +211,25 @@ pub(crate) struct RowRouteWindowPolicy {
     /// (`move_it_in_display_line_to` against `it->last_visible_x`,
     /// src/xdisp.c:10422-10451).
     pub(crate) scan_window_chars: usize,
+    /// Whether the end of the visible text slice is a real line end.
+    pub(crate) source_end: RowRouteSourceEnd,
+}
+
+/// What the end of the visible text slice witnesses.
+///
+/// The row and sync source bounds always cut AFTER a real newline, and the
+/// accessible end is the buffer's own last line, so a scan that runs off the
+/// slice has seen the line's real end. A character horizon (the geometry
+/// allowance of a bounded viewport read) can stop INSIDE a line: the buffer
+/// continues past the slice, so a scan that runs off it knows nothing about
+/// the line's end and must leave the row to the pipeline, whose walk reports
+/// the horizon and re-acquires more source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowRouteSourceEnd {
+    /// The slice ends at the accessible end or after a complete line.
+    LineEnd,
+    /// The slice ends at a character horizon inside a line.
+    CharacterHorizon,
 }
 
 /// Why a candidate row stayed on the buffer pipeline. Every refusal point in
@@ -246,6 +265,12 @@ pub(crate) enum RouteRefusal {
     /// newline-less tail line itself ROUTES ([`RoutedRowLineEnd::EndOfSource`]);
     /// the bare-newline empty line routes RowBreak-only.
     ScanEob,
+    /// The scan ran off the visible text at a CHARACTER horizon
+    /// ([`RowRouteSourceEnd::CharacterHorizon`]): the line continues past the
+    /// slice, so its end — and any continuation/truncation policy that
+    /// depends on it — stays with the pipeline, which reports the horizon and
+    /// re-acquires more source.
+    ScanHorizon,
     /// Point sits inside the routed coverage (cursor capture stays on the
     /// buffer pipeline).
     PointInRow,
@@ -453,11 +478,14 @@ pub(crate) enum RoutedRowLineEnd {
     /// what keeps the multi-row carry-over bookkeeping byte-identical.
     OverflowHandoff,
     /// Phase 2h rung 2: the line ends AT the end of the source text with no
-    /// newline. The window read bound always cuts AFTER a complete line's
-    /// newline (`find_nth_preserved_newline_after` returns newline+1) or at the
-    /// accessible end, so a newline-less tail line is never a mid-line
-    /// artifact of the bound — it is the buffer's (or narrowed region's)
+    /// newline. A row/sync read bound always cuts AFTER a complete line's
+    /// newline (`find_nth_preserved_newline_within` returns newline+1) or at
+    /// the accessible end, so on those bounds a newline-less tail line is
+    /// never a mid-line artifact — it is the buffer's (or narrowed region's)
     /// last line, GNU's `IT_EOB` exit (xdisp.c:26007, `row->ends_at_zv_p`).
+    /// A CHARACTER horizon can cut mid-line; the scan refuses such a row
+    /// with [`RouteRefusal::ScanHorizon`] before either mode is chosen, so
+    /// this variant is only ever produced for a real source end.
     /// The plan covers the whole tail; the routed render leaves the walk at
     /// the source end and the visible loop exits, after which the pipeline's
     /// post-loop end-of-buffer machinery (EOB cursor/tail request, appended

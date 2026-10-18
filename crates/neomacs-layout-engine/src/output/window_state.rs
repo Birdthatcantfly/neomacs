@@ -89,6 +89,31 @@ impl OutputWindowBuildState {
         self.current_row = checkpoint.current_row;
     }
 
+    /// The window owning the currently open (unpublished) row grid, if any.
+    #[inline]
+    pub(crate) fn unpublished_window_grid_owner(&self) -> Option<u64> {
+        self.current_row_grid
+            .as_ref()
+            .map(|_| self.current_window_id)
+    }
+
+    /// Drop the row grid of an unpublished (discarded) window attempt.
+    ///
+    /// A live visibility/point retry re-enters the window producer before the
+    /// discarded attempt's `End` lifecycle. Its grid was never pushed into
+    /// `windows`, so nothing references it, and the next `Begin` would replace
+    /// it anyway; dropping it here lets a bounded source retry capture its
+    /// checkpoint between completed windows. Only the SAME window's discarded
+    /// grid may be dropped — an open grid of another window is published row
+    /// content, not a discarded attempt.
+    pub(crate) fn discard_unpublished_window_grid(&mut self, window_id: u64) {
+        debug_assert!(
+            self.current_row_grid.is_none() || self.current_window_id == window_id,
+            "only the same window's unpublished grid may be discarded"
+        );
+        self.current_row_grid = None;
+    }
+
     pub(crate) fn reset(&mut self) {
         self.windows.clear();
         self.current_row_grid = None;

@@ -375,15 +375,19 @@ impl BufferSourceWalkSetup {
                 Some(params.window_id as u64),
                 self.charpos,
                 loop_context.text_start_byte(),
-            )
-            // The live viewport walk owns no retry machinery, so its bound is
-            // the per-scan allowance instead of an absolute horizon: every
-            // row's run production, slicing and measurement stays proportional
-            // to the row (the GNU display-line bound, `move_it_in_display_line_to`
-            // stopping against `it->last_visible_x`, src/xdisp.c:10422-10451),
-            // and progress never depends on the bound.
-            .with_ordinary_run_scan_budget(CharLen::new(params.display_line_scan_budget_chars())),
-        };
+            ),
+        }
+        // The two bounds are orthogonal and both numeric: the acquisition
+        // horizon limits the COPIED source, while this allowance limits each
+        // row's run scan so every row's run production, slicing and
+        // measurement stays proportional to the row (the GNU display-line
+        // bound, `move_it_in_display_line_to` stopping against
+        // `it->last_visible_x`, src/xdisp.c:10422-10451). Splitting a run is
+        // pure re-chunking of the same stream and progress never depends on
+        // the bound, so the acquisition-bounded walk needs it exactly as much
+        // as the unbounded one: without it a bounded newline-less tail makes
+        // every visible row re-scan and re-measure up to the horizon.
+        .with_ordinary_run_scan_budget(CharLen::new(params.display_line_scan_budget_chars()));
 
         BufferSourceLoopMutableState::new(
             &mut self.invisible_text_checkpoint,

@@ -2203,13 +2203,30 @@ impl<'a, B: LayoutBufferView> RustBufferAccess<'a, B> {
     }
 
     /// Find a read boundary after N source newlines that cannot be consumed by
-    /// a display/invisible property. Inserted strings and wrapping only add
-    /// rows. Conservatively ignore every newline covered by either property,
-    /// including inactive values and overlays belonging to another window.
-    /// Skip hazardous extents directly, so a large fold needs no per-line
-    /// property queries. The returned offset always follows a real newline.
-    pub fn find_nth_preserved_newline_after(&self, byte_from: i64, n: usize) -> Option<i64> {
-        let bounds = clamped_layout_emacs_byte_range(self.buffer, byte_from, self.zv())?;
+    /// a display/invisible property, scanning only `[byte_from, byte_limit)`.
+    /// Inserted strings and wrapping only add rows. Conservatively ignore every
+    /// newline covered by either property, including inactive values and
+    /// overlays belonging to another window. Skip hazardous extents directly,
+    /// so a large fold needs no per-line property queries. The returned offset
+    /// always follows a real newline.
+    ///
+    /// This is a line-EXISTENCE query: `None` says the bounded region holds
+    /// fewer than `n` preserved newlines, never that the buffer ended. GNU
+    /// asks the same question of `find_newline` (src/search.c:675), which
+    /// answers it from the newline cache's newline-free region records
+    /// (src/search.c:595-644 `region_cache_forward`), and it bounds its own
+    /// continued-line search by the window's cell count
+    /// (`WINDOW_TOTAL_LINES (w) * WINDOW_TOTAL_COLS (w)`, src/xdisp.c:19763).
+    /// A caller that only needs a screenful of lines must pass such a bound,
+    /// or a newline-less tail walks (and is then copied) to ZV.
+    pub fn find_nth_preserved_newline_within(
+        &self,
+        byte_from: i64,
+        byte_limit: i64,
+        n: usize,
+    ) -> Option<i64> {
+        let bounds =
+            clamped_layout_emacs_byte_range(self.buffer, byte_from, byte_limit.min(self.zv()))?;
         if n == 0 {
             return Some(bounds.start().get() as i64);
         }
@@ -2223,10 +2240,15 @@ impl<'a, B: LayoutBufferView> RustBufferAccess<'a, B> {
             let result = self.buffer.layout_try_for_each_emacs_byte_range_chunk(
                 EmacsByteRange::new(start, bounds.end()),
                 |chunk| {
-                    for (index, byte) in chunk.iter().enumerate() {
-                        if *byte != b'\n' {
-                            continue;
-                        }
+                    // memchr, not a scalar byte loop: on a newline-free region
+                    // this query is a scan for the first newline, which GNU
+                    // answers from the newline cache without reading the bytes
+                    // at all (src/search.c:595-644); the vectorized search is
+                    // the closest bounded equivalent.
+                    let mut searched = 0;
+                    while let Some(found) = memchr::memchr(b'\n', &chunk[searched..]) {
+                        let index = searched + found;
+                        searched = index + 1;
                         let pos = EmacsBytePos::new(offset + index);
                         let after = EmacsBytePos::new(pos.get() + 1);
                         let mut skip_to = pos;

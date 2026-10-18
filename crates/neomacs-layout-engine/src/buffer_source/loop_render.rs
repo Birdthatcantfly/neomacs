@@ -182,6 +182,16 @@ impl<'rows, 'emit, 'surface> BufferSourceLoopMutableState<'rows, 'emit, 'surface
                 .row_geometry
                 .current_row_is_visible(loop_context.row_visibility_limit()))
         {
+            tracing::debug!(
+                "layout_window_rust: window horizon exhausted byte_idx={} text_len={} charpos={} accessible_end={} row_visible={}",
+                self.progress.byte_idx(),
+                text.len(),
+                self.progress.charpos(),
+                loop_context.accessible_end(),
+                self.row_build
+                    .row_geometry
+                    .current_row_is_visible(loop_context.row_visibility_limit()),
+            );
             // A physical-line scan that ends exactly at the copied boundary
             // cannot certify the last row, even if its transition filled the
             // viewport. Complete display elements may jump beyond that slice;

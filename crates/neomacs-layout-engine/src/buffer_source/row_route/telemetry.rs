@@ -82,6 +82,7 @@ impl RouteRefusal {
             | RouteRefusal::ScanChar
             | RouteRefusal::ScanCompose
             | RouteRefusal::ScanEob
+            | RouteRefusal::ScanHorizon
             | RouteRefusal::Overlay
             | RouteRefusal::Elision
             | RouteRefusal::OverflowElision

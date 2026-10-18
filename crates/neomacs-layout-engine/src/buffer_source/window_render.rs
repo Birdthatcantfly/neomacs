@@ -34,16 +34,32 @@ enum SyncSourceRead {
     UncappedRetry,
 }
 
-/// Acquisition allowance owned by one synchronous query attempt. Its numeric
+/// How a bounded viewport read stops. The two modes differ only in whether
+/// the newline-existence query runs first: a synchronous query copies its
+/// whole geometry allowance outright, while a live viewport walk asks whether
+/// the allowance even holds the rows a viewport can show and copies only
+/// through the last preserved newline when it does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViewportSourceReadMode {
+    /// Copy exactly the geometry character allowance.
+    CharHorizon,
+    /// Stop after the row budget's preserved newlines, never past the
+    /// geometry character allowance. Reaching the allowance is a horizon the
+    /// retry loop extends, never an end of buffer.
+    RowsWithinChars,
+}
+
+/// Acquisition allowance owned by one viewport render attempt. Its numeric
 /// geometry estimate limits copied source, never ZV or visible geometry. Each
 /// mutator grows its own allowance when the canonical walk needs more source.
 #[derive(Clone, Copy)]
 struct WindowTextReadBudget {
     chars: CharLen,
+    mode: ViewportSourceReadMode,
 }
 
 impl WindowTextReadBudget {
-    fn initial(params: &WindowParams) -> Self {
+    fn initial(params: &WindowParams, mode: ViewportSourceReadMode) -> Self {
         let cols = (params.text_bounds.width / params.char_width.max(1.0))
             .ceil()
             .max(1.0) as usize;
@@ -55,14 +71,51 @@ impl WindowTextReadBudget {
             .max(1);
         Self {
             chars: CharLen::new(chars),
+            mode,
         }
     }
 
     fn grow(self) -> Self {
         Self {
             chars: CharLen::new(self.chars.get().saturating_mul(2)),
+            mode: self.mode,
         }
     }
+
+    fn apply(self, request: BufferWindowSourceRequest) -> BufferWindowSourceRequest {
+        match self.mode {
+            ViewportSourceReadMode::CharHorizon => request.with_window_chars(self.chars),
+            ViewportSourceReadMode::RowsWithinChars => request.with_window_rows_within(self.chars),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Force the initial viewport source allowance (tests only). Numeric
+    /// witness for the bounded read and its re-acquisition; no Lisp state is
+    /// retained and the shipping build has no such override.
+    static VIEWPORT_READ_ALLOWANCE_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+    /// Viewport source re-acquisitions on this thread (tests only).
+    static VIEWPORT_READ_RETRIES: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Force the initial viewport source allowance on this thread (tests only).
+#[cfg(test)]
+pub(crate) fn set_viewport_read_allowance_for_test(chars: Option<usize>) {
+    VIEWPORT_READ_ALLOWANCE_OVERRIDE.with(|cell| cell.set(chars));
+}
+
+#[cfg(test)]
+pub(crate) fn viewport_read_retries_for_test() -> u64 {
+    VIEWPORT_READ_RETRIES.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_viewport_read_retries_for_test() {
+    VIEWPORT_READ_RETRIES.with(|cell| cell.set(0));
 }
 
 pub(crate) struct BufferWindowRenderRequest<'a, B>
@@ -136,21 +189,45 @@ where
     /// leaf's fontification and display-when preparation. Re-entering the
     /// outer leaf would repeat fontification callbacks that leave fontified
     /// nil. No tail/chrome/end snapshot was published by the failed body.
+    ///
+    /// A bounded viewport read that runs out of source re-acquires here the
+    /// same way, with its geometry allowance grown; the discarded attempt's
+    /// unpublished window grid is dropped before the retaken body replaces it.
     pub(crate) fn render_into(
         self,
         mut context: BufferSourceRenderAttemptContext<'_, '_>,
         text_buf: &mut Vec<u8>,
         remaining_visibility_retries: usize,
-        cursor_only: Option<crate::incremental_layout::CursorOnlyReplay>,
+        mut cursor_only: Option<crate::incremental_layout::CursorOnlyReplay>,
         scroll: Option<crate::incremental_layout::ScrollReplay>,
     ) -> BufferSourceRenderAttemptOutcome {
-        if self.position_publication.is_synchronous_query()
-            && self.params.source_extent == crate::types::WindowSourceExtent::Viewport
-            // Selective indentation classification needs a complete indent.
-            // Its current scanner has no incomplete-acquisition witness.
-            && self.params.selective_display == 0
-        {
-            let mut budget = WindowTextReadBudget::initial(self.params);
+        if let Some(mode) = self.viewport_source_read_mode(scroll.is_none()) {
+            // A live visibility/point retry re-enters the producer without
+            // finishing the discarded attempt's window; its open grid was
+            // never published, and the retaken body replaces it. Drop it so
+            // the source-attempt checkpoint begins between completed windows.
+            if let Some(owner) = context
+                .output_mut()
+                .output_target()
+                .builder()
+                .unpublished_window_grid_owner()
+            {
+                tracing::debug!(
+                    "layout_window_rust: dropping unpublished grid window={} for window={}",
+                    owner,
+                    self.params.window_id
+                );
+                context
+                    .output_mut()
+                    .output_target()
+                    .builder()
+                    .discard_unpublished_window_grid(self.params.window_id as u64);
+            }
+            let mut budget = WindowTextReadBudget::initial(self.params, mode);
+            #[cfg(test)]
+            if let Some(chars) = VIEWPORT_READ_ALLOWANCE_OVERRIDE.with(std::cell::Cell::get) {
+                budget.chars = CharLen::new(chars.max(1));
+            }
             loop {
                 let checkpoint = context
                     .output_mut()
@@ -179,7 +256,11 @@ where
                     context.reborrow(),
                     text_buf,
                     remaining_visibility_retries,
-                    None,
+                    // A retained cursor-only body is consumed by its first
+                    // attempt exactly once: it walks no source, so it can
+                    // never exhaust the horizon, and a re-acquired body must
+                    // be walked afresh.
+                    cursor_only.take(),
                     None,
                     SyncSourceRead::AllowHorizon,
                     Some(budget),
@@ -195,6 +276,8 @@ where
                     .output_target()
                     .builder()
                     .restore_source_attempt_checkpoint(checkpoint);
+                #[cfg(test)]
+                VIEWPORT_READ_RETRIES.with(|cell| cell.set(cell.get() + 1));
                 budget = budget.grow();
             }
         }
@@ -275,6 +358,35 @@ where
             )
         } else {
             outcome
+        }
+    }
+
+    /// The bounded source mode for this attempt, when its acquisition may be
+    /// limited by the viewport geometry.
+    ///
+    /// A synchronous query copies its geometry allowance outright; a plain
+    /// live viewport walk (no edit replay to synchronize) asks the same
+    /// allowance for the rows a viewport can show, so a newline-less tail is
+    /// never walked and copied to ZV; a scroll replay keeps its own sync-stop
+    /// horizon, and an `AccessibleEnd` (mini-window) measurement must observe
+    /// the real ZV.
+    fn viewport_source_read_mode(
+        &self,
+        plain_viewport_walk: bool,
+    ) -> Option<ViewportSourceReadMode> {
+        if self.params.source_extent != crate::types::WindowSourceExtent::Viewport
+            // Selective indentation classification needs a complete indent.
+            // Its current scanner has no incomplete-acquisition witness.
+            || self.params.selective_display != 0
+        {
+            return None;
+        }
+        if self.position_publication.is_synchronous_query() {
+            Some(ViewportSourceReadMode::CharHorizon)
+        } else if plain_viewport_walk {
+            Some(ViewportSourceReadMode::RowsWithinChars)
+        } else {
+            None
         }
     }
 
@@ -447,10 +559,9 @@ where
             BufferWindowSourceRequest::from_window_params(params, geometry.max_rows)
         };
 
-        let source_request = if let Some(budget) = window_text_budget {
-            source_request.with_window_chars(budget.chars)
-        } else {
-            source_request
+        let source_request = match window_text_budget {
+            Some(budget) => budget.apply(source_request),
+            None => source_request,
         };
 
         let text_source = if scroll.is_some() {

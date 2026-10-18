@@ -133,6 +133,19 @@ impl DisplayOutputBuilder {
         }
     }
 
+    /// The window owning the currently open (unpublished) row grid, if any
+    /// (see [`OutputWindowBuildState::unpublished_window_grid_owner`]).
+    #[inline]
+    pub(crate) fn unpublished_window_grid_owner(&self) -> Option<u64> {
+        self.window_state.unpublished_window_grid_owner()
+    }
+
+    /// Drop an unpublished window row grid left by a discarded attempt of
+    /// this same window (see [`OutputWindowBuildState::discard_unpublished_window_grid`]).
+    pub(crate) fn discard_unpublished_window_grid(&mut self, window_id: u64) {
+        self.window_state.discard_unpublished_window_grid(window_id);
+    }
+
     #[cold]
     #[inline(never)]
     pub(crate) fn restore_source_attempt_checkpoint(

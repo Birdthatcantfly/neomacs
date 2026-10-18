@@ -22404,6 +22404,7 @@ fn plain_route_classification<B: crate::neovm_bridge::LayoutBufferView>(
                 wrap_mode: crate::types::LineWrapMode::Truncate,
                 overlay_string_window: Some(0),
                 scan_window_chars: 1_000_000,
+                source_end: crate::buffer_source::row_route::RowRouteSourceEnd::LineEnd,
             },
         ),
     )
@@ -23670,6 +23671,7 @@ fn assert_segmented_plain_shadow_row(
             wrap_mode: crate::types::LineWrapMode::Truncate,
             overlay_string_window: Some(0),
             scan_window_chars: 1_000_000,
+            source_end: crate::buffer_source::row_route::RowRouteSourceEnd::LineEnd,
         },
     )
     .expect("scenario row must classify for the item route");
@@ -37202,3 +37204,7 @@ mod point_rows_test;
 #[cfg(test)]
 #[path = "mini_scroll_sites_test.rs"]
 mod mini_scroll_sites;
+
+#[cfg(test)]
+#[path = "live_viewport_source_bound_engine_test.rs"]
+mod live_viewport_source_bound_tests;

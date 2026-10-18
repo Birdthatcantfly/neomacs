@@ -26,6 +26,7 @@ fn plain_policy() -> RowRouteWindowPolicy {
         // Far above every test line, so the extent scan still sees whole
         // lines and the assertions keep their pre-window meaning.
         scan_window_chars: 1_000_000,
+        source_end: RowRouteSourceEnd::LineEnd,
     }
 }
 
@@ -3147,4 +3148,37 @@ fn classifier_eob_tail_plans_face_boundaries() {
     .expect("segmented EOB tail plan");
     assert_eq!(plan.line_end(), RoutedRowLineEnd::EndOfSource);
     assert_eq!(plan.face_boundaries(), &[1, 2]);
+}
+
+/// A character horizon ends the visible text INSIDE a line: the line's end —
+/// and every continuation/truncation decision that depends on it — is not
+/// knowable from the slice, so the row stays on the pipeline, whose walk
+/// reports the horizon and re-acquires more source. The same slice at a real
+/// source end keeps the phase-2h end-of-source route.
+#[test]
+fn classifier_refuses_a_line_cut_by_a_character_horizon() {
+    let mut eval = Context::new();
+    let text = "abcdef";
+    let buf_id = buffer_with_text(&mut eval, text);
+    let buffer = eval.buffer_manager().get(buf_id).expect("buffer");
+    let mut horizon_policy = plain_policy();
+    horizon_policy.source_end = RowRouteSourceEnd::CharacterHorizon;
+    assert_eq!(
+        plan_plain_row_classified(
+            buffer,
+            row_start(text.as_bytes(), 0, 0),
+            wide_fit(),
+            horizon_policy
+        )
+        .unwrap_err(),
+        RouteRefusal::ScanHorizon
+    );
+    let plan = plan_plain_row_classified(
+        buffer,
+        row_start(text.as_bytes(), 0, 0),
+        wide_fit(),
+        plain_policy(),
+    )
+    .expect("a newline-less tail at the real source end routes");
+    assert!(plan.is_end_of_source());
 }

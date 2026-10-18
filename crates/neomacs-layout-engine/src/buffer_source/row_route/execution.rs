@@ -136,6 +136,11 @@ impl<'rows, 'emit, 'surface>
             wrap_mode: params.wrap_mode,
             overlay_string_window: self.surface.overlay_context.string_window_id(),
             scan_window_chars: params.narrowed_width_chars(),
+            source_end: if loop_context.source_is_character_horizon() {
+                RowRouteSourceEnd::CharacterHorizon
+            } else {
+                RowRouteSourceEnd::LineEnd
+            },
         };
         // P4.8(a): the entry taxonomy is gone, but continuation routing still
         // needs this positional fact for its other admission checks.  It is

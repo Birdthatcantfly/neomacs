@@ -415,3 +415,111 @@ fn window_character_budget_remains_progressive_with_hidden_or_selective_source()
         assert_eq!(source.accessible_end(), 800_000);
     }
 }
+
+/// The live viewport read asks a line-EXISTENCE question bounded by the
+/// window's geometry allowance. On a newline-less tail fewer than the row
+/// budget's preserved newlines exist inside the allowance, so the read stops
+/// there as a CHARACTER HORIZON — the walk extends it, never EOB — instead of
+/// walking and copying the whole tail to ZV (GNU `find_newline` answers the
+/// same question from the newline cache, src/search.c:675).
+#[test]
+fn window_rows_budget_stops_a_newline_less_tail_at_the_allowance() {
+    let mut eval = Context::new();
+    eval.buffer_manager_mut()
+        .current_buffer_mut()
+        .unwrap()
+        .insert(&"a".repeat(1_000_000));
+    let buffer = eval.buffer_manager().current_buffer().unwrap();
+    let view = crate::neovm_bridge::BorrowedLayoutBuffer::for_window(
+        buffer,
+        eval.variables(),
+        CharPos0::new(0),
+        128,
+        crate::display_property::DisplayPropertyTarget::for_window_system(true),
+    );
+    let access = RustBufferAccess::new(&view);
+    let request = BufferWindowSourceRequest::new(
+        0,
+        None,
+        0,
+        0,
+        1_000_000,
+        38,
+        WindowKind::Main,
+        ScrollPolicy::Recenter,
+        0,
+    )
+    .with_window_rows_within(CharLen::new(1024));
+    let mut bytes = Vec::new();
+    let source = request.read_exact_into(&access, &mut bytes);
+    assert_eq!(bytes.len(), 1024);
+    assert_eq!(
+        source.read_boundary(),
+        BufferWindowReadBoundary::WindowChars(CharPos0::new(1024))
+    );
+    assert!(source.read_boundary().is_character_horizon());
+    assert!(
+        source
+            .read_boundary()
+            .exhausts_window_horizon(1024, 1024, 1024, 1_000_000),
+        "the allowance end is a horizon while source remains, not EOB"
+    );
+    // The semantic end and the window start are untouched by the allowance.
+    assert_eq!(source.accessible_end(), 1_000_000);
+    assert_eq!(source.window_start(), 0);
+}
+
+/// When the allowance holds the rows the viewport can show, the same read
+/// keeps the pre-existing newline-bounded semantics: it cuts after the Nth
+/// preserved newline, and a buffer whose lines are too long for the allowance
+/// is bounded by the allowance instead of the whole tail.
+#[test]
+fn window_rows_budget_keeps_the_newline_bound_when_the_rows_fit() {
+    for (text, expected_len, boundary) in [
+        // 1000 four-byte lines: the 40th preserved newline is at byte 160.
+        (
+            "row\n".repeat(1000),
+            160,
+            BufferWindowReadBoundary::WindowRows,
+        ),
+        // 200-byte lines need byte 8000 for 40 rows, past the allowance.
+        (
+            format!("{}\n", "x".repeat(199)).repeat(50),
+            1024,
+            BufferWindowReadBoundary::WindowChars(CharPos0::new(1024)),
+        ),
+    ] {
+        let mut eval = Context::new();
+        eval.buffer_manager_mut()
+            .current_buffer_mut()
+            .unwrap()
+            .insert(&text);
+        let chars = text.chars().count() as i64;
+        let buffer = eval.buffer_manager().current_buffer().unwrap();
+        let view = crate::neovm_bridge::BorrowedLayoutBuffer::for_window(
+            buffer,
+            eval.variables(),
+            CharPos0::new(0),
+            128,
+            crate::display_property::DisplayPropertyTarget::for_window_system(true),
+        );
+        let access = RustBufferAccess::new(&view);
+        let request = BufferWindowSourceRequest::new(
+            0,
+            None,
+            0,
+            0,
+            chars,
+            38,
+            WindowKind::Main,
+            ScrollPolicy::Recenter,
+            0,
+        )
+        .with_window_rows_within(CharLen::new(1024));
+        let mut bytes = Vec::new();
+        let source = request.read_exact_into(&access, &mut bytes);
+        assert_eq!(bytes.len(), expected_len, "{boundary:?}");
+        assert_eq!(source.read_boundary(), boundary);
+        assert_eq!(source.accessible_end(), chars);
+    }
+}

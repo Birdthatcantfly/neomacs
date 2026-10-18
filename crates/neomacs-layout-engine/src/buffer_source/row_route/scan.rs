@@ -166,6 +166,7 @@ pub(super) fn routed_line_scan<B: LayoutBufferView + ?Sized>(
     fit: RowRouteFit<'_>,
     replacements: &[RoutedRowReplacement],
     overlay_strings: &[RoutedRowOverlayStrings],
+    source_end: RowRouteSourceEnd,
 ) -> Result<RoutedLineScan, RouteRefusal> {
     let mut idx = byte_idx;
     let mut char_len = 0usize;
@@ -361,6 +362,14 @@ pub(super) fn routed_line_scan<B: LayoutBufferView + ?Sized>(
     // individually satisfied the fit rule).
     if char_len == 0 {
         return Err(RouteRefusal::ScanEob);
+    }
+    // The slice can end INSIDE this line (a bounded viewport read's character
+    // horizon): the buffer continues past it, so neither the line end nor the
+    // continuation/truncation policy it decides is knowable here. Refuse
+    // before any plan commits; the pipeline reports the horizon and the walk
+    // re-acquires more source.
+    if source_end == RowRouteSourceEnd::CharacterHorizon {
+        return Err(RouteRefusal::ScanHorizon);
     }
     Ok(RoutedLineScan {
         byte_len: idx - byte_idx,

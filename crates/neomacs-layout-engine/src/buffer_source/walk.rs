@@ -154,9 +154,9 @@ impl<'request, B: LayoutBufferView> BufferSourceWalk<'request, B> {
 
     /// Bound each ordinary text-run scan to `budget` characters past its own
     /// start, the per-row allowance of GNU `get_narrowed_width`
-    /// (src/xdisp.c:3717-3735). The live window walk sets this so a
-    /// newline-less tail cannot make a visible row walk the remaining buffer;
-    /// query walks keep their absolute acquisition horizon instead.
+    /// (src/xdisp.c:3717-3735). Every window walk sets this so a newline-less
+    /// tail cannot make a visible row walk the remaining buffer; it composes
+    /// with (and is independent of) a walk's absolute acquisition horizon.
     pub(crate) fn with_ordinary_run_scan_budget(mut self, budget: CharLen) -> Self {
         self.producer.set_ordinary_run_scan_budget(budget);
         self
