@@ -5,6 +5,7 @@
 //! crossing channels can be inverted to recover those attributes.
 
 use super::{NeoColor, NeoFace, ResolvedFace, TerminalColor, color_to_pixel, colors_close};
+use neovm_core::window::FrameId;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum FaceVideo {
@@ -326,4 +327,16 @@ impl TtyPaintKey {
         self.attributes == FaceColorAttributes::from_base(face)
             && self.underline_color == face.underline_color
     }
+}
+
+/// One realized terminal paint retained beside the composed source it came
+/// from. The frame and binding-generation stamp validity, exactly GNU's
+/// `face_change` retirement of frame face-cache entries (src/xfaces.c:349,
+/// src/xfaces.c:3098-3105); the source allocation is the memo's lifetime.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TtyPaintMemo {
+    pub(super) frame: FrameId,
+    pub(super) face_change_count: u64,
+    pub(super) key: TtyPaintKey,
+    pub(super) paint: TtyPaint,
 }

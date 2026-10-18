@@ -1,11 +1,15 @@
 //! Independently rooted lface source attributes retained by layout snapshots.
 
+use super::ResolvedFace;
+use super::face_colors::{TtyPaint, TtyPaintKey, TtyPaintMemo};
 use neovm_core::emacs_core::Value;
 use neovm_core::face::Face;
 #[cfg(test)]
 use neovm_core::face::FaceTable;
 use neovm_core::gc_trace::GcTrace;
 use neovm_core::tagged::transport::{SharedRoot, SharedRootError};
+use neovm_core::window::FrameId;
+use std::cell::Cell;
 use std::sync::Arc;
 
 /// A logical face whose Lisp-valued attributes remain alive independently of
@@ -21,6 +25,14 @@ use std::sync::Arc;
 pub(super) struct RootedFace {
     attributes: Face,
     roots: Arc<FaceRoots>,
+    /// The last terminal paint realized from this source, keyed by frame and
+    /// binding generation. Realization revisits the same interned sources far
+    /// more often than it meets new ones, so parking one slot beside the
+    /// content it belongs to serves every revisit without a probe structure:
+    /// the entry retires with its stamp (GNU `face_change`, src/xfaces.c:349)
+    /// or dies with this allocation. Interior mutability keeps the Arc
+    /// API; this type is already !Sync by construction.
+    tty_paint: Cell<Option<TtyPaintMemo>>,
 }
 
 #[derive(Debug)]
@@ -89,6 +101,7 @@ impl RootedFace {
             return Ok(Self {
                 attributes,
                 roots: Arc::clone(&base.roots),
+                tty_paint: Cell::new(None),
             });
         }
         // SAFETY: callers construct attributes only from the installed
@@ -104,7 +117,42 @@ impl RootedFace {
                 values,
                 _leases: leases,
             }),
+            tty_paint: Cell::new(None),
         })
+    }
+
+    /// The paint this source last realized for `frame` at binding generation
+    /// `face_change_count`, when `face` is still in the recorded entry state.
+    ///
+    /// A hit is GNU serving a repeated merged-lface lookup from the frame
+    /// face cache without re-running `realize_tty_face` (`lookup_face`,
+    /// src/xfaces.c:5064-5093).
+    pub(super) fn cached_tty_paint(
+        &self,
+        frame: FrameId,
+        face_change_count: u64,
+        face: &ResolvedFace,
+    ) -> Option<TtyPaint> {
+        let memo = self.tty_paint.get()?;
+        (memo.frame == frame
+            && memo.face_change_count == face_change_count
+            && memo.key.matches(face))
+        .then(|| memo.paint)
+    }
+
+    /// Retain one realized terminal paint beside its source.
+    pub(super) fn record_tty_paint(
+        &self,
+        frame: FrameId,
+        face_change_count: u64,
+        face: &ResolvedFace,
+    ) {
+        self.tty_paint.set(Some(TtyPaintMemo {
+            frame,
+            face_change_count,
+            key: TtyPaintKey::of(face),
+            paint: TtyPaint::snapshot(face),
+        }));
     }
 }
 

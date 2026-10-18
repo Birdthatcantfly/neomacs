@@ -38,7 +38,7 @@ mod property_keys;
 use property_keys::PropertyKeyOrder;
 
 mod face_colors;
-use face_colors::{FaceColorAttributes, FaceColorState, TtyPaint, TtyPaintKey};
+use face_colors::{FaceColorAttributes, FaceColorState, TtyPaint};
 mod face_sources;
 use face_sources::{FaceTableRoots, RootedFace};
 
@@ -4007,38 +4007,8 @@ struct ComposedSourceCache {
     /// identity of the `face-remapping-alist` object they ran against; see
     /// [`NamedSpecEntry`].
     named_specs: rustc_hash::FxHashMap<Box<str>, NamedSpecEntry>,
-    /// Realized terminal paint per composed source, keyed by allocation
-    /// identity (see [`TtyPaintKey`]). GNU serves a repeated merged-lface
-    /// lookup from its frame face cache without re-realizing
-    /// (`lookup_face`, src/xfaces.c:5064-5093); this is the paint half of
-    /// that reuse, stamped by frame and `face_change_count` so a definition
-    /// change retires it with the rest of the cache. Entries hold their
-    /// source allocation, so an address cannot be recycled under a live
-    /// entry. Realization order re-visits the same handful of sources far
-    /// more often than it meets new ones, so a fixed slot ring beats a hash
-    /// table here: probing is a few pointer and generation compares, and
-    /// hashing the merged-attribute key costs more instruction budget than
-    /// the installs a hit saves.
-    tty_paint: [Option<TtyPaintEntry>; TTY_PAINT_MEMO_SLOTS],
-    /// Round-robin write cursor into `tty_paint`.
-    tty_paint_next: usize,
     len: usize,
 }
-
-/// One memoized terminal realization. The frame and binding generation
-/// stamp validity: paint is a function of the definitions that were live
-/// when it was realized, exactly GNU's `face_change` retirement
-/// (src/xfaces.c:3098-3105).
-struct TtyPaintEntry {
-    frame: FrameId,
-    face_change_count: u64,
-    key: TtyPaintKey,
-    source: std::sync::Arc<RootedFace>,
-    paint: TtyPaint,
-}
-
-/// Slots in the terminal-paint memo ring.
-const TTY_PAINT_MEMO_SLOTS: usize = 4;
 
 /// One folded named-face specification plus the buffer-local
 /// `face-remapping-alist` object it was folded against.
@@ -4083,8 +4053,6 @@ impl ComposedSourceCache {
         self.compositions.clear();
         self.identity_compositions.clear();
         self.named_specs.clear();
-        self.tty_paint = [None, None, None, None];
-        self.tty_paint_next = 0;
         self.len = 0;
     }
 }
@@ -4759,22 +4727,12 @@ impl FaceResolver {
         frame: FrameId,
         face_change_count: u64,
     ) -> Option<TtyPaint> {
-        let cache = self.composed_sources.borrow();
-        cache
-            .tty_paint
-            .iter()
-            .flatten()
-            .find(|entry| {
-                entry.frame == frame
-                    && entry.face_change_count == face_change_count
-                    && std::sync::Arc::ptr_eq(&entry.source, source)
-                    && entry.key.matches(face)
-            })
-            .map(|entry| entry.paint)
+        source.cached_tty_paint(frame, face_change_count, face)
     }
 
-    /// Retain one realized terminal paint for reuse, holding the source
-    /// allocation so its address cannot be recycled under an entry.
+    /// Retain one realized terminal paint for reuse beside its source; the
+    /// allocation holds the memo, so its address cannot be recycled under an
+    /// entry and a retired source releases its paint with everything else.
     fn record_tty_paint(
         &self,
         face: &ResolvedFace,
@@ -4782,16 +4740,7 @@ impl FaceResolver {
         frame: FrameId,
         face_change_count: u64,
     ) {
-        let mut cache = self.composed_sources.borrow_mut();
-        let next = cache.tty_paint_next;
-        cache.tty_paint_next = (next + 1) % TTY_PAINT_MEMO_SLOTS;
-        cache.tty_paint[next] = Some(TtyPaintEntry {
-            frame,
-            face_change_count,
-            key: TtyPaintKey::of(face),
-            source,
-            paint: TtyPaint::snapshot(face),
-        });
+        source.record_tty_paint(frame, face_change_count, face)
     }
 
     /// The previously merged source for `overlay` over `base`, when this exact
