@@ -11,9 +11,6 @@ error[E0277]: `Rc<()>` cannot be sent between threads safely
   = help: within `{closure@$DIR/tests/p1rv_ui/resume_image_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `Rc<()>`
 note: required because it appears within the type `PhantomData<Rc<()>>`
  --> $RUST/core/src/marker.rs
-  |
-  | pub struct PhantomData<T: PointeeSized>;
-  |            ^^^^^^^^^^^
 note: required because it appears within the type `ResumeGcImage<'_, 'static>`
  --> src/tagged/gc/mutator_registration/rendezvous/resume.rs
   |
@@ -26,12 +23,6 @@ note: required because it's used within this closure
   |                        ^^^^^^^
 note: required by a bound in `spawn`
  --> $RUST/std/src/thread/functions.rs
-  |
-  | pub fn spawn<F, T>(f: F) -> JoinHandle<T>
-  |        ----- required by a bound in this function
-...
-  |     F: Send + 'static,
-  |        ^^^^ required by this bound in `spawn`
 
 error[E0277]: `NonNull<ConsCell>` cannot be sent between threads safely
  --> tests/p1rv_ui/resume_image_cannot_cross_threads.rs:8:24
@@ -49,9 +40,6 @@ note: required because it appears within the type `gc::cons_storage::CatalogRegi
   |                   ^^^^^^^^^^^^^
 note: required because it appears within the type `Option<gc::cons_storage::CatalogRegion>`
  --> $RUST/core/src/option.rs
-  |
-  | pub enum Option<T> {
-  |          ^^^^^^
 note: required because it appears within the type `gc::mutator_registration::image::OwnerGcState`
  --> src/tagged/gc/mutator_registration/image.rs
   |
@@ -60,14 +48,8 @@ note: required because it appears within the type `gc::mutator_registration::ima
   = note: required for `std::ptr::Unique<gc::mutator_registration::image::OwnerGcState>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<gc::mutator_registration::image::OwnerGcState>`
  --> $RUST/alloc/src/boxed.rs
-  |
-  | pub struct Box<
-  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<gc::mutator_registration::image::OwnerGcState>>`
  --> $RUST/core/src/option.rs
-  |
-  | pub enum Option<T> {
-  |          ^^^^^^
 note: required because it appears within the type `Mutator<'static>`
  --> src/tagged/gc/mutator_registration/token.rs
   |
@@ -86,12 +68,6 @@ note: required because it's used within this closure
   |                        ^^^^^^^
 note: required by a bound in `spawn`
  --> $RUST/std/src/thread/functions.rs
-  |
-  | pub fn spawn<F, T>(f: F) -> JoinHandle<T>
-  |        ----- required by a bound in this function
-...
-  |     F: Send + 'static,
-  |        ^^^^ required by this bound in `spawn`
 
 error[E0277]: `*mut GcHeader` cannot be sent between threads safely
  --> tests/p1rv_ui/resume_image_cannot_cross_threads.rs:8:24
@@ -104,19 +80,10 @@ error[E0277]: `*mut GcHeader` cannot be sent between threads safely
   = help: within `gc::mutator_registration::image::OwnerGcState`, the trait `Send` is not implemented for `*mut GcHeader`
 note: required because it appears within the type `PhantomData<*mut GcHeader>`
  --> $RUST/core/src/marker.rs
-  |
-  | pub struct PhantomData<T: PointeeSized>;
-  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<*mut GcHeader>`
  --> $RUST/alloc/src/raw_vec/mod.rs
-  |
-  | pub(crate) struct RawVec<T, A: Allocator = Global> {
-  |                   ^^^^^^
 note: required because it appears within the type `Vec<*mut GcHeader>`
  --> $RUST/alloc/src/vec/mod.rs
-  |
-  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
-  |            ^^^
 note: required because it appears within the type `gc::mutator_gc::MutatorGcState`
  --> src/tagged/gc/mutator_gc.rs
   |
@@ -130,14 +97,8 @@ note: required because it appears within the type `gc::mutator_registration::ima
   = note: required for `std::ptr::Unique<gc::mutator_registration::image::OwnerGcState>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<gc::mutator_registration::image::OwnerGcState>`
  --> $RUST/alloc/src/boxed.rs
-  |
-  | pub struct Box<
-  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<gc::mutator_registration::image::OwnerGcState>>`
  --> $RUST/core/src/option.rs
-  |
-  | pub enum Option<T> {
-  |          ^^^^^^
 note: required because it appears within the type `Mutator<'static>`
  --> src/tagged/gc/mutator_registration/token.rs
   |
@@ -156,12 +117,6 @@ note: required because it's used within this closure
   |                        ^^^^^^^
 note: required by a bound in `spawn`
  --> $RUST/std/src/thread/functions.rs
-  |
-  | pub fn spawn<F, T>(f: F) -> JoinHandle<T>
-  |        ----- required by a bound in this function
-...
-  |     F: Send + 'static,
-  |        ^^^^ required by this bound in `spawn`
 
 error[E0277]: `*const ()` cannot be sent between threads safely
  --> tests/p1rv_ui/resume_image_cannot_cross_threads.rs:8:24
@@ -174,9 +129,6 @@ error[E0277]: `*const ()` cannot be sent between threads safely
   = help: within `gc::mutator_registration::image::OwnerGcState`, the trait `Send` is not implemented for `*const ()`
 note: required because it appears within the type `PhantomData<*const ()>`
  --> $RUST/core/src/marker.rs
-  |
-  | pub struct PhantomData<T: PointeeSized>;
-  |            ^^^^^^^^^^^
 note: required because it appears within the type `TaggedValue`
  --> src/tagged/value.rs
   |
@@ -184,19 +136,10 @@ note: required because it appears within the type `TaggedValue`
   |            ^^^^^^^^^^^
 note: required because it appears within the type `PhantomData<TaggedValue>`
  --> $RUST/core/src/marker.rs
-  |
-  | pub struct PhantomData<T: PointeeSized>;
-  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<TaggedValue>`
  --> $RUST/alloc/src/raw_vec/mod.rs
-  |
-  | pub(crate) struct RawVec<T, A: Allocator = Global> {
-  |                   ^^^^^^
 note: required because it appears within the type `Vec<TaggedValue>`
  --> $RUST/alloc/src/vec/mod.rs
-  |
-  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
-  |            ^^^
 note: required because it appears within the type `gc::mutator_gc::MutatorGcState`
  --> src/tagged/gc/mutator_gc.rs
   |
@@ -210,14 +153,8 @@ note: required because it appears within the type `gc::mutator_registration::ima
   = note: required for `std::ptr::Unique<gc::mutator_registration::image::OwnerGcState>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<gc::mutator_registration::image::OwnerGcState>`
  --> $RUST/alloc/src/boxed.rs
-  |
-  | pub struct Box<
-  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<gc::mutator_registration::image::OwnerGcState>>`
  --> $RUST/core/src/option.rs
-  |
-  | pub enum Option<T> {
-  |          ^^^^^^
 note: required because it appears within the type `Mutator<'static>`
  --> src/tagged/gc/mutator_registration/token.rs
   |
@@ -236,9 +173,3 @@ note: required because it's used within this closure
   |                        ^^^^^^^
 note: required by a bound in `spawn`
  --> $RUST/std/src/thread/functions.rs
-  |
-  | pub fn spawn<F, T>(f: F) -> JoinHandle<T>
-  |        ----- required by a bound in this function
-...
-  |     F: Send + 'static,
-  |        ^^^^ required by this bound in `spawn`

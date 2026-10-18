@@ -7,9 +7,6 @@ error[E0277]: `Rc<()>` cannot be shared between threads safely
   = help: within `Mutator<'static>`, the trait `Sync` is not implemented for `Rc<()>`
 note: required because it appears within the type `PhantomData<Rc<()>>`
  --> $RUST/core/src/marker.rs
-  |
-  | pub struct PhantomData<T: PointeeSized>;
-  |            ^^^^^^^^^^^
 note: required because it appears within the type `Mutator<'static>`
  --> src/tagged/gc/mutator_registration/token.rs
   |
@@ -42,14 +39,8 @@ note: required because it appears within the type `gc::mutator_registration::ima
   = note: required for `std::ptr::Unique<gc::mutator_registration::image::OwnerGcState>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<gc::mutator_registration::image::OwnerGcState>`
  --> $RUST/alloc/src/boxed.rs
-  |
-  | pub struct Box<
-  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<gc::mutator_registration::image::OwnerGcState>>`
  --> $RUST/core/src/option.rs
-  |
-  | pub enum Option<T> {
-  |          ^^^^^^
 note: required because it appears within the type `Mutator<'static>`
  --> src/tagged/gc/mutator_registration/token.rs
   |
@@ -75,9 +66,6 @@ note: required because it appears within the type `gc::cons_storage::CatalogRegi
   |                   ^^^^^^^^^^^^^
 note: required because it appears within the type `Option<gc::cons_storage::CatalogRegion>`
  --> $RUST/core/src/option.rs
-  |
-  | pub enum Option<T> {
-  |          ^^^^^^
 note: required because it appears within the type `gc::mutator_registration::image::OwnerGcState`
  --> src/tagged/gc/mutator_registration/image.rs
   |
@@ -86,14 +74,8 @@ note: required because it appears within the type `gc::mutator_registration::ima
   = note: required for `std::ptr::Unique<gc::mutator_registration::image::OwnerGcState>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<gc::mutator_registration::image::OwnerGcState>`
  --> $RUST/alloc/src/boxed.rs
-  |
-  | pub struct Box<
-  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<gc::mutator_registration::image::OwnerGcState>>`
  --> $RUST/core/src/option.rs
-  |
-  | pub enum Option<T> {
-  |          ^^^^^^
 note: required because it appears within the type `Mutator<'static>`
  --> src/tagged/gc/mutator_registration/token.rs
   |
@@ -114,19 +96,10 @@ error[E0277]: `*mut GcHeader` cannot be shared between threads safely
   = help: within `gc::mutator_registration::image::OwnerGcState`, the trait `Sync` is not implemented for `*mut GcHeader`
 note: required because it appears within the type `PhantomData<*mut GcHeader>`
  --> $RUST/core/src/marker.rs
-  |
-  | pub struct PhantomData<T: PointeeSized>;
-  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<*mut GcHeader>`
  --> $RUST/alloc/src/raw_vec/mod.rs
-  |
-  | pub(crate) struct RawVec<T, A: Allocator = Global> {
-  |                   ^^^^^^
 note: required because it appears within the type `Vec<*mut GcHeader>`
  --> $RUST/alloc/src/vec/mod.rs
-  |
-  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
-  |            ^^^
 note: required because it appears within the type `gc::mutator_gc::MutatorGcState`
  --> src/tagged/gc/mutator_gc.rs
   |
@@ -140,14 +113,8 @@ note: required because it appears within the type `gc::mutator_registration::ima
   = note: required for `std::ptr::Unique<gc::mutator_registration::image::OwnerGcState>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<gc::mutator_registration::image::OwnerGcState>`
  --> $RUST/alloc/src/boxed.rs
-  |
-  | pub struct Box<
-  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<gc::mutator_registration::image::OwnerGcState>>`
  --> $RUST/core/src/option.rs
-  |
-  | pub enum Option<T> {
-  |          ^^^^^^
 note: required because it appears within the type `Mutator<'static>`
  --> src/tagged/gc/mutator_registration/token.rs
   |
@@ -168,9 +135,6 @@ error[E0277]: `*const ()` cannot be shared between threads safely
   = help: within `gc::mutator_registration::image::OwnerGcState`, the trait `Sync` is not implemented for `*const ()`
 note: required because it appears within the type `PhantomData<*const ()>`
  --> $RUST/core/src/marker.rs
-  |
-  | pub struct PhantomData<T: PointeeSized>;
-  |            ^^^^^^^^^^^
 note: required because it appears within the type `TaggedValue`
  --> src/tagged/value.rs
   |
@@ -178,19 +142,10 @@ note: required because it appears within the type `TaggedValue`
   |            ^^^^^^^^^^^
 note: required because it appears within the type `PhantomData<TaggedValue>`
  --> $RUST/core/src/marker.rs
-  |
-  | pub struct PhantomData<T: PointeeSized>;
-  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<TaggedValue>`
  --> $RUST/alloc/src/raw_vec/mod.rs
-  |
-  | pub(crate) struct RawVec<T, A: Allocator = Global> {
-  |                   ^^^^^^
 note: required because it appears within the type `Vec<TaggedValue>`
  --> $RUST/alloc/src/vec/mod.rs
-  |
-  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
-  |            ^^^
 note: required because it appears within the type `gc::mutator_gc::MutatorGcState`
  --> src/tagged/gc/mutator_gc.rs
   |
@@ -204,14 +159,8 @@ note: required because it appears within the type `gc::mutator_registration::ima
   = note: required for `std::ptr::Unique<gc::mutator_registration::image::OwnerGcState>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<gc::mutator_registration::image::OwnerGcState>`
  --> $RUST/alloc/src/boxed.rs
-  |
-  | pub struct Box<
-  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<gc::mutator_registration::image::OwnerGcState>>`
  --> $RUST/core/src/option.rs
-  |
-  | pub enum Option<T> {
-  |          ^^^^^^
 note: required because it appears within the type `Mutator<'static>`
  --> src/tagged/gc/mutator_registration/token.rs
   |
