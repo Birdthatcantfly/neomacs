@@ -108,6 +108,63 @@ pub(crate) fn writer_exit(word: &AtomicU64) {
     word.store(0, Ordering::Release);
 }
 
+/// The shell configuration a reader may observe (B3 op bodies): the
+/// immutable-after-creation test, and whether the table was made by
+/// `define-hash-table-test` (lookups must run its test/hash functions).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableDescription {
+    pub test: crate::emacs_core::value::HashTableTest,
+    pub user_defined: bool,
+}
+
+/// The §3.1 nesting count taken around one user test/hash callback.
+///
+/// Minted from a lease (the table is proved rooted), but owns no authority:
+/// the callback runs with READER_COUNT and WRITER both released — the
+/// accepted protocol — while the table-level count keeps any owner's
+/// same-table mutation refusing, exactly GNU's `check_mutable_hash_table`.
+/// The count enter is a direct atomic RMW on the shared byte, never routed
+/// through the serial edit body, so it flips no Lisp-visible contents and
+/// leaves `switch_epoch` untouched. RAII Drop counts back down; `!Send`.
+pub struct UserTestHold {
+    table: *mut HashTableObj,
+    _thread: PhantomData<Rc<()>>,
+}
+
+impl UserTestHold {
+    fn take(table: *mut HashTableObj) -> Result<Self, RegistrationError> {
+        // SAFETY: the pointer came from a lease mint, which validated the
+        // object; the byte is table-level metadata, not storage contents.
+        let depth = unsafe { &(*table).table.test_depth };
+        let was = depth.fetch_add(1, Ordering::AcqRel);
+        if was == u8::MAX {
+            // Design §3.1: the count saturates defensively and a saturating
+            // enter refuses a new nested test rather than wrapping.
+            depth.fetch_sub(1, Ordering::Release);
+            return Err(RegistrationError::Exhausted);
+        }
+        Ok(Self {
+            table,
+            _thread: PhantomData,
+        })
+    }
+}
+
+impl Drop for UserTestHold {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: pairs with the enter at mint; unwind-safe by being the Drop.
+        unsafe {
+            (*self.table)
+                .table
+                .test_depth
+                .fetch_sub(1, Ordering::Release)
+        };
+    }
+}
+
+static_assertions::assert_not_impl_any!(UserTestHold: Send, Sync, Clone, Copy);
+
 /// The seal. No type outside this module can name it, so no out-of-module
 /// `impl SealedTableAccess` can extend the capability surface (fixture (f)).
 mod seal {
@@ -265,6 +322,32 @@ impl<'access> TableRef<'access> {
         let storage = unsafe { &(*self.table).table.data };
         f(storage)
     }
+
+    /// The shell configuration a sealed read may observe (B3): the test and
+    /// whether lookups run user-defined functions. Both are fixed at
+    /// creation, so this races nothing a writer may edit.
+    pub fn describe(&self) -> TableDescription {
+        let table = self.guarded_table();
+        TableDescription {
+            test: table.test,
+            user_defined: table.user_cmp_function.is_some(),
+        }
+    }
+
+    /// The §3.1 nesting count as the mutating ops read it (GNU's mutability
+    /// check): nonzero means some owner is inside this table's test or hash
+    /// function and a mutation must refuse.
+    pub fn user_test_depth(&self) -> u8 {
+        self.guarded_table().test_depth.load(Ordering::Acquire)
+    }
+
+    /// Take the §3.1 nesting count for one callback window. The hold owns
+    /// no authority: drop the minting lease (and every other lease on this
+    /// table) before running the callback, then let this Drop release the
+    /// count when the window closes.
+    pub fn hold_user_test(&self) -> Result<UserTestHold, RegistrationError> {
+        UserTestHold::take(self.table)
+    }
 }
 
 impl Drop for TableMut<'_> {
@@ -299,6 +382,13 @@ impl<'access> TableMut<'access> {
             _access: PhantomData,
             _thread: PhantomData,
         })
+    }
+
+    /// GNU's mutability check on the writer side (§3.1): `true` when this
+    /// table's nesting count is nonzero and the edit must refuse instead.
+    /// Read it before `edit`, mirroring where the serial builtins check.
+    pub fn user_test_mutation_refused(&self) -> bool {
+        self.guarded_table().test_depth.load(Ordering::Acquire) != 0
     }
 
     /// One Rust-side edit under WRITER: the drain has already happened at

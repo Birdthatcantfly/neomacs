@@ -627,7 +627,10 @@ pub(crate) fn lookup_hash_table_test_alias(name: &str) -> Option<HashTableTestAl
     HASH_TABLE_TEST_ALIASES.with(|slot| slot.borrow().aliases.get(name).cloned())
 }
 
-fn maybe_resize_hash_table_for_insert(table: &mut LispHashTable, inserting_new_key: bool) {
+pub(crate) fn maybe_resize_hash_table_for_insert(
+    table: &mut LispHashTable,
+    inserting_new_key: bool,
+) {
     if !inserting_new_key {
         return;
     }

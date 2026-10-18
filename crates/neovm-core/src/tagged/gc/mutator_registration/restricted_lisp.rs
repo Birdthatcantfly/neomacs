@@ -9,9 +9,12 @@
 
 use super::{
     AllStopped, HeapIdentity, Mutator, MutatorPermit, OwnerRootSlot, ParallelHeapEra,
-    RegistrationError, Registry, RendezvousError, RunAccess, RunSlice, SliceRoot,
+    RegistrationError, Registry, RendezvousError, RunAccess, RunSlice, SealedTableAccess,
+    SliceRoot, TableMut, TableRef,
 };
+use crate::emacs_core::builtins::maybe_resize_hash_table_for_insert;
 use crate::emacs_core::eval::Context;
+use crate::emacs_core::value::{HashProbe, HashTableTest};
 use crate::tagged::transport::SharedRoot;
 use crate::tagged::value::{Fixnum, TaggedValue};
 use rustc_hash::FxHashSet;
@@ -26,21 +29,92 @@ const CHANNEL_WAIT: Duration = Duration::from_secs(90);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Op {
-    ConstNil { dst: u16 },
-    ConstT { dst: u16 },
-    ConstFixnum { dst: u16, value: i64 },
-    Move { dst: u16, src: u16 },
-    Add { dst: u16, a: u16, b: u16 },
-    Sub { dst: u16, a: u16, b: u16 },
-    Lt { dst: u16, a: u16, b: u16 },
-    Eq { dst: u16, a: u16, b: u16 },
-    BranchIfNil { cond: u16, target: u16 },
-    Jump { target: u16 },
-    Cons { dst: u16, car: u16, cdr: u16 },
-    Car { dst: u16, cell: u16 },
-    Cdr { dst: u16, cell: u16 },
-    SetCar { cell: u16, value: u16 },
-    SetCdr { cell: u16, value: u16 },
+    ConstNil {
+        dst: u16,
+    },
+    ConstT {
+        dst: u16,
+    },
+    ConstFixnum {
+        dst: u16,
+        value: i64,
+    },
+    Move {
+        dst: u16,
+        src: u16,
+    },
+    Add {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    Sub {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    Lt {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    Eq {
+        dst: u16,
+        a: u16,
+        b: u16,
+    },
+    BranchIfNil {
+        cond: u16,
+        target: u16,
+    },
+    Jump {
+        target: u16,
+    },
+    Cons {
+        dst: u16,
+        car: u16,
+        cdr: u16,
+    },
+    Car {
+        dst: u16,
+        cell: u16,
+    },
+    Cdr {
+        dst: u16,
+        cell: u16,
+    },
+    SetCar {
+        cell: u16,
+        value: u16,
+    },
+    SetCdr {
+        cell: u16,
+        value: u16,
+    },
+    /// B3 sealed hash-table ops. The table operand is an owner slot planted
+    /// with the table word at admission time; results go back into owner
+    /// slots. These are the only ops that mint a lease, so they execute
+    /// between slice regions ([`Flow::Lease`]).
+    HtGet {
+        table: u16,
+        key: u16,
+        found: u16,
+        value: u16,
+    },
+    HtPut {
+        table: u16,
+        key: u16,
+        value: u16,
+    },
+    HtRem {
+        table: u16,
+        key: u16,
+        found: u16,
+    },
+    HtCount {
+        table: u16,
+        dst: u16,
+    },
     Safepoint,
 }
 
@@ -63,6 +137,11 @@ enum Abs {
     T,
     Fix(i64),
     Cons,
+    /// A bare symbol planted by hash-table setup: an `eq` key shape.
+    Sym,
+    /// A hash table planted by [`HtSetup`]: only the `Ht*` table operand
+    /// accepts it, and it is the one shape a key operand refuses.
+    Table,
     Top,
 }
 
@@ -85,6 +164,24 @@ enum ExecError {
     Overflow,
     Backedge,
     Slot,
+    /// A sealed mutating op ran while this table's §3.1 nesting count was
+    /// nonzero: the user test (or hash) callback tried to edit the table it
+    /// was running for. GNU's "hash table test modifies table" refusal.
+    UserTestMutation,
+    /// A user-test lookup could not settle within [`HT_RETRY_ROUNDS`]
+    /// revalidation rounds: the epoch moved under every scan.
+    EpochRetry,
+}
+
+/// Why exec handed control back to the driver. A safepoint pauses for the
+/// collection protocol; a lease op needs `&mut RunAccess`, which the open
+/// slice region is borrowing, so the op runs only after the region closes
+/// and the driver then re-enters the slice at the same pc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Flow {
+    Done,
+    Safepoint,
+    Lease,
 }
 
 impl From<RegistrationError> for ExecError {
@@ -400,7 +497,7 @@ fn prevalidate_with(
                         }
                         pc = dest;
                     }
-                    Abs::T | Abs::Fix(_) | Abs::Cons => pc += 1,
+                    Abs::T | Abs::Fix(_) | Abs::Cons | Abs::Sym | Abs::Table => pc += 1,
                     Abs::Top => return Err(Reject::RejectedType),
                 }
             }
@@ -431,10 +528,59 @@ fn prevalidate_with(
                 let _ = slot_index(value, nslots)?;
                 pc += 1;
             }
+            Op::HtGet {
+                table,
+                key,
+                found,
+                value,
+            } => {
+                table_must(slots.as_slice(), nslots, table)?;
+                key_may(slots.as_slice(), nslots, key)?;
+                slots[slot_index(found, nslots)?] = Abs::Top;
+                slots[slot_index(value, nslots)?] = Abs::Top;
+                pc += 1;
+            }
+            Op::HtPut { table, key, value } => {
+                table_must(slots.as_slice(), nslots, table)?;
+                key_may(slots.as_slice(), nslots, key)?;
+                let _ = slot_index(value, nslots)?;
+                pc += 1;
+            }
+            Op::HtRem { table, key, found } => {
+                table_must(slots.as_slice(), nslots, table)?;
+                key_may(slots.as_slice(), nslots, key)?;
+                slots[slot_index(found, nslots)?] = Abs::Top;
+                pc += 1;
+            }
+            Op::HtCount { table, dst } => {
+                table_must(slots.as_slice(), nslots, table)?;
+                slots[slot_index(dst, nslots)?] = Abs::Top;
+                pc += 1;
+            }
             Op::Safepoint => pc += 1,
         }
     }
     Ok(())
+}
+
+/// The `Ht*` table operand must be a planted table word (never Top: a
+/// program that might run a table op on a non-table is rejected before any
+/// owner is activated, like every other type fact here).
+fn table_must(slots: &[Abs], nslots: usize, table: u16) -> Result<(), Reject> {
+    match slots[slot_index(table, nslots)?] {
+        Abs::Table => Ok(()),
+        _ => Err(Reject::RejectedType),
+    }
+}
+
+/// B3 key shapes: fixnum, bare symbol, or a cons (an `equal` key). Nil and t
+/// would be honest eq keys, but the closed program set never needs them, and
+/// refusing keeps the fact lattice from joining them into Top.
+fn key_may(slots: &[Abs], nslots: usize, key: u16) -> Result<(), Reject> {
+    match slots[slot_index(key, nslots)?] {
+        Abs::Fix(_) | Abs::Sym | Abs::Cons | Abs::Top => Ok(()),
+        _ => Err(Reject::RejectedType),
+    }
 }
 
 fn fix_pair(slots: &[Abs], nslots: usize, a: u16, b: u16) -> Result<(i64, i64), Reject> {
@@ -691,7 +837,7 @@ fn oracle_lines() -> Vec<&'static str> {
     let lines: Vec<_> = include_str!("restricted_lisp_oracle.expected")
         .lines()
         .collect();
-    assert_eq!(lines.len(), 13, "GNU 31.1 oracle fixture");
+    assert_eq!(lines.len(), 28, "GNU 31.1 oracle fixture");
     lines
 }
 
@@ -725,7 +871,14 @@ fn prin1(bits: usize) -> String {
                 out.push(')');
                 return;
             }
-            assert!(cursor.is_cons(), "dotted prin1");
+            if !cursor.is_cons() {
+                // Dotted tail: `(a . b)`, as GNU prin1 renders the (KEY . HASH)
+                // pairs of the B3 bucket dumps.
+                out.push_str(" . ");
+                walk(cursor, out, depth + 1);
+                out.push(')');
+                return;
+            }
         }
         panic!("prin1 length");
     }
@@ -764,7 +917,7 @@ fn exec<'brand>(
     bound: u32,
     overlap: Option<&Overlap>,
     index: usize,
-) -> Result<bool, ExecError> {
+) -> Result<Flow, ExecError> {
     if let Some(overlap) = overlap
         && !machine.entered
     {
@@ -892,11 +1045,17 @@ fn exec<'brand>(
             Op::Safepoint => {
                 machine.safepoints += 1;
                 machine.pc += 1;
-                return Ok(true);
+                return Ok(Flow::Safepoint);
+            }
+            Op::HtGet { .. } | Op::HtPut { .. } | Op::HtRem { .. } | Op::HtCount { .. } => {
+                // Leases mint from `&mut RunAccess`, and the open slice
+                // region is borrowing it: leave pc on the op and let the
+                // driver perform it between regions (design §6).
+                return Ok(Flow::Lease);
             }
         }
     }
-    Ok(false)
+    Ok(Flow::Done)
 }
 
 fn fix_operands<'brand>(
@@ -993,6 +1152,586 @@ fn field_store<'brand>(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// B3: sealed hash-table ops through the proof-2 leases (design §6, §7 B3)
+// ---------------------------------------------------------------------------
+
+/// Revalidation rounds for a user-test scan: how many times a lookup may
+/// restart after the epoch moved under its callback window (the B1 bound).
+const HT_RETRY_ROUNDS: usize = 8;
+
+/// The hash and comparison programs standing in for one table's
+/// user-defined test functions. Restricted callbacks replace the engine's
+/// eval-applied closures: same protocol, closed program set.
+struct UserTestProg<'env> {
+    /// The owner slot holding this table's word.
+    slot: u16,
+    hash_ops: &'env [Op],
+    cmp_ops: &'env [Op],
+}
+
+/// The B3 table environment of one session: which owner slots carry
+/// user-defined tests, the callback scratch slots, and the counters the
+/// tests assert on. Shared immutably by every owner.
+struct HtEnv<'env> {
+    users: &'env [UserTestProg<'env>],
+    cb_key: u16,
+    cb_cand: u16,
+    cb_out: u16,
+    /// Scans that re-ran because the epoch moved under a callback window.
+    revalidations: AtomicUsize,
+    /// P8 lever: while nonzero, a comparison window first performs a legal
+    /// writer edit on the table under test — a no-op edit still bumps the
+    /// epoch — modeling another owner's mutation inside the window. Only a
+    /// single-owner session can observe the retry this provokes; by design
+    /// the guard itself makes a same-table edit by the callback impossible.
+    bump_before_cb: AtomicUsize,
+}
+
+impl<'env> HtEnv<'env> {
+    fn user_prog(&self, slot: u16) -> Option<&'env UserTestProg<'env>> {
+        self.users.iter().find(|prog| prog.slot == slot)
+    }
+}
+
+/// The pre-admission setup of one B3 session: elisp builds each table (and
+/// the planted bare symbols) in the serial world; the harness keeps the
+/// values alive as transport roots and plants them into owner slots in
+/// place of nil, so the root-slot bank budget is unchanged.
+struct HtSetup {
+    /// Eval'd before `admit_owned_parallel`; must return the plant list.
+    source: &'static str,
+    /// `(slot, fact)` per element of the plant list, in order.
+    facts: Vec<(u16, Abs)>,
+    nslots: usize,
+}
+
+impl HtSetup {
+    /// The initial abstract facts prevalidation needs: every planted slot
+    /// starts at its fact, every other slot at nil.
+    fn initial(&self) -> Vec<(u16, Abs)> {
+        self.facts.clone()
+    }
+}
+
+/// Plant result words back into owner slots: the answer of a lease op and
+/// the arguments of a callback cross the lease boundary as whole tagged
+/// words, never as borrowed storage references (design §3.2).
+fn plant_words<'era>(
+    run: &mut RunAccess<'_, 'era>,
+    slots: &[OwnerRootSlot<'era>],
+    words: &[(u16, usize)],
+) -> Result<(), ExecError> {
+    run.with_slice(|slice| {
+        let mut homes = Vec::with_capacity(slots.len());
+        for slot in slots {
+            homes.push(slice.bind(slot)?);
+        }
+        for &(slot, bits) in words {
+            let index = home_index(slot, homes.len())?;
+            slice.plant_word_for_test(&mut homes[index], bits);
+        }
+        Ok(())
+    })
+    .map_err(ExecError::from)?
+}
+
+/// Run one user-test callback program to completion and return the `cb_out`
+/// word. Callback programs are safepoint-free; a nested table op inside a
+/// callback ends the region like any other lease op and runs from a fresh
+/// run access, where the nesting count refuses the mutating ones. Arguments
+/// are planted on entry (pc == 0) only.
+fn run_cb<'era>(
+    owner: &mut Mutator<'era>,
+    slots: &[OwnerRootSlot<'era>],
+    env: &HtEnv<'_>,
+    ops: &[Op],
+    args: &[(u16, usize)],
+) -> Result<usize, ExecError> {
+    let mut machine = Machine::new();
+    loop {
+        let flow = with_run(owner, |run| {
+            run.with_slice(|slice| {
+                let mut homes = Vec::with_capacity(slots.len());
+                for slot in slots {
+                    homes.push(slice.bind(slot)?);
+                }
+                if machine.pc == 0 {
+                    for &(slot, bits) in args {
+                        let index = home_index(slot, homes.len())?;
+                        slice.plant_word_for_test(&mut homes[index], bits);
+                    }
+                }
+                exec(slice, &mut homes, ops, &mut machine, 0, None, 0)
+            })
+            .map_err(ExecError::from)?
+        })?;
+        match flow {
+            Flow::Done => {
+                return with_run(owner, |run| {
+                    Ok(slots[usize::from(env.cb_out)].word_for_test(run))
+                });
+            }
+            Flow::Safepoint => panic!("user test callback contains a safepoint op"),
+            Flow::Lease => {
+                let op = ops[machine.pc];
+                machine.pc += 1;
+                ht_step(owner, slots, op, Some(env))?;
+            }
+        }
+    }
+}
+
+/// The shell configuration one brief reader lease can observe.
+fn describe_table(
+    owner: &mut Mutator<'_>,
+    table_tv: TaggedValue,
+) -> Result<(HashTableTest, bool), ExecError> {
+    with_run(owner, |run| {
+        let lease = TableRef::enter(run, table_tv)?;
+        let described = lease.describe();
+        Ok((described.test, described.user_defined))
+    })
+}
+
+fn epoch_of(owner: &mut Mutator<'_>, table_tv: TaggedValue) -> Result<u64, ExecError> {
+    with_run(owner, |run| {
+        let lease = TableRef::enter(run, table_tv)?;
+        Ok(lease.read(|s| s.switch_epoch))
+    })
+}
+
+/// GNU's mutability refusal on the reader side: some owner is inside this
+/// table's test or hash function, so a mutating op must refuse before it
+/// scans (mirroring where the serial builtins check).
+fn refuse_in_user_test(owner: &mut Mutator<'_>, table_tv: TaggedValue) -> Result<(), ExecError> {
+    with_run(owner, |run| {
+        let lease = TableRef::enter(run, table_tv)?;
+        if lease.user_test_depth() != 0 {
+            return Err(ExecError::UserTestMutation);
+        }
+        Ok(())
+    })
+}
+
+/// The user hash callback: hold the nesting count (no lease outstanding),
+/// run the program, read a fixnum back.
+fn user_wanted_hash<'era>(
+    owner: &mut Mutator<'era>,
+    slots: &[OwnerRootSlot<'era>],
+    env: &HtEnv<'_>,
+    prog: &UserTestProg<'_>,
+    table_tv: TaggedValue,
+    key_tv: TaggedValue,
+) -> Result<i64, ExecError> {
+    let hold = with_run(owner, |run| {
+        let lease = TableRef::enter(run, table_tv)?;
+        Ok(lease.hold_user_test()?)
+    })?;
+    let out = run_cb(
+        owner,
+        slots,
+        env,
+        prog.hash_ops,
+        &[(env.cb_key, key_tv.bits())],
+    )?;
+    drop(hold);
+    TaggedValue::from_bits(out)
+        .as_fixnum()
+        .ok_or(ExecError::Type)
+}
+
+/// The user comparison callback: optionally fire the P8 lever (a legal
+/// writer edit with nothing held), then hold the nesting count across the
+/// callback window and read its truthiness.
+fn user_keys_equal<'era>(
+    owner: &mut Mutator<'era>,
+    slots: &[OwnerRootSlot<'era>],
+    env: &HtEnv<'_>,
+    prog: &UserTestProg<'_>,
+    table_tv: TaggedValue,
+    key_bits: usize,
+    cand_bits: usize,
+) -> Result<bool, ExecError> {
+    if env.bump_before_cb.load(Ordering::Acquire) > 0 {
+        env.bump_before_cb.fetch_sub(1, Ordering::AcqRel);
+        with_run(owner, |run| {
+            let mut lease = TableMut::enter(run, table_tv)?;
+            lease.edit(|_| ());
+            Ok(())
+        })?;
+    }
+    let hold = with_run(owner, |run| {
+        let lease = TableRef::enter(run, table_tv)?;
+        Ok(lease.hold_user_test()?)
+    })?;
+    let out = run_cb(
+        owner,
+        slots,
+        env,
+        prog.cmp_ops,
+        &[(env.cb_key, key_bits), (env.cb_cand, cand_bits)],
+    )?;
+    drop(hold);
+    Ok(!TaggedValue::from_bits(out).is_nil())
+}
+
+/// Copy the remembered-hash candidates out under one reader lease, with the
+/// epoch as it stood when the scan began.
+fn user_candidates(
+    owner: &mut Mutator<'_>,
+    table_tv: TaggedValue,
+    wanted: i64,
+) -> Result<(u64, Vec<(usize, usize)>), ExecError> {
+    with_run(owner, |run| {
+        let lease = TableRef::enter(run, table_tv)?;
+        let before = lease.read(|s| s.switch_epoch);
+        let candidates = lease.read(|s| {
+            s.entries_in_slot_order()
+                .filter(|entry| {
+                    s.user_hash(&entry.key.to_hash_key(&HashTableTest::Eq)) == Some(wanted)
+                })
+                .map(|entry| (entry.key.bits(), entry.value.bits()))
+                .collect()
+        });
+        Ok((before, candidates))
+    })
+}
+
+/// One revalidating user-test lookup: hash, copy candidates under a lease,
+/// compare with nothing held, and keep the answer only if the epoch held.
+fn user_lookup<'era>(
+    owner: &mut Mutator<'era>,
+    slots: &[OwnerRootSlot<'era>],
+    env: &HtEnv<'_>,
+    prog: &UserTestProg<'_>,
+    table_tv: TaggedValue,
+    key_tv: TaggedValue,
+) -> Result<(usize, Option<usize>), ExecError> {
+    for _ in 0..HT_RETRY_ROUNDS {
+        let wanted = user_wanted_hash(owner, slots, env, prog, table_tv, key_tv)?;
+        let (before, candidates) = user_candidates(owner, table_tv, wanted)?;
+        let mut matched: Option<usize> = None;
+        for &(cand_bits, value_bits) in &candidates {
+            // GNU's lookup fast path (fns.c `hash_find_with_hash`): an
+            // EQ-identical candidate matches without running the comparator.
+            if cand_bits == key_tv.bits() {
+                matched = Some(value_bits);
+                break;
+            }
+            if user_keys_equal(owner, slots, env, prog, table_tv, key_tv.bits(), cand_bits)? {
+                matched = Some(value_bits);
+                break;
+            }
+        }
+        if epoch_of(owner, table_tv)? == before {
+            let found_bits = if matched.is_some() {
+                TaggedValue::T.bits()
+            } else {
+                TaggedValue::NIL.bits()
+            };
+            return Ok((found_bits, matched));
+        }
+        env.revalidations.fetch_add(1, Ordering::Relaxed);
+    }
+    Err(ExecError::EpochRetry)
+}
+
+/// The scan `user_put`/`user_rem` share with the lookup, returning the
+/// matched candidate's bits (the storage key is rematerialized from them
+/// under WRITER; `HashKey` never crosses a lease boundary).
+fn user_scan<'era>(
+    owner: &mut Mutator<'era>,
+    slots: &[OwnerRootSlot<'era>],
+    env: &HtEnv<'_>,
+    prog: &UserTestProg<'_>,
+    table_tv: TaggedValue,
+    key_tv: TaggedValue,
+) -> Result<Option<usize>, ExecError> {
+    for _ in 0..HT_RETRY_ROUNDS {
+        let wanted = user_wanted_hash(owner, slots, env, prog, table_tv, key_tv)?;
+        let (before, candidates) = user_candidates(owner, table_tv, wanted)?;
+        let mut matched: Option<usize> = None;
+        for &(cand_bits, _) in &candidates {
+            // The same EQ fast path as the lookup (GNU fns.c
+            // `hash_find_with_hash`): identical objects skip the comparator.
+            if cand_bits == key_tv.bits() {
+                matched = Some(cand_bits);
+                break;
+            }
+            if user_keys_equal(owner, slots, env, prog, table_tv, key_tv.bits(), cand_bits)? {
+                matched = Some(cand_bits);
+                break;
+            }
+        }
+        if epoch_of(owner, table_tv)? == before {
+            return Ok(matched);
+        }
+        env.revalidations.fetch_add(1, Ordering::Relaxed);
+    }
+    Err(ExecError::EpochRetry)
+}
+
+/// `gethash` on a plain table: one sealed read of the engine lookup.
+fn plain_get(
+    owner: &mut Mutator<'_>,
+    table_tv: TaggedValue,
+    key_tv: TaggedValue,
+    test: HashTableTest,
+) -> Result<(usize, usize), ExecError> {
+    with_run(owner, |run| {
+        let lease = TableRef::enter(run, table_tv)?;
+        // The lookup's reference stays inside the read; only the whole
+        // tagged word crosses back out.
+        let found = lease.read(|s| {
+            s.try_lookup(key_tv, test, false)
+                .map_err(|_| ExecError::Type)
+                .map(|found| found.map(|value| value.bits()))
+        })?;
+        Ok(match found {
+            Some(bits) => (TaggedValue::T.bits(), bits),
+            None => (TaggedValue::NIL.bits(), TaggedValue::NIL.bits()),
+        })
+    })
+}
+
+/// `puthash` on a plain table: the serial builtin's storage steps, executed
+/// inside one writer lease instead of the serial choke point.
+fn plain_put(
+    owner: &mut Mutator<'_>,
+    table_tv: TaggedValue,
+    key_tv: TaggedValue,
+    value_tv: TaggedValue,
+    test: HashTableTest,
+) -> Result<(), ExecError> {
+    with_run(owner, |run| {
+        let mut lease = TableMut::enter(run, table_tv)?;
+        if lease.user_test_mutation_refused() {
+            return Err(ExecError::UserTestMutation);
+        }
+        lease.edit(|ht| {
+            match ht
+                .data
+                .try_probe_for_insert(key_tv, test, false)
+                .map_err(|_| ExecError::Type)?
+            {
+                HashProbe::Found(slot) => {
+                    if let Some(stored) = ht.data.slot_value_mut(slot) {
+                        *stored = value_tv;
+                    }
+                }
+                HashProbe::Absent(hash) => {
+                    maybe_resize_hash_table_for_insert(ht, true);
+                    let key = key_tv.to_hash_key_swp(&test, false);
+                    ht.data.insert_absent(hash, key, key_tv, value_tv);
+                }
+            }
+            Ok(())
+        })
+    })
+}
+
+/// `remhash` on a plain table; the word says whether a key left.
+fn plain_rem(
+    owner: &mut Mutator<'_>,
+    table_tv: TaggedValue,
+    key_tv: TaggedValue,
+    test: HashTableTest,
+) -> Result<usize, ExecError> {
+    with_run(owner, |run| {
+        let mut lease = TableMut::enter(run, table_tv)?;
+        if lease.user_test_mutation_refused() {
+            return Err(ExecError::UserTestMutation);
+        }
+        let removed = lease.edit(|ht| {
+            ht.data
+                .try_remove_by_value(key_tv, test, false)
+                .map_err(|_| ExecError::Type)
+        })?;
+        Ok(if removed.is_some() {
+            TaggedValue::T.bits()
+        } else {
+            TaggedValue::NIL.bits()
+        })
+    })
+}
+
+/// `hash-table-count` as one sealed read.
+fn plain_count(owner: &mut Mutator<'_>, table_tv: TaggedValue) -> Result<usize, ExecError> {
+    with_run(owner, |run| {
+        let lease = TableRef::enter(run, table_tv)?;
+        Ok(lease.read(|s| s.len()))
+    })
+}
+
+/// `puthash` on a user-test table: refuse inside a test, revalidating scan,
+/// then the serial builtin's edit steps under WRITER — overwrite the matched
+/// key, or insert and remember the hash (the fast arm's discipline).
+fn user_put<'era>(
+    owner: &mut Mutator<'era>,
+    slots: &[OwnerRootSlot<'era>],
+    env: &HtEnv<'_>,
+    prog: &UserTestProg<'_>,
+    table_tv: TaggedValue,
+    key_tv: TaggedValue,
+    value_tv: TaggedValue,
+) -> Result<(), ExecError> {
+    refuse_in_user_test(owner, table_tv)?;
+    let wanted = user_wanted_hash(owner, slots, env, prog, table_tv, key_tv)?;
+    let matched = user_scan(owner, slots, env, prog, table_tv, key_tv)?;
+    with_run(owner, |run| {
+        let mut lease = TableMut::enter(run, table_tv)?;
+        if lease.user_test_mutation_refused() {
+            return Err(ExecError::UserTestMutation);
+        }
+        lease.edit(|ht| {
+            let storage_key = match matched {
+                Some(bits) => TaggedValue::from_bits(bits).to_hash_key(&HashTableTest::Eq),
+                None => key_tv.to_hash_key(&HashTableTest::Eq),
+            };
+            if let Some(stored) = ht.data.get_mut(&storage_key) {
+                *stored = value_tv;
+            } else {
+                maybe_resize_hash_table_for_insert(ht, true);
+                ht.insert(storage_key.clone(), key_tv, value_tv);
+            }
+            ht.data.set_user_hash(storage_key, wanted);
+        });
+        Ok(())
+    })
+}
+
+/// `remhash` on a user-test table: refuse inside a test, revalidating scan,
+/// then remove the matched storage key under WRITER.
+fn user_rem<'era>(
+    owner: &mut Mutator<'era>,
+    slots: &[OwnerRootSlot<'era>],
+    env: &HtEnv<'_>,
+    prog: &UserTestProg<'_>,
+    table_tv: TaggedValue,
+    key_tv: TaggedValue,
+) -> Result<usize, ExecError> {
+    refuse_in_user_test(owner, table_tv)?;
+    let matched = user_scan(owner, slots, env, prog, table_tv, key_tv)?;
+    let removed = with_run(owner, |run| {
+        let mut lease = TableMut::enter(run, table_tv)?;
+        if lease.user_test_mutation_refused() {
+            return Err(ExecError::UserTestMutation);
+        }
+        Ok(lease.edit(|ht| match matched {
+            Some(bits) => {
+                let storage_key = TaggedValue::from_bits(bits).to_hash_key(&HashTableTest::Eq);
+                ht.data.remove(&storage_key)
+            }
+            None => None,
+        }))
+    })?;
+    Ok(if removed.is_some() {
+        TaggedValue::T.bits()
+    } else {
+        TaggedValue::NIL.bits()
+    })
+}
+
+/// Read the operand words of one table op out of owner slots.
+fn ht_operand<'era>(
+    owner: &mut Mutator<'era>,
+    slots: &[OwnerRootSlot<'era>],
+    which: &[u16],
+) -> Result<Vec<TaggedValue>, ExecError> {
+    with_run(owner, |run| {
+        Ok(which
+            .iter()
+            .map(|&slot| TaggedValue::from_bits(slots[usize::from(slot)].word_for_test(run)))
+            .collect())
+    })
+}
+
+/// Perform one sealed table op between slice regions. The parameter is the
+/// owner (not a run access) because user tests run whole callback programs,
+/// which open slice regions and mint leases of their own.
+fn ht_step<'era>(
+    owner: &mut Mutator<'era>,
+    slots: &[OwnerRootSlot<'era>],
+    op: Op,
+    env: Option<&HtEnv<'_>>,
+) -> Result<(), ExecError> {
+    // The user-program dispatch table: a registered program for the table
+    // slot selects the user path, and the harness invariant is that those
+    // tables really are user-defined (and vice versa for the plain path).
+    let (table, user_path) = match op {
+        Op::HtGet { table, .. }
+        | Op::HtPut { table, .. }
+        | Op::HtRem { table, .. }
+        | Op::HtCount { table, .. } => {
+            let prog = env.and_then(|env| env.user_prog(table));
+            (table, prog)
+        }
+        _ => unreachable!("ht_step on a non-table op"),
+    };
+    let table_tv = ht_operand(owner, slots, &[table])?[0];
+    let (test, user_defined) = describe_table(owner, table_tv)?;
+    let prog = match user_path {
+        Some(prog) => {
+            assert!(
+                user_defined,
+                "harness registered a user program for a plain table"
+            );
+            Some(prog)
+        }
+        None => {
+            assert!(
+                !user_defined || matches!(op, Op::HtCount { .. }),
+                "user-defined table without a registered test program"
+            );
+            None
+        }
+    };
+    let env_of = || env.expect("a registered user program implies an env");
+    match op {
+        Op::HtGet {
+            key, found, value, ..
+        } => {
+            let key_tv = ht_operand(owner, slots, &[key])?[0];
+            let (found_bits, value_bits) = match prog {
+                Some(prog) => {
+                    let (found_bits, matched) =
+                        user_lookup(owner, slots, env_of(), prog, table_tv, key_tv)?;
+                    (found_bits, matched.unwrap_or(TaggedValue::NIL.bits()))
+                }
+                None => plain_get(owner, table_tv, key_tv, test)?,
+            };
+            with_run(owner, |run| {
+                plant_words(run, slots, &[(found, found_bits), (value, value_bits)])
+            })
+        }
+        Op::HtPut { key, value, .. } => {
+            let words = ht_operand(owner, slots, &[key, value])?;
+            match prog {
+                Some(prog) => user_put(owner, slots, env_of(), prog, table_tv, words[0], words[1]),
+                None => plain_put(owner, table_tv, words[0], words[1], test),
+            }
+        }
+        Op::HtRem { key, found, .. } => {
+            let key_tv = ht_operand(owner, slots, &[key])?[0];
+            let found_bits = match prog {
+                Some(prog) => user_rem(owner, slots, env_of(), prog, table_tv, key_tv)?,
+                None => plain_rem(owner, table_tv, key_tv, test)?,
+            };
+            with_run(owner, |run| plant_words(run, slots, &[(found, found_bits)]))
+        }
+        Op::HtCount { dst, .. } => {
+            // Counting never consults the test: one sealed read either way.
+            let count = plain_count(owner, table_tv)?;
+            let number = i64::try_from(count).map_err(|_| ExecError::Overflow)?;
+            let fix = Fixnum::try_from(number).map_err(|_| ExecError::Overflow)?;
+            let bits = TaggedValue::from_fixnum(fix).bits();
+            with_run(owner, |run| plant_words(run, slots, &[(dst, bits)]))
+        }
+        _ => unreachable!("ht_step on a non-table op"),
+    }
+}
+
 fn with_run<'era, R>(
     owner: &mut Mutator<'era>,
     body: impl FnOnce(&mut RunAccess<'_, 'era>) -> Result<R, ExecError>,
@@ -1023,17 +1762,37 @@ fn one_slice<'era>(
     bound: u32,
     overlap: Option<&Overlap>,
     index: usize,
+    ht: Option<&HtEnv<'_>>,
 ) -> Result<(bool, usize, Vec<usize>), ExecError> {
-    with_run(owner, |run| {
-        let hit = run
-            .with_slice(|slice| {
+    let mut hit = false;
+    loop {
+        // A lease op ends the region and hands back `owner`, so the op runs
+        // with a fresh run access; the machine stays on the same pc and the
+        // next iteration re-enters the slice past the op.
+        let flow = with_run(owner, |run| {
+            run.with_slice(|slice| {
                 let mut homes = Vec::with_capacity(slots.len());
                 for slot in slots {
                     homes.push(slice.bind(slot)?);
                 }
                 exec(slice, &mut homes, ops, machine, bound, overlap, index)
             })
-            .map_err(ExecError::from)??;
+            .map_err(ExecError::from)?
+        })?;
+        match flow {
+            Flow::Done => break,
+            Flow::Safepoint => {
+                hit = true;
+                break;
+            }
+            Flow::Lease => {
+                let op = ops[machine.pc];
+                machine.pc += 1;
+                ht_step(owner, slots, op, ht)?;
+            }
+        }
+    }
+    with_run(owner, |run| {
         let bytes = run.state().hot.bytes_since_gc;
         let words = slots.iter().map(|slot| slot.word_for_test(run)).collect();
         Ok((hit, bytes, words))
@@ -1185,6 +1944,23 @@ fn seed_nils<'era>(
     }))
 }
 
+/// Seed with the B3 table setup instead: designated slots take their planted
+/// transport roots (tables, bare symbols) and the rest take nil. The
+/// root-slot bank budget is unchanged — planted words replace nil seeds.
+fn seed_planted<'era>(
+    owner: &mut Mutator<'era>,
+    nil: &SharedRoot,
+    planted: &[Option<SharedRoot>],
+) -> Vec<OwnerRootSlot<'era>> {
+    must(with_run(owner, |run| {
+        let mut slots = Vec::with_capacity(planted.len());
+        for root in planted {
+            slots.push(run.root_slot(root.as_ref().unwrap_or(nil))?);
+        }
+        Ok(slots)
+    }))
+}
+
 fn shutdown_owner(
     mut owner: Mutator<'_>,
     index: usize,
@@ -1227,6 +2003,10 @@ struct OwnerLaunch<'permit, 'env> {
     retired_tx: Sender<usize>,
     registry: &'permit Registry,
     abort: &'env AtomicBool,
+    /// B3: planted slot seeds (`None` = nil) and the table environment.
+    /// Empty/`None` for every pre-B3 program.
+    planted: &'env [Option<SharedRoot>],
+    ht: Option<&'env HtEnv<'env>>,
 }
 
 impl OwnerLaunch<'_, '_> {
@@ -1251,10 +2031,17 @@ impl OwnerLaunch<'_, '_> {
             retired_tx,
             registry,
             abort,
+            planted,
+            ht,
         } = self;
         let _panic = PanicFlag { registry, abort };
         let mut owner = activate_owner(permit, heap, id);
-        let slots = seed_nils(&mut owner, nil, nslots);
+        let slots = if planted.is_empty() {
+            seed_nils(&mut owner, nil, nslots)
+        } else {
+            assert_eq!(planted.len(), nslots, "one seed per root-slot");
+            seed_planted(&mut owner, nil, planted)
+        };
         let mut machine = Machine::new();
         let mut lines = Vec::with_capacity(programs.len());
         let mut final_slots = Vec::new();
@@ -1271,6 +2058,7 @@ impl OwnerLaunch<'_, '_> {
                 &pause_tx,
                 &go_rx,
                 stop_at,
+                ht,
             );
             lines.push(prin1(final_slots[line_slot]));
         }
@@ -1299,10 +2087,12 @@ fn run_program<'era>(
     pause_tx: &Sender<Snap>,
     go_rx: &Receiver<Go>,
     stop_at: fn(usize, usize) -> Option<Go>,
+    ht: Option<&HtEnv<'_>>,
 ) -> Vec<usize> {
     loop {
-        let (hit, bytes, words) =
-            must(one_slice(owner, slots, ops, machine, bound, overlap, index));
+        let (hit, bytes, words) = must(one_slice(
+            owner, slots, ops, machine, bound, overlap, index, ht,
+        ));
         if !hit {
             return words;
         }
@@ -1429,6 +2219,8 @@ impl<'body, 'heap> Session<'body, 'heap> {
                 retired_tx: retired_tx.clone(),
                 registry,
                 abort,
+                planted: &[],
+                ht: None,
             };
             scope.spawn(move || launch.run());
         }
@@ -1818,7 +2610,8 @@ fn a6_runtime_refuses_foreign_cons_without_writing() {
                     Ok((foreign, vec![head, scratch]))
                 }));
                 let mut machine = Machine::new();
-                let outcome = one_slice(&mut owner, &slots, &program, &mut machine, 0, None, 0);
+                let outcome =
+                    one_slice(&mut owner, &slots, &program, &mut machine, 0, None, 0, None);
                 let car =
                     TaggedValue::from_bits(foreign.cons_word_for_test()).cons_car_unobserved();
                 report_tx
@@ -1894,6 +2687,8 @@ fn a6_arithmetic_matches_gnu_oracle() {
                     retired_tx,
                     registry,
                     abort: abort_flag,
+                    planted: &[],
+                    ht: None,
                 }
                 .run()
             });
@@ -1910,6 +2705,991 @@ fn a6_arithmetic_matches_gnu_oracle() {
         });
     });
     assert_eq!(started.load(Ordering::Relaxed), 1);
+}
+
+// ---------------------------------------------------------------------------
+// B3 tests: sealed single-owner hash-table ops against GNU 31.1 oracles
+// ---------------------------------------------------------------------------
+
+/// B3 owner-slot map (design §6): slots 0-8 tables, 9-10 bare symbols,
+/// 11-13 callback scratch, 14 the line slot, 15-19 program scratch.
+const HT_TA: u16 = 0;
+const HT_TB: u16 = 1;
+const HT_TC: u16 = 2;
+const HT_TD: u16 = 3;
+const HT_TE: u16 = 4;
+const HT_TG: u16 = 5;
+const HT_TU: u16 = 6;
+const HT_TO: u16 = 7;
+const HT_TO2: u16 = 8;
+const HT_SYM_A: u16 = 9;
+const HT_SYM_B: u16 = 10;
+const HT_CB_KEY: u16 = 11;
+const HT_CB_CAND: u16 = 12;
+const HT_CB_OUT: u16 = 13;
+const HT_LINE: u16 = 14;
+const HT_NSLOTS: usize = 20;
+
+/// Cons the already-loaded element words onto the line slot in reverse, so
+/// the finished list reads in the order given.
+fn finish_line(elements: &[u16]) -> Vec<Op> {
+    let mut ops = vec![Op::ConstNil { dst: HT_LINE }];
+    for &slot in elements.iter().rev() {
+        ops.push(Op::Cons {
+            dst: HT_LINE,
+            car: slot,
+            cdr: HT_LINE,
+        });
+    }
+    ops
+}
+
+/// The setup the oracle twin mirrors table-for-table: five plain tables, a
+/// growth table, two user-test tables (pure and other-mutating), and the
+/// plain table the other-mutating comparison legally edits.
+fn ht_main_setup() -> HtSetup {
+    HtSetup {
+        source: r#"(progn
+  (setq a6-tA (make-hash-table :test 'eq))
+  (setq a6-tB (make-hash-table :test 'eq))
+  (setq a6-tC (make-hash-table :test 'eql))
+  (setq a6-tD (make-hash-table :test 'equal))
+  (setq a6-tE (make-hash-table :test 'eq))
+  (setq a6-tG (make-hash-table :test 'eq))
+  (fset 'a6-user-hash (lambda (x) x))
+  (fset 'a6-user-cmp (lambda (a b) (eq a b)))
+  (define-hash-table-test 'a6-user-test 'a6-user-cmp 'a6-user-hash)
+  (setq a6-tU (make-hash-table :test 'a6-user-test))
+  (fset 'a6-user-hash2 (lambda (x) 7))
+  (fset 'a6-user-cmp-other (lambda (a b) (puthash 5 55 a6-tO2) (eq a b)))
+  (define-hash-table-test 'a6-user-test-other 'a6-user-cmp-other 'a6-user-hash2)
+  (setq a6-tO (make-hash-table :test 'a6-user-test-other))
+  (setq a6-tO2 (make-hash-table :test 'eq))
+  (list a6-tA a6-tB a6-tC a6-tD a6-tE a6-tG a6-tU a6-tO a6-tO2
+        'a6-symA 'a6-symB))"#,
+        facts: vec![
+            (HT_TA, Abs::Table),
+            (HT_TB, Abs::Table),
+            (HT_TC, Abs::Table),
+            (HT_TD, Abs::Table),
+            (HT_TE, Abs::Table),
+            (HT_TG, Abs::Table),
+            (HT_TU, Abs::Table),
+            (HT_TO, Abs::Table),
+            (HT_TO2, Abs::Table),
+            (HT_SYM_A, Abs::Sym),
+            (HT_SYM_B, Abs::Sym),
+        ],
+        nslots: HT_NSLOTS,
+    }
+}
+
+/// P1: eq table, fixnum keys — put, hit, miss, count → (t 100 nil nil 2).
+fn ht_p1() -> Vec<Op> {
+    let mut ops = vec![
+        Op::ConstFixnum { dst: 15, value: 10 },
+        Op::ConstFixnum {
+            dst: 16,
+            value: 100,
+        },
+        Op::HtPut {
+            table: HT_TA,
+            key: 15,
+            value: 16,
+        },
+        Op::ConstFixnum { dst: 15, value: 20 },
+        Op::ConstFixnum {
+            dst: 16,
+            value: 200,
+        },
+        Op::HtPut {
+            table: HT_TA,
+            key: 15,
+            value: 16,
+        },
+        Op::ConstFixnum { dst: 15, value: 10 },
+        Op::HtGet {
+            table: HT_TA,
+            key: 15,
+            found: 16,
+            value: 17,
+        },
+        Op::ConstFixnum { dst: 15, value: 30 },
+        Op::HtGet {
+            table: HT_TA,
+            key: 15,
+            found: 18,
+            value: 19,
+        },
+        Op::HtCount {
+            table: HT_TA,
+            dst: 15,
+        },
+    ];
+    ops.extend(finish_line(&[16, 17, 18, 19, 15]));
+    ops
+}
+
+/// P2: eq table, bare-symbol keys → (t 1 nil nil 2).
+fn ht_p2() -> Vec<Op> {
+    let mut ops = vec![
+        Op::ConstFixnum { dst: 16, value: 1 },
+        Op::HtPut {
+            table: HT_TB,
+            key: HT_SYM_A,
+            value: 16,
+        },
+        Op::ConstFixnum { dst: 16, value: 2 },
+        Op::HtPut {
+            table: HT_TB,
+            key: HT_SYM_B,
+            value: 16,
+        },
+        Op::HtGet {
+            table: HT_TB,
+            key: HT_SYM_A,
+            found: 16,
+            value: 17,
+        },
+        Op::ConstFixnum { dst: 15, value: 99 },
+        Op::HtGet {
+            table: HT_TB,
+            key: 15,
+            found: 18,
+            value: 19,
+        },
+        Op::HtCount {
+            table: HT_TB,
+            dst: 15,
+        },
+    ];
+    ops.extend(finish_line(&[16, 17, 18, 19, 15]));
+    ops
+}
+
+/// P3: eql table → (t 1000 1).
+fn ht_p3() -> Vec<Op> {
+    let mut ops = vec![
+        Op::ConstFixnum { dst: 15, value: 10 },
+        Op::ConstFixnum {
+            dst: 16,
+            value: 1000,
+        },
+        Op::HtPut {
+            table: HT_TC,
+            key: 15,
+            value: 16,
+        },
+        Op::HtGet {
+            table: HT_TC,
+            key: 15,
+            found: 18,
+            value: 19,
+        },
+        Op::HtCount {
+            table: HT_TC,
+            dst: 16,
+        },
+    ];
+    ops.extend(finish_line(&[18, 19, 16]));
+    ops
+}
+
+/// P4: equal table, two structurally-equal fresh cons keys → (t 5 1).
+fn ht_p4() -> Vec<Op> {
+    let mut ops = vec![
+        Op::ConstFixnum { dst: 15, value: 1 },
+        Op::ConstFixnum { dst: 16, value: 2 },
+        Op::Cons {
+            dst: 17,
+            car: 15,
+            cdr: 16,
+        },
+        Op::ConstFixnum { dst: 18, value: 5 },
+        Op::HtPut {
+            table: HT_TD,
+            key: 17,
+            value: 18,
+        },
+        Op::ConstFixnum { dst: 15, value: 1 },
+        Op::ConstFixnum { dst: 16, value: 2 },
+        Op::Cons {
+            dst: 19,
+            car: 15,
+            cdr: 16,
+        },
+        Op::HtGet {
+            table: HT_TD,
+            key: 19,
+            found: 15,
+            value: 16,
+        },
+        Op::HtCount {
+            table: HT_TD,
+            dst: 17,
+        },
+    ];
+    ops.extend(finish_line(&[15, 16, 17]));
+    ops
+}
+
+/// P5: rem removes once, refuses twice, one entry survives → (t nil 1);
+/// GNU's `remhash` returns nil unconditionally, so the twin derives the
+/// found flags from presence checks instead of return values.
+fn ht_p5() -> Vec<Op> {
+    let mut ops = vec![
+        Op::ConstFixnum { dst: 15, value: 1 },
+        Op::ConstFixnum { dst: 16, value: 11 },
+        Op::HtPut {
+            table: HT_TE,
+            key: 15,
+            value: 16,
+        },
+        Op::ConstFixnum { dst: 15, value: 2 },
+        Op::ConstFixnum { dst: 16, value: 22 },
+        Op::HtPut {
+            table: HT_TE,
+            key: 15,
+            value: 16,
+        },
+        Op::ConstFixnum { dst: 15, value: 1 },
+        Op::HtRem {
+            table: HT_TE,
+            key: 15,
+            found: 17,
+        },
+        Op::HtRem {
+            table: HT_TE,
+            key: 15,
+            found: 18,
+        },
+        Op::HtCount {
+            table: HT_TE,
+            dst: 16,
+        },
+    ];
+    ops.extend(finish_line(&[17, 18, 16]));
+    ops
+}
+
+/// P6: 65 puts grow the table through several resizes → (65 128).
+fn ht_p6() -> Vec<Op> {
+    // 15 one, 16 value/scratch, 17 limit, 18 k, 19 cond
+    let mut ops = vec![
+        Op::ConstFixnum { dst: 17, value: 65 },
+        Op::ConstFixnum { dst: 18, value: 0 },
+        Op::ConstFixnum { dst: 15, value: 1 },
+    ];
+    let loop_at = ops.len() as u16;
+    ops.push(Op::Lt {
+        dst: 19,
+        a: 18,
+        b: 17,
+    });
+    let branch_at = ops.len();
+    ops.push(Op::BranchIfNil {
+        cond: 19,
+        target: 0,
+    });
+    ops.push(Op::Add {
+        dst: 16,
+        a: 18,
+        b: 18,
+    });
+    ops.push(Op::HtPut {
+        table: HT_TG,
+        key: 18,
+        value: 16,
+    });
+    ops.push(Op::Add {
+        dst: 18,
+        a: 18,
+        b: 15,
+    });
+    ops.push(Op::Jump { target: loop_at });
+    let done = ops.len() as u16;
+    ops.push(Op::HtCount {
+        table: HT_TG,
+        dst: 16,
+    });
+    ops.push(Op::ConstFixnum { dst: 17, value: 64 });
+    ops.push(Op::HtGet {
+        table: HT_TG,
+        key: 17,
+        found: 18,
+        value: 19,
+    });
+    ops[branch_at] = Op::BranchIfNil {
+        cond: 19,
+        target: done,
+    };
+    ops.extend(finish_line(&[16, 19]));
+    ops
+}
+
+/// P7: pure user-test table — put, hit, miss, count → (t 8 nil nil 2).
+fn ht_p7() -> Vec<Op> {
+    let mut ops = vec![
+        Op::ConstFixnum { dst: 15, value: 7 },
+        Op::ConstFixnum { dst: 16, value: 8 },
+        Op::HtPut {
+            table: HT_TU,
+            key: 15,
+            value: 16,
+        },
+        Op::ConstFixnum { dst: 15, value: 8 },
+        Op::ConstFixnum { dst: 16, value: 9 },
+        Op::HtPut {
+            table: HT_TU,
+            key: 15,
+            value: 16,
+        },
+        Op::ConstFixnum { dst: 15, value: 7 },
+        Op::HtGet {
+            table: HT_TU,
+            key: 15,
+            found: 16,
+            value: 17,
+        },
+        Op::ConstFixnum { dst: 15, value: 30 },
+        Op::HtGet {
+            table: HT_TU,
+            key: 15,
+            found: 18,
+            value: 19,
+        },
+        Op::HtCount {
+            table: HT_TU,
+            dst: 15,
+        },
+    ];
+    ops.extend(finish_line(&[16, 17, 18, 19, 15]));
+    ops
+}
+
+/// P8s: a non-EQ lookup (constant hash) forces the user comparison, which
+/// legally mutates a different table → (nil nil 1). The EQ fast path (GNU
+/// fns.c `hash_find_with_hash`) never calls the comparator for identical
+/// objects, so exercising it needs distinct keys with one hash.
+fn ht_p8s() -> Vec<Op> {
+    let mut ops = vec![
+        Op::ConstFixnum { dst: 15, value: 5 },
+        Op::ConstFixnum { dst: 16, value: 50 },
+        Op::HtPut {
+            table: HT_TO,
+            key: 15,
+            value: 16,
+        },
+        Op::ConstFixnum { dst: 15, value: 9 },
+        Op::HtGet {
+            table: HT_TO,
+            key: 15,
+            found: 17,
+            value: 18,
+        },
+        Op::HtCount {
+            table: HT_TO2,
+            dst: 16,
+        },
+    ];
+    ops.extend(finish_line(&[17, 18, 16]));
+    ops
+}
+
+/// One B3 single-owner session over planted tables: eval the setup in the
+/// serial world, run the programs through the restricted executor inside
+/// the era, then eval the dump forms once the serial world is back. The
+/// caller owns the [`HtEnv`] so its observation counters survive the run.
+/// Returns the program lines followed by the dump lines.
+fn run_ht_session(
+    setup: &HtSetup,
+    programs: Vec<Vec<Op>>,
+    bound: u32,
+    env: &HtEnv<'_>,
+    dump_forms: &[&str],
+) -> (Vec<String>, Vec<String>) {
+    let mut context = Context::new();
+    let plant_values = context
+        .eval_str(setup.source)
+        .unwrap_or_else(|error| panic!("ht setup eval: {error:?}"));
+    // SAFETY: every planted word belongs to this Context's heap; the roots
+    // keep the tables and symbols alive for the whole era.
+    let nil = unsafe { SharedRoot::new(&context.tagged_heap, TaggedValue::NIL) };
+    let mut planted: Vec<Option<SharedRoot>> = vec![None; setup.nslots];
+    {
+        let mut cursor = plant_values;
+        for &(slot, _fact) in &setup.facts {
+            assert!(cursor.is_cons(), "setup list shorter than its facts");
+            // SAFETY: same heap as the context above.
+            let root =
+                unsafe { SharedRoot::new(&context.tagged_heap, cursor.cons_car_unobserved()) };
+            planted[usize::from(slot)] = Some(root);
+            cursor = cursor.cons_cdr_unobserved();
+        }
+        assert!(cursor.is_nil(), "setup list longer than its facts");
+    }
+    let abort = AtomicBool::new(false);
+    let mut lines: Vec<String> = Vec::new();
+    context
+        .admit_owned_parallel(|projection| {
+            {
+                let era = projection.era();
+                era.start_cons_storage()
+                    .unwrap_or_else(|error| panic!("cons catalog: {error:?}"));
+                thread::scope(|scope| {
+                    let _panic = PanicFlag {
+                        registry: era.registry(),
+                        abort: &abort,
+                    };
+                    let heap = era.heap_identity();
+                    let registry = era.registry();
+                    let permit = retry_reg(|| era.register(6600, setup.nslots));
+                    let (end_tx, end_rx) = channel();
+                    let (ready_tx, ready_rx) = channel();
+                    let (done_tx, done_rx) = channel();
+                    let (retired_tx, retired_rx) = channel();
+                    let (pause_tx, _pause_rx) = channel();
+                    let (_go_tx, go_rx) = channel();
+                    let launch = OwnerLaunch {
+                        permit,
+                        heap,
+                        id: 6600,
+                        nil: &nil,
+                        programs,
+                        nslots: setup.nslots,
+                        bound,
+                        line_slot: usize::from(HT_LINE),
+                        stop_at: no_stop,
+                        overlap: None,
+                        index: 0,
+                        pause_tx,
+                        go_rx,
+                        end_tx,
+                        ready_tx,
+                        done_rx,
+                        retired_tx,
+                        registry,
+                        abort: &abort,
+                        planted: &planted,
+                        ht: Some(env),
+                    };
+                    scope.spawn(move || launch.run());
+                    let end = recv(&end_rx);
+                    assert_eq!(recv(&ready_rx), 0);
+                    let mut stopped = retry_rv(|| era.stop());
+                    assert_eq!(stopped.epoch().get(), 1);
+                    retry_reg(|| era.return_cons_storage(&stopped));
+                    assert!(retry_rv(|| era.collect_stopped(&mut stopped)).major);
+                    complete(stopped);
+                    done_tx.send(()).unwrap();
+                    assert_eq!(recv(&retired_rx), 0);
+                    lines = end.lines;
+                });
+            }
+            let (collector, keeper) = projection
+                .finish()
+                .unwrap_or_else(|error| panic!("finish: {error:?}"));
+            (collector, keeper, ())
+        })
+        .unwrap_or_else(|error| panic!("admit: {error:?}"));
+    let dumps = dump_forms
+        .iter()
+        .map(|form| {
+            let value = context
+                .eval_str(form)
+                .unwrap_or_else(|error| panic!("ht dump eval {form}: {error:?}"));
+            prin1(value.bits())
+        })
+        .collect();
+    (lines, dumps)
+}
+
+#[test]
+fn a6_ht_ops_match_gnu_oracle() {
+    let started = AtomicUsize::new(0);
+    let programs = vec![
+        ht_p1(),
+        ht_p2(),
+        ht_p3(),
+        ht_p4(),
+        ht_p5(),
+        ht_p6(),
+        ht_p7(),
+        ht_p8s(),
+    ];
+    let setup = ht_main_setup();
+    let initial = setup.initial();
+    // The gate runs before any owner: straight-line programs admit with no
+    // backedge budget, the growth loop with exactly its 65.
+    for program in &programs[..5] {
+        prevalidate_with(program, HT_NSLOTS, 0, &initial)
+            .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+    }
+    prevalidate_with(&programs[5], HT_NSLOTS, 65, &initial)
+        .unwrap_or_else(|error| panic!("prevalidate p6: {error:?}"));
+    for program in &programs[6..] {
+        prevalidate_with(program, HT_NSLOTS, 0, &initial)
+            .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+    }
+    // Callback programs are gated too: the pure and other-mutating
+    // comparisons, the identity hash, and the constant hash that makes the
+    // comparison reachable past the EQ fast path.
+    let hash_prog = [Op::Move {
+        dst: HT_CB_OUT,
+        src: HT_CB_KEY,
+    }];
+    let hash2_prog = [Op::ConstFixnum {
+        dst: HT_CB_OUT,
+        value: 7,
+    }];
+    let cmp_prog = [Op::Eq {
+        dst: HT_CB_OUT,
+        a: HT_CB_KEY,
+        b: HT_CB_CAND,
+    }];
+    // (puthash 5 55 a6-tO2) then the comparison, mirroring the twin's
+    // a6-user-cmp-other body exactly.
+    let cmp_other = [
+        Op::ConstFixnum { dst: 15, value: 5 },
+        Op::ConstFixnum { dst: 16, value: 55 },
+        Op::HtPut {
+            table: HT_TO2,
+            key: 15,
+            value: 16,
+        },
+        Op::Eq {
+            dst: HT_CB_OUT,
+            a: HT_CB_KEY,
+            b: HT_CB_CAND,
+        },
+    ];
+    for ops in [
+        &hash_prog[..],
+        &hash2_prog[..],
+        &cmp_prog[..],
+        &cmp_other[..],
+    ] {
+        let mut facts = initial.clone();
+        facts.extend([(HT_CB_KEY, Abs::Fix(0)), (HT_CB_CAND, Abs::Fix(0))]);
+        prevalidate_with(ops, HT_NSLOTS, 0, &facts)
+            .unwrap_or_else(|error| panic!("callback prevalidate: {error:?}"));
+    }
+    started.fetch_add(1, Ordering::Relaxed);
+    assert_eq!(started.load(Ordering::Relaxed), 1);
+    let users = [
+        UserTestProg {
+            slot: HT_TU,
+            hash_ops: &hash_prog,
+            cmp_ops: &cmp_prog,
+        },
+        UserTestProg {
+            slot: HT_TO,
+            hash_ops: &hash2_prog,
+            cmp_ops: &cmp_other,
+        },
+    ];
+    let env = HtEnv {
+        users: &users,
+        cb_key: HT_CB_KEY,
+        cb_cand: HT_CB_CAND,
+        cb_out: HT_CB_OUT,
+        revalidations: AtomicUsize::new(0),
+        bump_before_cb: AtomicUsize::new(0),
+    };
+    let dump_forms = [
+        "(internal--hash-table-buckets a6-tA)",
+        "(internal--hash-table-histogram a6-tB)",
+        "(internal--hash-table-buckets a6-tD)",
+        "(internal--hash-table-buckets a6-tE)",
+        "(internal--hash-table-histogram a6-tG)",
+        "(internal--hash-table-buckets a6-tU)",
+    ];
+    let (lines, dumps) = run_ht_session(&setup, programs, 65, &env, &dump_forms);
+    assert_eq!(lines.len(), 8);
+    assert_eq!(dumps.len(), 6);
+    let oracle = oracle_lines();
+    // Program lines and structural dumps interleave exactly as the twin
+    // emits them (oracle lines 13..27; the 28th is the P7b refusal test's).
+    assert_eq!(lines[0], oracle[13], "P1 eq fixnum");
+    assert_eq!(dumps[0], oracle[14], "tA buckets");
+    assert_eq!(lines[1], oracle[15], "P2 eq symbol");
+    assert_eq!(dumps[1], oracle[16], "tB histogram");
+    assert_eq!(lines[2], oracle[17], "P3 eql");
+    assert_eq!(lines[3], oracle[18], "P4 equal cons");
+    assert_eq!(dumps[2], oracle[19], "tD buckets");
+    assert_eq!(lines[4], oracle[20], "P5 rem");
+    assert_eq!(dumps[3], oracle[21], "tE buckets after rems");
+    assert_eq!(lines[5], oracle[22], "P6 growth");
+    assert_eq!(dumps[4], oracle[23], "tG histogram");
+    assert_eq!(lines[6], oracle[24], "P7 user pure");
+    assert_eq!(dumps[5], oracle[25], "tU buckets");
+    assert_eq!(lines[7], oracle[26], "P8s user other-table");
+    assert_eq!(started.load(Ordering::Relaxed), 1);
+}
+
+/// P7b: a comparison that edits the table under test must be refused with
+/// GNU's message, and the table must be untouched.
+#[test]
+fn a6_ht_user_test_refuses_mutation_inside_the_test() {
+    let started = AtomicUsize::new(0);
+    // 0 tM, 1-3 callback scratch, 4-6 operands.
+    const TM: u16 = 0;
+    let program = vec![
+        Op::ConstFixnum { dst: 4, value: 42 },
+        Op::ConstFixnum { dst: 5, value: 1 },
+        Op::HtPut {
+            table: TM,
+            key: 4,
+            value: 5,
+        },
+        // A different key with the same (constant) hash, so the comparator
+        // really runs — the EQ fast path would otherwise skip it.
+        Op::ConstFixnum { dst: 4, value: 43 },
+        Op::HtGet {
+            table: TM,
+            key: 4,
+            found: 5,
+            value: 6,
+        },
+    ];
+    let cmp_bad = [
+        Op::ConstFixnum { dst: 4, value: 99 },
+        Op::ConstFixnum { dst: 5, value: 9 },
+        Op::HtPut {
+            table: TM,
+            key: 4,
+            value: 5,
+        },
+        Op::Eq { dst: 3, a: 1, b: 2 },
+    ];
+    let hash_prog = [Op::ConstFixnum { dst: 3, value: 7 }];
+    let initial = [(TM, Abs::Table), (1, Abs::Fix(0)), (2, Abs::Fix(0))];
+    prevalidate_with(&program, 7, 0, &initial)
+        .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+    for ops in [&hash_prog[..], &cmp_bad[..]] {
+        prevalidate_with(ops, 7, 0, &initial)
+            .unwrap_or_else(|error| panic!("callback prevalidate: {error:?}"));
+    }
+    started.fetch_add(1, Ordering::Relaxed);
+    assert_eq!(started.load(Ordering::Relaxed), 1);
+    let setup = HtSetup {
+        source: r#"(progn
+  (fset 'a6-user-hash2 (lambda (x) 7))
+  (fset 'a6-user-cmp-bad (lambda (a b) (puthash 99 9 a6-tM) (eq a b)))
+  (define-hash-table-test 'a6-user-test-bad 'a6-user-cmp-bad 'a6-user-hash2)
+  (setq a6-tM (make-hash-table :test 'a6-user-test-bad))
+  (list a6-tM))"#,
+        facts: vec![(TM, Abs::Table)],
+        nslots: 7,
+    };
+    let users = [UserTestProg {
+        slot: TM,
+        hash_ops: &hash_prog,
+        cmp_ops: &cmp_bad,
+    }];
+    let mut context = Context::new();
+    let plant_values = context
+        .eval_str(setup.source)
+        .unwrap_or_else(|error| panic!("ht setup eval: {error:?}"));
+    // The setup form returns its one table wrapped in a list; the planted
+    // slot takes the table itself, exactly as `run_ht_session` unwraps its
+    // setup lists (a cons in the slot would fail the lease mint's type check).
+    let table_value = plant_values.cons_car_unobserved();
+    // SAFETY: the planted table belongs to this Context's heap.
+    let nil = unsafe { SharedRoot::new(&context.tagged_heap, TaggedValue::NIL) };
+    let table_root = unsafe { SharedRoot::new(&context.tagged_heap, table_value) };
+    let mut planted: Vec<Option<SharedRoot>> = vec![None; setup.nslots];
+    planted[0] = Some(table_root);
+    let env = HtEnv {
+        users: &users,
+        cb_key: 1,
+        cb_cand: 2,
+        cb_out: 3,
+        revalidations: AtomicUsize::new(0),
+        bump_before_cb: AtomicUsize::new(0),
+    };
+    let abort = AtomicBool::new(false);
+    let (report_tx, report_rx) = channel();
+    context
+        .admit_owned_parallel(|projection| {
+            {
+                let era = projection.era();
+                era.start_cons_storage()
+                    .unwrap_or_else(|error| panic!("cons catalog: {error:?}"));
+                thread::scope(|scope| {
+                    let _panic = PanicFlag {
+                        registry: era.registry(),
+                        abort: &abort,
+                    };
+                    let heap = era.heap_identity();
+                    let registry = era.registry();
+                    let permit = retry_reg(|| era.register(6601, setup.nslots));
+                    let abort_flag = &abort;
+                    let env_ref = &env;
+                    let planted_ref = &planted;
+                    let nil_ref = &nil;
+                    let program_ref = &program;
+                    let (ready_tx, ready_rx) = channel();
+                    let (done_tx, done_rx) = channel();
+                    let (retired_tx, retired_rx) = channel();
+                    scope.spawn(move || {
+                        let _panic = PanicFlag {
+                            registry,
+                            abort: abort_flag,
+                        };
+                        let mut owner = activate_owner(permit, heap, 6601);
+                        let slots = seed_planted(&mut owner, nil_ref, planted_ref);
+                        let mut machine = Machine::new();
+                        let outcome = one_slice(
+                            &mut owner,
+                            &slots,
+                            program_ref,
+                            &mut machine,
+                            0,
+                            None,
+                            0,
+                            Some(env_ref),
+                        );
+                        report_tx
+                            .send(outcome.err())
+                            .unwrap_or_else(|_| panic!("report channel closed"));
+                        shutdown_owner(owner, 0, &ready_tx, &done_rx, &retired_tx);
+                    });
+                    let error = recv(&report_rx);
+                    assert_eq!(error, Some(ExecError::UserTestMutation));
+                    assert_eq!(
+                        started.load(Ordering::Relaxed),
+                        1,
+                        "the refusal is a runtime guard, not a gate rejection"
+                    );
+                    assert_eq!(recv(&ready_rx), 0);
+                    let mut next_epoch = 1u64;
+                    let mut stopped = retry_rv(|| era.stop());
+                    assert_eq!(stopped.epoch().get(), next_epoch);
+                    next_epoch += 1;
+                    let _ = next_epoch;
+                    retry_reg(|| era.return_cons_storage(&stopped));
+                    assert!(retry_rv(|| era.collect_stopped(&mut stopped)).major);
+                    complete(stopped);
+                    done_tx.send(()).unwrap();
+                    assert_eq!(recv(&retired_rx), 0);
+                });
+            }
+            let (collector, keeper) = projection
+                .finish()
+                .unwrap_or_else(|error| panic!("finish: {error:?}"));
+            (collector, keeper, ())
+        })
+        .unwrap_or_else(|error| panic!("admit: {error:?}"));
+    // Serial world back: the refused put left the table exactly as seeded.
+    let count = context
+        .eval_str("(hash-table-count a6-tM)")
+        .unwrap_or_else(|error| panic!("count eval: {error:?}"));
+    assert_eq!(prin1(count.bits()), "1");
+    let oracle = oracle_lines();
+    assert_eq!(oracle[27], "\"hash table test modifies table\"");
+}
+
+/// P8b: the forced-bump lever. A legal writer edit lands inside a comparison
+/// window with nothing held; the epoch moves, the scan revalidates, and the
+/// second round answers — same line as the stable twin (the P8s oracle
+/// line). Only the tO comparison qualifies: the EQ fast path means the pure
+/// tU lookups never reach a comparator window at all.
+#[test]
+fn a6_ht_user_test_revalidates_after_callback_window() {
+    let started = AtomicUsize::new(0);
+    let program = ht_p8s();
+    let setup = ht_main_setup();
+    let initial = setup.initial();
+    prevalidate_with(&program, HT_NSLOTS, 0, &initial)
+        .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+    let hash_prog = [Op::Move {
+        dst: HT_CB_OUT,
+        src: HT_CB_KEY,
+    }];
+    let hash2_prog = [Op::ConstFixnum {
+        dst: HT_CB_OUT,
+        value: 7,
+    }];
+    let cmp_prog = [Op::Eq {
+        dst: HT_CB_OUT,
+        a: HT_CB_KEY,
+        b: HT_CB_CAND,
+    }];
+    let cmp_other = [
+        Op::ConstFixnum { dst: 15, value: 5 },
+        Op::ConstFixnum { dst: 16, value: 55 },
+        Op::HtPut {
+            table: HT_TO2,
+            key: 15,
+            value: 16,
+        },
+        Op::Eq {
+            dst: HT_CB_OUT,
+            a: HT_CB_KEY,
+            b: HT_CB_CAND,
+        },
+    ];
+    let mut facts = initial;
+    facts.extend([(HT_CB_KEY, Abs::Fix(0)), (HT_CB_CAND, Abs::Fix(0))]);
+    for ops in [
+        &hash_prog[..],
+        &hash2_prog[..],
+        &cmp_prog[..],
+        &cmp_other[..],
+    ] {
+        prevalidate_with(ops, HT_NSLOTS, 0, &facts)
+            .unwrap_or_else(|error| panic!("callback prevalidate: {error:?}"));
+    }
+    started.fetch_add(1, Ordering::Relaxed);
+    assert_eq!(started.load(Ordering::Relaxed), 1);
+    let users = [
+        UserTestProg {
+            slot: HT_TU,
+            hash_ops: &hash_prog,
+            cmp_ops: &cmp_prog,
+        },
+        UserTestProg {
+            slot: HT_TO,
+            hash_ops: &hash2_prog,
+            cmp_ops: &cmp_other,
+        },
+    ];
+    let env = HtEnv {
+        users: &users,
+        cb_key: HT_CB_KEY,
+        cb_cand: HT_CB_CAND,
+        cb_out: HT_CB_OUT,
+        revalidations: AtomicUsize::new(0),
+        bump_before_cb: AtomicUsize::new(1),
+    };
+    let (lines, _dumps) = run_ht_session(&setup, vec![program], 0, &env, &[]);
+    assert_eq!(
+        env.revalidations.load(Ordering::SeqCst),
+        1,
+        "the bumped window retries exactly once and then settles"
+    );
+    let oracle = oracle_lines();
+    assert_eq!(lines[0], oracle[26], "same answer as the stable twin");
+    assert_eq!(started.load(Ordering::Relaxed), 1);
+}
+
+/// The lease-mint runtime tests B2 deferred: both lease kinds minted from a
+/// live run access on the owner's thread, the authority word's live
+/// transitions matching the B1 model, and one edit read back.
+#[test]
+fn a6_ht_lease_mints_from_a_live_run_access() {
+    const WRITER: u64 = 1 << 63;
+    let abort = AtomicBool::new(false);
+    let mut context = Context::new();
+    let table = context
+        .eval_str("(make-hash-table :test 'eq)")
+        .unwrap_or_else(|error| panic!("table eval: {error:?}"));
+    // SAFETY: the table belongs to this Context's heap; the root keeps it
+    // alive for the whole era.
+    let root = unsafe { SharedRoot::new(&context.tagged_heap, table) };
+    let (report_tx, report_rx) = channel();
+    context
+        .admit_owned_parallel(|projection| {
+            {
+                let era = projection.era();
+                era.start_cons_storage()
+                    .unwrap_or_else(|error| panic!("cons catalog: {error:?}"));
+                thread::scope(|scope| {
+                    let _panic = PanicFlag {
+                        registry: era.registry(),
+                        abort: &abort,
+                    };
+                    let heap = era.heap_identity();
+                    let registry = era.registry();
+                    let permit = retry_reg(|| era.register(6602, 1));
+                    let abort_flag = &abort;
+                    let root = root.clone();
+                    let (ready_tx, ready_rx) = channel();
+                    let (done_tx, done_rx) = channel();
+                    let (retired_tx, retired_rx) = channel();
+                    scope.spawn(move || {
+                        let _panic = PanicFlag {
+                            registry,
+                            abort: abort_flag,
+                        };
+                        let mut owner = activate_owner(permit, heap, 6602);
+                        let report = must(with_run(&mut owner, |run| {
+                            let table = TaggedValue::from_bits(root.cons_word_for_test());
+                            let key = TaggedValue::fixnum(5);
+                            let value = TaggedValue::fixnum(6);
+                            // Readers nest as a count and never set the bit;
+                            // both leases stay mintable from this one access.
+                            let r1 = TableRef::enter(run, table)?;
+                            let w1 = r1.authority_word().load(Ordering::Acquire);
+                            let r2 = TableRef::enter(run, table)?;
+                            let w2 = r2.authority_word().load(Ordering::Acquire);
+                            drop(r2);
+                            let w3 = r1.authority_word().load(Ordering::Acquire);
+                            drop(r1);
+                            // The writer drains the count and holds the whole
+                            // word; entering right after the last reader left
+                            // also proves the word returned to quiescent.
+                            let mut writer = TableMut::enter(run, table)?;
+                            let w4 = writer.authority_word().load(Ordering::Acquire);
+                            writer.edit(|ht| {
+                                let probe = ht
+                                    .data
+                                    .try_probe_for_insert(key, HashTableTest::Eq, false)
+                                    .expect("an empty eq table probes cleanly");
+                                let HashProbe::Absent(hash) = probe else {
+                                    panic!("fresh table has no matching entry");
+                                };
+                                maybe_resize_hash_table_for_insert(ht, true);
+                                let hash_key = key.to_hash_key_swp(&HashTableTest::Eq, false);
+                                ht.data.insert_absent(hash, hash_key, key, value);
+                            });
+                            drop(writer);
+                            let reader = TableRef::enter(run, table)?;
+                            let seen = reader.read(|s| {
+                                (
+                                    s.len(),
+                                    s.try_lookup(key, HashTableTest::Eq, false)
+                                        .ok()
+                                        .flatten()
+                                        .map(|found| found.bits()),
+                                )
+                            });
+                            drop(reader);
+                            Ok((w1, w2, w3, w4, seen))
+                        }));
+                        report_tx
+                            .send(report)
+                            .unwrap_or_else(|_| panic!("report channel closed"));
+                        shutdown_owner(owner, 0, &ready_tx, &done_rx, &retired_tx);
+                    });
+                    let (w1, w2, w3, w4, (len, found)) = recv(&report_rx);
+                    assert_eq!(w1, 1, "the first reader takes count 1");
+                    assert_eq!(w2, 2, "readers nest as a count, never the bit");
+                    assert_eq!(w3, 1, "dropping a nested reader decrements");
+                    assert_eq!(w4, WRITER, "the writer holds the whole word");
+                    assert_eq!(len, 1, "the sealed edit inserted one entry");
+                    assert_eq!(
+                        found,
+                        Some(TaggedValue::fixnum(6).bits()),
+                        "the read-back sees the edit"
+                    );
+                    assert_eq!(recv(&ready_rx), 0);
+                    let mut stopped = retry_rv(|| era.stop());
+                    assert_eq!(stopped.epoch().get(), 1);
+                    retry_reg(|| era.return_cons_storage(&stopped));
+                    assert!(retry_rv(|| era.collect_stopped(&mut stopped)).major);
+                    complete(stopped);
+                    done_tx.send(()).unwrap();
+                    assert_eq!(recv(&retired_rx), 0);
+                });
+            }
+            let (collector, keeper) = projection
+                .finish()
+                .unwrap_or_else(|error| panic!("finish: {error:?}"));
+            (collector, keeper, ())
+        })
+        .unwrap_or_else(|error| panic!("admit: {error:?}"));
 }
 
 #[test]
@@ -2117,6 +3897,8 @@ where
             retired_tx: retired_tx.clone(),
             registry,
             abort,
+            planted: &[],
+            ht: None,
         };
         scope.spawn(move || launch.run());
     }
