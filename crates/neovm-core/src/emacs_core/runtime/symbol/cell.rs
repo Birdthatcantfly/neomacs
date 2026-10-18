@@ -35,7 +35,7 @@
 use super::{
     LispBufferLocalValue, SYMBOL_NAME_SENTINEL, SymbolInterned, SymbolRedirect, SymbolTrappedWrite,
 };
-use crate::emacs_core::forward::LispFwd;
+use crate::emacs_core::forward::FwdRef;
 use crate::emacs_core::intern::{NameId, SymId, symbol_name_id};
 use crate::emacs_core::value::Value;
 use crate::tagged::header::load_value_atomic;
@@ -261,7 +261,7 @@ pub(crate) enum ValueCell {
     /// GNU `SYMBOL_LOCALIZED`: the buffer-local record.
     Localized(BlvPtr),
     /// GNU `SYMBOL_FORWARDED`: the descriptor whose slot holds the value.
-    Forwarded(&'static LispFwd),
+    Forwarded(FwdRef),
 }
 
 /// The one machine word behind a cell; what it means is the tag's business,
@@ -289,8 +289,8 @@ impl CellWord {
     }
 
     #[inline(always)]
-    fn forwarded(fwd: &'static LispFwd) -> Self {
-        Self(std::ptr::from_ref(fwd) as usize)
+    fn forwarded(fwd: FwdRef) -> Self {
+        Self(fwd.address())
     }
 
     /// The word stored under `Plainval` by [`Self::plain`].
@@ -316,10 +316,10 @@ impl CellWord {
 
     /// The word stored under `Forwarded` by [`Self::forwarded`].
     #[inline(always)]
-    fn read_forwarded(self) -> &'static LispFwd {
-        // SAFETY: only `CellWord::forwarded` stores under this tag, from a
-        // `&'static LispFwd`.
-        unsafe { &*(self.0 as *const LispFwd) }
+    fn read_forwarded(self) -> FwdRef {
+        // Only `CellWord::forwarded` stores under this tag, and it stores a
+        // live descriptor's header address.
+        FwdRef::from_address(self.0)
     }
 
     /// Decode under the tag the word was stored with.
@@ -494,7 +494,7 @@ impl LispSymbol {
     /// projected onto the World's VOID descriptor (`HEADER`), carrying the
     /// host-projection bit every checked writer refuses, as admission leaves
     /// every void cell.
-    pub(super) fn new_projected(id: SymId, header: &'static LispFwd) -> Self {
+    pub(super) fn new_projected(id: SymId, header: FwdRef) -> Self {
         let mut sym = Self::new(id);
         // A detached symbol: no other thread can see it, so the cell is
         // written without the seqlock or a pre-image note.
@@ -698,7 +698,7 @@ impl LispSymbol {
 
     /// The descriptor of a `Forwarded` cell; `None` for every other redirect.
     #[inline(always)]
-    pub(crate) fn forwarded_descriptor(&self) -> Option<&'static LispFwd> {
+    pub(crate) fn forwarded_descriptor(&self) -> Option<FwdRef> {
         match self.flags.redirect() {
             SymbolRedirect::Forwarded => Some(self.val.read_forwarded()),
             SymbolRedirect::Plainval | SymbolRedirect::Varalias | SymbolRedirect::Localized => None,
@@ -1002,7 +1002,7 @@ impl PlainArm<'_, '_> {
     /// GNU `defvar_int` / `defvar_bool` / `defvar_lisp` /
     /// `defvar_per_buffer` / `defvar_kboard` (`src/lread.c`,
     /// `src/buffer.c`).
-    pub(super) fn forward_to(self, fwd: &'static LispFwd) {
+    pub(super) fn forward_to(self, fwd: FwdRef) {
         self.write.publish(
             NewTag::Set(SymbolRedirect::Forwarded),
             CellWord::forwarded(fwd),
@@ -1055,18 +1055,18 @@ impl LocalizedArm<'_, '_> {
 /// A `Forwarded` cell being written.
 pub(super) struct ForwardedArm<'w, 'a> {
     write: &'w mut CellWrite<'a>,
-    fwd: &'static LispFwd,
+    fwd: FwdRef,
 }
 
 impl ForwardedArm<'_, '_> {
     #[inline]
-    pub(super) fn descriptor(&self) -> &'static LispFwd {
+    pub(super) fn descriptor(&self) -> FwdRef {
         self.fwd
     }
 
     /// Install FWD in place of the current descriptor (a re-registration,
     /// or `Obarray::clone` re-homing a stateful descriptor's copy).
-    pub(super) fn forward_to(self, fwd: &'static LispFwd) {
+    pub(super) fn forward_to(self, fwd: FwdRef) {
         self.write.publish(NewTag::Keep, CellWord::forwarded(fwd));
     }
 
@@ -1121,7 +1121,7 @@ impl LocalizedArm<'_, '_> {
 pub(super) enum RevealedCell {
     Plain(Value),
     Localized(BlvPtr),
-    Forwarded(&'static LispFwd),
+    Forwarded(FwdRef),
 }
 
 impl ForwardedArm<'_, '_> {

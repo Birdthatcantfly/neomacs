@@ -3424,7 +3424,7 @@ fn dump_localized_val(
 
 fn dump_forwarded_val(
     encoder: &mut DumpEncoder,
-    fwd: &crate::emacs_core::forward::LispFwd,
+    fwd: crate::emacs_core::forward::FwdRef,
 ) -> DumpSymbolVal {
     use crate::emacs_core::forward::ForwardSlot;
     match fwd.slot() {

@@ -587,7 +587,7 @@ fn variable_words_are_where_compiled_code_reads_them() {
     ev.obarray.define_int_variable("neovm--jl-int", 7);
     let bool_fwd = ev.obarray.forwarder(intern("neovm--jl-bool")).expect("fwd");
     let int_fwd = ev.obarray.forwarder(intern("neovm--jl-int")).expect("fwd");
-    let bool_base = std::ptr::from_ref(bool_fwd).cast::<u8>();
+    let bool_base = bool_fwd.as_ptr().cast::<u8>();
     // SAFETY: the offset is pinned to this live AtomicBool field.
     let bool_slot = unsafe {
         &*bool_base
@@ -596,10 +596,7 @@ fn variable_words_are_where_compiled_code_reads_them() {
     };
     assert!(bool_slot.load(std::sync::atomic::Ordering::Relaxed));
     assert_eq!(
-        atomic_word_at(
-            std::ptr::from_ref(int_fwd).cast(),
-            LISP_INT_FWD_VALUE_OFFSET
-        ),
+        atomic_word_at(int_fwd.as_ptr().cast(), LISP_INT_FWD_VALUE_OFFSET),
         Value::fixnum(7).bits()
     );
     let obj = crate::emacs_core::forward::alloc_objfwd(Value::fixnum(9));

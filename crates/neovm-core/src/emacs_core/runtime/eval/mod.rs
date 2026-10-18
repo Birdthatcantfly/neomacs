@@ -6920,7 +6920,7 @@ impl ForwardChecked {
 fn assignment_forwarder(
     obarray: &Obarray,
     sym_id: SymId,
-) -> Option<&'static crate::emacs_core::forward::LispFwd> {
+) -> Option<crate::emacs_core::forward::FwdRef> {
     use crate::emacs_core::symbol::SymbolRedirect;
 
     match obarray.get_by_id(sym_id).map(|symbol| symbol.redirect()) {
@@ -6975,7 +6975,7 @@ pub(crate) fn check_forwarded_store_at(
 /// [`check_forwarded_store_at`] once the governing forwarder FWD is known.
 #[inline(always)]
 fn check_store_through(
-    fwd: &crate::emacs_core::forward::LispFwd,
+    fwd: crate::emacs_core::forward::FwdRef,
     buffers: &BufferManager,
     specpdl: &[SpecBinding],
     sym_id: SymId,

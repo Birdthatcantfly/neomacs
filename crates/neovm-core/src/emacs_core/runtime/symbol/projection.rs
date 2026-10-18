@@ -23,7 +23,7 @@
 use super::cell::{ArmMut, RevealedCell};
 use super::{Obarray, SymId, SymbolTrappedWrite};
 use crate::emacs_core::forward::{
-    BuiltinForwarder, CanonicalArm, CanonicalBlv, LispFwd, ThreadProjectionDescriptor,
+    BuiltinForwarder, CanonicalArm, CanonicalBlv, FwdRef, LispFwd, ThreadProjectionDescriptor,
     ThreadProjectionTable,
 };
 use crate::emacs_core::value::Value;
@@ -138,7 +138,7 @@ pub(super) fn scopes_live() -> bool {
 /// The header a fresh symbol of GENERATION's obarray is born on: VOID once
 /// its World admitted threads, none before. One load in a dormant process.
 #[inline]
-pub(super) fn born_projected(generation: u64) -> Option<&'static LispFwd> {
+pub(super) fn born_projected(generation: u64) -> Option<FwdRef> {
     if PROJECTION_SCOPES_LIVE.load(Ordering::Relaxed) == 0 {
         return None;
     }
@@ -147,7 +147,7 @@ pub(super) fn born_projected(generation: u64) -> Option<&'static LispFwd> {
 
 #[cold]
 #[inline(never)]
-fn born_projected_slow(generation: u64) -> Option<&'static LispFwd> {
+fn born_projected_slow(generation: u64) -> Option<FwdRef> {
     scope_for(generation).map(|scope| scope.void.header())
 }
 
@@ -323,7 +323,7 @@ impl Obarray {
                 ArmMut::Forwarded(forwarded) => {
                     let fwd = forwarded.descriptor();
                     // A nested operation may already have concealed it.
-                    if !std::ptr::eq(fwd, projection.header()) {
+                    if fwd != projection.header() {
                         let builtin = BuiltinForwarder::new(fwd)
                             .expect("a revealed cell never forwards to another projection");
                         projection.set_arm(CanonicalArm::Forwarded(builtin));

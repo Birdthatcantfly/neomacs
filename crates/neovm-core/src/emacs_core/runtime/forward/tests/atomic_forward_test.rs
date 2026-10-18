@@ -60,7 +60,7 @@ fn forward_load_copy_survives_replacement_and_clone_has_independent_slot() {
     assert_eq!(old.as_fixnum(), Some(3));
     assert_eq!(cloned.load().and_then(Value::as_fixnum), Some(3));
     assert_eq!(header.load().and_then(Value::as_fixnum), Some(9));
-    assert!(!std::ptr::eq(header, cloned));
+    assert!(header != cloned);
 }
 
 #[test]

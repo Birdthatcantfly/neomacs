@@ -1048,7 +1048,7 @@ impl Context {
     fn specbind_slot_in_place(
         &mut self,
         resolved: SymId,
-        logical: &'static crate::emacs_core::forward::LispFwd,
+        logical: crate::emacs_core::forward::FwdRef,
         buffer: BufferId,
         value: Value,
     ) -> Result<(), Flow> {

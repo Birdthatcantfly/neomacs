@@ -140,7 +140,7 @@ fn canonical_storage_keeps_the_logical_cell() {
     assert!(wrapped.host_projected());
     match wrapped.arm() {
         CanonicalArm::Forwarded(canonical) => {
-            assert!(std::ptr::eq(canonical.descriptor(), builtin));
+            assert!(canonical.descriptor() == builtin);
         }
         other => panic!("canonical storage became {other:?}"),
     }

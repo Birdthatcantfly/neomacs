@@ -304,7 +304,7 @@ pub struct LispBufferLocalValue {
     /// Optional forwarder for variables that have BOTH a per-buffer
     /// binding *and* a static C slot (e.g. `case-fold-search`). Must not
     /// be a `BufferObj` or `KboardObj`.
-    pub fwd: Option<&'static crate::emacs_core::forward::LispFwd>,
+    pub fwd: Option<crate::emacs_core::forward::FwdRef>,
     /// Buffer for which `valcell` was loaded, or `Value::NIL` for the
     /// global default. GNU `where`.
     ///
@@ -421,7 +421,7 @@ pub(crate) struct BlvCacheHit {
     /// GNU `local_if_set`: a `set` with no binding creates one.
     pub(crate) local_if_set: bool,
     /// The forwarder whose type rule the value obeys (`make_blv` keeps it).
-    pub(crate) fwd: Option<&'static crate::emacs_core::forward::LispFwd>,
+    pub(crate) fwd: Option<crate::emacs_core::forward::FwdRef>,
 }
 
 /// A `Localized` symbol's cells as `set_default_internal` sees them
@@ -432,7 +432,7 @@ pub(crate) struct BlvDefaultCells {
     /// default is what is loaded, so one store reaches both.
     pub(crate) defcell: Value,
     /// The forwarder whose type rule the value obeys.
-    pub(crate) fwd: Option<&'static crate::emacs_core::forward::LispFwd>,
+    pub(crate) fwd: Option<crate::emacs_core::forward::FwdRef>,
 }
 
 /// Mirrors GNU `swap_in_symval_forwarding` (`src/data.c:1539-1571`).
@@ -897,7 +897,7 @@ pub struct Obarray {
     /// Append-only and leaked, exactly like GNU's static `DEFVAR_*` slots,
     /// which `staticpro` and `mark_kboards` root for the same reason.
     /// Membership is decided by `LispFwd::owned_value`, not by the caller.
-    value_fwds: Vec<&'static crate::emacs_core::forward::LispFwd>,
+    value_fwds: Vec<crate::emacs_core::forward::FwdRef>,
     /// Whether `max-lisp-eval-depth` has EVER been made buffer-local in this
     /// obarray. The eval-depth guard on every function call has to know
     /// whether a buffer-local value could undercut the global limit; asking
@@ -1489,13 +1489,11 @@ impl Clone for Obarray {
         // Duplicate the forwarders that OWN a value. Sharing them would make
         // `(setq gc-cons-threshold ...)` in one obarray visible in the other,
         // which is the very desync the per-context descriptor exists to avoid.
-        let mut fwd_map: rustc_hash::FxHashMap<
-            usize,
-            &'static crate::emacs_core::forward::LispFwd,
-        > = rustc_hash::FxHashMap::default();
+        let mut fwd_map: rustc_hash::FxHashMap<usize, crate::emacs_core::forward::FwdRef> =
+            rustc_hash::FxHashMap::default();
         let mut value_fwds = Vec::with_capacity(self.value_fwds.len());
-        let mut clone_stateful = |orig: &'static crate::emacs_core::forward::LispFwd| {
-            let key = std::ptr::from_ref(orig) as usize;
+        let mut clone_stateful = |orig: crate::emacs_core::forward::FwdRef| {
+            let key = orig.address();
             if let Some(&existing) = fwd_map.get(&key) {
                 return Some(existing);
             }
@@ -1556,8 +1554,7 @@ impl Clone for Obarray {
             // SAFETY: a record this clone just leaked and alone owns.
             let blv = unsafe { &mut *blv_ptr.as_ptr() };
             if let Some(fwd) = blv.fwd
-                && let Some(&copy) =
-                    fwd_map.get(&(fwd as *const crate::emacs_core::forward::LispFwd as usize))
+                && let Some(&copy) = fwd_map.get(&fwd.address())
             {
                 blv.fwd = Some(copy);
             }
@@ -2724,7 +2721,7 @@ impl Obarray {
 
     /// The forward descriptor installed on `id`, if the symbol is
     /// `SYMBOL_FORWARDED`. Mirrors GNU `SYMBOL_FWD` (`src/lisp.h:1082`).
-    pub fn forwarder(&self, id: SymId) -> Option<&'static crate::emacs_core::forward::LispFwd> {
+    pub fn forwarder(&self, id: SymId) -> Option<crate::emacs_core::forward::FwdRef> {
         self.slot(id)?.forwarded_descriptor()
     }
 
@@ -3171,11 +3168,7 @@ impl Obarray {
     /// (`false`): a late declaration of a localized variable goes through
     /// [`Self::reattach_localized_forwarder`] instead, and replacing the arm
     /// would orphan the alias edge or the buffer-local record.
-    fn forward_cell(
-        &mut self,
-        id: SymId,
-        fwd: &'static crate::emacs_core::forward::LispFwd,
-    ) -> bool {
+    fn forward_cell(&mut self, id: SymId, fwd: crate::emacs_core::forward::FwdRef) -> bool {
         let mut write = self.cell_write_ensure(id);
         let installed = match write.arm() {
             ArmMut::Plain(plain) => {
@@ -3383,7 +3376,7 @@ impl Obarray {
     /// The predicate lives in `LispFwd::owned_value`, so a new forward variant
     /// cannot be added and silently left untraced by a registry that forgot
     /// about it.
-    fn register_value_fwd(&mut self, fwd: &'static crate::emacs_core::forward::LispFwd) {
+    fn register_value_fwd(&mut self, fwd: crate::emacs_core::forward::FwdRef) {
         if fwd.owned_value().is_some() {
             self.value_fwds.push(fwd);
         }
@@ -4238,7 +4231,7 @@ impl Obarray {
     pub(crate) fn boundp_id_with(
         &self,
         id: SymId,
-        projected: impl FnOnce(&'static crate::emacs_core::forward::LispFwd) -> bool,
+        projected: impl FnOnce(crate::emacs_core::forward::FwdRef) -> bool,
     ) -> bool {
         let mut current = id;
         for _ in 0..50 {
@@ -4287,7 +4280,7 @@ impl Obarray {
     /// projection is bound as the variable it projects is by default.
     #[cold]
     #[inline(never)]
-    fn host_projected_forwarded_boundp(&self, fwd: &crate::emacs_core::forward::LispFwd) -> bool {
+    fn host_projected_forwarded_boundp(&self, fwd: crate::emacs_core::forward::FwdRef) -> bool {
         match fwd.thread_projection() {
             None => true,
             Some(projection) => self.projected_default_value(projection).is_some(),

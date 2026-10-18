@@ -26,7 +26,7 @@
 //! `neovm--vm-profile-dump` prints them.
 
 use super::*;
-use crate::emacs_core::forward::{ForwardStore, LispFwd, LispFwdType};
+use crate::emacs_core::forward::{ForwardStore, FwdRef, LispFwdType};
 use crate::emacs_core::symbol::{
     BlvCacheHit, LispSymbol, SYMCELL_INLINE_WRITE_MASK, SymbolRedirect, symcell_inline_write_value,
 };
@@ -599,12 +599,7 @@ impl Context {
     }
 
     #[inline(always)]
-    fn specbind_forwarded_cached(
-        &mut self,
-        id: SymId,
-        fwd: &'static LispFwd,
-        value: Value,
-    ) -> bool {
+    fn specbind_forwarded_cached(&mut self, id: SymId, fwd: FwdRef, value: Value) -> bool {
         // A per-buffer slot binds `LetLocal`/`LetDefault` by its local flag;
         // a keyboard variable is GNU's `where.kbd` binding.
         if matches!(fwd.ty(), LispFwdType::BufferObj | LispFwdType::KboardObj) {
@@ -837,7 +832,7 @@ fn read_cached_binding_old<const COMPILED: bool>(cell: Value) -> Value {
 /// canonicalises to `t`/`nil`), or `None` where the general path signals or
 /// where FWD is a per-buffer slot, whose rule depends on the buffer.
 #[inline(always)]
-fn forward_rule(fwd: Option<&'static LispFwd>, value: Value) -> Option<Value> {
+fn forward_rule(fwd: Option<FwdRef>, value: Value) -> Option<Value> {
     match fwd {
         None => Some(value),
         Some(fwd) if fwd.ty() == LispFwdType::BufferObj => None,

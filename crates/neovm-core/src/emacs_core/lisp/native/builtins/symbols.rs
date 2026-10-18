@@ -297,7 +297,7 @@ pub(crate) fn boundp_in(eval: &super::eval::Context, symbol: SymId) -> EvalResul
 fn host_projected_boundp(
     eval: &super::eval::Context,
     resolved: SymId,
-    fwd: &crate::emacs_core::forward::LispFwd,
+    fwd: crate::emacs_core::forward::FwdRef,
 ) -> bool {
     fwd.thread_projection().is_none()
         || matches!(

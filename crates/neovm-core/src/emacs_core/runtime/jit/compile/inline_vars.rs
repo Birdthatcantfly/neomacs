@@ -274,7 +274,7 @@ fn classify(sym: u32) -> Option<VarSite> {
                         Some(fwd) if FwdKind::of(fwd.ty()).is_none() => VarShape::Plain,
                         fwd => VarShape::Localized {
                             blv: blv_ptr as usize,
-                            fwd: fwd.map_or(0, |f| std::ptr::from_ref::<LispFwd>(f) as usize),
+                            fwd: fwd.map_or(0, |f| f.address()),
                             rule: fwd.and_then(|f| FwdKind::of(f.ty())),
                             remembered_defcell: None,
                         },
@@ -282,7 +282,7 @@ fn classify(sym: u32) -> Option<VarSite> {
                 }
                 ValueCell::Forwarded(fwd) => match FwdKind::of(fwd.ty()) {
                     Some(kind) => VarShape::Forwarded {
-                        desc: std::ptr::from_ref::<LispFwd>(fwd) as usize,
+                        desc: fwd.address(),
                         kind,
                     },
                     None => VarShape::Plain,

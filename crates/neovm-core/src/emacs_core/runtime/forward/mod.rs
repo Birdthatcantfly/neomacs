@@ -116,19 +116,20 @@ impl LispFwdType {
 ///
 /// # Invariant
 ///
-/// A `&LispFwd` always addresses the header of a live descriptor of the
-/// family its [`ty`](Self::ty) names. That is what makes [`Self::slot`] --
-/// the one place the header is re-cast to its body -- sound, and it holds by
-/// construction:
+/// A descriptor handle ([`FwdRef`]) always addresses the header of a live
+/// descriptor of the family its `ty` names. That is what makes
+/// [`FwdRef::slot`] -- the one place the header is re-cast to its body --
+/// sound, and it holds by construction:
 /// - the header's field is private, so no code outside this module can build
 ///   one;
 /// - it is neither `Copy` nor `Clone` (pinned below), so a header cannot be
 ///   lifted out of its descriptor and re-read without the body after it;
 /// - every body's `ty` is private too and set only by its allocator, and the
-///   only way from a body to a `&LispFwd` is [`FwdDescriptor::header`].
+///   only way from a body to a handle is [`FwdDescriptor::header`].
 ///
-/// A symbol's `Forwarded` value cell holds such a reference, which is why
-/// that cell cannot be made to point at anything but a real descriptor.
+/// A symbol's `Forwarded` value cell stores such a handle's address, which
+/// is why that cell cannot be made to point at anything but a real
+/// descriptor.
 #[repr(C)]
 #[derive(Debug)]
 pub struct LispFwd {
@@ -155,8 +156,8 @@ pub trait FwdDescriptor: sealed::Sealed {
     /// The family every value of this body carries in its header.
     const TYPE: LispFwdType;
 
-    /// The header this body starts with.
-    fn header(&self) -> &LispFwd;
+    /// A handle to this body's header, carrying the body's provenance.
+    fn header(&self) -> FwdRef;
 }
 
 mod sealed {
@@ -171,14 +172,13 @@ macro_rules! fwd_descriptor {
             const TYPE: LispFwdType = LispFwdType::$family;
 
             #[inline(always)]
-            fn header(&self) -> &LispFwd {
+            fn header(&self) -> FwdRef {
                 debug_assert_eq!(self.ty, Self::TYPE);
-                // SAFETY: the body is `#[repr(C)]` and its first field is
-                // the same `LispFwdType` at offset zero. LispFwd's only other
-                // field is a zero-sized PhantomData, with no validity or
-                // storage requirements; size/alignment are pinned below.
-                // The returned borrow has the body's lifetime.
-                unsafe { &*std::ptr::from_ref(self).cast::<LispFwd>() }
+                // The body is `#[repr(C)]` and its first field is the same
+                // `LispFwdType` at offset zero, so the header pointer is the
+                // body pointer. Deriving it from `self` (the body) keeps the
+                // whole descriptor's extent, which `FwdRef::slot` needs.
+                FwdRef::of_body(self)
             }
         }
 
@@ -196,7 +196,7 @@ fwd_descriptor!(LispKboardObjFwd, KboardObj);
 /// the `XINTFWD` / `XBOOLFWD` / `XOBJFWD` / `XBUFFER_OBJFWD` /
 /// `XKBOARD_OBJFWD` casts it guards, as one exhaustive value.
 ///
-/// [`LispFwd::slot`] is the only producer, so a caller matching on this can
+/// [`FwdRef::slot`] is the only producer, so a caller matching on this can
 /// neither forget a family nor read a body as the wrong one.
 #[derive(Clone, Copy, Debug)]
 pub enum ForwardSlot<'a> {
@@ -256,23 +256,101 @@ impl ForwardStore {
     }
 }
 
-impl LispFwd {
-    /// The descriptor family the header names.
+/// A handle to a forwarded descriptor: a header pointer that keeps the
+/// **whole descriptor's** provenance.
+///
+/// [`LispFwd`] is the one-byte header a descriptor body starts with, so a
+/// `&LispFwd` retags the pointer with a one-byte extent even when it
+/// addresses the start of a larger `#[repr(C)]` body. Re-casting that
+/// pointer to the body and dereferencing it is then out of bounds for the
+/// tag under Stacked Borrows (the same class of bug as widening a `&field`
+/// to its containing struct). A handle built either from a body reference
+/// (`of`, every installer) or from the cell word (`from_address`, which the
+/// cell stores as an address) addresses the allocation the header really
+/// heads. All body access goes through this type.
+#[derive(Clone, Copy, Debug)]
+pub struct FwdRef(std::ptr::NonNull<LispFwd>);
+
+static_assertions::assert_eq_size!(FwdRef, std::ptr::NonNull<LispFwd>);
+// Descriptors can carry GC-visible storage; the handle is thread-confined
+// exactly like `LispFwd` (raw pointers are `!Send`/`!Sync`).
+static_assertions::assert_not_impl_any!(FwdRef: Send, Sync);
+
+impl FwdRef {
+    /// A handle for `body`, the descriptor that owns this header.
     #[inline(always)]
-    pub fn ty(&self) -> LispFwdType {
-        self.ty
+    pub fn of<D: FwdDescriptor>(body: &'static D) -> Self {
+        Self::of_body(body)
     }
 
+    /// As [`Self::of`], for a body borrow with any lifetime. The caller is
+    /// responsible for using the handle only while the descriptor lives (the
+    /// allocators leak descriptors, which is why the cell can keep it).
+    #[inline(always)]
+    fn of_body<D: FwdDescriptor + ?Sized>(body: &D) -> Self {
+        // SAFETY: a reference is never null.
+        Self(unsafe {
+            std::ptr::NonNull::new_unchecked(std::ptr::from_ref(body).cast_mut().cast())
+        })
+    }
+
+    /// The header address, for storage in a cell word.
+    #[inline(always)]
+    pub(crate) fn address(self) -> usize {
+        self.0.as_ptr() as usize
+    }
+
+    /// Rebuild from a cell word. `address` must name a live descriptor
+    /// header (the cell only stores addresses that came from [`Self::of`]).
+    #[inline(always)]
+    pub(crate) fn from_address(address: usize) -> Self {
+        // The cell stores only addresses that came from `of`; descriptor
+        // allocations are never at the null address.
+        Self(
+            std::ptr::NonNull::new(address as *mut LispFwd)
+                .expect("forwarded cell address is a live descriptor"),
+        )
+    }
+
+    /// The raw header address, for identity comparisons.
+    #[inline(always)]
+    pub(crate) fn as_ptr(self) -> *const LispFwd {
+        self.0.as_ptr()
+    }
+}
+
+impl PartialEq for FwdRef {
+    #[inline(always)]
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for FwdRef {}
+
+impl FwdRef {
+    /// The descriptor family the header names.
+    #[inline(always)]
+    pub fn ty(self) -> LispFwdType {
+        // SAFETY: the handle names a live descriptor header; the
+        // discriminant is its first byte, valid for `LispFwdType`.
+        unsafe { self.0.as_ref().ty }
+    }
+}
+
+impl FwdRef {
     /// The descriptor resolved to its family (see [`ForwardSlot`]).
     #[inline]
-    pub fn slot(&self) -> ForwardSlot<'_> {
-        let header = std::ptr::from_ref(self);
-        // SAFETY: by the type's invariant `self` heads a live descriptor of
-        // the family `ty` names, and every body is `#[repr(C)]` with that
+    pub fn slot(self) -> ForwardSlot<'static> {
+        let header = self.0.as_ptr();
+        // SAFETY: by the type's invariant the handle heads a live descriptor
+        // of the family `ty` names, and every body is `#[repr(C)]` with that
         // header first (`fwd_descriptor!`), so the cast names the body the
-        // header was allocated with. The borrow keeps `self`'s lifetime.
+        // header was allocated with. The handle addresses the whole
+        // descriptor allocation, not just the one-byte header, so the retag
+        // below is within its provenance.
         unsafe {
-            match self.ty {
+            match self.ty() {
                 LispFwdType::Int => ForwardSlot::Int(&*header.cast::<LispIntFwd>()),
                 LispFwdType::Bool => ForwardSlot::Bool(&*header.cast::<LispBoolFwd>()),
                 LispFwdType::Obj => ForwardSlot::Obj(&*header.cast::<LispObjFwd>()),
@@ -289,7 +367,7 @@ impl LispFwd {
     /// GNU `store_symval_forwarding` (`src/data.c:1469-1530`): the one switch
     /// on the forward type that decides whether an assignment is allowed and
     /// what the slot will hold.
-    pub fn store(&self, newval: Value) -> Result<ForwardStore, ForwardStoreError> {
+    pub fn store(self, newval: Value) -> Result<ForwardStore, ForwardStoreError> {
         match self.slot() {
             ForwardSlot::Int(_) => Ok(ForwardStore::Int(LispInteger::check(newval)?)),
             ForwardSlot::Bool(_) => Ok(ForwardStore::Bool(!newval.is_nil())),
@@ -310,7 +388,7 @@ impl LispFwd {
     /// `BufferObj` is the only variant that reads out of context this borrow
     /// does not have (the current buffer's slot array), so it is the only one
     /// that answers `None`.
-    pub fn load(&self) -> Option<Value> {
+    pub fn load(self) -> Option<Value> {
         match self.slot() {
             ForwardSlot::Int(int_fwd) => Some(int_fwd.get()),
             ForwardSlot::Bool(bool_fwd) => Some(Value::bool_val(bool_fwd.get())),
@@ -329,7 +407,7 @@ impl LispFwd {
     /// Here those slots live in the leaked descriptor, so the descriptor is
     /// the root -- and this is the one place that decides which variants are
     /// roots at all, rather than each registry deciding for itself.
-    pub fn owned_value(&self) -> Option<Value> {
+    pub fn owned_value(self) -> Option<Value> {
         match self.slot() {
             // `Bool` owns a native `bool`; `BufferObj`'s storage is the
             // buffer's slot array, traced with the buffer.
@@ -347,7 +425,7 @@ impl LispFwd {
     /// `BufferObj` holds immutable registration metadata (offset,
     /// predicate, default) that stays in the owning heap, so it answers
     /// `None`. This does not admit a raw default Value to another thread.
-    pub fn clone_stateful(&self) -> Option<&'static Self> {
+    pub fn clone_stateful(self) -> Option<FwdRef> {
         match self.slot() {
             // Re-wrapping without re-checking is sound only here, inside the
             // module that owns the invariant: the value being copied came out
@@ -361,7 +439,7 @@ impl LispFwd {
     }
 
     /// The descriptor as an integer forwarder, if that is what it is.
-    pub fn as_int_fwd(&self) -> Option<&LispIntFwd> {
+    pub fn as_int_fwd(self) -> Option<&'static LispIntFwd> {
         match self.slot() {
             ForwardSlot::Int(int_fwd) => Some(int_fwd),
             ForwardSlot::Bool(_)
@@ -372,7 +450,7 @@ impl LispFwd {
     }
 
     /// The descriptor as a Boolean forwarder, if that is what it is.
-    pub fn as_bool_fwd(&self) -> Option<&LispBoolFwd> {
+    pub fn as_bool_fwd(self) -> Option<&'static LispBoolFwd> {
         match self.slot() {
             ForwardSlot::Bool(bool_fwd) => Some(bool_fwd),
             ForwardSlot::Int(_)
@@ -383,7 +461,7 @@ impl LispFwd {
     }
 
     /// The descriptor as a Lisp-object forwarder, if that is what it is.
-    pub fn as_obj_fwd(&self) -> Option<&LispObjFwd> {
+    pub fn as_obj_fwd(self) -> Option<&'static LispObjFwd> {
         match self.slot() {
             ForwardSlot::Obj(obj_fwd) => Some(obj_fwd),
             ForwardSlot::Int(_)
@@ -394,7 +472,7 @@ impl LispFwd {
     }
 
     /// The descriptor as a per-buffer slot forwarder, if that is what it is.
-    pub fn as_buffer_obj_fwd(&self) -> Option<&LispBufferObjFwd> {
+    pub fn as_buffer_obj_fwd(self) -> Option<&'static LispBufferObjFwd> {
         match self.slot() {
             ForwardSlot::BufferObj(buf_fwd) => Some(buf_fwd),
             ForwardSlot::Int(_)
@@ -405,7 +483,7 @@ impl LispFwd {
     }
 
     /// The descriptor as a keyboard-object forwarder, if that is what it is.
-    pub fn as_kboard_obj_fwd(&self) -> Option<&LispKboardObjFwd> {
+    pub fn as_kboard_obj_fwd(self) -> Option<&'static LispKboardObjFwd> {
         match self.slot() {
             ForwardSlot::KboardObj(kbd_fwd) => Some(kbd_fwd),
             ForwardSlot::Int(_)
@@ -422,7 +500,7 @@ impl LispFwd {
     /// per-buffer, whose storage the caller writes -- the arm a thread
     /// projection's header takes.
     #[inline(always)]
-    pub(crate) fn commit_unless_per_buffer(&self, store: ForwardStore) -> bool {
+    pub(crate) fn commit_unless_per_buffer(self, store: ForwardStore) -> bool {
         match self.slot() {
             ForwardSlot::BufferObj(_) => false,
             ForwardSlot::Int(_)
@@ -435,7 +513,7 @@ impl LispFwd {
         }
     }
 
-    pub fn commit(&self, store: ForwardStore) -> Value {
+    pub fn commit(self, store: ForwardStore) -> Value {
         match (store, self.slot()) {
             (ForwardStore::Int(integer), ForwardSlot::Int(int_fwd)) => int_fwd.set(integer),
             (ForwardStore::Bool(flag), ForwardSlot::Bool(bool_fwd)) => bool_fwd.set(flag),
@@ -454,7 +532,7 @@ impl LispFwd {
                 | ForwardSlot::Obj(_)
                 | ForwardSlot::BufferObj(_)
                 | ForwardSlot::KboardObj(_),
-            ) => debug_assert!(false, "{store:?} cannot commit into a {:?} slot", self.ty),
+            ) => debug_assert!(false, "{store:?} cannot commit into a {:?} slot", self.ty()),
         }
         store.canonical_value()
     }

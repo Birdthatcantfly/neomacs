@@ -265,7 +265,7 @@ impl<'a> VariableView<'a> {
     /// [`Self::boundp`] of a host-projected forwarded cell.
     #[cold]
     #[inline(never)]
-    fn projected_boundp(self, fwd: &crate::emacs_core::forward::LispFwd) -> bool {
+    fn projected_boundp(self, fwd: crate::emacs_core::forward::FwdRef) -> bool {
         let Some(projection) = fwd.thread_projection() else {
             return true;
         };

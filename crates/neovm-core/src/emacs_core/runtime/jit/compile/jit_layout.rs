@@ -264,7 +264,7 @@ pub(crate) const CONS_CDR_OFFSET: usize = offset_of!(crate::tagged::header::Cons
 const _: () = {
     assert!(BLV_FOUND_OFFSET == BLV_LOCAL_IF_SET_OFFSET + 1);
     assert!(size_of::<bool>() == 1);
-    assert!(size_of::<Option<&'static crate::emacs_core::forward::LispFwd>>() == WORD);
+    assert!(size_of::<Option<crate::emacs_core::forward::FwdRef>>() == WORD);
     assert!(BLV_WHERE_BUF_ID_OFFSET % WORD == 0 && BLV_ALIST_EPOCH_OFFSET % WORD == 0);
     assert!(BLV_DEFCELL_OFFSET % WORD == 0 && BLV_VALCELL_OFFSET % WORD == 0);
     assert!(BLV_FWD_OFFSET % WORD == 0 && CONS_CDR_OFFSET % WORD == 0);

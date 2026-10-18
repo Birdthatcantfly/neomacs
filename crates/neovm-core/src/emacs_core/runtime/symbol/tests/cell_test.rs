@@ -126,10 +126,7 @@ fn each_reader_answers_only_for_its_own_arm() {
         ArmMut::Plain(plain) => plain.forward_to(fwd),
         _ => unreachable!("fresh cells are plain"),
     }
-    assert!(std::ptr::eq(
-        forwarded.forwarded_descriptor().expect("forwarded"),
-        fwd
-    ));
+    assert!(forwarded.forwarded_descriptor().expect("forwarded") == fwd);
     assert_eq!(forwarded.plain_value().map(Value::bits), None);
     assert_eq!(forwarded.alias_target(), None);
 
