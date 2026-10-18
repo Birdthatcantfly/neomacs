@@ -206,8 +206,8 @@ impl Context {
                     .and_then(|runtime| runtime.standard_case_table.get()),
             )
         };
-        let mut views = baton.owner_views(current);
-        crate::tagged::gc::set_tagged_heap(&mut views.tagged_heap);
+        let views = baton.owner_views(current);
+        views.tagged_heap.install_tagged_heap();
         let mut owner = Context::assemble(views, seed);
         owner.cached_standard_case_table = case_table;
         owner.gc_count = owner.tagged_heap.gc_collections() as u64;

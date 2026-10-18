@@ -221,8 +221,11 @@ thread_local! {
     static TAGGED_HEAP_SATB_CACHE: [Cell<usize>; BARRIER_CACHE_SLOTS] =
         const { [const { Cell::new(0) }; BARRIER_CACHE_SLOTS] };
     /// Auto-allocated heap for tests that construct Values without a Context.
+    /// The owner keeps the allocation's single provenance root, so the raw
+    /// pointer installed in `TAGGED_HEAP` is never derived from a borrow that
+    /// a later `borrow_mut` would invalidate.
     #[cfg(test)]
-    static TEST_FALLBACK_TAGGED_HEAP: std::cell::RefCell<Option<Box<TaggedHeap>>> =
+    static TEST_FALLBACK_TAGGED_HEAP: std::cell::RefCell<Option<AliasableBox<TaggedHeap>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -2751,6 +2754,9 @@ pub(crate) use cons_block_trailer::{
     CONS_MARKS_OFFSET, ConsAge,
 };
 use cons_blocks::*;
+
+mod aliasable;
+pub(crate) use aliasable::AliasableBox;
 
 mod arena_pages;
 pub(crate) use arena_pages::*;

@@ -24,7 +24,7 @@ fn world_storage_views_keep_exact_allocations_and_canonical_identity() {
     assert!(context.obarray.admission_matches_canonical());
     assert_eq!(
         context.tagged_heap.ptr.as_ptr(),
-        context.tagged_heap.lease.0.tagged_heap.get()
+        context.tagged_heap.lease.0.tagged_heap.root().as_ptr()
     );
 }
 

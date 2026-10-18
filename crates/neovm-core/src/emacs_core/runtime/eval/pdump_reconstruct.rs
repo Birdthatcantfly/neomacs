@@ -13,7 +13,7 @@ impl Context {
     /// before calling this.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_dump(
-        tagged_heap: Box<crate::tagged::gc::TaggedHeap>,
+        tagged_heap: crate::tagged::gc::AliasableBox<crate::tagged::gc::TaggedHeap>,
         obarray: Obarray,
         lexenv: Value,
         features: Vec<SymId>,
@@ -41,8 +41,8 @@ impl Context {
         let dumped_function_surface = obarray.clone();
         let mut obarray = obarray;
         let core_eval_symbols = install_core_eval_symbols(&mut obarray, false);
-        let mut tagged_heap = tagged_heap;
-        crate::tagged::gc::set_tagged_heap(&mut tagged_heap);
+        let tagged_heap = tagged_heap;
+        crate::tagged::gc::set_tagged_heap_root(tagged_heap.root());
         let noninteractive = obarray
             .canonical_value_or_nil(
                 CanonicalAccess::DUMP,

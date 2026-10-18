@@ -2282,9 +2282,11 @@ impl Context {
 
     pub(super) fn new_inner(surface: ConstructionSurface) -> Self {
         // Create the heap and set thread-locals so tagged constructors work
-        // during evaluator initialization.
-        let mut tagged_heap = Box::new(crate::tagged::gc::TaggedHeap::new());
-        crate::tagged::gc::set_tagged_heap(&mut tagged_heap);
+        // during evaluator initialization. The owner carries the allocation's
+        // provenance root; installation and every later access derive from it.
+        let tagged_heap =
+            crate::tagged::gc::AliasableBox::new(crate::tagged::gc::TaggedHeap::new());
+        crate::tagged::gc::set_tagged_heap_root(tagged_heap.root());
 
         // Clear any caches that hold heap-allocated Values (tagged pointers) from a
         // previous heap. Critical for test isolation when multiple Contexts

@@ -760,8 +760,8 @@ fn reconstruct_evaluator_after_symbol_table_with_decoder_and_value_fixups(
 ) -> Result<Context, DumpError> {
     // 2. Reconstruct the tagged heap before any heap-backed value/object loads
     // so tagged dump references can resolve directly to live tagged objects.
-    let mut tagged_heap = Box::new(crate::tagged::gc::TaggedHeap::new());
-    crate::tagged::gc::set_tagged_heap(&mut tagged_heap);
+    let tagged_heap = crate::tagged::gc::AliasableBox::new(crate::tagged::gc::TaggedHeap::new());
+    crate::tagged::gc::set_tagged_heap_root(tagged_heap.root());
     decoder.preload_tagged_heap_with_value_fixup_section(value_fixups_section)?;
 
     // 3. Reset thread-local runtime caches before replaying semantic state.

@@ -1521,12 +1521,48 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
     let _ = job.exited.send(logs.result);
 }
 
-/// Set the thread-local tagged heap pointer.
+/// Set the thread-local tagged heap pointer from the heap's provenance root.
+///
+/// `root` must be a copy of the allocation's single root raw pointer (see
+/// [`super::AliasableBox`]), not a pointer derived from a `&mut` borrow of the
+/// heap. The TLS slot hands the pointer back out to `with_tagged_heap`, so it
+/// must remain valid across every other access path the owner takes; a
+/// `&mut`-derived tag is popped by the owning `&mut`'s next use (Stacked
+/// Borrows) or disabled by it (Tree Borrows).
+///
+/// All production installers use this form. [`set_tagged_heap`] remains for
+/// test fixtures that own a bare heap directly.
+pub(crate) fn set_tagged_heap_root(mut root: std::ptr::NonNull<TaggedHeap>) {
+    // SAFETY: the caller supplies the live allocation's root pointer.
+    if !tagged_heap_is_current(unsafe { root.as_ref() }) {
+        super::super::collection_reads::reset_recent_reads_for_heap_installation();
+    }
+    TAGGED_HEAP.with(|h| h.set(root.as_ptr()));
+    // The mirrors below need a `&mut`. Deriving it from the root (rather than
+    // from a caller's borrow) is what leaves the stored root tag intact: a
+    // sibling reborrow pops only its predecessor, never the root itself.
+    // SAFETY: the root is live and the caller has exclusive access to the
+    // heap at installation time; no TLS-derived access is live here.
+    sync_heap_tls_mirrors(unsafe { root.as_mut() });
+}
+
+/// Set the thread-local tagged heap pointer, borrowing the heap directly.
+///
+/// This form derives the stored pointer from a `&mut TaggedHeap`, so it is
+/// only sound while the owner never uses that same borrow path again after
+/// the call, and never holds a `&mut TaggedHeap` across a TLS-derived access.
+/// It exists for test fixtures whose heap they own directly; production code
+/// installs through [`set_tagged_heap_root`].
 pub fn set_tagged_heap(heap: &mut TaggedHeap) {
     if !tagged_heap_is_current(heap) {
         super::super::collection_reads::reset_recent_reads_for_heap_installation();
     }
     TAGGED_HEAP.with(|h| h.set(heap as *mut TaggedHeap));
+    sync_heap_tls_mirrors(heap);
+}
+
+/// Refresh the per-heap TLS mirrors after the allocation slot was stored.
+fn sync_heap_tls_mirrors(heap: &mut TaggedHeap) {
     TAGGED_HEAP_ID.with(|identity| identity.set(Some(heap.identity())));
     TAGGED_HEAP_WRITE_TRACKING_MODE.with(|mode| mode.set(heap.write_tracking_mode()));
     TAGGED_HEAP_PARTITION_ACTIVE.with(|p| p.set(heap.partition_dump));
@@ -1668,14 +1704,18 @@ pub fn with_tagged_heap<R>(f: impl FnOnce(&mut TaggedHeap) -> R) -> R {
         #[cfg(test)]
         {
             TEST_FALLBACK_TAGGED_HEAP.with(|fb| {
-                let mut borrow = fb.borrow_mut();
-                if borrow.is_none() {
-                    *borrow = Some(Box::new(TaggedHeap::new()));
-                }
-                let heap_ref: &mut TaggedHeap = borrow.as_mut().unwrap();
-                let ptr = heap_ref as *mut TaggedHeap;
-                set_tagged_heap(heap_ref);
-                f(unsafe { &mut *ptr })
+                // Copy the root out first: holding the `RefCell` borrow across
+                // `f` would both block reentrancy and hand out a `&mut` with a
+                // shorter provenance than the slot needs.
+                let root = {
+                    let mut borrow = fb.borrow_mut();
+                    if borrow.is_none() {
+                        *borrow = Some(AliasableBox::new(TaggedHeap::new()));
+                    }
+                    borrow.as_ref().unwrap().root()
+                };
+                set_tagged_heap_root(root);
+                f(unsafe { &mut *root.as_ptr() })
             })
         }
         #[cfg(not(test))]
