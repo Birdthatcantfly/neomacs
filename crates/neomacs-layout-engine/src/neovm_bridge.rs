@@ -4036,6 +4036,12 @@ struct ComposedSourceCache {
     /// [`NamedSpecEntry`].
     named_specs: rustc_hash::FxHashMap<Box<str>, NamedSpecEntry>,
     len: usize,
+    /// Routed-row speculation depth: insert methods journal their undo
+    /// records while this is non-zero (see [`FaceCacheRewind`]). The route
+    /// arms before its first face probe and rewinds on any refusal, so a
+    /// refused row leaves the caches exactly as it found them.
+    speculation_depth: u32,
+    speculation_journal: Vec<FaceCacheRewind>,
 }
 
 /// One folded named-face specification plus the buffer-local
@@ -4086,7 +4092,112 @@ impl ComposedSourceCache {
         self.identity_compositions.clear();
         self.named_specs.clear();
         self.len = 0;
+        // The wholesale reset only runs at speculation depth 0 (see the
+        // insert methods), where the journal is already empty; clearing it
+        // here keeps that invariant explicit rather than accidental.
+        self.speculation_journal.clear();
     }
+}
+
+/// One undo record of a face-cache insert performed inside a speculative
+/// routed-row attempt. GNU lets a retried display keep the faces it
+/// realized — the frame face cache empties only on `face_change`
+/// (src/xfaces.c:3098-3105) — but a routed row here must be INVISIBLE when
+/// refused: the buffer pipeline re-renders it, and the attempt's cache
+/// entries would otherwise change which later insert trips the wholesale
+/// [`COMPOSED_SOURCE_CACHE_LIMIT`] reset or which paint a one-slot memo
+/// still answers for. Records apply in reverse insertion order, so a
+/// pushed entry is still the last of its bucket when its undo runs.
+enum FaceCacheRewind {
+    /// A realized terminal paint recorded beside its source; the previous
+    /// slot contents are restored wholesale (the slot is one deep).
+    TtyPaint {
+        source: std::sync::Arc<RootedFace>,
+        previous: Option<face_colors::TtyPaintMemo>,
+    },
+    /// An interned composed source appended to a digest bucket.
+    ComposedEntry {
+        hash: u64,
+        pushed: std::sync::Arc<RootedFace>,
+    },
+    /// A content-keyed `base + overlay` composition.
+    Composition {
+        key: (usize, u64),
+        pushed: std::sync::Arc<RootedFace>,
+    },
+    /// An identity-keyed `base + overlay` composition.
+    IdentityComposition {
+        key: (usize, usize),
+        pushed: std::sync::Arc<RootedFace>,
+    },
+    /// A folded named-face specification; `previous` restores a replaced
+    /// fold, or removes a fresh one.
+    NamedSpec {
+        name: Box<str>,
+        previous: Option<NamedSpecEntry>,
+    },
+}
+
+impl FaceCacheRewind {
+    /// Undo the insert this record was journaled for. Bucket entries are
+    /// matched by allocation identity, never by content: an equal-content
+    /// entry from before the attempt must survive the rewind.
+    fn apply(self, cache: &mut ComposedSourceCache) {
+        let removed = match self {
+            FaceCacheRewind::TtyPaint { source, previous } => {
+                source.rewind_tty_paint(previous);
+                return;
+            }
+            FaceCacheRewind::ComposedEntry { hash, pushed } => cache
+                .entries
+                .get_mut(&hash)
+                .is_some_and(|bucket| remove_by_identity(bucket, &pushed, |entry| entry)),
+            FaceCacheRewind::Composition { key, pushed } => cache
+                .compositions
+                .get_mut(&key)
+                .is_some_and(|bucket| remove_by_identity(bucket, &pushed, |entry| &entry.merged)),
+            FaceCacheRewind::IdentityComposition { key, pushed } => cache
+                .identity_compositions
+                .get_mut(&key)
+                .is_some_and(|bucket| remove_by_identity(bucket, &pushed, |entry| &entry.merged)),
+            FaceCacheRewind::NamedSpec { name, previous } => {
+                match previous {
+                    Some(entry) => cache.named_specs.insert(name, entry),
+                    None => cache.named_specs.remove(&name),
+                };
+                // The insert always counted one entry, even when it replaced
+                // a fold; the undo owes the same one back.
+                true
+            }
+        };
+        if removed {
+            cache.len = cache.len.saturating_sub(1);
+        }
+    }
+}
+
+/// Drop `pushed` from `bucket` by allocation identity. Bucket order carries
+/// no meaning (probes scan linearly), so a swap-remove is exact.
+fn remove_by_identity<E>(
+    bucket: &mut Vec<E>,
+    pushed: &std::sync::Arc<RootedFace>,
+    merged_of: impl Fn(&E) -> &std::sync::Arc<RootedFace>,
+) -> bool {
+    bucket
+        .iter()
+        .position(|entry| std::sync::Arc::ptr_eq(merged_of(entry), pushed))
+        .is_some_and(|position| {
+            bucket.swap_remove(position);
+            true
+        })
+}
+
+/// Marker of a face-cache speculation window handed back by
+/// [`FaceResolver::arm_face_cache_speculation`]. Opaque by design: only the
+/// resolver's accept/rewind pair consumes it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FaceCacheSpeculationMark {
+    journal_len: usize,
 }
 
 /// Beyond this many distinct composed sources the cache resets wholesale: a
@@ -4567,6 +4678,47 @@ impl FaceResolver {
         self.invalid_face_references.take()
     }
 
+    /// Begin journaling this resolver's face-cache inserts for a speculative
+    /// routed-row attempt. While the window is open every insert appends an
+    /// undo record; [`Self::rewind_face_cache_speculation`] restores the
+    /// caches to this point so a refused row leaves no face-cache side
+    /// effects visible, and [`Self::accept_face_cache_speculation`] keeps
+    /// what a routed row earned. The journal rides the shared composed-source
+    /// cache, so it survives a mid-attempt resolver refresh unchanged. A Lisp
+    /// color callback that runs a nested layout inside the window journals
+    /// those inserts too; undoing them is safe because every cache here is a
+    /// pure function of its inputs — the nested layout's published state
+    /// never reads the memo back through this journal.
+    pub(crate) fn arm_face_cache_speculation(&self) -> FaceCacheSpeculationMark {
+        let mut cache = self.composed_sources.borrow_mut();
+        cache.speculation_depth += 1;
+        FaceCacheSpeculationMark {
+            journal_len: cache.speculation_journal.len(),
+        }
+    }
+
+    /// Close a speculation window whose row routed: the inserts stay, their
+    /// undo records go.
+    pub(crate) fn accept_face_cache_speculation(&self, mark: FaceCacheSpeculationMark) {
+        let mut cache = self.composed_sources.borrow_mut();
+        cache.speculation_depth = cache.speculation_depth.saturating_sub(1);
+        cache.speculation_journal.truncate(mark.journal_len);
+    }
+
+    /// Close a speculation window whose row was refused: undo its inserts in
+    /// reverse order. Records apply newest-first, so a pushed bucket entry is
+    /// still the last of its bucket when its undo runs.
+    pub(crate) fn rewind_face_cache_speculation(&self, mark: FaceCacheSpeculationMark) {
+        let mut cache = self.composed_sources.borrow_mut();
+        cache.speculation_depth = cache.speculation_depth.saturating_sub(1);
+        while cache.speculation_journal.len() > mark.journal_len {
+            let Some(undo) = cache.speculation_journal.pop() else {
+                break;
+            };
+            undo.apply(&mut cache);
+        }
+    }
+
     /// Point the resolver at the window whose faces are about to be resolved,
     /// so a `(:window PARAM VALUE)` `:filtered` predicate can consult that
     /// window's parameters. Call at each window boundary (and with an empty
@@ -4688,10 +4840,26 @@ impl FaceResolver {
         };
         let mut cache = self.composed_sources.borrow_mut();
         if cache.len >= COMPOSED_SOURCE_CACHE_LIMIT {
+            if cache.speculation_depth > 0 {
+                // A speculative insert must not trip the wholesale reset
+                // (undoing one would mean snapshotting the whole cache);
+                // leave this source uncached and let the next plain insert
+                // take the reset.
+                return Some(rooted);
+            }
             cache.clear();
         }
+        let speculative = cache.speculation_depth > 0;
         cache.entries.entry(hash).or_default().push(rooted.clone());
         cache.len += 1;
+        if speculative {
+            cache
+                .speculation_journal
+                .push(FaceCacheRewind::ComposedEntry {
+                    hash,
+                    pushed: rooted.clone(),
+                });
+        }
         Some(rooted)
     }
 
@@ -4743,8 +4911,16 @@ impl FaceResolver {
         let shared = std::sync::Arc::new(folded);
         let mut cache = self.composed_sources.borrow_mut();
         if cache.len >= COMPOSED_SOURCE_CACHE_LIMIT {
+            if cache.speculation_depth > 0 {
+                // See `shared_composed_source`: a speculative fold stays out
+                // of the cache rather than trip the wholesale reset.
+                return shared;
+            }
             cache.clear();
         }
+        let previous = (cache.speculation_depth > 0)
+            .then(|| cache.named_specs.get(name).cloned())
+            .flatten();
         cache.named_specs.insert(
             name.into(),
             NamedSpecEntry {
@@ -4753,6 +4929,12 @@ impl FaceResolver {
             },
         );
         cache.len += 1;
+        if cache.speculation_depth > 0 {
+            cache.speculation_journal.push(FaceCacheRewind::NamedSpec {
+                name: name.into(),
+                previous,
+            });
+        }
         shared
     }
 
@@ -4788,7 +4970,18 @@ impl FaceResolver {
         frame: FrameId,
         face_change_count: u64,
     ) {
-        source.record_tty_paint(frame, face_change_count, probe_key, face)
+        // The slot is one deep, so a speculative record would evict whatever
+        // paint the source carried into this attempt; journal the previous
+        // contents for the rewind (see `FaceCacheRewind::TtyPaint`).
+        let previous =
+            (self.composed_sources.borrow().speculation_depth > 0).then(|| source.tty_paint_slot());
+        source.record_tty_paint(frame, face_change_count, probe_key, face);
+        if let Some(previous) = previous {
+            self.composed_sources
+                .borrow_mut()
+                .speculation_journal
+                .push(FaceCacheRewind::TtyPaint { source, previous });
+        }
     }
 
     /// The previously merged source for `overlay` over `base`, when this exact
@@ -4860,8 +5053,13 @@ impl FaceResolver {
         );
         let mut cache = self.composed_sources.borrow_mut();
         if cache.len >= COMPOSED_SOURCE_CACHE_LIMIT {
+            if cache.speculation_depth > 0 {
+                // See `shared_composed_source`.
+                return;
+            }
             cache.clear();
         }
+        let speculative = cache.speculation_depth > 0;
         cache
             .identity_compositions
             .entry(key)
@@ -4869,9 +5067,17 @@ impl FaceResolver {
             .push(IdentityComposedEntry {
                 base: std::sync::Arc::downgrade(&base),
                 overlay: std::sync::Arc::downgrade(&overlay),
-                merged,
+                merged: std::sync::Arc::clone(&merged),
             });
         cache.len += 1;
+        if speculative {
+            cache
+                .speculation_journal
+                .push(FaceCacheRewind::IdentityComposition {
+                    key,
+                    pushed: merged,
+                });
+        }
     }
 
     fn record_composed_over(
@@ -4886,8 +5092,13 @@ impl FaceResolver {
         );
         let mut cache = self.composed_sources.borrow_mut();
         if cache.len >= COMPOSED_SOURCE_CACHE_LIMIT {
+            if cache.speculation_depth > 0 {
+                // See `shared_composed_source`.
+                return;
+            }
             cache.clear();
         }
+        let speculative = cache.speculation_depth > 0;
         cache
             .compositions
             .entry(key)
@@ -4895,9 +5106,17 @@ impl FaceResolver {
             .push(ComposedOverlayEntry {
                 base: std::sync::Arc::downgrade(&base),
                 overlay,
-                merged,
+                merged: std::sync::Arc::clone(&merged),
             });
         cache.len += 1;
+        if speculative {
+            cache
+                .speculation_journal
+                .push(FaceCacheRewind::Composition {
+                    key,
+                    pushed: merged,
+                });
+        }
     }
 
     fn apply_specified_face_over(
@@ -6138,6 +6357,10 @@ mod tests;
 #[cfg(test)]
 #[path = "neovm_bridge/tests/tty_paint_memo_test.rs"]
 mod tty_paint_memo_test;
+
+#[cfg(test)]
+#[path = "neovm_bridge/tests/face_cache_speculation_test.rs"]
+mod face_cache_speculation_test;
 
 #[cfg(test)]
 #[path = "neovm_bridge/tests/resolved_identity_test.rs"]

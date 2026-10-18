@@ -164,6 +164,17 @@ impl RootedFace {
             paint: TtyPaint::snapshot(face),
         }));
     }
+
+    /// The paint slot's current contents, journaled before a speculative
+    /// routed-row attempt overwrites it (see `FaceCacheRewind::TtyPaint`).
+    pub(super) fn tty_paint_slot(&self) -> Option<TtyPaintMemo> {
+        self.tty_paint.get()
+    }
+
+    /// Restore a journaled paint slot after a refused routed-row attempt.
+    pub(super) fn rewind_tty_paint(&self, previous: Option<TtyPaintMemo>) {
+        self.tty_paint.set(previous);
+    }
 }
 
 impl AsRef<Face> for RootedFace {

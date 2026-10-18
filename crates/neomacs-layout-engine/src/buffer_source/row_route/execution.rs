@@ -102,15 +102,25 @@ struct RoutedRowCheckpoint {
         Option<neovm_core::buffer::LispCharPos1>,
         Option<neovm_core::buffer::LispCharPos1>,
     ),
+    /// The face-cache speculation window the attempt opened before its
+    /// first probe (`arm_face_cache_speculation`): probes realize faces and
+    /// the render pass resolves more, so both journal their cache inserts.
+    /// A rewind restores every memo the attempt touched, and an accepted row
+    /// keeps what it earned — the buffer pipeline re-renders a refused row
+    /// from a cache state identical to the one the attempt started from.
+    face_cache_mark: crate::neovm_bridge::FaceCacheSpeculationMark,
 }
 
 impl RoutedRowCheckpoint {
     /// Capture the walk and row state an attempt mutates. `None` when no
     /// output row is open — the route has nothing to render into and the
-    /// buffer pipeline owns the row.
+    /// buffer pipeline owns the row. `face_cache_mark` is the speculation
+    /// window the caller armed before its first face probe; ownership moves
+    /// here so the checkpoint is the single rewind authority for the attempt.
     fn capture(
         state: &mut crate::buffer_source::loop_state::BufferSourceLoopMutableState<'_, '_, '_>,
         active_face: &DisplayRowActiveFaceState,
+        face_cache_mark: crate::neovm_bridge::FaceCacheSpeculationMark,
     ) -> Option<Self> {
         let row = state.source_render.current_row_snapshot()?;
         let position = state.progress.row_position();
@@ -131,6 +141,7 @@ impl RoutedRowCheckpoint {
             row,
             display_point_len: emitter.display_point_len(),
             row_display_positions: emitter.current_row_display_positions(),
+            face_cache_mark,
         })
     }
 
@@ -167,6 +178,23 @@ impl RoutedRowCheckpoint {
         state
             .progress
             .apply_row_position(DisplayRowPosition::new(self.row_x, self.row_col));
+        // The face caches are the one mutation the row snapshot cannot carry:
+        // they live on the shared resolver, not the loop state. Rewind them
+        // here so a refused row leaves no face-cache side effects visible.
+        state
+            .source_render
+            .rewind_face_cache_speculation(self.face_cache_mark);
+    }
+
+    /// Close the attempt's face-cache speculation window for a row that
+    /// routed: its cache entries were earned and stay.
+    fn accept(
+        self,
+        state: &mut crate::buffer_source::loop_state::BufferSourceLoopMutableState<'_, '_, '_>,
+    ) {
+        state
+            .source_render
+            .accept_face_cache_speculation(self.face_cache_mark);
     }
 }
 
@@ -375,6 +403,16 @@ impl<'rows, 'emit, 'surface>
         // append writer, which stops at the row's right edge and reports it
         // (GNU `move_it_in_display_line_to`, src/xdisp.c:10422-10451), and a
         // refused row rewinds to the checkpoint.
+        //
+        // Probes realize faces from cache, and both they and the render pass
+        // write resolver-side memos (paint beside composed sources, folded
+        // named specifications). The attempt journals all of it from before
+        // its first probe: a refusal rewinds to this mark, so the caches look
+        // exactly as they did before the attempt and the buffer pipeline
+        // re-renders the row from the same starting state. Only the
+        // content-addressed stable-id mints stay unjournaled — the pipeline
+        // performs them identically for the same row.
+        let face_cache_mark = self.source_render.arm_face_cache_speculation();
         struct ProbedSegment<'plan> {
             start: CharPos0,
             end: CharPos0,
@@ -406,6 +444,8 @@ impl<'rows, 'emit, 'surface>
                     .realize_cached_face_for_display(&mut resolved)
                 {
                     note_route_refusal(RouteRefusal::UnrealizedFace);
+                    self.source_render
+                        .rewind_face_cache_speculation(face_cache_mark);
                     return PlainRowRouteOutcome::NotRouted;
                 }
                 let face_id = crate::display_row::face_state::stable_face_id_for_resolved(
@@ -423,6 +463,8 @@ impl<'rows, 'emit, 'surface>
             // the canonical cursor must own that row's source topology too.
             if active.resolved_face().box_type != 0 {
                 note_route_refusal(RouteRefusal::ProbeBoxFace);
+                self.source_render
+                    .rewind_face_cache_speculation(face_cache_mark);
                 return PlainRowRouteOutcome::NotRouted;
             }
             // The pipeline stamps glyphs with the PER-RUN face chain; refuse
@@ -444,6 +486,8 @@ impl<'rows, 'emit, 'surface>
                 })
             {
                 note_route_refusal(RouteRefusal::ProbeFaceDiverges);
+                self.source_render
+                    .rewind_face_cache_speculation(face_cache_mark);
                 return PlainRowRouteOutcome::NotRouted;
             }
             carried_active = Some(active.clone());
@@ -458,10 +502,15 @@ impl<'rows, 'emit, 'surface>
         // ---- Rewindable checkpoint: everything the render pass below can
         // mutate, captured before its first write. GNU keeps its display
         // iterator saveable for exactly this decision (SAVE_IT / RESTORE_IT,
-        // src/xdisp.c:840-861).
-        let Some(checkpoint) = RoutedRowCheckpoint::capture(self, active_face_state) else {
+        // src/xdisp.c:840-861). The face-cache mark moves in with it: from
+        // here the checkpoint is the attempt's single rewind authority.
+        let Some(checkpoint) =
+            RoutedRowCheckpoint::capture(self, active_face_state, face_cache_mark)
+        else {
             // No open output row: the buffer pipeline renders this row.
             note_route_refusal(RouteRefusal::CommitRefused);
+            self.source_render
+                .rewind_face_cache_speculation(face_cache_mark);
             return PlainRowRouteOutcome::NotRouted;
         };
 
@@ -819,6 +868,8 @@ impl<'rows, 'emit, 'surface>
             note_route_refusal(RouteRefusal::CommitRefused);
             return PlainRowRouteOutcome::NotRouted;
         }
+        // The row routed: its cache entries were earned and stay.
+        checkpoint.accept(self);
 
         self.progress.max_charpos(line_end.get() as i64);
         self.progress

@@ -57,7 +57,7 @@ use crate::display_spec::DisplayFringeSide;
 use crate::display_text_output_install::TextWindowRowDecorationRequest;
 use crate::font::metrics::FontMetricsService;
 use crate::frame_face_arena::FrameFaceAttempt;
-use crate::neovm_bridge::{FaceResolver, LayoutBufferView, ResolvedFace};
+use crate::neovm_bridge::{FaceCacheSpeculationMark, FaceResolver, LayoutBufferView, ResolvedFace};
 use crate::types::WindowParams;
 use crate::window_output::{
     DisplayTextRowGeometryTransition, DisplayTextRowTransition, TextWindowOutputTarget,
@@ -1286,6 +1286,27 @@ impl<'a> TextRowSourceRenderState<'a> {
         self.faces
             .pipeline_resolver()
             .realize_cached_for_display(face, self.output_render.evaluator)
+    }
+
+    /// Open the routed-row face-cache speculation window: from here until the
+    /// matching accept/rewind, the shared resolver journals every cache
+    /// insert, so a refused row restores the caches exactly.
+    pub(crate) fn arm_face_cache_speculation(&mut self) -> FaceCacheSpeculationMark {
+        self.faces.pipeline_resolver().arm_face_cache_speculation()
+    }
+
+    /// Close the window for a row that routed: keep its cache entries.
+    pub(crate) fn accept_face_cache_speculation(&mut self, mark: FaceCacheSpeculationMark) {
+        self.faces
+            .pipeline_resolver()
+            .accept_face_cache_speculation(mark);
+    }
+
+    /// Close the window for a refused row: undo its cache entries.
+    pub(crate) fn rewind_face_cache_speculation(&mut self, mark: FaceCacheSpeculationMark) {
+        self.faces
+            .pipeline_resolver()
+            .rewind_face_cache_speculation(mark);
     }
 
     pub(crate) fn with_cached_face_realizer<R>(
