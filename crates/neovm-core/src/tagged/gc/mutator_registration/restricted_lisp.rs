@@ -469,6 +469,12 @@ fn try_admit(
 }
 
 fn list_ops(base: i64) -> Vec<Op> {
+    tp_list_ops(base, 8)
+}
+
+/// `list_ops` with a parameterized loop limit: the A8 throughput rows need
+/// longer lists than the oracle fixtures' eight cells.
+fn tp_list_ops(base: i64, limit: i64) -> Vec<Op> {
     // 0 nil, 1 base, 2 k, 3 limit, 4 head, 5 tail, 6 cell, 7 one, 8 cond, 9 car, 10 scratch
     let mut ops = vec![
         Op::ConstNil { dst: 0 },
@@ -477,7 +483,10 @@ fn list_ops(base: i64) -> Vec<Op> {
             value: base,
         },
         Op::ConstFixnum { dst: 2, value: 0 },
-        Op::ConstFixnum { dst: 3, value: 8 },
+        Op::ConstFixnum {
+            dst: 3,
+            value: limit,
+        },
         Op::ConstNil { dst: 4 },
         Op::ConstNil { dst: 5 },
         Op::ConstFixnum { dst: 7, value: 1 },
@@ -1927,4 +1936,411 @@ fn a6_overlap_lists_two_owners() {
 #[test]
 fn a6_overlap_lists_four_owners() {
     overlap_lists(4);
+}
+
+// ---------------------------------------------------------------------------
+// A8 throughput rows (design section 7.2)
+// ---------------------------------------------------------------------------
+
+/// Owner-cons threshold for the throughput rows' requested collections; 0
+/// disables every stop (the allocation-only row).
+static TP_THRESHOLD: AtomicUsize = AtomicUsize::new(0);
+
+fn tp_stop(cons_count: usize, _safepoints: usize) -> Option<Go> {
+    let threshold = TP_THRESHOLD.load(Ordering::Relaxed);
+    if threshold > 0 && cons_count > 0 && cons_count % threshold == 0 {
+        Some(Go::Threshold)
+    } else {
+        None
+    }
+}
+
+struct TpRow {
+    label: String,
+    owners: usize,
+    cells_per_owner: usize,
+    gcs: usize,
+    wall_ns: u64,
+    pause_ns: Vec<u64>,
+    live_bytes_last: usize,
+    live_bytes_max: usize,
+    per_owner_conses: Vec<usize>,
+    witness_enter: Vec<usize>,
+    witness_alloc: Vec<usize>,
+    grant_calls: u64,
+    grant_ns: u64,
+    grant_max_ns: u64,
+    close_calls: u64,
+    close_ns: u64,
+    close_max_ns: u64,
+}
+
+fn reset_tp_catalog_waits() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let waits = &crate::tagged::gc::cons_storage::CATALOG_WAITS;
+    waits.grant_calls.store(0, Relaxed);
+    waits.grant_ns.store(0, Relaxed);
+    waits.grant_max_ns.store(0, Relaxed);
+    waits.close_calls.store(0, Relaxed);
+    waits.close_ns.store(0, Relaxed);
+    waits.close_max_ns.store(0, Relaxed);
+}
+
+fn read_tp_catalog_waits() -> (u64, u64, u64, u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let waits = &crate::tagged::gc::cons_storage::CATALOG_WAITS;
+    (
+        waits.grant_calls.load(Relaxed),
+        waits.grant_ns.load(Relaxed),
+        waits.grant_max_ns.load(Relaxed),
+        waits.close_calls.load(Relaxed),
+        waits.close_ns.load(Relaxed),
+        waits.close_max_ns.load(Relaxed),
+    )
+}
+
+/// One timed round: every owner is parked at its threshold safepoint before
+/// the window opens, and the window closes when `complete` returns.
+fn tp_round(session: &mut Session<'_, '_>) -> (usize, u64) {
+    let _ = session.pauses();
+    let t0 = Instant::now();
+    let mut stopped = open_collection(
+        session.era,
+        &session.go_txs,
+        Go::Threshold,
+        &mut session.next_epoch,
+    );
+    let report = retry_rv(|| session.era.collect_stopped(&mut stopped));
+    assert!(report.major, "throughput rounds collect a major cycle");
+    retry_reg(|| session.era.resume_cons_storage(&stopped));
+    complete(stopped);
+    let ns = t0.elapsed().as_nanos() as u64;
+    (report.live_bytes, ns)
+}
+
+/// [`Session::launch`] for the throughput rows: each owner runs its program
+/// `reps` times, so per-owner work is a plain product.
+fn tp_launch<'body, 'heap, 'scope, 'env>(
+    era: &'body ParallelHeapEra<'heap>,
+    nil: &'env SharedRoot,
+    programs: &[Vec<Op>],
+    reps: usize,
+    nslots: usize,
+    bound: u32,
+    line_slot: usize,
+    overlap: Option<&'env Overlap>,
+    abort: &'env AtomicBool,
+    scope: &'scope thread::Scope<'scope, 'env>,
+) -> Session<'body, 'heap>
+where
+    'body: 'env,
+{
+    let n = programs.len();
+    let heap = era.heap_identity();
+    let registry = era.registry();
+    let (pause_tx, pause_rx) = channel();
+    let (end_tx, end_rx) = channel();
+    let (ready_tx, ready_rx) = channel();
+    let (retired_tx, retired_rx) = channel();
+    let mut go_txs = Vec::with_capacity(n);
+    let mut done_txs = Vec::with_capacity(n);
+    // Design 3.3: register every permit before spawning any owner thread.
+    let mut permits = Vec::with_capacity(n);
+    for index in 0..n {
+        permits.push(retry_reg(|| era.register(6300 + index as u64, nslots)));
+    }
+    for (index, permit) in permits.into_iter().enumerate() {
+        let (go_tx, go_rx) = channel();
+        let (done_tx, done_rx) = channel();
+        go_txs.push(go_tx);
+        done_txs.push(done_tx);
+        let launch = OwnerLaunch {
+            permit,
+            heap,
+            id: 6300 + index as u64,
+            nil,
+            programs: vec![programs[index].clone(); reps],
+            nslots,
+            bound,
+            line_slot,
+            stop_at: tp_stop,
+            overlap,
+            index,
+            pause_tx: pause_tx.clone(),
+            go_rx,
+            end_tx: end_tx.clone(),
+            ready_tx: ready_tx.clone(),
+            done_rx,
+            retired_tx: retired_tx.clone(),
+            registry,
+            abort,
+        };
+        scope.spawn(move || launch.run());
+    }
+    drop(pause_tx);
+    drop(end_tx);
+    drop(ready_tx);
+    drop(retired_tx);
+    Session {
+        era,
+        go_txs,
+        done_txs,
+        pause_rx,
+        end_rx,
+        ready_rx,
+        retired_rx,
+        next_epoch: 1,
+    }
+}
+
+/// Drive one row: `owners` executors, each running `reps` programs of
+/// `cells` cons builds. Returns the measured row.
+fn tp_drive(
+    label: &str,
+    owners: usize,
+    cells: usize,
+    reps: usize,
+    stop: bool,
+    threshold_override: Option<usize>,
+) -> TpRow {
+    let threshold: usize = threshold_override.unwrap_or_else(|| {
+        std::env::var("A8_TP_THRESHOLD")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(2048)
+    });
+    TP_THRESHOLD.store(if stop { threshold } else { 0 }, Ordering::Relaxed);
+    let program = tp_list_ops(owners as i64 * 1_000_000, cells as i64);
+    let programs: Vec<Vec<Op>> = (0..owners)
+        .map(|index| {
+            let _ = index;
+            program.clone()
+        })
+        .collect();
+    for program in &programs {
+        prevalidate(program, 11, (cells as u32) * 8 + 64)
+            .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+    }
+    // Each program builds `cells` loop conses plus one final cons for the
+    // old-to-young SetCar edge.
+    let total_per_owner = reps * (cells + 1);
+    let expected_rounds = if stop { total_per_owner / threshold } else { 0 };
+    reset_tp_catalog_waits();
+    let overlap = Overlap::new(owners, true);
+    let mut row = TpRow {
+        label: label.to_string(),
+        owners,
+        cells_per_owner: total_per_owner,
+        gcs: 0,
+        wall_ns: 0,
+        pause_ns: Vec::new(),
+        live_bytes_last: 0,
+        live_bytes_max: 0,
+        per_owner_conses: Vec::new(),
+        witness_enter: Vec::new(),
+        witness_alloc: Vec::new(),
+        grant_calls: 0,
+        grant_ns: 0,
+        grant_max_ns: 0,
+        close_calls: 0,
+        close_ns: 0,
+        close_max_ns: 0,
+    };
+    with_admitted(|era, generational, nil, _one| {
+        assert_eq!(
+            generational,
+            std::env::var("NEOVM_GC_GENERATIONAL").as_deref() == Ok("1"),
+            "row must record the heap mode it ran under"
+        );
+        thread::scope(|scope| {
+            let _panic = PanicFlag {
+                registry: era.registry(),
+                abort: &overlap.abort,
+            };
+            let mut session = tp_launch(
+                era,
+                nil,
+                &programs,
+                reps,
+                11,
+                (cells as u32) * 8 + 64,
+                2,
+                Some(&overlap),
+                &overlap.abort,
+                scope,
+            );
+            let t0 = Instant::now();
+            for _ in 0..expected_rounds {
+                let (live, ns) = tp_round(&mut session);
+                row.pause_ns.push(ns);
+                row.live_bytes_last = live;
+                row.live_bytes_max = row.live_bytes_max.max(live);
+            }
+            // The timed window ends when the last owner reports completion;
+            // the teardown round below stays outside it.
+            let ends = gather(&session.end_rx, owners, |end| end.index);
+            let wall = t0.elapsed();
+            let waits = read_tp_catalog_waits();
+            row.gcs = expected_rounds;
+            row.wall_ns = wall.as_nanos() as u64;
+            row.per_owner_conses = ends.iter().map(|end| end.cons_count).collect();
+            row.witness_enter = (0..owners)
+                .map(|index| overlap.seen_enter[index].load(Ordering::SeqCst))
+                .collect();
+            row.witness_alloc = (0..owners)
+                .map(|index| overlap.seen_alloc[index].load(Ordering::SeqCst))
+                .collect();
+            row.grant_calls = waits.0;
+            row.grant_ns = waits.1;
+            row.grant_max_ns = waits.2;
+            row.close_calls = waits.3;
+            row.close_ns = waits.4;
+            row.close_max_ns = waits.5;
+            for end in &ends {
+                assert_eq!(end.cons_count, total_per_owner, "owner finished its work");
+            }
+            // Teardown, mirroring `finish_owners` without its callback.
+            for _ in 0..owners {
+                recv(&session.ready_rx);
+            }
+            let mut stopped = retry_rv(|| session.era.stop());
+            assert_eq!(stopped.epoch().get(), session.next_epoch, "reclaim epoch");
+            session.next_epoch += 1;
+            retry_reg(|| session.era.return_cons_storage(&stopped));
+            let report = retry_rv(|| session.era.collect_stopped(&mut stopped));
+            assert!(report.major);
+            complete(stopped);
+            for tx in &session.done_txs {
+                tx.send(())
+                    .unwrap_or_else(|_| panic!("done channel closed"));
+            }
+            for _ in 0..owners {
+                recv(&session.retired_rx);
+            }
+        });
+    });
+    row
+}
+
+fn tp_row_print(row: &TpRow, generational: bool, tsv: &mut Option<&mut String>) {
+    let cells = (row.owners * row.cells_per_owner) as f64;
+    let seconds = row.wall_ns as f64 / 1_000_000_000.0;
+    let cells_per_s = cells / seconds;
+    let bytes_per_s = cells * 16.0 / seconds;
+    let mut pauses = row.pause_ns.clone();
+    pauses.sort_unstable();
+    let p50 = if pauses.is_empty() {
+        0
+    } else {
+        pauses[pauses.len() / 2]
+    };
+    let max = pauses.last().copied().unwrap_or(0);
+    let line = format!(
+        "A8TP gen1={} row={} owners={} cells_per_owner={} total_cells={} wall_ms={:.3} cells_per_s={:.0} mib_per_s={:.1} gcs={} live_last={} live_max={} pause_p50_us={:.1} pause_max_us={:.1} per_owner_conses={:?} witness_enter={:?} witness_alloc={:?} grant_calls={} grant_ns={} grant_max_ns={} close_calls={} close_ns={} close_max_ns={}",
+        generational,
+        row.label,
+        row.owners,
+        row.cells_per_owner,
+        row.owners * row.cells_per_owner,
+        row.wall_ns as f64 / 1_000_000.0,
+        cells_per_s,
+        bytes_per_s / (1024.0 * 1024.0),
+        row.gcs,
+        row.live_bytes_last,
+        row.live_bytes_max,
+        p50 as f64 / 1000.0,
+        max as f64 / 1000.0,
+        row.per_owner_conses,
+        row.witness_enter,
+        row.witness_alloc,
+        row.grant_calls,
+        row.grant_ns,
+        row.grant_max_ns,
+        row.close_calls,
+        row.close_ns,
+        row.close_max_ns,
+    );
+    println!("{line}");
+    if let Some(tsv) = tsv {
+        tsv.push_str(&line.replace('\t', " "));
+        tsv.push('\n');
+    }
+}
+
+/// The A8 throughput matrix on the proof executor (design section 7.2).
+/// NOT arbitrary-Lisp performance: the same restricted executor, one fixed
+/// list-building program per owner.
+#[test]
+#[ignore = "A8 throughput matrix; run pinned under the measurement lock"]
+fn a8_throughput_rows() {
+    let cells: usize = std::env::var("A8_TP_CELLS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(512);
+    let reps_fixed: usize = std::env::var("A8_TP_REPS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(48);
+    let total: usize = std::env::var("A8_TP_TOTAL")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(cells * reps_fixed);
+    let tsv_dir = std::env::var("A8_TP_TSV").ok().filter(|s| !s.is_empty());
+    let threshold: usize = std::env::var("A8_TP_THRESHOLD")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(2048);
+    let mut tsv = String::new();
+    let generational = std::env::var("NEOVM_GC_GENERATIONAL").as_deref() == Ok("1");
+
+    // Identical per-owner work at 1..4 tokens.
+    for owners in [1usize, 2, 3, 4] {
+        let row = tp_drive(
+            &format!("per-owner-fixed-{owners}"),
+            owners,
+            cells,
+            reps_fixed,
+            true,
+            None,
+        );
+        tp_row_print(&row, generational, &mut Some(&mut tsv));
+    }
+    // Identical total work at 1..4 tokens: the driver splits the same total
+    // into equal per-owner shares (rounded down to whole programs).
+    for owners in [1usize, 2, 3, 4] {
+        let reps = (total / owners) / (cells + 1);
+        assert!(reps >= 1, "total too small for {owners} owners");
+        // Scale the per-owner threshold by 1/N so every fixed-total row runs
+        // the same number of collection rounds, not total/N of them.
+        let row = tp_drive(
+            &format!("total-fixed-{owners}"),
+            owners,
+            cells,
+            reps,
+            true,
+            Some((threshold / owners).max(1)),
+        );
+        tp_row_print(&row, generational, &mut Some(&mut tsv));
+    }
+    // Bounded allocation-only rows with every collection disabled.
+    for owners in [1usize, 4] {
+        let row = tp_drive(
+            &format!("alloc-only-{owners}"),
+            owners,
+            cells,
+            reps_fixed,
+            false,
+            None,
+        );
+        assert_eq!(row.gcs, 0, "no collections inside the timed window");
+        tp_row_print(&row, generational, &mut Some(&mut tsv));
+    }
+    if let Some(dir) = tsv_dir {
+        let path = format!(
+            "{dir}/throughput-{}.tsv",
+            if generational { "gen1" } else { "gen0" }
+        );
+        std::fs::write(&path, tsv).unwrap_or_else(|error| panic!("write {path}: {error:?}"));
+        println!("tsv: {path}");
+    }
 }
