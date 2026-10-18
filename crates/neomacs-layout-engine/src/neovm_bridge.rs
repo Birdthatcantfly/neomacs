@@ -38,7 +38,7 @@ mod property_keys;
 use property_keys::PropertyKeyOrder;
 
 mod face_colors;
-use face_colors::{FaceColorAttributes, FaceColorState};
+use face_colors::{FaceColorAttributes, FaceColorState, TtyPaint, TtyPaintKey};
 mod face_sources;
 use face_sources::{FaceTableRoots, RootedFace};
 
@@ -3627,17 +3627,6 @@ impl PartialEq for ResolvedFace {
 }
 
 impl ResolvedFace {
-    /// Resolve one complete lface at the iterator boundary. Never realize its
-    /// individual inheritance/plist contributions: GNU lookup_face hashes the
-    /// merged vector and realizes it once (xfaces.c:5064-5093).
-    pub(crate) fn realize_for_frame(&mut self, evaluator: &mut Context, frame_id: FrameId) {
-        let Some(attributes) = self.source_attributes.as_ref() else {
-            return;
-        };
-        let realized = evaluator.realize_display_face_for_frame(frame_id, attributes.attributes());
-        self.install_realized_tty_colors(&realized);
-    }
-
     fn install_realized_tty_colors(&mut self, realized: &NeoFace) {
         // Read the retained pre-inverse channel state, never reverse-engineer
         // source colors from this face's already-inverted paint.
@@ -4018,7 +4007,27 @@ struct ComposedSourceCache {
     /// identity of the `face-remapping-alist` object they ran against; see
     /// [`NamedSpecEntry`].
     named_specs: std::collections::HashMap<Box<str>, NamedSpecEntry>,
+    /// Realized terminal paint per composed source, keyed by allocation
+    /// identity (see [`TtyPaintKey`]). GNU serves a repeated merged-lface
+    /// lookup from its frame face cache without re-realizing
+    /// (`lookup_face`, src/xfaces.c:5064-5093); this is the paint half of
+    /// that reuse, stamped by frame and `face_change_count` so a definition
+    /// change retires it with the rest of the cache. Entries hold their
+    /// source allocation, so a key address cannot be recycled under a live
+    /// entry.
+    tty_paint: std::collections::HashMap<TtyPaintKey, TtyPaintEntry>,
     len: usize,
+}
+
+/// One memoized terminal realization. The frame and binding generation
+/// stamp validity: paint is a function of the definitions that were live
+/// when it was realized, exactly GNU's `face_change` retirement
+/// (src/xfaces.c:3098-3105).
+struct TtyPaintEntry {
+    frame: FrameId,
+    face_change_count: u64,
+    source: std::sync::Arc<RootedFace>,
+    paint: TtyPaint,
 }
 
 /// One folded named-face specification plus the buffer-local
@@ -4064,6 +4073,7 @@ impl ComposedSourceCache {
         self.compositions.clear();
         self.identity_compositions.clear();
         self.named_specs.clear();
+        self.tty_paint.clear();
         self.len = 0;
     }
 }
@@ -4436,15 +4446,22 @@ impl FaceResolver {
             return true;
         }
         let frame_id = source.frame_id;
-        let Some(attributes) = face.source_attributes.as_deref() else {
+        let Some(attributes) = face.source_attributes.clone() else {
             return true;
         };
+        if let Some(paint) =
+            self.cached_tty_paint(face, &attributes, frame_id, evaluator.face_change_count())
+        {
+            paint.install(face);
+            return true;
+        }
         let Some(realized) =
             evaluator.cached_display_face_for_frame(frame_id, attributes.attributes())
         else {
             return false;
         };
         face.install_realized_tty_colors(&realized);
+        self.record_tty_paint(face, attributes, frame_id, evaluator.face_change_count());
         true
     }
 
@@ -4459,7 +4476,32 @@ impl FaceResolver {
             // definitions, including through nested redisplay. Leave temporary
             // paint alone until the transaction rejects/restarts; entering Lisp
             // here would realize a later glyph from obsolete source attributes.
-            face.realize_for_frame(evaluator, source.frame_id);
+            let Some(attributes) = face.source_attributes.clone() else {
+                return;
+            };
+            if let Some(paint) = self.cached_tty_paint(
+                face,
+                &attributes,
+                source.frame_id,
+                evaluator.face_change_count(),
+            ) {
+                paint.install(face);
+                return;
+            }
+            let realized =
+                evaluator.realize_display_face_for_frame(source.frame_id, attributes.attributes());
+            face.install_realized_tty_colors(&realized);
+            // A deferred or in-flight hook flow realized against a placeholder
+            // (`realize_display_face_for_frame` returns the source unchanged);
+            // such paint is transactional and must not seed the memo.
+            if !evaluator.redisplay_hook_flow_pending() {
+                self.record_tty_paint(
+                    face,
+                    attributes,
+                    source.frame_id,
+                    evaluator.face_change_count(),
+                );
+            }
         }
     }
 
@@ -4670,6 +4712,54 @@ impl FaceResolver {
         );
         cache.len += 1;
         shared
+    }
+
+    /// The previously realized terminal paint for `face`'s composed source,
+    /// when this exact realization ran against the same frame definitions.
+    ///
+    /// Paint is a pure function of the entry color state, the underline slot
+    /// the install preserves, and the rooted source — whose realization is
+    /// stamped by the binding `face_change_count`. A hit is GNU serving a
+    /// repeated merged-lface lookup from the frame face cache
+    /// (`lookup_face`, src/xfaces.c:5064-5093) without re-running
+    /// `realize_tty_face`.
+    fn cached_tty_paint(
+        &self,
+        face: &ResolvedFace,
+        source: &std::sync::Arc<RootedFace>,
+        frame: FrameId,
+        face_change_count: u64,
+    ) -> Option<TtyPaint> {
+        let key = TtyPaintKey::new(face, std::sync::Arc::as_ptr(source) as usize);
+        let cache = self.composed_sources.borrow();
+        let entry = cache.tty_paint.get(&key)?;
+        (entry.frame == frame && entry.face_change_count == face_change_count).then(|| entry.paint)
+    }
+
+    /// Retain one realized terminal paint for reuse, holding the source
+    /// allocation so its address cannot be recycled under the key.
+    fn record_tty_paint(
+        &self,
+        face: &ResolvedFace,
+        source: std::sync::Arc<RootedFace>,
+        frame: FrameId,
+        face_change_count: u64,
+    ) {
+        let key = TtyPaintKey::new(face, std::sync::Arc::as_ptr(&source) as usize);
+        let mut cache = self.composed_sources.borrow_mut();
+        if cache.len >= COMPOSED_SOURCE_CACHE_LIMIT {
+            cache.clear();
+        }
+        cache.tty_paint.insert(
+            key,
+            TtyPaintEntry {
+                frame,
+                face_change_count,
+                source,
+                paint: TtyPaint::snapshot(face),
+            },
+        );
+        cache.len += 1;
     }
 
     /// The previously merged source for `overlay` over `base`, when this exact
@@ -5981,6 +6071,10 @@ fn box_style_to_u8(style: &NeoBoxStyle) -> u8 {
 #[cfg(test)]
 #[path = "neovm_bridge/tests/neovm_bridge_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "neovm_bridge/tests/tty_paint_memo_test.rs"]
+mod tty_paint_memo_test;
 
 #[cfg(test)]
 #[path = "neovm_bridge/tests/line_count_test.rs"]

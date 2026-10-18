@@ -6,7 +6,7 @@
 
 use super::{NeoColor, NeoFace, ResolvedFace, TerminalColor, color_to_pixel, colors_close};
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 enum FaceVideo {
     #[default]
     Normal,
@@ -15,13 +15,13 @@ enum FaceVideo {
 
 /// Seed faces are manually built frame fallbacks. Once realized, every merge
 /// uses the retained attributes, never the public paint fields.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum FaceColorState {
     Seed,
     Realized(FaceColorAttributes),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct FaceColorAttributes {
     foreground: TerminalFaceColor,
     background: TerminalFaceColor,
@@ -165,7 +165,7 @@ impl RealizedFaceColors {
 /// ANSI has distinct "default foreground" and "default background" values;
 /// a boolean attached to the destination slot cannot represent one after
 /// inverse-video moves it to the other slot.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum FaceColorSlot {
     Foreground,
     Background,
@@ -178,7 +178,7 @@ enum FaceColorSlot {
 /// colours through `map_tty_color` and then swaps the results
 /// (src/xfaces.c:6800-6810), so whatever the writer emits for the foreground
 /// must be exactly what was realized for the background.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum TerminalFaceColor {
     Concrete {
         pixel: u32,
@@ -242,6 +242,82 @@ impl TerminalFaceColor {
         match self {
             Self::Concrete { pixel, .. } => pixel,
             Self::TerminalDefault { fallback_pixel, .. } => fallback_pixel,
+        }
+    }
+}
+
+/// One realized terminal paint, snapshotted after installation.
+///
+/// GNU's frame face cache returns the SAME realized face for a repeated
+/// merged-lface lookup: only the first `lookup_face` runs
+/// `load_face_colors`/`realize_tty_face` (src/xfaces.c:5064-5093). This is
+/// the paint half of that reuse — installing a snapshot reproduces the exact
+/// field writes `install_realized_tty_colors` performed.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TtyPaint {
+    fg: u32,
+    terminal_fg: Option<TerminalColor>,
+    use_default_foreground: bool,
+    bg: u32,
+    terminal_bg: Option<TerminalColor>,
+    use_default_background: bool,
+    terminal_inverse_video: bool,
+    terminal_underline_color: Option<TerminalColor>,
+    underline_color: u32,
+    color_state: FaceColorState,
+}
+
+impl TtyPaint {
+    pub(super) fn snapshot(face: &ResolvedFace) -> Self {
+        Self {
+            fg: face.fg,
+            terminal_fg: face.terminal_fg,
+            use_default_foreground: face.use_default_foreground,
+            bg: face.bg,
+            terminal_bg: face.terminal_bg,
+            use_default_background: face.use_default_background,
+            terminal_inverse_video: face.terminal_inverse_video,
+            terminal_underline_color: face.terminal_underline_color,
+            underline_color: face.underline_color,
+            color_state: face.color_state.clone(),
+        }
+    }
+
+    pub(super) fn install(self, face: &mut ResolvedFace) {
+        face.fg = self.fg;
+        face.terminal_fg = self.terminal_fg;
+        face.use_default_foreground = self.use_default_foreground;
+        face.bg = self.bg;
+        face.terminal_bg = self.terminal_bg;
+        face.use_default_background = self.use_default_background;
+        face.terminal_inverse_video = self.terminal_inverse_video;
+        face.terminal_underline_color = self.terminal_underline_color;
+        face.underline_color = self.underline_color;
+        face.color_state = self.color_state;
+    }
+}
+
+/// Memo key for one terminal realization.
+///
+/// The realization consumed the composed source (its palette callbacks and
+/// underline decoration) plus the face's entry color state — the merged
+/// attributes the merge/realize pipeline read — and the entry underline
+/// slot, which the install keeps when the realized underline is disabled.
+/// The source enters by allocation identity: the memo holds the allocation,
+/// so an equal key is the same rooted source by construction.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) struct TtyPaintKey {
+    attributes: FaceColorAttributes,
+    underline_color: u32,
+    source: usize,
+}
+
+impl TtyPaintKey {
+    pub(super) fn new(face: &ResolvedFace, source_address: usize) -> Self {
+        Self {
+            attributes: FaceColorAttributes::from_base(face),
+            underline_color: face.underline_color,
+            source: source_address,
         }
     }
 }
