@@ -84,7 +84,11 @@ pub(crate) fn new_child_command_calls_for_test() -> usize {
 /// limit is indeterminate, which is the same "no answer" case, so it takes the
 /// fallback too.
 pub fn command_line_max_length() -> i64 {
-    #[cfg(unix)]
+    // Miri does not implement `sysconf(_SC_ARG_MAX)` and aborts the run the
+    // moment a Context is built. The value is a startup constant with no
+    // bearing on heap or aliasing behaviour, so interpreted runs take GNU's
+    // own 4096 fallback instead (the arm `sysconf` failure takes anyway).
+    #[cfg(all(unix, not(miri)))]
     {
         // SAFETY: `sysconf` reads a static system limit and touches no memory
         // the caller owns.
