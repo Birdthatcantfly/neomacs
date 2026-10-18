@@ -1714,33 +1714,35 @@ pub fn note_heap_slot_write(
 ) {
     if owner.is_cons() {
         let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
-        // Keep the immediate arm separate so the missed-window path reads
-        // its TLS window directly, without selecting between TLS addresses.
-        // An immediate overwrite still needs its preimage during SATB.
-        if value.is_fixnum() {
-            if TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr)) {
-                note_heap_write_slow(owner, kind, Some(slot), Some(value));
-            }
+        // The precomputed mirror comes first: in GEN0 it equals the real
+        // window, so a miss is exactly pre-b125's plain store and the hot
+        // path pays one address test. In GEN1 the mirror is ALL, so every
+        // cons store enters the filter below — where main called the cons
+        // slow path unconditionally.
+        if !TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get().covers(addr)) {
             return;
         }
+        // A real-window hit takes the full barrier in both generations: an
+        // immediate overwrite still needs its preimage during SATB. GEN0's
+        // mirror equals the real window, so a GEN0 owner admitted above
+        // always hits here; only GEN1 can miss.
         if TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr)) {
             note_heap_write_slow(owner, kind, Some(slot), Some(value));
             return;
         }
-        // GEN0's mirror equals the real window: after a miss it cannot be
-        // ALL, which covers every aligned owner. Only GEN1 leaves an ALL
-        // mirror here. Test its length instead of a second address range.
-        if TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get().len()) != usize::MAX {
+        // The missed real window and ALL mirror prove an installed GEN1
+        // heap (a GEN0 mirror would have hit above). Uninstall clears both
+        // mirrors. No allocation, callback or safe point can change the
+        // installation. An immediate creates no old-to-young edge, so only
+        // a pointer value reaches the owner check below.
+        if value.is_fixnum() {
             return;
         }
-        // The missed real window and ALL mirror prove an installed GEN1
-        // heap. Uninstall clears both mirrors, including this length.
-        // No allocation, callback or safe point can change the installation.
         // Only the zero-old-count certificate stays inline: the old-owner
-        // tail is outlined below, because every inline store site carrying
-        // it grew past the setters' outline thresholds and absorbed the
-        // whole barrier instead (b122: specbind_cached +133 instructions,
-        // setcdr call sites inlined away). Young-block stores — the hot
+        // tail is outlined, because every inline store site carrying it
+        // grew past the setters' outline thresholds and absorbed the whole
+        // barrier instead (b122: specbind_cached +133 instructions, setcdr
+        // call sites inlined away). Young-block stores — the hot
         // generational case — still return without any call.
         let ptr = TAGGED_HEAP.with(Cell::get);
         debug_assert!(!ptr.is_null());
@@ -1754,17 +1756,16 @@ pub fn note_heap_slot_write(
     }
     if barrier_gate(owner) {
         let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
-        // Preserve GEN0's persistent owner bookkeeping. An ALL mirror
-        // length proves GEN1 installed (GEN0's mirror equals the real
-        // window, so its length is never ALL), where an immediate outside
+        // Preserve GEN0's persistent owner bookkeeping. GEN0's mirror equals
+        // the real window, so its length is never ALL: one length test and
+        // the admitted GEN0 store reaches the full barrier, as before b125.
+        // An ALL mirror proves GEN1 installed, where an immediate outside
         // the real window creates no old-to-young edge and needs no
-        // bookkeeping. Real-window writes retain full bookkeeping. GEN0
-        // pays one length test; pointer values short-circuit before it.
-        if value.is_fixnum()
-            && TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get().len()) == usize::MAX
-            && !TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr))
-        {
-            return;
+        // bookkeeping; real-window writes retain it.
+        if TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get().len()) == usize::MAX {
+            if value.is_fixnum() && !TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr)) {
+                return;
+            }
         }
         note_heap_write_slow(owner, kind, Some(slot), Some(value));
     }
@@ -1784,7 +1785,7 @@ fn generation_only_old_cons_store(heap: &TaggedHeap, owner: TaggedValue, addr: u
 }
 
 /// Bulk stores and non-cons slot stores retain the legacy window/header
-/// gate. Cons slot stores select their immediate arm before reaching it.
+/// gate. Cons slot stores take their mirror-first path above instead.
 #[inline(always)]
 fn barrier_gate(owner: TaggedValue) -> bool {
     if !owner.is_heap_object() {
