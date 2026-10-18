@@ -67,6 +67,15 @@ std::cfg_select! {
             Some(PasswdEntry { login, gecos })
         }
 
+        // Miri implements neither `getpwuid_r` nor `getpwnam_r`; a failed
+        // lookup is already a supported outcome (the caller falls back to the
+        // environment), so interpreted runs take it instead of aborting.
+        #[cfg(miri)]
+        fn lookup_passwd_by_uid(_uid: i64) -> Option<PasswdEntry> {
+            None
+        }
+
+        #[cfg(not(miri))]
         fn lookup_passwd_by_uid(uid: i64) -> Option<PasswdEntry> {
             let uid = libc::uid_t::try_from(uid).ok()?;
             let mut buffer_len = 1024usize;
@@ -95,6 +104,12 @@ std::cfg_select! {
             }
         }
 
+        #[cfg(miri)]
+        fn lookup_passwd_by_login(_login: &str) -> Option<PasswdEntry> {
+            None
+        }
+
+        #[cfg(not(miri))]
         fn lookup_passwd_by_login(login: &str) -> Option<PasswdEntry> {
             let login = CString::new(login).ok()?;
             let mut buffer_len = 1024usize;
@@ -315,10 +330,15 @@ pub(crate) fn lookup_full_name_by_login(login: &str) -> Option<String> {
 }
 
 fn normalized_system_name() -> String {
-    hostname::get()
+    // `hostname::get` asks `sysconf(_SC_HOST_NAME_MAX)`, which Miri does not
+    // implement; take the crate's own failure fallback instead of aborting.
+    #[cfg(miri)]
+    let raw = "localhost".to_string();
+    #[cfg(not(miri))]
+    let raw = hostname::get()
         .map(|os| os.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "localhost".to_string())
-        .chars()
+        .unwrap_or_else(|_| "localhost".to_string());
+    raw.chars()
         .map(|character| match character {
             ' ' | '\t' => '-',
             other => other,

@@ -1129,7 +1129,14 @@ impl ProcessWaitBackendInterest {
 
 impl ProcessWaitBackend {
     pub(super) fn new() -> Self {
+        // Miri implements no `timerfd_create`, which `polling::Poller::new`
+        // uses on Linux. The backend already tolerates a missing poller (its
+        // wait loop falls back to sleep-polling), and interpreted tests do not
+        // spawn children, so interpreted runs start without one.
+        #[cfg(not(miri))]
         let poller = polling::Poller::new().ok().map(Arc::new);
+        #[cfg(miri)]
+        let poller: Option<Arc<polling::Poller>> = None;
         #[cfg(unix)]
         let signal_fd = poller.as_ref().and_then(|poller| {
             let fd = crate::emacs_core::os_signal::install().self_pipe_read_fd()?;

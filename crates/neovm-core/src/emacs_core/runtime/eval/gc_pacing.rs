@@ -732,7 +732,9 @@ impl Context {
     /// no runtime owner predicate enters its callers.
     #[inline(always)]
     pub(super) fn setup_thread_locals_inner<const SNAPSHOT_TERMINAL_IDS: bool>(&mut self) {
-        crate::tagged::gc::set_tagged_heap(&mut self.tagged_heap);
+        // Root-based install (see `AliasableBox`): the slot must survive
+        // every later `&mut` reborrow this Context takes through its view.
+        self.tagged_heap.install_tagged_heap();
         super::super::ccl::install_ccl_registry_handle(&self.ccl_registry);
         super::super::charset::install_charset_registry_handle(&self.charset_registry);
         super::super::xfaces::install_font_registry_handle(&self.font_registry);
