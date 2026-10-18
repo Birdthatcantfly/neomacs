@@ -132,8 +132,20 @@ impl Drop for RunAccess<'_, '_> {
         self.owner
             .entry
             .live_run_loan
-            .store(false, Ordering::Release);
-        self.owner.registry.wake.notify_all();
+            .store(false, Ordering::SeqCst);
+        if self.owner.registry.park.parked.load(Ordering::SeqCst) != 0 {
+            // Loan predicates (entry admission/resume) are evaluated under the
+            // gate, and the condvar wait releases exactly that gate, so
+            // acquiring it here orders this notify after any in-progress park.
+            // Gate holders never wait, so this block is bounded and is reached
+            // only while a waiter is parked. On a gate error (poison, or the
+            // impossible same-thread re-entry) the bare notify still matches
+            // the previous unconditional behaviour.
+            if let Ok(gate) = self.owner.registry.lock_blocking() {
+                drop(gate);
+            }
+            self.owner.registry.park.wake.notify_all();
+        }
     }
 }
 
@@ -213,7 +225,7 @@ impl<'era> Mutator<'era> {
         if self.thread != std::thread::current().id() {
             return Err(RegistrationError::WrongThread);
         }
-        if self.registry.poisoned.load(Ordering::Acquire) {
+        if self.registry.park.poisoned.load(Ordering::Acquire) {
             return Err(RegistrationError::Poisoned);
         }
         Ok(())
@@ -229,7 +241,7 @@ impl<'era> Mutator<'era> {
     pub fn run_access(&mut self) -> Result<RunAccess<'_, 'era>, RegistrationError> {
         self.check_thread()?;
         let gate = self.registry.lock()?;
-        let entry = self.registry.validate(&gate, self.entry.key)?;
+        let entry = self.registry.validate_ref(&gate, self.entry.key)?;
         let state = entry.state.try_lock().map_err(entry_lock_error)?;
         if gate.catalog_transition
             || state.phase != EntryPhase::Running

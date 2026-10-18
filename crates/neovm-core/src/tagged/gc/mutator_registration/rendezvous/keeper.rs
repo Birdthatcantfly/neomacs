@@ -119,10 +119,11 @@ impl ParallelHeapEra<'_> {
         let registry = self.registry();
         keeper(registry)?;
         request(registry)?;
+        let _park = registry.park_ticket();
         let mut gate = registry.lock().map_err(registration_error)?;
         loop {
             gate.rendezvous.live()?;
-            if registry.poisoned.load(Ordering::Acquire) {
+            if registry.park.poisoned.load(Ordering::Acquire) {
                 return Err(RendezvousError::Poisoned);
             }
             match gate.rendezvous.phase {
@@ -205,7 +206,7 @@ impl<'era> AllStopped<'era> {
     }
 
     fn validate(&self, gate: &RegistryState) -> Result<(), RendezvousError> {
-        if self.registry.poisoned.load(Ordering::Acquire) {
+        if self.registry.park.poisoned.load(Ordering::Acquire) {
             return Err(RendezvousError::Poisoned);
         }
         if gate.rendezvous.phase != Phase::Tracing(self.epoch) {
@@ -238,7 +239,7 @@ impl<'era> AllStopped<'era> {
             let proof = ParallelStoppedMutatorsProof::from_all_stopped(self);
             body(self, &proof)?
         };
-        if self.registry.poisoned.load(Ordering::Acquire) {
+        if self.registry.park.poisoned.load(Ordering::Acquire) {
             return Err(RendezvousError::Poisoned);
         }
         self.traced = true;
@@ -280,7 +281,7 @@ impl<'era> AllStopped<'era> {
         };
         let result = body(reader);
         attempt.finished = true;
-        if self.registry.poisoned.load(Ordering::Acquire) {
+        if self.registry.park.poisoned.load(Ordering::Acquire) {
             return Err(RendezvousError::Poisoned);
         }
         Ok(result)
@@ -300,7 +301,7 @@ impl<'era> AllStopped<'era> {
         };
         let result = body(image);
         attempt.finished = true;
-        if self.registry.poisoned.load(Ordering::Acquire) {
+        if self.registry.park.poisoned.load(Ordering::Acquire) {
             return Err(RendezvousError::Poisoned);
         }
         Ok(result)
@@ -359,7 +360,7 @@ impl<'era> AllStopped<'era> {
         if completion.is_ok() {
             a8_probes::mark(a8_probes::KEEPER_COMPLETED, gate.rendezvous.completed, 0);
         }
-        self.registry.wake.notify_all();
+        self.registry.park.wake.notify_all();
         completion
     }
 
@@ -381,7 +382,7 @@ impl Drop for AllStopped<'_> {
     fn drop(&mut self) {
         if !self.finished {
             self.registry.poison();
-            self.registry.wake.notify_all();
+            self.registry.park.wake.notify_all();
         }
     }
 }

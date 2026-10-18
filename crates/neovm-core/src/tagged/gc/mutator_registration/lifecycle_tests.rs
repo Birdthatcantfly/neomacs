@@ -122,7 +122,7 @@ fn forgotten_summary_guard_refuses_reentry_and_teardown_without_waiting() {
         ));
         let failure = era.finish().unwrap_err();
         assert!(matches!(
-            failure.era.registry().state.try_lock(),
+            failure.era.registry().gate.state.try_lock(),
             Err(std::sync::TryLockError::WouldBlock)
         ));
         // This Drop must not try to recover the leaked mutex guard or wait for

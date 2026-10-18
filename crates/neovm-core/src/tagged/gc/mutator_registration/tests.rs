@@ -327,7 +327,7 @@ fn young_resolver_checks_one_canonical_entry_and_retiring_generation() {
 #[test]
 fn panic_abandonment_poison_retains_owner_state_and_world_authority() {
     Context::with_test_mutator_era(|era| {
-        let initial = era.registry().state.lock().unwrap().entries.len();
+        let initial = era.registry().gate.state.lock().unwrap().entries.len();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut token = era
                 .register(1, 3)
@@ -348,7 +348,7 @@ fn panic_abandonment_poison_retains_owner_state_and_world_authority() {
             Err(RegistrationError::Poisoned)
         ));
         assert_eq!(
-            era.registry().state.lock().unwrap().entries.len(),
+            era.registry().gate.state.lock().unwrap().entries.len(),
             initial + 1
         );
         let failed = era.finish().unwrap_err();

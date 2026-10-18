@@ -53,7 +53,7 @@ impl ParallelHeapEra<'_> {
         install: bool,
     ) -> Result<(), RegistrationError> {
         let registry = self.registry();
-        if registry.poisoned.load(Ordering::Acquire) {
+        if registry.park.poisoned.load(Ordering::Acquire) {
             return Err(RegistrationError::Poisoned);
         }
         if std::thread::current().id() != registry.keeper_thread {

@@ -177,7 +177,7 @@ impl Rendezvous<'_> {
     }
     /// A notification is only a hint; predicate loops decide every transition.
     pub fn notify(&self) {
-        self.registry.wake.notify_all();
+        self.registry.park.wake.notify_all();
     }
 }
 impl ParallelHeapEra<'_> {
@@ -246,7 +246,7 @@ pub(super) fn request(registry: &Registry) -> Result<Request, RendezvousError> {
         #[cfg(test)]
         a8_probes::mark(a8_probes::REQUEST_PUBLISHED, gate.rendezvous.epoch, 0);
     }
-    registry.wake.notify_all();
+    registry.park.wake.notify_all();
     Ok(request)
 }
 pub(super) fn finish_debt(
@@ -262,7 +262,7 @@ pub(super) fn finish_debt(
             }
         }
     }
-    registry.wake.notify_all();
+    registry.park.wake.notify_all();
     Ok(())
 }
 pub(super) fn verify_stopped(
@@ -270,7 +270,7 @@ pub(super) fn verify_stopped(
     gate: &RegistryState,
 ) -> Result<(), RendezvousError> {
     gate.rendezvous.live()?;
-    if registry.poisoned.load(Ordering::Acquire) {
+    if registry.park.poisoned.load(Ordering::Acquire) {
         return Err(RendezvousError::Poisoned);
     }
     if !gate.rendezvous.debt.is_empty() {

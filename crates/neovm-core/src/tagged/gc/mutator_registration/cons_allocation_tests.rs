@@ -649,7 +649,7 @@ fn return_cons_storage_preserves_busy_stop_validation_for_retry() {
             let (held_tx, held_rx) = mpsc::channel();
             let (release_tx, release_rx) = mpsc::channel();
             let actor = scope.spawn(move || {
-                let _gate = registry.state.lock().unwrap();
+                let _gate = registry.gate.state.lock().unwrap();
                 held_tx.send(()).unwrap();
                 receive(&release_rx);
             });
@@ -659,7 +659,7 @@ fn return_cons_storage_preserves_busy_stop_validation_for_retry() {
             release_tx.send(()).unwrap();
             actor.join().unwrap();
             assert_eq!(refusal, Err(RegistrationError::Busy));
-            assert!(!registry.poisoned.load(Ordering::Acquire));
+            assert!(!registry.park.poisoned.load(Ordering::Acquire));
         });
         retry_registration(|| era.return_cons_storage(&stopped));
         era.collect_stopped(&mut stopped).unwrap();
@@ -687,7 +687,7 @@ fn forgotten_open_cons_run_refuses_publication_native_and_finish_without_waiting
         // return this grant. Only the canonical live-loan ledger remains.
         std::mem::forget(run);
         assert!(owner.entry.live_run_loan.load(Ordering::Acquire));
-        assert!(!era.registry().poisoned.load(Ordering::Acquire));
+        assert!(!era.registry().park.poisoned.load(Ordering::Acquire));
         let before = era.cons_catalog_snapshot_for_test().unwrap();
         assert!(before.installed && before.metadata_coherent);
         // One lent tail (or a multi-run batch) stays charged until the owner

@@ -100,7 +100,7 @@ impl<'era> StoppedSummaries<'era> {
         &self,
         mut visit: impl FnMut(MutatorKey, EntryPhase, &PublishedGcImage),
     ) -> Result<(), RegistrationError> {
-        if self.registry.poisoned.load(Ordering::Acquire) {
+        if self.registry.park.poisoned.load(Ordering::Acquire) {
             return Err(RegistrationError::Poisoned);
         }
         for entry in &self.gate.entries {
@@ -166,7 +166,7 @@ impl<'era> StoppedSummaries<'era> {
         young: YoungRegistrationId,
         use_log: impl FnOnce(&mut YoungBlockLog) -> R,
     ) -> Result<R, RegistrationError> {
-        if self.registry.poisoned.load(Ordering::Acquire) {
+        if self.registry.park.poisoned.load(Ordering::Acquire) {
             return Err(RegistrationError::Poisoned);
         }
         if young.heap_identity() != self.registry.heap {

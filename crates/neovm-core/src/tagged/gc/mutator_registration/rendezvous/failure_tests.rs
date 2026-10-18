@@ -212,11 +212,11 @@ pub(super) fn lost_poison_notification_between_predicate_and_wait_fails_closed()
     Context::with_test_rooted_mutator_era(|era, _roots| {
         let registry = era.registry();
         let gate = registry.lock().unwrap();
-        assert!(!registry.poisoned.load(Ordering::Acquire));
+        assert!(!registry.park.poisoned.load(Ordering::Acquire));
         // Model the exact gap AFTER wait's initial check, BEFORE CV wait:
         // same-thread poison recognizes the held gate; wait rechecks it.
         registry.poison();
-        registry.wake.notify_all();
+        registry.park.wake.notify_all();
         assert!(matches!(
             wait_after_poison_check(registry, gate),
             Err(RendezvousError::Poisoned)
@@ -234,11 +234,11 @@ pub(super) fn external_poison_between_predicate_and_wait_is_event_driven() {
         let registry = era.registry();
         std::thread::scope(|scope| {
             let gate = registry.lock().unwrap();
-            assert!(!registry.poisoned.load(Ordering::Acquire));
+            assert!(!registry.park.poisoned.load(Ordering::Acquire));
             let (attempted, ready) = std::sync::mpsc::channel();
             let poisoner = scope.spawn(move || {
                 assert!(matches!(
-                    registry.state.try_lock(),
+                    registry.gate.state.try_lock(),
                     Err(std::sync::TryLockError::WouldBlock)
                 ));
                 attempted.send(()).unwrap();
@@ -252,7 +252,7 @@ pub(super) fn external_poison_between_predicate_and_wait_is_event_driven() {
                 Err(RendezvousError::Poisoned)
             ));
             poisoner.join().unwrap();
-            assert_eq!(registry.gate_owner.load(Ordering::Acquire), 0);
+            assert_eq!(registry.gate.gate_owner.load(Ordering::Acquire), 0);
         });
         assert_eq!(
             era.finish().unwrap_err().reason,
@@ -270,10 +270,10 @@ fn mutex_unwind_recovers_guard_before_publishing_terminal_poison() {
             panic!("forced registry gate unwind");
         }));
         assert!(panic.is_err());
-        assert_eq!(registry.gate_owner.load(Ordering::Acquire), 0);
+        assert_eq!(registry.gate.gate_owner.load(Ordering::Acquire), 0);
         assert!(matches!(registry.lock(), Err(RegistrationError::Poisoned)));
-        assert!(registry.poisoned.load(Ordering::Acquire));
-        assert_eq!(registry.gate_owner.load(Ordering::Acquire), 0);
+        assert!(registry.park.poisoned.load(Ordering::Acquire));
+        assert_eq!(registry.gate.gate_owner.load(Ordering::Acquire), 0);
         // Both the external blocking path and recovered try-lock path are safe.
         registry.poison();
         assert_eq!(
@@ -308,7 +308,7 @@ fn condvar_reacquire_recovers_poisoned_guard_without_recursive_lock() {
                 Err(RendezvousError::Poisoned)
             ));
             poisoner.join().unwrap();
-            assert_eq!(registry.gate_owner.load(Ordering::Acquire), 0);
+            assert_eq!(registry.gate.gate_owner.load(Ordering::Acquire), 0);
         });
         assert_eq!(
             era.finish().unwrap_err().reason,
@@ -373,7 +373,7 @@ fn forgotten_run_access_blocks_finish_and_ack_then_owner_drop_poisons() {
         let failure = era.finish().unwrap_err();
         assert_eq!(failure.reason, RegistrationError::OutstandingLoan);
         drop(failure);
-        assert!(registry.poisoned.load(Ordering::Acquire));
+        assert!(registry.park.poisoned.load(Ordering::Acquire));
     });
     Context::with_test_rooted_mutator_era(|era, roots| {
         let mut owner = era

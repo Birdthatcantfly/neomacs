@@ -14,7 +14,7 @@ use super::{
 use crate::emacs_core::eval::Context;
 use crate::tagged::transport::SharedRoot;
 use crate::tagged::value::{Fixnum, TaggedValue};
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
@@ -112,7 +112,7 @@ struct Snap {
     safepoints: usize,
     bytes: usize,
     slots: Vec<usize>,
-    conses: HashSet<usize>,
+    conses: FxHashSet<usize>,
 }
 
 #[derive(Debug)]
@@ -120,7 +120,7 @@ struct EndState {
     index: usize,
     lines: Vec<String>,
     slots: Vec<usize>,
-    conses: HashSet<usize>,
+    conses: FxHashSet<usize>,
     cons_count: usize,
     safepoints: usize,
 }
@@ -130,7 +130,7 @@ struct Machine {
     backedges: u32,
     cons_count: usize,
     safepoints: usize,
-    owned: HashSet<usize>,
+    owned: FxHashSet<usize>,
     entered: bool,
     allocated: bool,
 }
@@ -142,7 +142,7 @@ impl Machine {
             backedges: 0,
             cons_count: 0,
             safepoints: 0,
-            owned: HashSet::new(),
+            owned: FxHashSet::default(),
             entered: false,
             allocated: false,
         }
@@ -154,13 +154,18 @@ impl Machine {
     }
 }
 
+/// One cacheline per owner: adjacent owners' progress counters must not
+/// share a line, or the witness itself becomes the measured bottleneck.
+#[repr(align(64))]
+struct PaddedUsize(AtomicUsize);
+
 struct Overlap {
     abort: AtomicBool,
     entered: AtomicUsize,
     allocated: AtomicUsize,
     seen_enter: Vec<AtomicUsize>,
     seen_alloc: Vec<AtomicUsize>,
-    progress: Vec<AtomicUsize>,
+    progress: Vec<PaddedUsize>,
     n: usize,
     watch_alloc: bool,
 }
@@ -173,7 +178,7 @@ impl Overlap {
         for _ in 0..n {
             seen_enter.push(AtomicUsize::new(0));
             seen_alloc.push(AtomicUsize::new(0));
-            progress.push(AtomicUsize::new(0));
+            progress.push(PaddedUsize(AtomicUsize::new(0)));
         }
         Self {
             abort: AtomicBool::new(false),
@@ -857,7 +862,10 @@ fn exec<'brand>(
                 machine.owned.insert(born);
                 machine.cons_count += 1;
                 if let Some(overlap) = overlap {
-                    overlap.progress[index].fetch_add(1, Ordering::SeqCst);
+                    // Relaxed: the witness reads these counts only after a
+                    // channel receive or thread join, which orders them; the
+                    // per-cons SeqCst RMW would be the measured bottleneck.
+                    overlap.progress[index].0.fetch_add(1, Ordering::Relaxed);
                     if overlap.watch_alloc && !machine.allocated {
                         overlap.arrive_alloc(index);
                         machine.allocated = true;
@@ -962,7 +970,7 @@ fn field_load<'brand>(
 fn field_store<'brand>(
     slice: &mut RunSlice<'brand, '_>,
     homes: &mut [SliceRoot<'brand>],
-    owned: &HashSet<usize>,
+    owned: &FxHashSet<usize>,
     cell: u16,
     value: u16,
     car: bool,
@@ -1510,7 +1518,7 @@ fn dump_witness(overlap: &Overlap, label: &str) {
         .map(|index| overlap.seen_alloc[index].load(Ordering::SeqCst))
         .collect();
     let progress: Vec<_> = (0..overlap.n)
-        .map(|index| overlap.progress[index].load(Ordering::SeqCst))
+        .map(|index| overlap.progress[index].0.load(Ordering::SeqCst))
         .collect();
     println!(
         "A6_OVERLAP {label} owners={} seen_enter={enter:?} seen_alloc={alloc:?} progress={progress:?}",
@@ -1518,7 +1526,7 @@ fn dump_witness(overlap: &Overlap, label: &str) {
     );
 }
 
-fn assert_owned_conses(heap: &crate::tagged::gc::TaggedHeap, conses: &HashSet<usize>) {
+fn assert_owned_conses(heap: &crate::tagged::gc::TaggedHeap, conses: &FxHashSet<usize>) {
     for bits in conses {
         let cell = TaggedValue::from_bits(*bits);
         assert!(cell.is_cons());
@@ -1574,21 +1582,21 @@ fn overlap_lists(owners: usize) {
             );
             let mut heads = vec![0usize; owners];
             let mut head_known = vec![false; owners];
-            let mut phase9 = vec![HashSet::new(); owners];
+            let mut phase9 = vec![FxHashSet::default(); owners];
             for (round, &(count, kind)) in LIST_ROUNDS.iter().enumerate() {
                 let snaps = session.pauses();
                 if round == 0 {
                     for index in 0..owners {
                         assert_eq!(overlap.seen_enter[index].load(Ordering::SeqCst), owners);
                         assert_eq!(overlap.seen_alloc[index].load(Ordering::SeqCst), owners);
-                        assert!(overlap.progress[index].load(Ordering::SeqCst) >= 1);
+                        assert!(overlap.progress[index].0.load(Ordering::SeqCst) >= 1);
                     }
                     dump_witness(&overlap, "first-stop");
                 }
                 for snap in &snaps {
                     assert_eq!(snap.cons_count, count);
                     assert_eq!(snap.conses.len(), count);
-                    assert_eq!(overlap.progress[snap.index].load(Ordering::SeqCst), count);
+                    assert_eq!(overlap.progress[snap.index].0.load(Ordering::SeqCst), count);
                     if count < 8 {
                         assert!(snap.cons_count < 8, "unfinished rooted list");
                     }
@@ -1612,7 +1620,7 @@ fn overlap_lists(owners: usize) {
                     }
                 }
                 assert_eq!(
-                    heads.iter().collect::<HashSet<_>>().len(),
+                    heads.iter().collect::<FxHashSet<_>>().len(),
                     owners,
                     "owners built one head each"
                 );
@@ -1674,7 +1682,7 @@ fn overlap_lists(owners: usize) {
                 assert_eq!(end.slots[4], heads[end.index]);
                 assert_eq!(end.lines.len(), 1);
                 assert_eq!(end.lines[0], oracle[9 + end.index]);
-                assert_eq!(overlap.progress[end.index].load(Ordering::SeqCst), 9);
+                assert_eq!(overlap.progress[end.index].0.load(Ordering::SeqCst), 9);
             }
         });
     });

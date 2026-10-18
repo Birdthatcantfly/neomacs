@@ -211,7 +211,7 @@ impl ConsRunState<'_> {
         if self.thread != std::thread::current().id() {
             return Err(RegistrationError::WrongThread);
         }
-        if self.registry.poisoned.load(Ordering::Acquire) {
+        if self.registry.park.poisoned.load(Ordering::Acquire) {
             return Err(RegistrationError::Poisoned);
         }
         if !self.entry.live_run_loan.load(Ordering::Acquire) {

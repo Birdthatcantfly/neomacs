@@ -135,7 +135,7 @@ fn forgetting_callback_reference_still_closes_slice_and_roots_the_alias_chain() 
             assert_eq!(run.state().hot.allocated_count, 260);
             head.word_for_test(run)
         });
-        assert!(!era.registry().poisoned.load(Ordering::Acquire));
+        assert!(!era.registry().park.poisoned.load(Ordering::Acquire));
         // The closed slice left its tail lent to this owner: the charge is
         // exactly what the ACK below must publish back.
         assert!(era.cons_catalog_snapshot_for_test().unwrap().active_regions >= 1);
@@ -231,7 +231,7 @@ fn abandoned_slice_retains_committed_cursor(panic_body: bool) {
             } else {
                 assert_eq!(result.unwrap(), Err(RegistrationError::Poisoned));
             }
-            assert!(era.registry().poisoned.load(Ordering::Acquire));
+            assert!(era.registry().park.poisoned.load(Ordering::Acquire));
             let (start, end, unused) = run
                 .cons_region_for_test()
                 .expect("retained canonical grant");

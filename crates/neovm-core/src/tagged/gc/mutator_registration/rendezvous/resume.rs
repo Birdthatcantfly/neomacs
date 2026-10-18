@@ -120,6 +120,7 @@ impl<'era> Mutator<'era> {
         let registry = self.registry;
         // A stopped-summary or root callback may reenter on this thread.
         // Retained control/entry guards must cause Busy rather than a spin.
+        let _park = registry.park_ticket();
         let mut gate = registry.lock()?;
         loop {
             registry.validate(&gate, self.entry.key)?;
@@ -287,7 +288,7 @@ impl<'owner, 'era> ResumeGcImage<'owner, 'era> {
             gate.rendezvous.poison();
             registry.poison();
         }
-        registry.wake.notify_all();
+        registry.park.wake.notify_all();
         completion
     }
 

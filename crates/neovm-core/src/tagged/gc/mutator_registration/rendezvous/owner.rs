@@ -28,6 +28,7 @@ impl<'era> Mutator<'era> {
     /// StartingStopped cannot obtain a run slice until its bootstrap is opened.
     pub fn wait_started(&mut self) -> Result<(), RendezvousError> {
         self.check_thread()?;
+        let _park = self.registry.park_ticket();
         let mut gate = self.registry.lock()?;
         loop {
             let mode = entry_state(&self.entry)?.rendezvous.mode;
@@ -50,6 +51,7 @@ impl<'era> Mutator<'era> {
     }
     pub fn wait_request(&self) -> Result<NonZeroU64, RendezvousError> {
         self.check_thread()?;
+        let _park = self.registry.park_ticket();
         let mut gate = self.registry.lock()?;
         loop {
             let e = entry_state(&self.entry)?;
@@ -327,7 +329,7 @@ impl<'era> Mutator<'era> {
         );
         drop(e);
         drop(gate);
-        self.registry.wake.notify_all();
+        self.registry.park.wake.notify_all();
         Ok(())
     }
 }

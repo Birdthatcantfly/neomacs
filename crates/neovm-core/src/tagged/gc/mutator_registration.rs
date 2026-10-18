@@ -45,7 +45,7 @@ use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::ThreadId;
 
@@ -154,6 +154,9 @@ struct EntryState {
 
 /// Stable Send + Sync metadata. It never contains a Context, heap reference,
 /// owner-state borrow, or owner-confined SATB buffer.
+/// Line-padded so adjacent entries' admission words (the loan flag and the
+/// entry mutex) never share a cacheline across owners.
+#[repr(align(64))]
 pub struct MutatorEntry {
     key: MutatorKey,
     young: YoungRegistrationId,
@@ -193,13 +196,29 @@ struct RegistryState {
     rendezvous: rendezvous::control::State,
 }
 
+/// Per-acquisition gate words packed on one line: a single exclusive
+/// cacheline transfer per lock covers both the mutex word and the owner tag.
+#[repr(align(64))]
+struct GateLine {
+    state: Mutex<RegistryState>,
+    gate_owner: AtomicU64,
+}
+
+/// Park/poison/notify words on their own line. `parked` is read on every
+/// run-slice drop, so it must not ride the gate line's transfers, and the
+/// condvar is RMW'd only while some waiter is parked.
+#[repr(align(64))]
+struct ParkLine {
+    parked: AtomicUsize,
+    poisoned: AtomicBool,
+    wake: std::sync::Condvar,
+}
+
 struct Registry {
     heap: HeapIdentity,
     world: HeapIdentity,
-    state: Mutex<RegistryState>,
-    poisoned: AtomicBool,
-    gate_owner: AtomicU64,
-    wake: std::sync::Condvar,
+    gate: GateLine,
+    park: ParkLine,
     request_epoch: AtomicU64,
     completed_epoch: AtomicU64,
     keeper_thread: ThreadId,
@@ -213,6 +232,17 @@ impl Registry {
         state: &RegistryState,
         key: MutatorKey,
     ) -> Result<Arc<MutatorEntry>, RegistrationError> {
+        let entry = self.validate_ref(state, key)?;
+        Ok(Arc::clone(entry))
+    }
+
+    /// Admission identity check without the per-slice reference-count RMW.
+    /// The borrow is only used while the caller still holds the gate.
+    fn validate_ref<'a>(
+        &self,
+        state: &'a RegistryState,
+        key: MutatorKey,
+    ) -> Result<&'a Arc<MutatorEntry>, RegistrationError> {
         if key.heap != self.heap || key.world != self.world {
             return Err(RegistrationError::WrongHeap);
         }
@@ -228,7 +258,7 @@ impl Registry {
         if entry.key != key {
             return Err(RegistrationError::StaleRegistration);
         }
-        Ok(Arc::clone(entry))
+        Ok(entry)
     }
 }
 
@@ -368,22 +398,27 @@ impl<'heap> ParallelHeapEra<'heap> {
             registry: Some(Arc::new(Registry {
                 heap,
                 world: heap,
-                poisoned: AtomicBool::new(false),
-                gate_owner: AtomicU64::new(0),
-                wake: std::sync::Condvar::new(),
+                gate: GateLine {
+                    state: Mutex::new(RegistryState {
+                        entries: vec![entry],
+                        young_index,
+                        next_registration: 2,
+                        generation_limit: u64::MAX,
+                        catalog_transition: false,
+                        rendezvous: rendezvous::control::State::new(),
+                    }),
+                    gate_owner: AtomicU64::new(0),
+                },
+                park: ParkLine {
+                    parked: AtomicUsize::new(0),
+                    poisoned: AtomicBool::new(false),
+                    wake: std::sync::Condvar::new(),
+                },
                 request_epoch: AtomicU64::new(0),
                 completed_epoch: AtomicU64::new(0),
                 keeper_thread: std::thread::current().id(),
                 root_epoch,
                 cons_catalog: super::cons_storage::ConsCatalog::new(heap),
-                state: Mutex::new(RegistryState {
-                    entries: vec![entry],
-                    young_index,
-                    next_registration: 2,
-                    generation_limit: u64::MAX,
-                    catalog_transition: false,
-                    rendezvous: rendezvous::control::State::new(),
-                }),
             })),
             _thread: PhantomData,
         })
