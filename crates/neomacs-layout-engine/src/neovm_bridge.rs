@@ -4022,6 +4022,22 @@ impl ComposedSourcePin {
     }
 }
 
+/// Engine-side carry of one resolver's realized terminal faces.
+///
+/// `prepare_tty_realization` re-derives the default and every basic face from
+/// core's per-frame display cache, roots each source, and installs its
+/// realized colors. A redisplay where no face definition changed needs none of
+/// that work: GNU's realized faces survive on the frame until `face_change`
+/// invalidates them (src/xfaces.c:3098-3105), and the binding generation —
+/// the `face_change_count` at realization time — is that stamp here.
+pub(crate) struct TtyRealizationPin {
+    frame_id: FrameId,
+    generation: u64,
+    table: FaceTable,
+    default_face: ResolvedFace,
+    basic_faces: Box<enum_map::EnumMap<BasicFace, Option<ResolvedFace>>>,
+}
+
 /// GNU basic-face lookup has two realization outcomes.  A canonical lookup
 /// keeps the fixed `enum face_id` slot.  A window-named lookup starts from the
 /// frame's unremapped default, then may incorporate direct or inherited entries
@@ -4182,7 +4198,18 @@ impl FaceResolver {
     /// Bind the pure resolver to the real terminal frame. Basic-face colors
     /// were realized by core's GNU lifecycle; importing them is read-only and
     /// must not demand synthetic or missing basic names (notably tab-line).
-    pub(crate) fn prepare_tty_realization(&mut self, frame_id: FrameId, evaluator: &mut Context) {
+    ///
+    /// `previous` carries the last bound resolver's realized faces: when the
+    /// frame, the `face_change_count` stamp, and the table snapshot all match,
+    /// the realization is reused instead of re-derived — GNU keeps a frame's
+    /// realized faces until a definition change invalidates them
+    /// (src/xfaces.c:3098-3105).
+    pub(crate) fn prepare_tty_realization(
+        &mut self,
+        frame_id: FrameId,
+        evaluator: &mut Context,
+        previous: Option<TtyRealizationPin>,
+    ) {
         if !neovm_core::face::realization::enabled()
             || self.window_system.is_some()
             || !evaluator.frame_is_tty_face_target(frame_id)
@@ -4200,6 +4227,20 @@ impl FaceResolver {
                     return;
                 }
             }
+        }
+        if let Some(pin) = previous
+            && pin.frame_id == frame_id
+            && pin.generation == evaluator.face_change_count()
+            && self.face_table.same_snapshot(&pin.table)
+            && pin.basic_faces[BasicFace::Default].is_some()
+        {
+            self.default_face = pin.default_face;
+            self.tty_face_source = Some(BoundTtyFaceSource {
+                frame_id,
+                generation: pin.generation,
+            });
+            self.realized_basic_faces = Some(pin.basic_faces);
+            return;
         }
         let Some((default_source, default_paint)) =
             evaluator.cached_basic_display_face_for_frame(frame_id, BasicFace::Default.name())
@@ -4270,6 +4311,20 @@ impl FaceResolver {
 
     pub(crate) fn has_tty_realization(&self) -> bool {
         self.tty_face_source.is_some()
+    }
+
+    /// The realized terminal faces and their binding stamp, for the engine to
+    /// carry into the next redisplay's resolver (see [`TtyRealizationPin`]).
+    pub(crate) fn tty_realization_pin(&self) -> Option<TtyRealizationPin> {
+        let bound = self.tty_face_source?;
+        let basic_faces = self.realized_basic_faces.as_ref()?;
+        Some(TtyRealizationPin {
+            frame_id: bound.frame_id,
+            generation: bound.generation,
+            table: self.face_table.clone(),
+            default_face: self.default_face.clone(),
+            basic_faces: basic_faces.clone(),
+        })
     }
 
     /// The composed-source cache together with the face table snapshot it was

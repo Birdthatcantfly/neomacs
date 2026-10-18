@@ -955,6 +955,11 @@ pub struct LayoutEngine {
     /// a face definition changes (`face_change`, src/xfaces.c:349 and
     /// src/xfaces.c:3098-3105) — the pinned snapshot plays that role here.
     face_composed_sources: Option<super::neovm_bridge::ComposedSourcePin>,
+    /// The previous frame layout's realized terminal faces, valid while the
+    /// binding stamp and table snapshot recorded with them still hold. This is
+    /// GNU's per-frame realized-face reuse (src/xfaces.c:3098-3105) carried
+    /// across the per-transaction resolver boundary.
+    face_tty_realization: Option<super::neovm_bridge::TtyRealizationPin>,
     /// Last accepted layout per window, used by cursor, scroll, and edit
     /// replay. Speculative attempts never replace this state.
     retained_window_matrices: rustc_hash::FxHashMap<DisplayWindowId, RetainedWindowMatrix>,
@@ -1436,6 +1441,20 @@ impl LayoutEngine {
         self.face_composed_sources = Some(face_resolver.composed_source_pin());
     }
 
+    /// Bind the resolver's terminal realization, adopting the previous
+    /// transaction's realized faces when their stamp and snapshot still hold,
+    /// and re-pinning the result for the next transaction.
+    fn prepare_face_resolver_tty(
+        &mut self,
+        face_resolver: &mut super::neovm_bridge::FaceResolver,
+        frame_id: neovm_core::window::FrameId,
+        evaluator: &mut neovm_core::emacs_core::Context,
+    ) {
+        let previous = self.face_tty_realization.take();
+        face_resolver.prepare_tty_realization(frame_id, evaluator, previous);
+        self.face_tty_realization = face_resolver.tty_realization_pin();
+    }
+
     /// Invalidate every retained value whose geometry or identity was derived
     /// from old font-selection inputs. This is deliberately one exhaustive
     /// owner rather than a list of clears spread across redisplay fast paths.
@@ -1444,6 +1463,7 @@ impl LayoutEngine {
         self.frame_visual_histories = FrameVisualHistories::default();
         self.frame_face_arenas.clear();
         self.face_composed_sources = None;
+        self.face_tty_realization = None;
         self.retained_window_matrices.clear();
         self.prepared_viewports = PreparedViewports::default();
         self.scroll_coverage.cancel();
@@ -1623,6 +1643,7 @@ impl LayoutEngine {
             scroll_preview_coverage: Vec::new(),
             frame_face_arenas: rustc_hash::FxHashMap::default(),
             face_composed_sources: None,
+            face_tty_realization: None,
             retained_window_matrices: rustc_hash::FxHashMap::default(),
             prepared_viewports: PreparedViewports::default(),
             scroll_coverage: scroll_coverage::ScrollCoverage::default(),
@@ -1666,6 +1687,7 @@ impl LayoutEngine {
             scroll_preview_coverage: Vec::new(),
             frame_face_arenas: rustc_hash::FxHashMap::default(),
             face_composed_sources: None,
+            face_tty_realization: None,
             retained_window_matrices: rustc_hash::FxHashMap::default(),
             prepared_viewports: PreparedViewports::default(),
             scroll_coverage: scroll_coverage::ScrollCoverage::default(),
@@ -1924,7 +1946,7 @@ impl LayoutEngine {
             self.font_sizing,
         );
         self.bind_face_composed_sources(&mut face_resolver);
-        face_resolver.prepare_tty_realization(frame_id, evaluator);
+        self.prepare_face_resolver_tty(&mut face_resolver, frame_id, evaluator);
         let mut resolver_face_change_count = evaluator.face_change_count();
         enum FaceResolverRefresh {
             Current,
@@ -2069,7 +2091,7 @@ impl LayoutEngine {
                         self.font_sizing,
                     );
                     self.bind_face_composed_sources(&mut face_resolver);
-                    face_resolver.prepare_tty_realization(frame_id, evaluator);
+                    self.prepare_face_resolver_tty(&mut face_resolver, frame_id, evaluator);
                     resolver_face_change_count = after_sync;
                     resolver_refresh = FaceResolverRefresh::Current;
                 }
