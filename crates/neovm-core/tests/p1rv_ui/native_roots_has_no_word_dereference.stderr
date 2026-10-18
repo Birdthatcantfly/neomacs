@@ -1,0 +1,5 @@
+error[E0599]: no method named `word_value` found for reference `&NativeRoots<'_>` in the current scope
+ --> tests/p1rv_ui/native_roots_has_no_word_dereference.rs:4:24
+  |
+4 |     let _value = roots.word_value(0);
+  |                        ^^^^^^^^^^ method not found in `&NativeRoots<'_>`

@@ -1,0 +1,17 @@
+error: lifetime may not live long enough
+ --> tests/p1rv_ui/extent_handle_cannot_escape.rs:5:75
+  |
+5 |     let _ = mutator.with_native_extent(roots, |handles: &NativeRoots<'_>| handles);
+  |                                                         -               - ^^^^^^^ returning this value requires that `'1` must outlive `'2`
+  |                                                         |               |
+  |                                                         |               return type of closure is &'2 NativeRoots<'_>
+  |                                                         let's call the lifetime of this reference `'1`
+
+error: lifetime may not live long enough
+ --> tests/p1rv_ui/extent_handle_cannot_escape.rs:5:75
+  |
+5 |     let _ = mutator.with_native_extent(roots, |handles: &NativeRoots<'_>| handles);
+  |                                                -------                  - ^^^^^^^ returning this value requires that `'3` must outlive `'4`
+  |                                                |                        |
+  |                                                |                        return type of closure is &NativeRoots<'4>
+  |                                                has type `&NativeRoots<'3>`

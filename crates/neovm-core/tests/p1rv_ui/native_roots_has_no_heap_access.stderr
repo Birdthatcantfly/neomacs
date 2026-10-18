@@ -1,0 +1,5 @@
+error[E0599]: no method named `tagged_heap` found for reference `&NativeRoots<'_>` in the current scope
+ --> tests/p1rv_ui/native_roots_has_no_heap_access.rs:4:23
+  |
+4 |     let _heap = roots.tagged_heap();
+  |                       ^^^^^^^^^^^ method not found in `&NativeRoots<'_>`

@@ -45,6 +45,9 @@ error[E0277]: `Rc<()>` cannot be shared between threads safely
   = help: within `ParallelHeapEra<'static>`, the trait `Sync` is not implemented for `Rc<()>`
 note: required because it appears within the type `PhantomData<Rc<()>>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -77,6 +80,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -109,6 +115,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -141,6 +150,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -173,6 +185,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -205,6 +220,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -225,6 +243,9 @@ error[E0277]: `*mut ()` cannot be shared between threads safely
   = help: within `eval::world::World`, the trait `Sync` is not implemented for `*mut ()`
 note: required because it appears within the type `PhantomData<*mut ()>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `eval::world::sole_owner::SoleContextConstruction`
  --> src/emacs_core/runtime/eval/world/sole_owner.rs
   |
@@ -243,6 +264,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -264,6 +288,9 @@ error[E0277]: `UnsafeCell<owned_roots::OwnedRootRegistry>` cannot be shared betw
   = note: required for `std::ptr::Unique<UnsafeCell<owned_roots::OwnedRootRegistry>>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<owned_roots::OwnedRootRegistry>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -277,6 +304,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -298,6 +328,9 @@ error[E0277]: `UnsafeCell<TaggedHeap>` cannot be shared between threads safely
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -311,6 +344,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -332,6 +368,9 @@ error[E0277]: `UnsafeCell<neovm_core::emacs_core::Obarray>` cannot be shared bet
   = note: required for `std::ptr::Unique<UnsafeCell<neovm_core::emacs_core::Obarray>>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<neovm_core::emacs_core::Obarray>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -345,6 +384,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -366,6 +408,9 @@ error[E0277]: `UnsafeCell<Vec<SymId>>` cannot be shared between threads safely
   = note: required for `std::ptr::Unique<UnsafeCell<Vec<SymId>>>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<Vec<SymId>>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -379,6 +424,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -400,6 +448,9 @@ error[E0277]: `UnsafeCell<VariableWatcherList>` cannot be shared between threads
   = note: required for `std::ptr::Unique<UnsafeCell<VariableWatcherList>>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<VariableWatcherList>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -413,6 +464,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -434,6 +488,9 @@ error[E0277]: `UnsafeCell<HashSet<SymId>>` cannot be shared between threads safe
   = note: required for `std::ptr::Unique<UnsafeCell<HashSet<SymId>>>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<HashSet<SymId>>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -447,6 +504,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -468,6 +528,9 @@ error[E0277]: `UnsafeCell<AutoloadManager>` cannot be shared between threads saf
   = note: required for `std::ptr::Unique<UnsafeCell<AutoloadManager>>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<AutoloadManager>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -481,6 +544,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -502,6 +568,9 @@ error[E0277]: `UnsafeCell<treesit::TreeSitterManager>` cannot be shared between 
   = note: required for `std::ptr::Unique<UnsafeCell<treesit::TreeSitterManager>>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<treesit::TreeSitterManager>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -515,6 +584,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -536,6 +608,9 @@ error[E0277]: `UnsafeCell<FrameManager>` cannot be shared between threads safely
   = note: required for `std::ptr::Unique<UnsafeCell<FrameManager>>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<FrameManager>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -549,6 +624,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -570,6 +648,9 @@ error[E0277]: `UnsafeCell<CodingSystemManager>` cannot be shared between threads
   = note: required for `std::ptr::Unique<UnsafeCell<CodingSystemManager>>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<CodingSystemManager>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -583,6 +664,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -604,6 +688,9 @@ error[E0277]: `UnsafeCell<eval::MacroPerfStats>` cannot be shared between thread
   = note: required for `std::ptr::Unique<UnsafeCell<eval::MacroPerfStats>>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<eval::MacroPerfStats>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -617,6 +704,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -638,6 +728,9 @@ error[E0277]: `UnsafeCell<neovm_core::buffer::buffer::BufferStorage>` cannot be 
   = note: required for `std::ptr::Unique<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -651,6 +744,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -672,6 +768,9 @@ error[E0277]: `UnsafeCell<eval::global_state::GlobalState>` cannot be shared bet
   = note: required for `std::ptr::Unique<UnsafeCell<eval::global_state::GlobalState>>` to implement `Sync`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<eval::global_state::GlobalState>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -685,6 +784,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -705,6 +807,9 @@ error[E0277]: `*mut ()` cannot be sent between threads safely
   = help: within `eval::world::World`, the trait `Send` is not implemented for `*mut ()`
 note: required because it appears within the type `PhantomData<*mut ()>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `eval::world::sole_owner::SoleContextConstruction`
  --> src/emacs_core/runtime/eval/world/sole_owner.rs
   |
@@ -723,6 +828,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -743,6 +851,9 @@ error[E0277]: `*const ()` cannot be shared between threads safely
   = help: within `ParallelHeapEra<'static>`, the trait `Sync` is not implemented for `*const ()`
 note: required because it appears within the type `PhantomData<*const ()>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `TaggedValue`
  --> src/tagged/value.rs
   |
@@ -750,10 +861,19 @@ note: required because it appears within the type `TaggedValue`
   |            ^^^^^^^^^^^
 note: required because it appears within the type `PhantomData<TaggedValue>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<TaggedValue>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<TaggedValue>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `eval::world::green_owner::parallel_roots::FrozenLegacyRoots`
  --> src/emacs_core/runtime/eval/world/parallel_roots.rs
   |
@@ -761,6 +881,9 @@ note: required because it appears within the type `eval::world::green_owner::par
   |                   ^^^^^^^^^^^^^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::parallel_roots::FrozenLegacyRoots>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -781,6 +904,9 @@ error[E0277]: `*const ()` cannot be sent between threads safely
   = help: within `eval::owner_bindings::OwnerSlabRegistry`, the trait `Send` is not implemented for `*const ()`
 note: required because it appears within the type `PhantomData<*const ()>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `eval::owner_bindings::OwnerSlabRegistry`
  --> src/emacs_core/runtime/eval/owner_bindings.rs
   |
@@ -800,6 +926,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -825,9 +954,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -841,6 +976,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -871,9 +1009,15 @@ note: required because it appears within the type `neovm_core::buffer::buffer::B
   |            ^^^^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<neovm_core::buffer::buffer::BufferStorage>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -887,6 +1031,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -926,9 +1073,15 @@ note: required because it appears within the type `eval::global_state::GlobalSta
   | |_- in this macro invocation
 note: required because it appears within the type `UnsafeCell<eval::global_state::GlobalState>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<eval::global_state::GlobalState>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<eval::global_state::GlobalState>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -942,6 +1095,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -982,9 +1138,15 @@ note: required because it appears within the type `eval::global_state::GlobalSta
   | |_- in this macro invocation
 note: required because it appears within the type `UnsafeCell<eval::global_state::GlobalState>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<eval::global_state::GlobalState>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<eval::global_state::GlobalState>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -998,6 +1160,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1038,9 +1203,15 @@ note: required because it appears within the type `eval::global_state::GlobalSta
   | |_- in this macro invocation
 note: required because it appears within the type `UnsafeCell<eval::global_state::GlobalState>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<eval::global_state::GlobalState>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<eval::global_state::GlobalState>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -1054,6 +1225,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1075,10 +1249,19 @@ error[E0277]: `NonNull<eval::owner_bindings::OwnerSlab>` cannot be sent between 
   = help: within `eval::owner_bindings::OwnerSlabRegistry`, the trait `Send` is not implemented for `NonNull<eval::owner_bindings::OwnerSlab>`
 note: required because it appears within the type `PhantomData<NonNull<eval::owner_bindings::OwnerSlab>>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<NonNull<eval::owner_bindings::OwnerSlab>>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<NonNull<eval::owner_bindings::OwnerSlab>>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `eval::owner_bindings::OwnerSlabRegistry`
  --> src/emacs_core/runtime/eval/owner_bindings.rs
   |
@@ -1098,6 +1281,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1125,6 +1311,9 @@ note: required because it appears within the type `ThreadProjectionDescriptor`
   = note: required for `&'static ThreadProjectionDescriptor` to implement `Send`
 note: required because it appears within the type `Option<&'static ThreadProjectionDescriptor>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ThreadProjectionTable`
  --> src/emacs_core/runtime/forward/thread_projection.rs
   |
@@ -1144,6 +1333,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1169,6 +1361,9 @@ note: required because it appears within the type `LispString`
   |            ^^^^^^^^^^
 note: required because it appears within the type `Option<LispString>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `eval::global_state::GlobalState`
  --> src/emacs_core/runtime/eval/global_state.rs
   |
@@ -1185,9 +1380,15 @@ note: required because it appears within the type `eval::global_state::GlobalSta
   | |_- in this macro invocation
 note: required because it appears within the type `UnsafeCell<eval::global_state::GlobalState>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<eval::global_state::GlobalState>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<eval::global_state::GlobalState>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -1201,6 +1402,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1222,10 +1426,19 @@ error[E0277]: `*mut HashTableObj` cannot be sent between threads safely
   = help: within `UnsafeCell<TaggedHeap>`, the trait `Send` is not implemented for `*mut HashTableObj`
 note: required because it appears within the type `PhantomData<*mut HashTableObj>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<*mut HashTableObj>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<*mut HashTableObj>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `TaggedHeap`
  --> src/tagged/gc.rs
   |
@@ -1233,9 +1446,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -1249,6 +1468,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1269,10 +1491,19 @@ error[E0277]: `*mut FinalizerObj` cannot be sent between threads safely
   = help: within `UnsafeCell<TaggedHeap>`, the trait `Send` is not implemented for `*mut FinalizerObj`
 note: required because it appears within the type `PhantomData<*mut FinalizerObj>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<*mut FinalizerObj>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<*mut FinalizerObj>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `TaggedHeap`
  --> src/tagged/gc.rs
   |
@@ -1280,9 +1511,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -1296,6 +1533,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1316,10 +1556,19 @@ error[E0277]: `*mut *mut MarkerObj` cannot be sent between threads safely
   = help: within `UnsafeCell<TaggedHeap>`, the trait `Send` is not implemented for `*mut *mut MarkerObj`
 note: required because it appears within the type `PhantomData<*mut *mut MarkerObj>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<*mut *mut MarkerObj>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<*mut *mut MarkerObj>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `TaggedHeap`
  --> src/tagged/gc.rs
   |
@@ -1327,9 +1576,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -1343,6 +1598,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1363,10 +1621,19 @@ error[E0277]: `std::rc::Weak<[TaggedValue]>` cannot be sent between threads safe
   = help: within `Vec<std::rc::Weak<[TaggedValue]>>`, the trait `Send` is not implemented for `std::rc::Weak<[TaggedValue]>`
 note: required because it appears within the type `PhantomData<std::rc::Weak<[TaggedValue]>>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<std::rc::Weak<[TaggedValue]>>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<std::rc::Weak<[TaggedValue]>>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
   = note: required for `RefCell<Vec<std::rc::Weak<[TaggedValue]>>>` to implement `Send`
 note: required because it appears within the type `owned_roots::OwnedRootRegistry`
  --> src/emacs_core/runtime/owned_roots/mod.rs
@@ -1375,9 +1642,15 @@ note: required because it appears within the type `owned_roots::OwnedRootRegistr
   |                   ^^^^^^^^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<owned_roots::OwnedRootRegistry>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<owned_roots::OwnedRootRegistry>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<owned_roots::OwnedRootRegistry>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -1391,6 +1664,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1416,10 +1692,19 @@ note: required because it appears within the type `gc::cons_blocks::ConsBlock`
   |                   ^^^^^^^^^
 note: required because it appears within the type `PhantomData<gc::cons_blocks::ConsBlock>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<gc::cons_blocks::ConsBlock>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<gc::cons_blocks::ConsBlock>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `TaggedHeap`
  --> src/tagged/gc.rs
   |
@@ -1427,9 +1712,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -1443,6 +1734,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1468,10 +1762,19 @@ note: required because it appears within the type `gc::arena_pages::MappedConsRa
   |                   ^^^^^^^^^^^^^^^
 note: required because it appears within the type `PhantomData<gc::arena_pages::MappedConsRange>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<gc::arena_pages::MappedConsRange>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<gc::arena_pages::MappedConsRange>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `TaggedHeap`
  --> src/tagged/gc.rs
   |
@@ -1479,9 +1782,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -1495,6 +1804,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1520,10 +1832,19 @@ note: required because it appears within the type `gc::arena_pages::MappedFloatR
   |                   ^^^^^^^^^^^^^^^^
 note: required because it appears within the type `PhantomData<gc::arena_pages::MappedFloatRange>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<gc::arena_pages::MappedFloatRange>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<gc::arena_pages::MappedFloatRange>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `TaggedHeap`
  --> src/tagged/gc.rs
   |
@@ -1531,9 +1852,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -1547,6 +1874,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1572,10 +1902,19 @@ note: required because it appears within the type `gc::arena_pages::MappedVecLik
   |                   ^^^^^^^^^^^^^^^^^^^
 note: required because it appears within the type `PhantomData<gc::arena_pages::MappedVecLikeObject>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<gc::arena_pages::MappedVecLikeObject>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<gc::arena_pages::MappedVecLikeObject>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `TaggedHeap`
  --> src/tagged/gc.rs
   |
@@ -1583,9 +1922,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -1599,6 +1944,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1624,10 +1972,19 @@ note: required because it appears within the type `gc::arena_pages::MappedString
   |                   ^^^^^^^^^^^^^^^^^^
 note: required because it appears within the type `PhantomData<gc::arena_pages::MappedStringObject>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<gc::arena_pages::MappedStringObject>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<gc::arena_pages::MappedStringObject>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `TaggedHeap`
  --> src/tagged/gc.rs
   |
@@ -1635,9 +1992,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -1651,6 +2014,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1676,10 +2042,19 @@ note: required because it appears within the type `symbol::cell::BlvPtr`
   |                   ^^^^^^
 note: required because it appears within the type `PhantomData<symbol::cell::BlvPtr>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<symbol::cell::BlvPtr>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<symbol::cell::BlvPtr>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `neovm_core::emacs_core::Obarray`
  --> src/emacs_core/runtime/symbol/mod.rs
   |
@@ -1687,9 +2062,15 @@ note: required because it appears within the type `neovm_core::emacs_core::Obarr
   |            ^^^^^^^
 note: required because it appears within the type `UnsafeCell<neovm_core::emacs_core::Obarray>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<neovm_core::emacs_core::Obarray>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<neovm_core::emacs_core::Obarray>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -1703,6 +2084,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1734,8 +2118,14 @@ note: required because it appears within the type `treesit::NodeEntry`
   = note: required for `alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Owned, u64, treesit::NodeEntry, alloc::collections::btree::node::marker::LeafOrInternal>` to implement `Send`
 note: required because it appears within the type `Option<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Owned, u64, treesit::NodeEntry, alloc::collections::btree::node::marker::LeafOrInternal>>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `BTreeMap<u64, treesit::NodeEntry>`
  --> $RUST/alloc/src/collections/btree/map.rs
+  |
+  | pub struct BTreeMap<
+  |            ^^^^^^^^
 note: required because it appears within the type `treesit::TreeSitterManager`
  --> src/emacs_core/text/treesit/mod.rs
   |
@@ -1743,9 +2133,15 @@ note: required because it appears within the type `treesit::TreeSitterManager`
   |                   ^^^^^^^^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<treesit::TreeSitterManager>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<treesit::TreeSitterManager>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<treesit::TreeSitterManager>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -1759,6 +2155,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1790,8 +2189,14 @@ note: required because it appears within the type `treesit::NodeEntry`
   = note: required for `alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Owned, u64, treesit::NodeEntry, alloc::collections::btree::node::marker::LeafOrInternal>` to implement `Send`
 note: required because it appears within the type `Option<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Owned, u64, treesit::NodeEntry, alloc::collections::btree::node::marker::LeafOrInternal>>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `BTreeMap<u64, treesit::NodeEntry>`
  --> $RUST/alloc/src/collections/btree/map.rs
+  |
+  | pub struct BTreeMap<
+  |            ^^^^^^^^
 note: required because it appears within the type `treesit::TreeSitterManager`
  --> src/emacs_core/text/treesit/mod.rs
   |
@@ -1799,9 +2204,15 @@ note: required because it appears within the type `treesit::TreeSitterManager`
   |                   ^^^^^^^^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<treesit::TreeSitterManager>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<treesit::TreeSitterManager>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<treesit::TreeSitterManager>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -1815,6 +2226,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1844,6 +2258,9 @@ note: required because it appears within the type `hashbrown::map::HashMap<Buffe
  --> /rust/deps/hashbrown-0.16.1/src/map.rs:185:11
 note: required because it appears within the type `HashMap<BufferId, neovm_core::buffer::Buffer, rustc_hash::FxBuildHasher>`
  --> $RUST/std/src/collections/hash/map.rs
+  |
+  | pub struct HashMap<
+  |            ^^^^^^^
 note: required because it appears within the type `neovm_core::buffer::buffer::BufferStorage`
  --> src/buffer/buffer.rs
   |
@@ -1851,9 +2268,15 @@ note: required because it appears within the type `neovm_core::buffer::buffer::B
   |            ^^^^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<neovm_core::buffer::buffer::BufferStorage>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -1867,6 +2290,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1910,8 +2336,14 @@ note: required because it appears within the type `eval::green::GreenRuntime`
   = note: required for `std::ptr::Unique<eval::green::GreenRuntime>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<eval::green::GreenRuntime>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<eval::green::GreenRuntime>>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
   = note: required for `RefCell<Option<std::boxed::Box<eval::green::GreenRuntime>>>` to implement `Send`
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
@@ -1926,6 +2358,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -1969,8 +2404,14 @@ note: required because it appears within the type `eval::green::GreenRuntime`
   = note: required for `std::ptr::Unique<eval::green::GreenRuntime>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<eval::green::GreenRuntime>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<eval::green::GreenRuntime>>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
   = note: required for `RefCell<Option<std::boxed::Box<eval::green::GreenRuntime>>>` to implement `Send`
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
@@ -1985,6 +2426,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2028,8 +2472,14 @@ note: required because it appears within the type `eval::green::GreenRuntime`
   = note: required for `std::ptr::Unique<eval::green::GreenRuntime>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<eval::green::GreenRuntime>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<eval::green::GreenRuntime>>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
   = note: required for `RefCell<Option<std::boxed::Box<eval::green::GreenRuntime>>>` to implement `Send`
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
@@ -2044,6 +2494,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2087,8 +2540,14 @@ note: required because it appears within the type `eval::green::GreenRuntime`
   = note: required for `std::ptr::Unique<eval::green::GreenRuntime>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<eval::green::GreenRuntime>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<eval::green::GreenRuntime>>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
   = note: required for `RefCell<Option<std::boxed::Box<eval::green::GreenRuntime>>>` to implement `Send`
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
@@ -2103,6 +2562,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2146,8 +2608,14 @@ note: required because it appears within the type `eval::green::GreenRuntime`
   = note: required for `std::ptr::Unique<eval::green::GreenRuntime>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<eval::green::GreenRuntime>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<eval::green::GreenRuntime>>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
   = note: required for `RefCell<Option<std::boxed::Box<eval::green::GreenRuntime>>>` to implement `Send`
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
@@ -2162,6 +2630,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2205,8 +2676,14 @@ note: required because it appears within the type `eval::green::GreenRuntime`
   = note: required for `std::ptr::Unique<eval::green::GreenRuntime>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<eval::green::GreenRuntime>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<eval::green::GreenRuntime>>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
   = note: required for `RefCell<Option<std::boxed::Box<eval::green::GreenRuntime>>>` to implement `Send`
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
@@ -2221,6 +2698,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2264,8 +2744,14 @@ note: required because it appears within the type `eval::green::GreenRuntime`
   = note: required for `std::ptr::Unique<eval::green::GreenRuntime>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<eval::green::GreenRuntime>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<eval::green::GreenRuntime>>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
   = note: required for `RefCell<Option<std::boxed::Box<eval::green::GreenRuntime>>>` to implement `Send`
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
@@ -2280,6 +2766,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2323,8 +2812,14 @@ note: required because it appears within the type `eval::green::GreenRuntime`
   = note: required for `std::ptr::Unique<eval::green::GreenRuntime>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<eval::green::GreenRuntime>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<eval::green::GreenRuntime>>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
   = note: required for `RefCell<Option<std::boxed::Box<eval::green::GreenRuntime>>>` to implement `Send`
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
@@ -2339,6 +2834,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2359,6 +2857,9 @@ error[E0277]: `*mut VectorObj` cannot be sent between threads safely
   = help: within `UnsafeCell<TaggedHeap>`, the trait `Send` is not implemented for `*mut VectorObj`
 note: required because it appears within the type `PhantomData<*mut VectorObj>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `gc::arena_pages::ObjectPage<VectorObj>`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -2366,10 +2867,19 @@ note: required because it appears within the type `gc::arena_pages::ObjectPage<V
   |                   ^^^^^^^^^^
 note: required because it appears within the type `PhantomData<gc::arena_pages::ObjectPage<VectorObj>>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<gc::arena_pages::ObjectPage<VectorObj>>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<gc::arena_pages::ObjectPage<VectorObj>>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `gc::arena_pages::ObjectArena<VectorObj>`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -2382,9 +2892,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -2398,6 +2914,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2418,6 +2937,9 @@ error[E0277]: `*mut ByteCodeObj` cannot be sent between threads safely
   = help: within `UnsafeCell<TaggedHeap>`, the trait `Send` is not implemented for `*mut ByteCodeObj`
 note: required because it appears within the type `PhantomData<*mut ByteCodeObj>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `gc::arena_pages::ObjectPage<ByteCodeObj>`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -2425,10 +2947,19 @@ note: required because it appears within the type `gc::arena_pages::ObjectPage<B
   |                   ^^^^^^^^^^
 note: required because it appears within the type `PhantomData<gc::arena_pages::ObjectPage<ByteCodeObj>>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<gc::arena_pages::ObjectPage<ByteCodeObj>>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<gc::arena_pages::ObjectPage<ByteCodeObj>>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `gc::arena_pages::ObjectArena<ByteCodeObj>`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -2441,9 +2972,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -2457,6 +2994,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2477,6 +3017,9 @@ error[E0277]: `*mut LambdaObj` cannot be sent between threads safely
   = help: within `UnsafeCell<TaggedHeap>`, the trait `Send` is not implemented for `*mut LambdaObj`
 note: required because it appears within the type `PhantomData<*mut LambdaObj>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `gc::arena_pages::ObjectPage<LambdaObj>`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -2484,10 +3027,19 @@ note: required because it appears within the type `gc::arena_pages::ObjectPage<L
   |                   ^^^^^^^^^^
 note: required because it appears within the type `PhantomData<gc::arena_pages::ObjectPage<LambdaObj>>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<gc::arena_pages::ObjectPage<LambdaObj>>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<gc::arena_pages::ObjectPage<LambdaObj>>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `gc::arena_pages::ObjectArena<LambdaObj>`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -2500,9 +3052,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -2516,6 +3074,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2536,6 +3097,9 @@ error[E0277]: `*mut MacroObj` cannot be sent between threads safely
   = help: within `UnsafeCell<TaggedHeap>`, the trait `Send` is not implemented for `*mut MacroObj`
 note: required because it appears within the type `PhantomData<*mut MacroObj>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `gc::arena_pages::ObjectPage<MacroObj>`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -2543,10 +3107,19 @@ note: required because it appears within the type `gc::arena_pages::ObjectPage<M
   |                   ^^^^^^^^^^
 note: required because it appears within the type `PhantomData<gc::arena_pages::ObjectPage<MacroObj>>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<gc::arena_pages::ObjectPage<MacroObj>>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<gc::arena_pages::ObjectPage<MacroObj>>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `gc::arena_pages::ObjectArena<MacroObj>`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -2559,9 +3132,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -2575,6 +3154,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2595,6 +3177,9 @@ error[E0277]: `*mut RecordObj` cannot be sent between threads safely
   = help: within `UnsafeCell<TaggedHeap>`, the trait `Send` is not implemented for `*mut RecordObj`
 note: required because it appears within the type `PhantomData<*mut RecordObj>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `gc::arena_pages::ObjectPage<RecordObj>`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -2602,10 +3187,19 @@ note: required because it appears within the type `gc::arena_pages::ObjectPage<R
   |                   ^^^^^^^^^^
 note: required because it appears within the type `PhantomData<gc::arena_pages::ObjectPage<RecordObj>>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<gc::arena_pages::ObjectPage<RecordObj>>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<gc::arena_pages::ObjectPage<RecordObj>>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `gc::arena_pages::ObjectArena<RecordObj>`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -2618,9 +3212,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -2634,6 +3234,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2654,6 +3257,9 @@ error[E0277]: `*mut SymbolWithPosObj` cannot be sent between threads safely
   = help: within `UnsafeCell<TaggedHeap>`, the trait `Send` is not implemented for `*mut SymbolWithPosObj`
 note: required because it appears within the type `PhantomData<*mut SymbolWithPosObj>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `gc::arena_pages::ObjectPage<SymbolWithPosObj>`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -2661,10 +3267,19 @@ note: required because it appears within the type `gc::arena_pages::ObjectPage<S
   |                   ^^^^^^^^^^
 note: required because it appears within the type `PhantomData<gc::arena_pages::ObjectPage<SymbolWithPosObj>>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<gc::arena_pages::ObjectPage<SymbolWithPosObj>>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<gc::arena_pages::ObjectPage<SymbolWithPosObj>>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `gc::arena_pages::ObjectArena<SymbolWithPosObj>`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -2677,9 +3292,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -2693,6 +3314,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2713,6 +3337,9 @@ error[E0277]: `*mut BignumObj` cannot be sent between threads safely
   = help: within `UnsafeCell<TaggedHeap>`, the trait `Send` is not implemented for `*mut BignumObj`
 note: required because it appears within the type `PhantomData<*mut BignumObj>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `gc::arena_pages::ObjectPage<BignumObj>`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -2720,10 +3347,19 @@ note: required because it appears within the type `gc::arena_pages::ObjectPage<B
   |                   ^^^^^^^^^^
 note: required because it appears within the type `PhantomData<gc::arena_pages::ObjectPage<BignumObj>>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<gc::arena_pages::ObjectPage<BignumObj>>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<gc::arena_pages::ObjectPage<BignumObj>>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `gc::arena_pages::ObjectArena<BignumObj>`
  --> src/tagged/gc/arena_pages.rs
   |
@@ -2736,9 +3372,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -2752,6 +3394,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2786,6 +3431,9 @@ note: required because it appears within the type `hashbrown::map::HashMap<Buffe
  --> /rust/deps/hashbrown-0.16.1/src/map.rs:185:11
 note: required because it appears within the type `HashMap<BufferId, neovm_core::buffer::Buffer, rustc_hash::FxBuildHasher>`
  --> $RUST/std/src/collections/hash/map.rs
+  |
+  | pub struct HashMap<
+  |            ^^^^^^^
 note: required because it appears within the type `neovm_core::buffer::buffer::BufferStorage`
  --> src/buffer/buffer.rs
   |
@@ -2793,9 +3441,15 @@ note: required because it appears within the type `neovm_core::buffer::buffer::B
   |            ^^^^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<neovm_core::buffer::buffer::BufferStorage>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -2809,6 +3463,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2843,6 +3500,9 @@ note: required because it appears within the type `hashbrown::map::HashMap<Buffe
  --> /rust/deps/hashbrown-0.16.1/src/map.rs:185:11
 note: required because it appears within the type `HashMap<BufferId, neovm_core::buffer::Buffer, rustc_hash::FxBuildHasher>`
  --> $RUST/std/src/collections/hash/map.rs
+  |
+  | pub struct HashMap<
+  |            ^^^^^^^
 note: required because it appears within the type `neovm_core::buffer::buffer::BufferStorage`
  --> src/buffer/buffer.rs
   |
@@ -2850,9 +3510,15 @@ note: required because it appears within the type `neovm_core::buffer::buffer::B
   |            ^^^^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<neovm_core::buffer::buffer::BufferStorage>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -2866,6 +3532,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2900,6 +3569,9 @@ note: required because it appears within the type `hashbrown::map::HashMap<Buffe
  --> /rust/deps/hashbrown-0.16.1/src/map.rs:185:11
 note: required because it appears within the type `HashMap<BufferId, neovm_core::buffer::Buffer, rustc_hash::FxBuildHasher>`
  --> $RUST/std/src/collections/hash/map.rs
+  |
+  | pub struct HashMap<
+  |            ^^^^^^^
 note: required because it appears within the type `neovm_core::buffer::buffer::BufferStorage`
  --> src/buffer/buffer.rs
   |
@@ -2907,9 +3579,15 @@ note: required because it appears within the type `neovm_core::buffer::buffer::B
   |            ^^^^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<neovm_core::buffer::buffer::BufferStorage>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -2923,6 +3601,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -2943,6 +3624,9 @@ error[E0277]: `Rc<()>` cannot be sent between threads safely
   = help: within `gc::mutator_gc::MutatorSatbRegistry`, the trait `Send` is not implemented for `Rc<()>`
 note: required because it appears within the type `PhantomData<Rc<()>>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `gc::satb::SatbBuffer`
  --> src/tagged/gc/satb.rs
   |
@@ -2961,6 +3645,9 @@ note: required because it appears within the type `gc::mutator_gc::MutatorSatbRe
   = note: required for `std::ptr::Unique<gc::mutator_gc::MutatorSatbRegistry>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<gc::mutator_gc::MutatorSatbRegistry>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `gc::mutator_gc::MutatorSatbSlot`
  --> src/tagged/gc/mutator_gc.rs
   |
@@ -2973,9 +3660,15 @@ note: required because it appears within the type `TaggedHeap`
   |            ^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<TaggedHeap>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<TaggedHeap>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<TaggedHeap>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -2989,6 +3682,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -3014,6 +3710,9 @@ note: required because it appears within the type `Flow`
   |            ^^^^
 note: required because it appears within the type `Option<Flow>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `eval::redisplay_hooks::RedisplayHookOwnership`
  --> src/emacs_core/runtime/eval/redisplay_hooks.rs
   |
@@ -3026,6 +3725,9 @@ note: required because it appears within the type `eval::green::owner_carried::O
   |                   ^^^^^^^^^^^^
 note: required because it appears within the type `Option<eval::green::owner_carried::OwnerCarried>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
   = note: required for `RefCell<Option<eval::green::owner_carried::OwnerCarried>>` to implement `Send`
 note: required because it appears within the type `eval::green::GreenRuntime`
  --> src/emacs_core/runtime/eval/green/mod.rs
@@ -3035,8 +3737,14 @@ note: required because it appears within the type `eval::green::GreenRuntime`
   = note: required for `std::ptr::Unique<eval::green::GreenRuntime>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<eval::green::GreenRuntime>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<eval::green::GreenRuntime>>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
   = note: required for `RefCell<Option<std::boxed::Box<eval::green::GreenRuntime>>>` to implement `Send`
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
@@ -3051,6 +3759,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -3072,6 +3783,9 @@ error[E0277]: `Rc<Vec<AutomaticCompositionSpan>>` cannot be sent between threads
   = note: required because it appears within the type `(AutomaticCompositionKey, Rc<Vec<AutomaticCompositionSpan>>)`
 note: required because it appears within the type `Option<(AutomaticCompositionKey, Rc<Vec<AutomaticCompositionSpan>>)>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
   = note: required for `RefCell<Option<(AutomaticCompositionKey, Rc<Vec<AutomaticCompositionSpan>>)>>` to implement `Send`
 note: required because it appears within the type `neovm_core::buffer::Buffer`
  --> src/buffer/buffer.rs
@@ -3084,6 +3798,9 @@ note: required because it appears within the type `hashbrown::map::HashMap<Buffe
  --> /rust/deps/hashbrown-0.16.1/src/map.rs:185:11
 note: required because it appears within the type `HashMap<BufferId, neovm_core::buffer::Buffer, rustc_hash::FxBuildHasher>`
  --> $RUST/std/src/collections/hash/map.rs
+  |
+  | pub struct HashMap<
+  |            ^^^^^^^
 note: required because it appears within the type `neovm_core::buffer::buffer::BufferStorage`
  --> src/buffer/buffer.rs
   |
@@ -3091,9 +3808,15 @@ note: required because it appears within the type `neovm_core::buffer::buffer::B
   |            ^^^^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<neovm_core::buffer::buffer::BufferStorage>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -3107,6 +3830,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -3128,12 +3854,24 @@ error[E0277]: `(dyn std::any::Any + 'static)` cannot be sent between threads saf
   = note: required for `std::ptr::Unique<(dyn std::any::Any + 'static)>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<(dyn std::any::Any + 'static)>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `PhantomData<std::boxed::Box<(dyn std::any::Any + 'static)>>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<std::boxed::Box<(dyn std::any::Any + 'static)>>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<std::boxed::Box<(dyn std::any::Any + 'static)>>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `eval::green::carried::CarriedState`
  --> src/emacs_core/runtime/eval/green/carried.rs
   |
@@ -3148,8 +3886,14 @@ note: required because it appears within the type `eval::green::GreenRuntime`
   = note: required for `std::ptr::Unique<eval::green::GreenRuntime>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<eval::green::GreenRuntime>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<eval::green::GreenRuntime>>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
   = note: required for `RefCell<Option<std::boxed::Box<eval::green::GreenRuntime>>>` to implement `Send`
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
@@ -3164,6 +3908,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -3189,6 +3936,9 @@ note: required because it appears within the type `OverlaySnapshot`
   |            ^^^^^^^^^^^^^^^
 note: required because it appears within the type `Option<OverlaySnapshot>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
   = note: required for `RefCell<Option<OverlaySnapshot>>` to implement `Send`
 note: required because it appears within the type `OverlayList`
  --> src/buffer/overlay.rs
@@ -3206,6 +3956,9 @@ note: required because it appears within the type `hashbrown::map::HashMap<Buffe
  --> /rust/deps/hashbrown-0.16.1/src/map.rs:185:11
 note: required because it appears within the type `HashMap<BufferId, neovm_core::buffer::Buffer, rustc_hash::FxBuildHasher>`
  --> $RUST/std/src/collections/hash/map.rs
+  |
+  | pub struct HashMap<
+  |            ^^^^^^^
 note: required because it appears within the type `neovm_core::buffer::buffer::BufferStorage`
  --> src/buffer/buffer.rs
   |
@@ -3213,9 +3966,15 @@ note: required because it appears within the type `neovm_core::buffer::buffer::B
   |            ^^^^^^^^^^^^^
 note: required because it appears within the type `UnsafeCell<neovm_core::buffer::buffer::BufferStorage>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<neovm_core::buffer::buffer::BufferStorage>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -3229,6 +3988,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -3250,6 +4012,9 @@ error[E0277]: `(dyn for<'a> Fn(&'a LispString) -> Vec<LispString> + 'static)` ca
   = note: required for `std::ptr::Unique<(dyn for<'a> Fn(&'a LispString) -> Vec<LispString> + 'static)>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<(dyn for<'a> Fn(&'a LispString) -> Vec<LispString> + 'static)>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `CompletionTable`
  --> src/emacs_core/commands/minibuffer/mod.rs
   |
@@ -3257,6 +4022,9 @@ note: required because it appears within the type `CompletionTable`
   |          ^^^^^^^^^^^^^^^
 note: required because it appears within the type `Option<CompletionTable>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `MinibufferState`
  --> src/emacs_core/commands/minibuffer/mod.rs
   |
@@ -3264,10 +4032,19 @@ note: required because it appears within the type `MinibufferState`
   |            ^^^^^^^^^^^^^^^
 note: required because it appears within the type `PhantomData<MinibufferState>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<MinibufferState>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<MinibufferState>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
 note: required because it appears within the type `MinibufferManager`
  --> src/emacs_core/commands/minibuffer/mod.rs
   |
@@ -3289,9 +4066,15 @@ note: required because it appears within the type `eval::global_state::GlobalSta
   | |_- in this macro invocation
 note: required because it appears within the type `UnsafeCell<eval::global_state::GlobalState>`
  --> $RUST/core/src/cell.rs
+  |
+  | pub struct UnsafeCell<T: ?Sized> {
+  |            ^^^^^^^^^^
   = note: required for `std::ptr::Unique<UnsafeCell<eval::global_state::GlobalState>>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<UnsafeCell<eval::global_state::GlobalState>>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
   |
@@ -3305,6 +4088,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |
@@ -3331,12 +4117,24 @@ note: required because it appears within the type `dynamic_module::GlobalRefEntr
   |                   ^^^^^^^^^^^^^^
 note: required because it appears within the type `Option<dynamic_module::GlobalRefEntry>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `PhantomData<Option<dynamic_module::GlobalRefEntry>>`
  --> $RUST/core/src/marker.rs
+  |
+  | pub struct PhantomData<T: PointeeSized>;
+  |            ^^^^^^^^^^^
 note: required because it appears within the type `alloc::raw_vec::RawVec<Option<dynamic_module::GlobalRefEntry>>`
  --> $RUST/alloc/src/raw_vec/mod.rs
+  |
+  | pub(crate) struct RawVec<T, A: Allocator = Global> {
+  |                   ^^^^^^
 note: required because it appears within the type `Vec<Option<dynamic_module::GlobalRefEntry>>`
  --> $RUST/alloc/src/vec/mod.rs
+  |
+  | pub struct Vec<T, #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global> {
+  |            ^^^
   = note: required for `RefCell<Vec<Option<dynamic_module::GlobalRefEntry>>>` to implement `Send`
   = note: 1 redundant requirement hidden
   = note: required for `Arc<RefCell<Vec<Option<dynamic_module::GlobalRefEntry>>>>` to implement `Send`
@@ -3363,8 +4161,14 @@ note: required because it appears within the type `eval::green::GreenRuntime`
   = note: required for `std::ptr::Unique<eval::green::GreenRuntime>` to implement `Send`
 note: required because it appears within the type `std::boxed::Box<eval::green::GreenRuntime>`
  --> $RUST/alloc/src/boxed.rs
+  |
+  | pub struct Box<
+  |            ^^^
 note: required because it appears within the type `Option<std::boxed::Box<eval::green::GreenRuntime>>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
   = note: required for `RefCell<Option<std::boxed::Box<eval::green::GreenRuntime>>>` to implement `Send`
 note: required because it appears within the type `eval::world::World`
  --> src/emacs_core/runtime/eval/world.rs
@@ -3379,6 +4183,9 @@ note: required because it appears within the type `eval::world::green_owner::Bat
   |                   ^^^^^
 note: required because it appears within the type `Option<eval::world::green_owner::Baton>`
  --> $RUST/core/src/option.rs
+  |
+  | pub enum Option<T> {
+  |          ^^^^^^
 note: required because it appears within the type `ParallelHeapEra<'static>`
  --> src/tagged/gc/mutator_registration.rs
   |

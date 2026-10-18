@@ -2793,10 +2793,11 @@ pub use facade_mark::{
 };
 pub use mutator_registration::{
     AllStopped, AllStoppedFailure, CollectionError, CollectionReport, Mode, Mutator, MutatorEntry,
-    MutatorFinishFailure, MutatorKey, MutatorPermit, MutatorStartFailure, OwnerPublication,
-    OwnerRootSlot, ParallelHeapEra, Phase, RegistrationCensus, RegistrationError, Rendezvous,
-    RendezvousError, Request, ResumeGcImage, ResumeGcImageFailure, RootedRetireFailure, RunAccess,
-    RunSlice, SliceRoot, Snapshot, StoppedSummaries, YoungWorkerLoan,
+    MutatorFinishFailure, MutatorKey, MutatorPermit, MutatorStartFailure, NativeReturn,
+    NativeRoots, OwnerPublication, OwnerRootSlot, ParallelHeapEra, Phase, RegistrationCensus,
+    RegistrationError, Rendezvous, RendezvousError, Request, ResumeGcImage, ResumeGcImageFailure,
+    RootedRetireFailure, RunAccess, RunSlice, SliceRoot, Snapshot, StoppedSummaries,
+    YoungWorkerLoan,
 };
 
 pub(crate) use mutator_registration::{OwnerRootAdmission, StoppedRootAdmission};
