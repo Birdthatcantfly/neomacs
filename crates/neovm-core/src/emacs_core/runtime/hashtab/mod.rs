@@ -766,8 +766,10 @@ pub(crate) fn builtin_copy_hash_table(args: Vec<Value>) -> EvalResult {
             let mut new_table = args[0].as_hash_table().unwrap().clone();
             if hash_test_parity_enabled() {
                 // GNU copies entries and test functions, but a running test's
-                // logical immutability belongs only to its original table.
-                new_table.mutable = true;
+                // logical immutability belongs only to its original table:
+                // the copy's nesting count starts at zero even when the
+                // source is mid-test (Rev R2).
+                new_table.test_depth = std::sync::atomic::AtomicU8::new(0);
             }
             Ok(with_tagged_heap(|h| h.alloc_hash_table(new_table)))
         }

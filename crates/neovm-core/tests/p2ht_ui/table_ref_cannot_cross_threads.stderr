@@ -1,0 +1,80 @@
+error[E0277]: `*mut HashTableObj` cannot be sent between threads safely
+ --> tests/p2ht_ui/table_ref_cannot_cross_threads.rs:7:28
+  |
+7 |         std::thread::spawn(move || drop(lease));
+  |         ------------------ -------^^^^^^^^^^^^
+  |         |                  |
+  |         |                  `*mut HashTableObj` cannot be sent between threads safely
+  |         |                  within this `{closure@$DIR/tests/p2ht_ui/table_ref_cannot_cross_threads.rs:7:28: 7:35}`
+  |         required by a bound introduced by this call
+  |
+  = help: within `{closure@$DIR/tests/p2ht_ui/table_ref_cannot_cross_threads.rs:7:28: 7:35}`, the trait `Send` is not implemented for `*mut HashTableObj`
+note: required because it appears within the type `TableRef<'_>`
+ --> src/tagged/gc/mutator_registration/table_authority.rs
+  |
+  | pub struct TableRef<'access> {
+  |            ^^^^^^^^
+note: required because it's used within this closure
+ --> tests/p2ht_ui/table_ref_cannot_cross_threads.rs:7:28
+  |
+7 |         std::thread::spawn(move || drop(lease));
+  |                            ^^^^^^^
+note: required by a bound in `spawn`
+ --> $RUST/std/src/thread/functions.rs
+
+error[E0277]: `Rc<()>` cannot be sent between threads safely
+ --> tests/p2ht_ui/table_ref_cannot_cross_threads.rs:7:28
+  |
+7 |         std::thread::spawn(move || drop(lease));
+  |         ------------------ -------^^^^^^^^^^^^
+  |         |                  |
+  |         |                  `Rc<()>` cannot be sent between threads safely
+  |         |                  within this `{closure@$DIR/tests/p2ht_ui/table_ref_cannot_cross_threads.rs:7:28: 7:35}`
+  |         required by a bound introduced by this call
+  |
+  = help: within `{closure@$DIR/tests/p2ht_ui/table_ref_cannot_cross_threads.rs:7:28: 7:35}`, the trait `Send` is not implemented for `Rc<()>`
+note: required because it appears within the type `PhantomData<Rc<()>>`
+ --> $RUST/core/src/marker.rs
+note: required because it appears within the type `TableRef<'_>`
+ --> src/tagged/gc/mutator_registration/table_authority.rs
+  |
+  | pub struct TableRef<'access> {
+  |            ^^^^^^^^
+note: required because it's used within this closure
+ --> tests/p2ht_ui/table_ref_cannot_cross_threads.rs:7:28
+  |
+7 |         std::thread::spawn(move || drop(lease));
+  |                            ^^^^^^^
+note: required by a bound in `spawn`
+ --> $RUST/std/src/thread/functions.rs
+
+error[E0277]: `*const ()` cannot be sent between threads safely
+ --> tests/p2ht_ui/table_ref_cannot_cross_threads.rs:7:28
+  |
+7 |         std::thread::spawn(move || drop(lease));
+  |         ------------------ -------^^^^^^^^^^^^
+  |         |                  |
+  |         |                  `*const ()` cannot be sent between threads safely
+  |         |                  within this `{closure@$DIR/tests/p2ht_ui/table_ref_cannot_cross_threads.rs:7:28: 7:35}`
+  |         required by a bound introduced by this call
+  |
+  = help: within `{closure@$DIR/tests/p2ht_ui/table_ref_cannot_cross_threads.rs:7:28: 7:35}`, the trait `Send` is not implemented for `*const ()`
+note: required because it appears within the type `PhantomData<*const ()>`
+ --> $RUST/core/src/marker.rs
+note: required because it appears within the type `TaggedValue`
+ --> src/tagged/value.rs
+  |
+  | pub struct TaggedValue(pub(crate) usize, ThreadConfined);
+  |            ^^^^^^^^^^^
+note: required because it appears within the type `TableRef<'_>`
+ --> src/tagged/gc/mutator_registration/table_authority.rs
+  |
+  | pub struct TableRef<'access> {
+  |            ^^^^^^^^
+note: required because it's used within this closure
+ --> tests/p2ht_ui/table_ref_cannot_cross_threads.rs:7:28
+  |
+7 |         std::thread::spawn(move || drop(lease));
+  |                            ^^^^^^^
+note: required by a bound in `spawn`
+ --> $RUST/std/src/thread/functions.rs

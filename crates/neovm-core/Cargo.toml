@@ -208,6 +208,10 @@ name = "p1rv_contracts"
 path = "tests/p1rv_contracts.rs"
 
 [[test]]
+name = "p2ht_contracts"
+path = "tests/p2ht_contracts.rs"
+
+[[test]]
 name = "compat_all"
 path = "tests/compat_all.rs"
 

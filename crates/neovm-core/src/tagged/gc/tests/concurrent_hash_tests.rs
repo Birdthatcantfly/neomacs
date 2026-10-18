@@ -30,6 +30,16 @@ fn boxed_table(table: LispHashTable) -> Box<HashTableObj> {
     })
 }
 
+/// The Rev R2 nesting count: 0 outside any user test, one per in-flight
+/// activation on the table (was the `mutable` bool).
+fn depth(table: crate::emacs_core::value::Value) -> u8 {
+    table
+        .as_hash_table()
+        .unwrap()
+        .test_depth
+        .load(std::sync::atomic::Ordering::Acquire)
+}
+
 fn address(table: &HashTableObj) -> usize {
     table as *const HashTableObj as usize
 }
@@ -1178,7 +1188,7 @@ fn tier_h_user_test_guards_inhibit_gc_without_cow_and_restore_after_all_exits() 
 
         with_user_test_guard(&mut context, table, |context| {
             assert_eq!(context.gc_inhibit_depth, 1);
-            assert!(!table.as_hash_table().unwrap().mutable);
+            assert_eq!(depth(table), 1);
             with_user_test_guard(context, table, |context| {
                 assert_eq!(context.gc_inhibit_depth, 1);
                 assert_eq!(
@@ -1223,7 +1233,7 @@ fn tier_h_user_test_guards_inhibit_gc_without_cow_and_restore_after_all_exits() 
                 Some("hash table test modifies table")
             );
             assert_eq!(data[1], table);
-            assert!(table.as_hash_table().unwrap().mutable);
+            assert_eq!(depth(table), 0);
             assert_eq!(context.gc_inhibit_depth, 0);
             assert!(context.user_test_gc_accounting_pointer().is_none());
             assert_user_guard_did_not_enter_tier_h(&context, table, epoch);
@@ -1236,7 +1246,7 @@ fn tier_h_user_test_guards_inhibit_gc_without_cow_and_restore_after_all_exits() 
             let result =
                 with_user_test_guard(&mut context, table, |context| context.eval_str(exit));
             assert!(result.is_err());
-            assert!(table.as_hash_table().unwrap().mutable);
+            assert_eq!(depth(table), 0);
             assert_eq!(context.gc_inhibit_depth, 0);
             assert!(context.user_test_gc_accounting_pointer().is_none());
             assert_user_guard_did_not_enter_tier_h(&context, table, epoch);
@@ -1248,7 +1258,7 @@ fn tier_h_user_test_guards_inhibit_gc_without_cow_and_restore_after_all_exits() 
             });
         }));
         assert!(unwind.is_err());
-        assert!(table.as_hash_table().unwrap().mutable);
+        assert_eq!(depth(table), 0);
         assert_eq!(context.gc_inhibit_depth, 0);
         assert!(context.user_test_gc_accounting_pointer().is_none());
         assert_eq!(context.gc_count, gc_count);

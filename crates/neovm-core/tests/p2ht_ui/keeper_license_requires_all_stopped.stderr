@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+ --> tests/p2ht_ui/keeper_license_requires_all_stopped.rs:9:46
+  |
+9 |         let _license = KeeperTableMut::enter(owner, table);
+  |                        --------------------- ^^^^^ expected `&AllStopped<'_>`, found `&mut Mutator<'_>`
+  |                        |
+  |                        arguments to this function are incorrect
+  |
+  = note:      expected reference `&AllStopped<'_>`
+          found mutable reference `&mut Mutator<'static>`
+note: associated function defined here
+ --> src/tagged/gc/mutator_registration/table_authority.rs
+  |
+  |     pub fn enter(
+  |            ^^^^^

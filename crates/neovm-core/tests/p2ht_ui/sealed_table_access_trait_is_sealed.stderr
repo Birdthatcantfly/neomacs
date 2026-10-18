@@ -1,0 +1,39 @@
+error[E0046]: not all trait items implemented, missing: `authority_word`, `guarded_table`
+ --> tests/p2ht_ui/sealed_table_access_trait_is_sealed.rs:8:1
+  |
+8 | impl SealedTableAccess for ForgedTableAccess {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `authority_word`, `guarded_table` in implementation
+  |
+  = help: implement the missing item: `fn authority_word(&self) -> &Atomic<u64> { todo!() }`
+  = help: implement the missing item: `fn guarded_table(&self) -> &LispHashTable { todo!() }`
+
+error[E0277]: the trait bound `ForgedTableAccess: gc::mutator_registration::table_authority::seal::Sealed` is not satisfied
+ --> tests/p2ht_ui/sealed_table_access_trait_is_sealed.rs:8:28
+  |
+8 | impl SealedTableAccess for ForgedTableAccess {}
+  |                            ^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `gc::mutator_registration::table_authority::seal::Sealed` is not implemented for `ForgedTableAccess`
+ --> tests/p2ht_ui/sealed_table_access_trait_is_sealed.rs:6:1
+  |
+6 | struct ForgedTableAccess;
+  | ^^^^^^^^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `gc::mutator_registration::table_authority::seal::Sealed`
+ --> src/tagged/gc/mutator_registration/table_authority.rs
+  |
+  | impl seal::Sealed for TableRef<'_> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `TableRef<'_>`
+  | impl seal::Sealed for TableMut<'_> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `TableMut<'_>`
+  | impl seal::Sealed for KeeperTableMut<'_> {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `KeeperTableMut<'_>`
+note: required by a bound in `SealedTableAccess`
+ --> src/tagged/gc/mutator_registration/table_authority.rs
+  |
+  | pub trait SealedTableAccess: seal::Sealed {
+  |                              ^^^^^^^^^^^^ required by this bound in `SealedTableAccess`
+  = note: `SealedTableAccess` is a "sealed trait", because to implement it you also need to implement `neovm_core::tagged::gc::mutator_registration::table_authority::seal::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following types implement the trait:
+            neovm_core::tagged::gc::TableRef<'_>
+            neovm_core::tagged::gc::TableMut<'_>
+            neovm_core::tagged::gc::KeeperTableMut<'_>

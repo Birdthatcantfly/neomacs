@@ -1,0 +1,476 @@
+//! Proof 2 sealed authority for shared hash tables (design §2.1/§2.2/§2.3).
+//!
+//! Three lease types are the only callers of the authority word appended to
+//! [`HashTableStorage`]: a reader capability minted from a live run access,
+//! a writer capability likewise, and the collector's stop-all license minted
+//! from [`AllStopped`]. No production Sim/Green path constructs them; the
+//! proof executor (stage B3+) is their consumer. The word protocol matches
+//! the B1 loom model exactly: readers CAS-increment the low-bit count and
+//! never serialise with each other, a writer takes bit 63 with one
+//! uncontended CAS from a fully quiescent word — which is the drain — and
+//! semantic revalidation across user code stays on `switch_epoch`, not this
+//! word.
+
+use std::marker::PhantomData;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use super::{AllStopped, RegistrationError, RunAccess};
+use crate::emacs_core::value::HashTableStorage;
+use crate::emacs_core::value::LispHashTable;
+use crate::tagged::header::HashTableObj;
+use crate::tagged::value::{TAG_MASK, TaggedValue};
+
+/// Bit 63: a writer holds the table across one Rust-side edit.
+pub(crate) const WRITER: u64 = 1 << 63;
+/// Low 47 bits: in-flight sealed readers walking storage.
+pub(crate) const COUNT_MASK: u64 = (1 << 47) - 1;
+
+/// Spin shape before each yield (Rev B1-Q2): 64 `spin_loop` hints, then
+/// `yield_now`, repeated. Never park or futex — a writer holds WRITER only
+/// across a Rust-side edit with no Lisp, no allocation callback and no
+/// safepoint inside, so the hold is short by construction.
+const SPIN_HINTS: usize = 64;
+/// Debug-only starvation tripwire: a writer or reader that cannot make
+/// progress after this many yield rounds means the protocol is being used
+/// across a safepoint or Lisp call, which the design forbids.
+#[cfg(debug_assertions)]
+const MAX_YIELD_ROUNDS: u64 = 1 << 22;
+
+/// A fully quiescent word: no writer, no readers.
+#[inline]
+pub(crate) fn quiescent(word: &AtomicU64) -> bool {
+    word.load(Ordering::Acquire) == 0
+}
+
+/// Sealed reader enter: CAS-increment the count, refusing while WRITER is
+/// set (retry with the Rev B1-Q2 spin/yield shape). Parallel readers never
+/// block each other — only this one word is shared.
+#[inline]
+pub(crate) fn reader_enter(word: &AtomicU64) {
+    let mut rounds = 0u64;
+    loop {
+        let current = word.load(Ordering::Acquire);
+        if current & WRITER == 0 {
+            debug_assert_eq!(current & !COUNT_MASK, 0, "reserved authority bits set");
+            if word
+                .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return;
+            }
+        }
+        for _ in 0..SPIN_HINTS {
+            std::hint::spin_loop();
+        }
+        std::thread::yield_now();
+        rounds += 1;
+        #[cfg(debug_assertions)]
+        debug_assert!(rounds < MAX_YIELD_ROUNDS, "reader_enter starved");
+    }
+}
+
+/// Sealed reader exit: plain Release decrement of the count.
+#[inline]
+pub(crate) fn reader_exit(word: &AtomicU64) {
+    let was = word.fetch_sub(1, Ordering::Release);
+    debug_assert!(was & COUNT_MASK > 0, "reader_exit without a reader count");
+    debug_assert!(was & WRITER == 0, "reader count held across a writer");
+}
+
+/// Sealed writer enter: one CAS from a fully quiescent word. Succeeding
+/// means every in-flight reader has drained (the B1 `writer_drains_readers`
+/// case); new readers refuse while WRITER is set.
+#[inline]
+pub(crate) fn writer_enter(word: &AtomicU64) {
+    let mut rounds = 0u64;
+    loop {
+        if word
+            .compare_exchange_weak(0, WRITER, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            debug_assert_eq!(word.load(Ordering::Acquire), WRITER);
+            return;
+        }
+        for _ in 0..SPIN_HINTS {
+            std::hint::spin_loop();
+        }
+        std::thread::yield_now();
+        rounds += 1;
+        #[cfg(debug_assertions)]
+        debug_assert!(rounds < MAX_YIELD_ROUNDS, "writer_enter drain starved");
+    }
+}
+
+/// Sealed writer exit: plain Release store of the quiescent word.
+#[inline]
+pub(crate) fn writer_exit(word: &AtomicU64) {
+    word.store(0, Ordering::Release);
+}
+
+/// The seal. No type outside this module can name it, so no out-of-module
+/// `impl SealedTableAccess` can extend the capability surface (fixture (f)).
+mod seal {
+    pub trait Sealed {}
+}
+
+/// The sealed table-access capability: reaching a shared hash table's
+/// storage through the authority word. Implemented only by the three lease
+/// types below; the private supertrait makes further implementations a
+/// compile error.
+pub trait SealedTableAccess: seal::Sealed {
+    /// The authority word this lease guards. Sealed: only lease types can
+    /// expose it, and only the protocol functions above may change it.
+    fn authority_word(&self) -> &AtomicU64;
+
+    /// The guarded table. Callers see only what the lease's own methods
+    /// hand out; this exists for the lease implementations and in-crate
+    /// assertions, not for storage walks.
+    fn guarded_table(&self) -> &LispHashTable;
+}
+
+/// Validate a table value and take its object pointer. No reference into
+/// the payload is created: leases reach storage through the pointer under
+/// the word protocol only.
+fn table_object(table: TaggedValue) -> Result<*mut HashTableObj, RegistrationError> {
+    if table.veclike_type() != Some(crate::tagged::header::VecLikeType::HashTable) {
+        return Err(RegistrationError::Publication);
+    }
+    let ptr = (table.bits() & !TAG_MASK) as *mut HashTableObj;
+    if ptr.is_null() || (ptr as usize) & TAG_MASK != 0 {
+        return Err(RegistrationError::Publication);
+    }
+    Ok(ptr)
+}
+
+/// A reader capability for one shared hash table (design §2.2).
+///
+/// Minted only from a live [`RunAccess`] — possession is compiler-checkable
+/// evidence of a registered, thread-pinned, same-heap owner. `!Send`,
+/// `!Sync`, `!Clone`: the lease cannot cross a thread or alias. Its read
+/// methods take the READER_COUNT for the duration of one storage walk and
+/// copy whole tagged words out; no `&LispHashTable` and no storage slice
+/// escapes. The minting owner's root slot keeps the table object alive for
+/// the lease's lifetime.
+pub struct TableRef<'access> {
+    table: *mut HashTableObj,
+    value: TaggedValue,
+    _access: PhantomData<&'access ()>,
+    _thread: PhantomData<Rc<()>>,
+}
+
+/// A writer capability for one shared hash table (design §2.2).
+///
+/// Minted only from a live [`RunAccess`], which it borrows exclusively for
+/// its lifetime: one writer lease per owner at a time (an owner's own
+/// in-flight reader would otherwise dead-lock the drain). Its edit methods
+/// hold WRITER across the Rust-side edit only — no Lisp, no safepoint, no
+/// manager lock — reusing the serial mutation body unchanged.
+pub struct TableMut<'access> {
+    table: *mut HashTableObj,
+    value: TaggedValue,
+    _access: PhantomData<&'access mut ()>,
+    _thread: PhantomData<Rc<()>>,
+}
+
+/// The collector's stop-all writer license (design §2.2).
+///
+/// Minted only from [`AllStopped`]: every owner is stopped, so the word
+/// must already be quiescent and the license edits without taking WRITER.
+/// This is the "other threads cannot reach it any other way" clause for
+/// the keeper's weak sweeps and pending-entry handling.
+pub struct KeeperTableMut<'stop> {
+    table: *mut HashTableObj,
+    value: TaggedValue,
+    _stop: PhantomData<&'stop ()>,
+    _thread: PhantomData<Rc<()>>,
+}
+
+impl seal::Sealed for TableRef<'_> {}
+impl seal::Sealed for TableMut<'_> {}
+impl seal::Sealed for KeeperTableMut<'_> {}
+
+macro_rules! impl_sealed_table_access {
+    ($ty:ty) => {
+        impl SealedTableAccess for $ty {
+            #[inline]
+            fn authority_word(&self) -> &AtomicU64 {
+                // SAFETY: the mint validated the object and the lease keeps
+                // the table alive (rooted value; stop-all for the keeper).
+                unsafe { &(*self.table).table.data.authority }
+            }
+
+            #[inline]
+            fn guarded_table(&self) -> &LispHashTable {
+                // SAFETY: same liveness; read-only reach under the lease's
+                // own protocol (callers of THIS method are in-crate).
+                unsafe { &(*self.table).table }
+            }
+        }
+    };
+}
+
+impl_sealed_table_access!(TableRef<'_>);
+impl_sealed_table_access!(TableMut<'_>);
+impl_sealed_table_access!(KeeperTableMut<'_>);
+
+impl Drop for TableRef<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        // The lease's scope is the storage walk's extent: releasing the
+        // count at drop is the protocol (the B1 model's reader-exit assert
+        // checks the pairing). A dropped reader lease can never leave WRITER
+        // set — readers never hold that bit.
+        // SAFETY: the count was taken at mint; this pairs with it.
+        let word = unsafe { &(*self.table).table.data.authority };
+        reader_exit(word);
+    }
+}
+
+impl<'access> TableRef<'access> {
+    /// Mint a reader lease. The run access proves a registered owner on
+    /// this thread; the table value must be one the owner has rooted (B2
+    /// tests hold it on their own stack; the B3 executor passes slot
+    /// homes). Pending dump entries are hydrated here, before any word is
+    /// taken, matching `as_hash_table`'s first-access contract.
+    pub fn enter(
+        access: &mut RunAccess<'_, 'access>,
+        table: TaggedValue,
+    ) -> Result<Self, RegistrationError> {
+        access.owner.check_thread()?;
+        let ptr = table_object(table)?;
+        // SAFETY: the mint validated the object; hydration is a one-time
+        // serial-world edit performed before any reader counts exist.
+        unsafe {
+            if (*ptr).table.needs_hydration() {
+                (*ptr).table.hydrate_pending();
+            }
+            reader_enter(&(*ptr).table.data.authority);
+        }
+        Ok(Self {
+            table: ptr,
+            value: table,
+            _access: PhantomData,
+            _thread: PhantomData,
+        })
+    }
+
+    /// One storage walk under the reader count: `f` sees a table no writer
+    /// is editing (writers only proceed after this count drains). Copy
+    /// whole tagged words out; revalidation across user code is the
+    /// caller's `switch_epoch` protocol, not this word.
+    pub fn read<R>(&self, f: impl FnOnce(&HashTableStorage) -> R) -> R {
+        // SAFETY: the lease keeps the rooted table alive; the count taken
+        // at mint excludes any concurrent writer for the whole walk.
+        let storage = unsafe { &(*self.table).table.data };
+        f(storage)
+    }
+}
+
+impl Drop for TableMut<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: WRITER was taken at mint; the edit is done or unwound —
+        // either way the Rust-side edit section has ended and the word
+        // returns to quiescent.
+        let word = unsafe { &(*self.table).table.data.authority };
+        writer_exit(word);
+    }
+}
+
+impl<'access> TableMut<'access> {
+    /// Mint a writer lease. Borrows the run access exclusively for the
+    /// lease's lifetime: one writer per owner, and never alongside that
+    /// owner's own reader lease (the drain would wait on itself).
+    pub fn enter(
+        access: &mut RunAccess<'_, 'access>,
+        table: TaggedValue,
+    ) -> Result<Self, RegistrationError> {
+        access.owner.check_thread()?;
+        let ptr = table_object(table)?;
+        // SAFETY: the mint validated the object; hydration happens inside
+        // the serial edit body itself, under WRITER.
+        unsafe {
+            writer_enter(&(*ptr).table.data.authority);
+        }
+        Ok(Self {
+            table: ptr,
+            value: table,
+            _access: PhantomData,
+            _thread: PhantomData,
+        })
+    }
+
+    /// One Rust-side edit under WRITER: the drain has already happened at
+    /// mint, so `f` is the table's only editor. The body reuses the serial
+    /// choke point unchanged — `switch_epoch` bump, plan invalidation,
+    /// hydration, heap-write note — one code path, not a fork (design
+    /// §2.2). No Lisp, no safepoint, no allocation inside `f`.
+    pub fn edit<R>(&mut self, f: impl FnOnce(&mut LispHashTable) -> R) -> R {
+        // SAFETY: WRITER is held, so no sealed reader is in flight and the
+        // serial body's single-editor assumption holds; the table is rooted
+        // for the lease's lifetime.
+        unsafe {
+            crate::tagged::mutate::with_hash_table_mut_inactive(self.value, f)
+                .expect("mint validated the table type")
+        }
+    }
+}
+
+impl Drop for KeeperTableMut<'_> {
+    #[inline]
+    fn drop(&mut self) {
+        // The keeper never takes the word, so there is nothing to release;
+        // the Drop exists to mark the license scoped and must_use-like.
+    }
+}
+
+impl<'stop> KeeperTableMut<'stop> {
+    /// Mint the keeper license. At stop-all no owner can run, so the word
+    /// must already be quiescent — that assertion IS the safety argument
+    /// for editing without the word protocol.
+    pub fn enter(
+        _stopped: &AllStopped<'stop>,
+        table: TaggedValue,
+    ) -> Result<Self, RegistrationError> {
+        let ptr = table_object(table)?;
+        // SAFETY: the mint validated the object.
+        let word = unsafe { &(*ptr).table.data.authority };
+        debug_assert!(
+            quiescent(word),
+            "keeper license on a table with live authority"
+        );
+        Ok(Self {
+            table: ptr,
+            value: table,
+            _stop: PhantomData,
+            _thread: PhantomData,
+        })
+    }
+
+    /// One keeper edit without the word protocol: stop-all proves no
+    /// sealed reader or writer can exist. Same serial body as [`TableMut`].
+    pub fn edit<R>(&mut self, f: impl FnOnce(&mut LispHashTable) -> R) -> R {
+        // SAFETY: every owner is stopped; the serial single-editor
+        // assumption holds without taking the word.
+        unsafe {
+            crate::tagged::mutate::with_hash_table_mut_inactive(self.value, f)
+                .expect("mint validated the table type")
+        }
+    }
+}
+
+static_assertions::assert_not_impl_any!(TableRef<'static>: Send, Sync, Clone, Copy);
+static_assertions::assert_not_impl_any!(TableMut<'static>: Send, Sync, Clone, Copy);
+static_assertions::assert_not_impl_any!(KeeperTableMut<'static>: Send, Sync, Clone, Copy);
+
+/// The §2.3 convention guard: the restricted executor must reach shared
+/// hash tables only through the sealed op bodies added in stage B3 —
+/// never by naming the serial choke points or the observation helpers'
+/// targets directly. This scans the executor's own source and fails on a
+/// banned path, so a future op body that bypasses the seal trips a test
+/// rather than silently forking the mutation path.
+#[cfg(test)]
+#[test]
+fn restricted_lisp_does_not_name_the_serial_choke_points() {
+    let source = include_str!("restricted_lisp.rs");
+    for banned in [
+        "with_hash_table_mut",
+        "as_hash_table",
+        "mutate::",
+        "table_authority",
+    ] {
+        assert!(
+            !source.contains(banned),
+            "restricted_lisp.rs names `{banned}`: the executor must go through the sealed ops"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn word_transitions_match_the_b1_model() {
+        let word = std::sync::Arc::new(AtomicU64::new(0));
+        assert!(quiescent(&word));
+
+        // Parallel readers nest as a count and never set the reserved bit.
+        reader_enter(&word);
+        reader_enter(&word);
+        assert_eq!(word.load(Ordering::Acquire), 2);
+        assert!(!quiescent(&word));
+
+        // A writer must drain first: it cannot take WRITER while readers
+        // are in flight. The B1 model proved this exhaustively; here the
+        // live functions must show the same refusal.
+        let writer_word = std::sync::Arc::clone(&word);
+        let blocked = std::thread::spawn(move || {
+            writer_enter(&writer_word);
+            writer_word.load(Ordering::Acquire)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Readers drain; the waiting writer then holds the whole word.
+        reader_exit(&word);
+        reader_exit(&word);
+        let held = blocked.join().expect("writer must finish after the drain");
+        assert_eq!(held, WRITER);
+        assert!(!quiescent(&word));
+
+        // Writer exit restores full quiescence: readers can enter again.
+        writer_exit(&word);
+        assert!(quiescent(&word));
+        reader_enter(&word);
+        assert_eq!(word.load(Ordering::Acquire), 1);
+        reader_exit(&word);
+        assert!(quiescent(&word));
+    }
+
+    #[test]
+    fn parallel_reader_counts_never_exceed_their_owners() {
+        let word = AtomicU64::new(0);
+        let observed = AtomicU64::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..1000 {
+                        reader_enter(&word);
+                        let now = word.load(Ordering::Acquire);
+                        observed.fetch_max(now, Ordering::AcqRel);
+                        reader_exit(&word);
+                    }
+                });
+            }
+        });
+        assert!(quiescent(&word), "every count is returned");
+        assert!(
+            observed.load(Ordering::Acquire) <= 4,
+            "the word only counts in-flight readers"
+        );
+    }
+
+    #[test]
+    fn reserved_bits_outside_the_count_are_rejected_by_readers() {
+        // A word with WRITER set: readers must refuse (spin) rather than
+        // increment under a writer. Verified by observing no count change
+        // over a bounded window, then clearing so the probe can finish.
+        let word = std::sync::Arc::new(AtomicU64::new(WRITER));
+        let reader_word = std::sync::Arc::clone(&word);
+        let probe = std::thread::spawn(move || {
+            reader_enter(&reader_word);
+            reader_word.load(Ordering::Acquire)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(
+            word.load(Ordering::Acquire),
+            WRITER,
+            "no reader count while the writer holds the word"
+        );
+        writer_exit(&word);
+        let entered = probe.join().expect("reader enters after writer exit");
+        assert_eq!(entered, 1);
+        reader_exit(&word);
+        assert!(quiescent(&word));
+    }
+}

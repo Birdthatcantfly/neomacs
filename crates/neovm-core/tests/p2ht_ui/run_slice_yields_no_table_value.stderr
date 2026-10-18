@@ -1,0 +1,5 @@
+error[E0599]: no method named `value` found for struct `SliceRoot<'brand>` in the current scope
+ --> tests/p2ht_ui/run_slice_yields_no_table_value.rs:9:54
+  |
+9 |     run.with_slice(|slice| slice.bind(home).unwrap().value()).unwrap()
+  |                                                      ^^^^^ method not found in `SliceRoot<'_>`

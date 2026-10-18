@@ -1,0 +1,5 @@
+error: cannot construct `TableMut<'_>` with struct literal syntax due to private fields
+ --> tests/p2ht_ui/table_mut_cannot_be_constructed.rs:7:5
+  |
+7 |     TableMut {}
+  |     ^^^^^^^^

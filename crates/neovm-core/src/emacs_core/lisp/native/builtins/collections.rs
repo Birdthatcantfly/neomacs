@@ -859,7 +859,13 @@ pub(crate) fn hash_table_has_user_test(table: Value) -> bool {
 }
 
 fn check_mutable_hash_table(table: Value) -> Result<(), Flow> {
-    if table.as_hash_table().is_some_and(|ht| !ht.mutable) {
+    // Rev R2: the nesting count replaces the bool; GNU's table-level rule
+    // carries over — any owner's mutation signals while any owner is inside
+    // a user test or hash function on this table (depth > 0).
+    if table
+        .as_hash_table()
+        .is_some_and(|ht| ht.test_depth.load(std::sync::atomic::Ordering::Acquire) != 0)
+    {
         return Err(signal(
             "error",
             vec![Value::string("hash table test modifies table"), table],
@@ -879,13 +885,18 @@ fn hash_table_user_defined_call(
             eval.apply(function, args)
         });
     }
-    if table.as_hash_table().is_some_and(|ht| !ht.mutable) {
+    if table
+        .as_hash_table()
+        .is_some_and(|ht| ht.test_depth.load(std::sync::atomic::Ordering::Acquire) != 0)
+    {
         return eval.apply(function, args);
     }
 
-    let _ = table.with_hash_table_mut(|ht| ht.mutable = false);
+    let _ = table
+        .with_hash_table_mut(|ht| ht.test_depth.store(1, std::sync::atomic::Ordering::Release));
     let result = eval.apply(function, args);
-    let _ = table.with_hash_table_mut(|ht| ht.mutable = true);
+    let _ = table
+        .with_hash_table_mut(|ht| ht.test_depth.store(0, std::sync::atomic::Ordering::Release));
     result
 }
 

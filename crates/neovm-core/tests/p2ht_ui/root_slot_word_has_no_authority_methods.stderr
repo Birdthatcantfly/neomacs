@@ -1,0 +1,5 @@
+error[E0599]: no method named `authority_word` found for reference `&OwnerRootSlot<'_>` in the current scope
+ --> tests/p2ht_ui/root_slot_word_has_no_authority_methods.rs:7:10
+  |
+7 |     home.authority_word();
+  |          ^^^^^^^^^^^^^^ method not found in `&OwnerRootSlot<'_>`

@@ -205,6 +205,21 @@ fn load_hash_table_makes_all_dumped_entries_iterable() {
         2,
         "loaded hash tables must keep GNU maphash traversal in sync with live entries"
     );
+    // Proof 2 (R6): the dump never serialized in-flight state, so a restored
+    // table starts quiescent — no authority word, no user-test nesting count.
+    assert_eq!(
+        table
+            .data
+            .authority
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "restored tables start with a quiescent authority word"
+    );
+    assert_eq!(
+        table.test_depth.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "restored tables start outside any user test"
+    );
 }
 
 fn write_raw_word(bytes: &mut [u8], offset: usize, word: usize) {

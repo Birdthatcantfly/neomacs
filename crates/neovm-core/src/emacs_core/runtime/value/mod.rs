@@ -702,18 +702,45 @@ impl LambdaData {
 // ---------------------------------------------------------------------------
 
 /// Hash table with configurable test function.
-#[derive(Clone, Debug)]
+///
+/// `test_depth` (proof 2 Rev R2) is the atomic nesting count that replaced
+/// GNU's `mutable` bool: zero means "no owner is inside a user test or hash
+/// function on this table", and every in-flight activation counts, so two
+/// owners' tests nest to 2 and any owner's mutation signals while the count
+/// is nonzero. It sits in the bool's exact field position (1 byte, alignment
+/// 1, `data` still last), so no downstream offset moves. `Clone` copies the
+/// byte and copy-hash-table resets it to zero explicitly.
+#[derive(Debug)]
 pub struct LispHashTable {
     pub test: HashTableTest,
     pub test_name: Option<SymId>,
     pub user_cmp_function: Option<Value>,
     pub user_hash_function: Option<Value>,
-    pub mutable: bool,
+    pub test_depth: std::sync::atomic::AtomicU8,
     pub size: i64,
     pub weakness: Option<HashTableWeakness>,
     pub rehash_size: f64,
     pub rehash_threshold: f64,
     pub data: HashTableStorage,
+}
+
+impl Clone for LispHashTable {
+    fn clone(&self) -> Self {
+        Self {
+            test: self.test.clone(),
+            test_name: self.test_name,
+            user_cmp_function: self.user_cmp_function,
+            user_hash_function: self.user_hash_function,
+            test_depth: std::sync::atomic::AtomicU8::new(
+                self.test_depth.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+            size: self.size,
+            weakness: self.weakness,
+            rehash_size: self.rehash_size,
+            rehash_threshold: self.rehash_threshold,
+            data: self.data.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -729,7 +756,10 @@ pub struct HashTableEntry {
 /// number; slot order provides GNU-compatible iteration while storing only
 /// the original Lisp key and value. See [`hash_index`] for how an `equal`
 /// table finds a key.
-#[derive(Clone, Debug, Default)]
+///
+/// `Clone` is manual: the proof-2 authority word at the end is zeroed on
+/// every copy rather than copied (see the field's comment).
+#[derive(Debug, Default)]
 pub struct HashTableStorage {
     index: HashIndex,
     slots: Vec<Option<HashTableEntry>>,
@@ -782,6 +812,34 @@ pub struct HashTableStorage {
     /// JIT code that answers a jump table inline guards on it
     /// ([`switch_plan::SWITCH_EPOCH_OFFSET`]).
     pub(crate) switch_epoch: u64,
+    /// Proof 2 sealed authority (design §2.1), appended AFTER `switch_epoch`
+    /// so every existing field offset — in particular the JIT-read
+    /// `SWITCH_EPOCH_OFFSET` — is unchanged. Bit 63 is the WRITER hold
+    /// (taken by one uncontended CAS from a fully quiescent word, which
+    /// drains every in-flight sealed reader); the low 47 bits count sealed
+    /// readers walking storage under the read count. Zero on every fresh,
+    /// copied, dumped and restored table: a new table object never inherits
+    /// another's in-flight state. Only the sealed lease types
+    /// (`table_authority.rs`) touch this word.
+    pub(crate) authority: std::sync::atomic::AtomicU64,
+}
+
+impl Clone for HashTableStorage {
+    fn clone(&self) -> Self {
+        Self {
+            index: self.index.clone(),
+            slots: self.slots.clone(),
+            free_slots: self.free_slots.clone(),
+            user_hashes: self.user_hashes.clone(),
+            user_buckets: self.user_buckets.clone(),
+            pending: self.pending.clone(),
+            switch_plan: self.switch_plan.clone(),
+            switch_epoch: self.switch_epoch,
+            // A copy starts quiescent: it is never mid-drain and never
+            // carries another table object's readers or writer.
+            authority: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
 }
 
 /// Dump entries parked in `HashTableStorage::pending`: each tuple is
@@ -864,6 +922,7 @@ impl HashTableStorage {
             pending: None,
             switch_plan: switch_plan::SwitchPlanCache::default(),
             switch_epoch: 0,
+            authority: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -2178,7 +2237,7 @@ impl LispHashTable {
             test_name: None,
             user_cmp_function: None,
             user_hash_function: None,
-            mutable: true,
+            test_depth: std::sync::atomic::AtomicU8::new(0),
             size,
             weakness,
             rehash_size,
@@ -5718,3 +5777,7 @@ pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
 #[cfg(test)]
 #[path = "tests/gc_generational_hydration_test.rs"]
 mod gc_generational_hydration;
+
+#[cfg(test)]
+#[path = "tests/p2ht_authority_test.rs"]
+mod p2ht_authority;

@@ -1,6 +1,16 @@
 use super::*;
 use crate::emacs_core::value::HashTableTest;
 
+/// The Rev R2 nesting count as seen by assertions: 0 outside any user test,
+/// one per in-flight activation on the table.
+fn depth(table: Value) -> u8 {
+    table
+        .as_hash_table()
+        .unwrap()
+        .test_depth
+        .load(std::sync::atomic::Ordering::Acquire)
+}
+
 fn fixture() -> (Context, Value) {
     crate::test_utils::init_test_tracing();
     let mut context = Context::new();
@@ -37,20 +47,24 @@ fn hash_user_guard_restores_success_and_nested_depth() {
     let (mut context, table) = fixture();
     let other = Value::hash_table(HashTableTest::Eq);
     with_user_test_guard(&mut context, table, |context| {
-        assert!(!table.as_hash_table().unwrap().mutable);
+        assert_eq!(depth(table), 1);
         assert_eq!(context.gc_inhibit_depth, 1);
         with_user_test_guard(context, table, |context| {
+            // Nested on the SAME table: the count reaches 2 where the bool
+            // could only stay false (Rev R2), and the nested activation
+            // adds no GC-inhibit of its own.
+            assert_eq!(depth(table), 2);
             assert_eq!(context.gc_inhibit_depth, 1);
             with_user_test_guard(context, other, |context| {
                 assert_eq!(context.gc_inhibit_depth, 2);
-                assert!(!other.as_hash_table().unwrap().mutable);
+                assert_eq!(depth(other), 1);
             });
-            assert!(other.as_hash_table().unwrap().mutable);
+            assert_eq!(depth(other), 0);
             assert_eq!(context.gc_inhibit_depth, 1);
         });
-        assert!(!table.as_hash_table().unwrap().mutable);
+        assert_eq!(depth(table), 1);
     });
-    assert!(table.as_hash_table().unwrap().mutable);
+    assert_eq!(depth(table), 0);
     assert_eq!(context.gc_inhibit_depth, 0);
 }
 
@@ -76,7 +90,7 @@ fn hash_user_guard_rejects_mutations_before_lookup() {
             Some("hash table test modifies table")
         );
         assert_eq!(data[1], table);
-        assert!(table.as_hash_table().unwrap().mutable);
+        assert_eq!(depth(table), 0);
         assert_eq!(table.as_hash_table().unwrap().data.len(), 1);
         assert_eq!(context.gc_inhibit_depth, 0);
     }
@@ -106,7 +120,7 @@ fn hash_user_guard_allows_reads_other_writes_and_caught_error() {
     })
     .expect("read and independent write must succeed");
     assert_eq!(result.as_fixnum(), Some(106));
-    assert!(table.as_hash_table().unwrap().mutable);
+    assert_eq!(depth(table), 0);
     assert_eq!(context.gc_inhibit_depth, 0);
 }
 
@@ -116,7 +130,7 @@ fn hash_user_guard_restores_after_signal_and_throw() {
     for exit in ["(signal 'error '(guard-signal))", "(throw 'guard-exit 23)"] {
         let result = with_user_test_guard(&mut context, table, |context| context.eval_str(exit));
         assert!(result.is_err(), "non-local exit must escape the callback");
-        assert!(table.as_hash_table().unwrap().mutable);
+        assert_eq!(depth(table), 0);
         assert_eq!(context.gc_inhibit_depth, 0);
         context
             .eval_str(r#"(puthash "stored" 11 neovm-guard-table)"#)
@@ -130,12 +144,12 @@ fn hash_user_guard_restores_after_rust_unwind() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         with_user_test_guard(&mut context, table, |context| {
             assert_eq!(context.gc_inhibit_depth, 1);
-            assert!(!table.as_hash_table().unwrap().mutable);
+            assert_eq!(depth(table), 1);
             panic!("user-test callback unwind");
         });
     }));
     assert!(result.is_err());
-    assert!(table.as_hash_table().unwrap().mutable);
+    assert_eq!(depth(table), 0);
     assert_eq!(context.gc_inhibit_depth, 0);
     assert!(context.user_test_gc_accounting_pointer().is_none());
     context
@@ -242,8 +256,8 @@ fn hash_user_guard_preserves_live_settings_fallback_after_nested_exit() {
         context.eval_str("(signal 'error '(sticky-accounting))")
     });
     assert!(result.is_err());
-    assert!(table.as_hash_table().unwrap().mutable);
-    assert!(other.as_hash_table().unwrap().mutable);
+    assert_eq!(depth(table), 0);
+    assert_eq!(depth(other), 0);
     assert_eq!(context.gc_inhibit_depth, 0);
     assert!(context.user_test_gc_accounting_pointer().is_none());
     context
@@ -334,4 +348,54 @@ fn hash_user_guard_refreshes_dynamic_let_gc_threshold() {
                 < bound_threshold as i128 - hi_threshold as i128
         );
     });
+}
+
+#[test]
+fn hash_user_guard_two_activations_signal_and_unwind_cleanly() {
+    // The R2 loom case in the real engine: two nested activations on one
+    // table, a mutation attempt signals at depth 2, and every exit path
+    // counts back down to zero — including the non-local one.
+    let (mut context, table) = fixture();
+    let result = with_user_test_guard(&mut context, table, |context| {
+        with_user_test_guard(context, table, |context| {
+            assert_eq!(depth(table), 2);
+            context.eval_str(r#"(puthash "stored" 9 neovm-guard-table)"#)
+        })
+    });
+    let error = result.expect_err("mutation at depth 2 must signal");
+    let crate::emacs_core::error::EvalError::Signal { data, .. } = error else {
+        panic!("expected mutation signal");
+    };
+    assert_eq!(
+        data[0].as_str_owned().as_deref(),
+        Some("hash table test modifies table")
+    );
+    assert_eq!(depth(table), 0);
+    assert_eq!(context.gc_inhibit_depth, 0);
+    context
+        .eval_str(r#"(puthash "stored" 12 neovm-guard-table)"#)
+        .expect("writable after both activations unwound");
+}
+
+#[test]
+fn copy_inside_active_test_has_depth_zero() {
+    // The copy site fixture (Rev R2): GNU's copy re-opens its own mutability,
+    // so a copy taken while the source is mid-test starts unprotected.
+    let (mut context, table) = fixture();
+    with_user_test_guard(&mut context, table, |context| {
+        assert_eq!(depth(table), 1);
+        let copy = context
+            .eval_str("(copy-hash-table neovm-guard-table)")
+            .expect("copy inside an active test");
+        assert_eq!(depth(copy), 0, "copy's nesting count starts at zero");
+        assert_eq!(depth(table), 1);
+        context
+            .eval_str(
+                r#"(let ((c (copy-hash-table neovm-guard-table)))
+                     (puthash "fresh" 1 c)
+                     (gethash "fresh" c))"#,
+            )
+            .expect("writing the copy never signals");
+    });
+    assert_eq!(depth(table), 0);
 }

@@ -19,6 +19,7 @@ mod image;
 mod native_extent;
 mod root_slot;
 mod run_slice;
+mod table_authority;
 pub use collection::{CollectionError, CollectionReport};
 use gate::RegistryGuard;
 pub use root_slot::OwnerRootSlot;
@@ -37,6 +38,7 @@ pub use rendezvous::{
 pub(crate) use rendezvous::{OwnerRootAdmission, StoppedRootAdmission};
 
 pub use summaries::{RegistrationCensus, StoppedSummaries};
+pub use table_authority::{KeeperTableMut, SealedTableAccess, TableMut, TableRef};
 pub use token::{
     Mutator, MutatorFinishFailure, MutatorPermit, MutatorStartFailure, OwnerPublication, RunAccess,
     YoungWorkerLoan,
