@@ -1,3 +1,276 @@
+error[E0433]: cannot find `tagged` in `crate`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |     pub(in crate::tagged::gc) fn from_all_stopped(_: &'epoch super::AllStopped<'_>) -> Self {
+  |                   ^^^^^^ could not find `tagged` in the crate root
+
+error[E0433]: cannot find `tagged` in `crate`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |     pub(in crate::tagged::gc) fn legacy(&self) -> &StoppedMutatorsProof {
+  |                   ^^^^^^ could not find `tagged` in the crate root
+
+error[E0433]: cannot find `tagged` in `crate`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  | pub(in crate::tagged::gc) struct ParallelStoppedMutatorsProof<'epoch> {
+  |               ^^^^^^ could not find `tagged` in the crate root
+
+error[E0433]: cannot find `satb` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |     Poisoned(#[from] super::satb::SatbPoisoned),
+  |                             ^^^^ could not find `satb` in the crate root
+
+error[E0433]: cannot find `satb` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |     pub(super) fn fold_satb(&mut self) -> Result<usize, super::satb::SatbPoisoned> {
+  |                                                                ^^^^ could not find `satb` in the crate root
+
+error[E0433]: cannot find `satb` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |     pub(super) fn fold_satb_for_termination(&mut self) -> Result<usize, super::satb::SatbPoisoned> {
+  |                                                                                ^^^^ could not find `satb` in the crate root
+
+error[E0433]: cannot find `satb` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |     fn fold_satb_counts(&mut self) -> Result<SatbFoldCounts, super::satb::SatbPoisoned> {
+  |                                                                     ^^^^ could not find `satb` in the crate root
+
+error[E0433]: cannot find `MarkWord` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |                 .extend(chunk.into_words().into_iter().map(super::MarkWord::value));
+  |                                                                   ^^^^^^^^ could not find `MarkWord` in the crate root
+
+error[E0433]: cannot find `MarkWord` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |                 .extend(chunk.into_words().into_iter().map(super::MarkWord::value));
+  |                                                                   ^^^^^^^^ could not find `MarkWord` in the crate root
+
+error[E0433]: cannot find `young_registry` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |     ) -> Result<(), super::young_registry::YoungRegistryError> {
+  |                            ^^^^^^^^^^^^^^ could not find `young_registry` in the crate root
+
+error[E0433]: cannot find `young_registry` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |     ) -> Result<R, super::young_registry::YoungRegistryError> {
+  |                           ^^^^^^^^^^^^^^ could not find `young_registry` in the crate root
+
+error[E0433]: cannot find `cons_allocator` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |             &mut super::cons_allocator::ConsAllocatorOwner,
+  |                         ^^^^^^^^^^^^^^ could not find `cons_allocator` in the crate root
+
+error[E0433]: cannot find `young_registry` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |             &mut super::young_registry::StoppedYoungLogs<'_>,
+  |                         ^^^^^^^^^^^^^^ could not find `young_registry` in the crate root
+
+error[E0433]: cannot find `young_registry` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |     ) -> Result<R, super::young_registry::YoungRegistryError> {
+  |                           ^^^^^^^^^^^^^^ could not find `young_registry` in the crate root
+
+error[E0433]: cannot find `young_registry` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |             super::young_registry::StoppedYoungLogs::new(&mut heap._satb_layout_reserve, &proof)?;
+  |                    ^^^^^^^^^^^^^^ could not find `young_registry` in the crate root
+
+error[E0433]: cannot find `young_registry` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |         id: super::young_registry::YoungRegistrationId,
+  |                    ^^^^^^^^^^^^^^ could not find `young_registry` in the crate root
+
+error[E0433]: cannot find `young_registry` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |     ) -> Result<super::young_registry::YoungLogLoan, super::young_registry::YoungRegistryError>
+  |                        ^^^^^^^^^^^^^^ could not find `young_registry` in the crate root
+
+error[E0433]: cannot find `young_registry` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |     ) -> Result<super::young_registry::YoungLogLoan, super::young_registry::YoungRegistryError>
+  |                                                             ^^^^^^^^^^^^^^ could not find `young_registry` in the crate root
+
+error[E0433]: cannot find `young_registry` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |         loan: super::young_registry::YoungLogLoan,
+  |                      ^^^^^^^^^^^^^^ could not find `young_registry` in the crate root
+
+error[E0433]: cannot find `young_registry` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |     ) -> Result<(), super::young_registry::YoungLogReturnError> {
+  |                            ^^^^^^^^^^^^^^ could not find `young_registry` in the crate root
+
+error[E0433]: cannot find `young_registry` in `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |     ) -> super::young_registry::YoungRegistrationId {
+  |                 ^^^^^^^^^^^^^^ could not find `young_registry` in the crate root
+
+error[E0425]: cannot find type `AllStopped` in module `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |     pub(in crate::tagged::gc) fn from_all_stopped(_: &'epoch super::AllStopped<'_>) -> Self {
+  |                                                                     ^^^^^^^^^^ not found in `super`
+
+error[E0425]: cannot find type `ConsBlock` in module `super`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |             &[super::ConsBlock],
+  |                      ^^^^^^^^^ not found in `super`
+
+error[E0599]: no method named `record_termination_partial_words` found for mutable reference `&mut TaggedHeap` in the current scope
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  | /         self.heap
+  | |             .record_termination_partial_words(counts.partial_words, &proof);
+  | |             -^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&mut TaggedHeap`
+  | |_____________|
+  |
+
+error[E0599]: no method named `concurrent_mark_running` found for mutable reference `&mut TaggedHeap` in the current scope
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |             !self.heap.concurrent_mark_running(),
+  |                        ^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&mut TaggedHeap`
+
+error[E0609]: no field `satb_handoff` on type `&mut TaggedHeap`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |         let batches = self.heap.satb_handoff.take_all()?;
+  |                                 ^^^^^^^^^^^^ unknown field
+
+error[E0609]: no field `gray_queue` on type `&mut TaggedHeap`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |                 .gray_queue
+  |                  ^^^^^^^^^^ unknown field
+
+error[E0599]: no method named `mutator_gc_entries_world_stopped` found for mutable reference `&mut TaggedHeap` in the current scope
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |         for mutator in self.heap.mutator_gc_entries_world_stopped(&proof) {
+  |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&mut TaggedHeap`
+
+error[E0609]: no field `gray_queue` on type `&mut TaggedHeap`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |                 .gray_queue
+  |                  ^^^^^^^^^^ unknown field
+
+error[E0609]: no field `satb_handoff` on type `&mut TaggedHeap`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |         if !self.heap.satb_handoff.is_empty()?
+  |                       ^^^^^^^^^^^^ unknown field
+
+error[E0599]: no method named `mutator_satb_states` found for mutable reference `&mut TaggedHeap` in the current scope
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |             || self.heap.mutator_satb_states().any(|m| !m.satb.is_empty())
+  |                          ^^^^^^^^^^^^^^^^^^^ method not found in `&mut TaggedHeap`
+
+error[E0599]: no method named `concurrent_mark_running` found for mutable reference `&mut TaggedHeap` in the current scope
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |             !self.heap.concurrent_mark_running(),
+  |                        ^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&mut TaggedHeap`
+
+error[E0599]: no method named `mutator_gc_entries_world_stopped` found for mutable reference `&mut TaggedHeap` in the current scope
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |         for mutator in self.heap.mutator_gc_entries_world_stopped(&proof) {
+  |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&mut TaggedHeap`
+
+error[E0599]: no method named `concurrent_mark_running` found for mutable reference `&mut TaggedHeap` in the current scope
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |             !self.heap.concurrent_mark_running(),
+  |                        ^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&mut TaggedHeap`
+
+error[E0599]: no method named `mutator_gc_entries_world_stopped` found for mutable reference `&mut TaggedHeap` in the current scope
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |         for mutator in self.heap.mutator_gc_entries_world_stopped(&proof) {
+  |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&mut TaggedHeap`
+
+error[E0609]: no field `_satb_layout_reserve` on type `&mut TaggedHeap`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |             ._satb_layout_reserve
+  |              ^^^^^^^^^^^^^^^^^^^^ unknown field
+
+error[E0599]: no method named `concurrent_mark_running` found for mutable reference `&mut TaggedHeap` in the current scope
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |             !self.heap.concurrent_mark_running(),
+  |                        ^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&mut TaggedHeap`
+
+error[E0609]: no field `_satb_layout_reserve` on type `&mut TaggedHeap`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |             ._satb_layout_reserve
+  |              ^^^^^^^^^^^^^^^^^^^^ unknown field
+
+error[E0599]: no method named `concurrent_mark_running` found for mutable reference `&mut TaggedHeap` in the current scope
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |             !self.heap.concurrent_mark_running(),
+  |                        ^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&mut TaggedHeap`
+
+error[E0609]: no field `_satb_layout_reserve` on type `&mut TaggedHeap`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |             super::young_registry::StoppedYoungLogs::new(&mut heap._satb_layout_reserve, &proof)?;
+  |                                                                    ^^^^^^^^^^^^^^^^^^^^ unknown field
+
+error[E0609]: no field `cons_allocator` on type `&mut TaggedHeap`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |         Ok(body(&mut heap.cons_allocator, &mut logs, &heap.cons_blocks))
+  |                           ^^^^^^^^^^^^^^ unknown field
+
+error[E0609]: no field `cons_blocks` on type `&mut TaggedHeap`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |         Ok(body(&mut heap.cons_allocator, &mut logs, &heap.cons_blocks))
+  |                                                            ^^^^^^^^^^^ unknown field
+
+error[E0609]: no field `_satb_layout_reserve` on type `&mut TaggedHeap`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |         self.heap._satb_layout_reserve.take_young_loan(id, &proof)
+  |                   ^^^^^^^^^^^^^^^^^^^^ unknown field
+
+error[E0609]: no field `_satb_layout_reserve` on type `&mut TaggedHeap`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |             ._satb_layout_reserve
+  |              ^^^^^^^^^^^^^^^^^^^^ unknown field
+
+error[E0609]: no field `_satb_layout_reserve` on type `&mut TaggedHeap`
+ --> tests/thread_safety_ui/../../src/tagged/gc/scan_contract.rs
+  |
+  |         self.heap._satb_layout_reserve.current_young_id()
+  |                   ^^^^^^^^^^^^^^^^^^^^ unknown field
+
 error[E0133]: call to unsafe function `SingleMutatorWorld::<'h>::from_heap` is unsafe and requires unsafe block
  --> tests/thread_safety_ui/single_mutator_safe_admission.rs:6:18
   |

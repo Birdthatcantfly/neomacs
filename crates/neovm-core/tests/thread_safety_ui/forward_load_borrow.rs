@@ -1,6 +1,6 @@
-use neovm_core::emacs_core::forward::{FwdDescriptor, LispFwd, alloc_objfwd};
+use neovm_core::emacs_core::forward::{FwdDescriptor, FwdRef, alloc_objfwd};
 use neovm_core::emacs_core::value::Value;
-fn borrow_slot(header: &'static LispFwd) -> &'static Value {
+fn borrow_slot(header: FwdRef) -> &'static Value {
     header.load().expect("object slot")
 }
 fn main() {
