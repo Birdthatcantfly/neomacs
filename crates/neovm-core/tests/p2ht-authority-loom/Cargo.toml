@@ -1,0 +1,33 @@
+[package]
+name = "p2ht-authority-loom"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+autotests = false
+
+# Independent model: no production workspace feature, dependency or engine code.
+[workspace]
+
+[dev-dependencies]
+loom = "=0.7.2"
+static_assertions = "=1.1.0"
+
+[profile.test]
+opt-level = 1
+
+[[test]]
+name = "authority"
+path = "tests/authority.rs"
+
+[[test]]
+name = "revalidate"
+path = "tests/revalidate.rs"
+
+[[test]]
+name = "guard"
+path = "tests/guard.rs"
+
+[[test]]
+name = "growth"
+path = "tests/growth.rs"
