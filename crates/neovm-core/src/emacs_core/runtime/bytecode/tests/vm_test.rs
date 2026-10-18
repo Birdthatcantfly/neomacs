@@ -8581,14 +8581,26 @@ fn vm_sqlite_preserves_i64_errors_and_result_set_lifetime() {
 #[test]
 fn vm_native_stub_clusters_use_direct_dispatch() {
     crate::test_utils::init_test_tracing();
-    assert_eq!(
-        vm_eval_str(
-            r##"(list
-                 (null (fboundp 'debug-timer-check))
-                 (let ((w (inotify-add-watch "/tmp" nil nil)))
+    // GNU compiles src/inotify.c only under HAVE_INOTIFY (src/Makefile.in:
+    // "inotify.o if HAVE_INOTIFY"), and its file-notify backend is kqueue on
+    // Darwin (src/kqueue.c:338,475,505).  NeoVM declares the same split when
+    // it registers these subrs (file_notify/subrs.rs), so the inotify cluster
+    // is three live calls on Linux and three absences elsewhere.
+    let file_notify_probe = if cfg!(target_os = "linux") {
+        r#"(let ((w (inotify-add-watch "/tmp" nil nil)))
                    (list (consp w)
                          (inotify-valid-p w)
-                         (inotify-rm-watch w)))
+                         (inotify-rm-watch w)))"#
+    } else {
+        r#"(list (null (fboundp 'inotify-add-watch))
+                   (null (fboundp 'inotify-rm-watch))
+                   (null (fboundp 'inotify-valid-p)))"#
+    };
+    assert_eq!(
+        vm_eval_str(&format!(
+            r##"(list
+                 (null (fboundp 'debug-timer-check))
+                 {file_notify_probe}
                  (null (fboundp 'inotify-watch-list))
                  (null (fboundp 'inotify-allocated-p))
                  (eq (condition-case err
@@ -8663,7 +8675,7 @@ fn vm_native_stub_clusters_use_direct_dispatch() {
                    (error t))
                  (condition-case nil (gnutls-symmetric-encrypt nil nil nil nil)
                    (error t)))"##
-        ),
+        )),
         r#"OK (t (t t t) t t t t t t t t t t t t t t t t t t t t t t t t t t t t t t t t t t t (t wrong-type-argument wrong-type-argument t t t) t t t t t)"#
     );
 }
