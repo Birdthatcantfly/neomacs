@@ -4463,6 +4463,81 @@ fn phase1_put_text_property_bails_out_of_cursor_only() {
     );
 }
 
+/// Phase 1 — an edit AT the window start keeps the localized-edit replay.
+///
+/// The replay's first retained row is then dirty, nothing above it reuses, and
+/// the walk starts from the same charpos with the NEW text — the same rows GNU
+/// `try_window` re-lays after `try_window_id`'s GIVE_UP (15) declines a window
+/// start inside the changed area (src/xdisp.c:22816-22825). The start marker
+/// stays before text inserted at it (GNU `w->start`), so the position still
+/// denotes the same place; only the window-length bound may decline.
+#[test]
+fn phase1_insert_at_window_start_keeps_the_edit_replay() {
+    let text = "(defun f (a b) (+ a b))\n".repeat(40);
+    let (mut eval, frame_id, _buf_id, _win) = incr_editing_frame(&text, 800, 600);
+    let mut engine = LayoutEngine::new();
+    let m = measure_incremental_relayout(&mut engine, &mut eval, frame_id, |eval| {
+        eval.eval_str("(progn (goto-char (point-min)) (insert \"x\"))")
+            .expect("insert at window start");
+    });
+    assert_eq!(
+        m.stats.edit_windows, 1,
+        "an insertion at the window start relays through the localized-edit replay (got {:?})",
+        m.stats
+    );
+    assert_eq!(
+        m.stats.full_windows, 0,
+        "the bounded replay replaces the full window re-lay (got {:?})",
+        m.stats
+    );
+}
+
+/// A length-changing replacement that spans ACROSS the window start must not
+/// take the localized-edit replay: the start position no longer denotes the
+/// same source text. GNU `try_window_id` gives up for exactly this shape when
+/// the start lies in the changed area (GIVE_UP (15), src/xdisp.c:22816-22825)
+/// and re-lays the window with `try_window` (src/xdisp.c:21052, :21266);
+/// this engine declines the replay and takes the same window-bounded full
+/// re-lay.
+#[test]
+fn phase1_replacement_across_window_start_falls_back() {
+    let line = "(defun f (a b) (+ a b))\n";
+    let text = line.repeat(40);
+    let (mut eval, frame_id, buf_id, win) = incr_editing_frame(&text, 800, 600);
+    // Start the window on the 11th line (1-based 261, 0-based 260) with point
+    // there, so the warm layout keeps the start instead of recentering on BOB.
+    {
+        let buffer = eval.buffer_manager_mut().get_mut(buf_id).expect("buffer");
+        buffer.goto_emacs_byte_pos(neovm_core::buffer::EmacsBytePos::new(260));
+    }
+    {
+        let frame = eval.frame_manager_mut().get_mut(frame_id).expect("frame");
+        let window = frame.find_window_mut(win).expect("window");
+        if let neovm_core::window::Window::Leaf { window_start, .. } = window {
+            *window_start = LispCharPos1::from_one_based_usize(261);
+        }
+    }
+    let mut engine = LayoutEngine::new();
+    let m = measure_incremental_relayout(&mut engine, &mut eval, frame_id, |eval| {
+        // Replace 1-based 257..266 (0-based 256..265) with two characters:
+        // the window start (0-based 260) lies inside the replaced text and the
+        // replacement changes the length by -7.
+        eval.eval_str("(progn (goto-char 257) (delete-region 257 266) (insert \"zz\"))")
+            .expect("replace across window start");
+    });
+    assert_eq!(
+        m.stats.edit_windows, 0,
+        "a length-changing replacement across the window start must not use the \
+         localized-edit replay (got {:?})",
+        m.stats
+    );
+    assert_eq!(
+        m.stats.full_windows, 1,
+        "it falls back to the window-bounded full re-lay GNU try_window performs (got {:?})",
+        m.stats
+    );
+}
+
 /// Phase 1 — a face-attribute change (theme load / `set-face-attribute`) co-moving
 /// with the cursor MUST bail: `face_change_count` moved, mutating pixels with no
 /// buffer tick (spec §3: the per-glyph hash cannot backstop face-content drift).

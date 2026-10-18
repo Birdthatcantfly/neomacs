@@ -4313,22 +4313,40 @@ impl LayoutEngine {
         // The one-line-one-row ASCII proof is this engine's extra safety for
         // below-reuse; GNU gets the same guarantee by re-syncing its
         // regenerated region against the old matrix after the walk and never
-        // scans the changed text semantically. It also refuses to try when
-        // the change is not local to the window: `try_window_id` gives up
-        // outright when the window start lies inside the changed area
-        // (GIVE_UP (15), src/xdisp.c), and its regenerated region is always
-        // the window. Bound the proof identically: a span covering the
-        // window start, or longer than the whole narrowed region the window
-        // can display (`get_narrowed_len` = width × height, src/xdisp.c:3732),
-        // is never proven — below-reuse declines and the window re-lays,
-        // which is exactly the bounded cost GNU pays in the same situation.
+        // scans the changed text semantically. Bound the proof by the WINDOW,
+        // not the buffer: a dirty span longer than the whole narrowed region
+        // the window can display (`get_narrowed_len` = width × height,
+        // src/xdisp.c:3732) is never proven. That is the O(window) cap that
+        // keeps a cold first redisplay after a bulk insert from walking every
+        // inserted character; the window then re-lays, the bounded cost GNU
+        // pays in the same situation.
+        //
+        // The window-start condition is narrower than GNU `try_window_id`'s
+        // GIVE_UP (15), which declines whenever the start lies anywhere in the
+        // changed area (`CHARPOS (start) >= first_changed_charpos && CHARPOS
+        // (start) <= last_changed_charpos`, src/xdisp.c:22816-22825) and
+        // re-lays with `try_window` (:21052, :21266). This replay supports the
+        // bounded case GNU's give-up rejects: edit eligibility already pins
+        // the window start position (`RetainedWindowKey::edit_eligible`,
+        // `!window_start_moved`; the start marker stays before text inserted
+        // at it, `START_INSERTION_TYPE`), so when the span merely BEGINS at
+        // the window start the retained first row is dirty, nothing above it
+        // is reused, and the walk starts from that same charpos with the NEW
+        // text — exactly the rows `try_window` would re-lay — while the rows
+        // below reuse through the usual post-walk validation. A span that
+        // CROSSES a length-changing edit over the window start is the case
+        // where the position stops denoting the same source text; decline it
+        // like GIVE_UP (15). Properties-only damage (delta == 0) leaves every
+        // character in place, so the start stays valid even inside the span.
         // The newline count above is kept: it feeds the Sync walk's damage
         // record the way GNU feeds `find_newline` counts to its matrix
         // scroll, and costs bytes-per-span rather than chars-per-span.
-        let proof_span_covers_window_start =
-            curr_key.window_start >= dirty_start && curr_key.window_start < dirty_end;
+        let dirty_end_old = dirty_end.saturating_sub(delta);
+        let window_start_inside_changed_text = delta != 0
+            && dirty_start < curr_key.window_start
+            && curr_key.window_start < dirty_end_old;
         let proof_scan_allowed = self.allow_below_reuse
-            && !proof_span_covers_window_start
+            && !window_start_inside_changed_text
             && (dirty_end.saturating_sub(dirty_start).max(0) as usize)
                 <= params
                     .source_interpretation_rows()
@@ -4402,10 +4420,11 @@ impl LayoutEngine {
             // validation own the delete-specific safety.
             //
             // The scan itself is window-bounded through `proof_scan_allowed`
-            // above (GNU try_window_id's GIVE_UP (15) + get_narrowed_len): a
-            // bulk insert covering the window start or longer than the window
-            // can display skips the proof and pays one bounded window re-lay.
-            // Newlines come from `span_source_newline_count`, not this scan.
+            // above (get_narrowed_len): a span longer than the window can
+            // display skips the proof and pays one bounded window re-lay, and
+            // a length-changing edit crossing the window start declines like
+            // GNU try_window_id's GIVE_UP (15). Newlines come from
+            // `span_source_newline_count`, not this scan.
             #[cfg(test)]
             if self.allow_below_reuse {
                 crate::incremental_layout::lazy_proof_test_support::note_source_proof();
