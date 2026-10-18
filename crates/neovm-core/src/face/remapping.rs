@@ -233,6 +233,7 @@ impl FaceTable {
             RemappingBase::DefaultAndInherited => self.resolve_depth(name, 0),
             RemappingBase::SpecifiedOnly => self
                 .faces
+                .map
                 .get(&key)
                 .cloned()
                 .unwrap_or_else(|| Face::new(name)),

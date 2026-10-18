@@ -1766,7 +1766,7 @@ pub struct FaceTable {
     /// `collect_gc_roots` on the CONTEXT's handle, and a resolver's shared
     /// handle aliases the same allocation for the duration of one redisplay
     /// -- exactly the lifetime the old bitwise deep copy had.
-    faces: std::rc::Rc<HashMap<Value, Face>>,
+    faces: std::rc::Rc<FaceStorage>,
     /// Frame lface identity to the symbol naming that face.
     ///
     /// GNU display vectors carry the numeric lface index, not a name.  Keep
@@ -1783,30 +1783,30 @@ pub struct FaceTable {
     /// named faces used, and GNU guarantees that by realizing all of them
     /// through one `map_tty_color` (src/xfaces.c:6620-6694).
     tty_palette: std::rc::Rc<neomacs_display_protocol::TtyPalette>,
-    /// Memoized GC root list for the current immutable `faces` snapshot,
-    /// rebuilt only when a definition write publishes new storage. Keyed on
-    /// storage identity: writes always reallocate (see `update_faces`), and
-    /// the memo holds the snapshot it describes, so `Rc::ptr_eq` both proves
-    /// freshness and pins the address against reuse. GNU pays no equivalent
-    /// walk — lface definitions live on symbol plists the obarray already
-    /// roots (`Finternal_set_lisp_face_plist`, src/xfaces.c:1262-1280).
-    roots_memo: std::cell::RefCell<Option<FaceRootsMemo>>,
 }
 
-/// The traced-root memo for one immutable `faces` snapshot.
-#[derive(Clone)]
-struct FaceRootsMemo {
-    snapshot: std::rc::Rc<HashMap<Value, Face>>,
-    roots: std::rc::Rc<[Value]>,
+/// Copy-on-write definition storage: the map plus the traced-root memo for
+/// exactly this immutable snapshot. Never mutated in place — every write
+/// publishes a fresh allocation (`update_faces`) — so the memo derived on
+/// first trace stays valid for every holder of the snapshot, and keeping it
+/// beside the map leaves `FaceTable`'s inline footprint (and the Context
+/// layout after it) untouched. GNU pays no equivalent walk — lface
+/// definitions live on symbol plists the obarray already roots
+/// (`Finternal_set_lisp_face_plist`, src/xfaces.c:1262-1280).
+struct FaceStorage {
+    map: HashMap<Value, Face>,
+    roots: std::cell::OnceCell<std::rc::Rc<[Value]>>,
 }
 
 impl FaceTable {
     pub fn new() -> Self {
         let mut table = Self {
-            faces: std::rc::Rc::new(HashMap::new()),
+            faces: std::rc::Rc::new(FaceStorage {
+                map: HashMap::new(),
+                roots: std::cell::OnceCell::new(),
+            }),
             lisp_face_refs: std::rc::Rc::new(HashMap::new()),
             tty_palette: std::rc::Rc::new(neomacs_display_protocol::TtyPalette::default()),
-            roots_memo: std::cell::RefCell::new(None),
         };
         table.register_standard_faces();
         table
@@ -1837,30 +1837,23 @@ impl FaceTable {
             && std::rc::Rc::ptr_eq(&self.tty_palette, &other.tty_palette)
     }
 
-    /// The root list for the current immutable `faces` snapshot, rebuilt only
-    /// when a definition write replaced the storage since it was last
-    /// derived. Keyed on storage identity rather than a counter: a write can
-    /// never change a shared allocation in place (`update_faces`), so a live
-    /// snapshot pinned inside the memo whose pointer still matches `faces`
-    /// was never superseded.
+    /// The root list for the current immutable `faces` snapshot, derived on
+    /// first trace and served from the storage's memo thereafter. A
+    /// definition write can never change a shared allocation in place
+    /// (`update_faces` publishes fresh storage), so an entry beside the map
+    /// it was derived from can never go stale.
     fn traced_roots(&self) -> std::rc::Rc<[Value]> {
-        let mut memo = self.roots_memo.borrow_mut();
-        if let Some(m) = memo.as_ref()
-            && std::rc::Rc::ptr_eq(&m.snapshot, &self.faces)
-        {
-            return std::rc::Rc::clone(&m.roots);
-        }
-        let mut roots = Vec::new();
-        roots.extend(self.faces.keys().copied());
-        for face in self.faces.values() {
-            face.trace_roots(&mut roots);
-        }
-        let roots: std::rc::Rc<[Value]> = roots.into();
-        *memo = Some(FaceRootsMemo {
-            snapshot: std::rc::Rc::clone(&self.faces),
-            roots: std::rc::Rc::clone(&roots),
-        });
-        roots
+        self.faces
+            .roots
+            .get_or_init(|| {
+                let mut roots = Vec::new();
+                roots.extend(self.faces.map.keys().copied());
+                for face in self.faces.map.values() {
+                    face.trace_roots(&mut roots);
+                }
+                roots.into()
+            })
+            .clone()
     }
 
     /// The palette this table's faces were realized against, or `None` on a
@@ -2199,9 +2192,12 @@ impl FaceTable {
     /// per editing session plus load-time `defface`s — so the copy is
     /// amortized to noise next to the per-collection walks it removes.
     fn update_faces(&mut self, edit: impl FnOnce(&mut HashMap<Value, Face>)) {
-        let mut faces = (*self.faces).clone();
-        edit(&mut faces);
-        self.faces = std::rc::Rc::new(faces);
+        let mut storage = FaceStorage {
+            map: self.faces.map.clone(),
+            roots: std::cell::OnceCell::new(),
+        };
+        edit(&mut storage.map);
+        self.faces = std::rc::Rc::new(storage);
     }
 
     /// Define or update a face.
@@ -2249,7 +2245,7 @@ impl FaceTable {
 
     /// Look up a face by name.
     pub fn get(&self, name: &str) -> Option<&Face> {
-        self.faces.get(&face_symbol_value(name))
+        self.faces.map.get(&face_symbol_value(name))
     }
 
     /// Resolve a face name, merging inherited faces.
@@ -2285,7 +2281,7 @@ impl FaceTable {
         }
 
         let key = face_symbol_value(name);
-        let Some(face) = self.faces.get(&key) else {
+        let Some(face) = self.faces.map.get(&key) else {
             return Face::new(name);
         };
 
@@ -2370,7 +2366,7 @@ impl FaceTable {
         for name in face_names {
             // Use the raw face definition (not resolved), so inherited
             // attributes from the parent don't override prior merges.
-            if let Some(face) = self.faces.get(&face_symbol_value(name)) {
+            if let Some(face) = self.faces.map.get(&face_symbol_value(name)) {
                 result = result.merge(face);
             }
         }
@@ -2381,6 +2377,7 @@ impl FaceTable {
     /// List all defined face names.
     pub fn face_list(&self) -> Vec<String> {
         self.faces
+            .map
             .keys()
             .filter_map(|value| value.as_bare_symbol_name().map(str::to_string))
             .collect()
@@ -2388,16 +2385,17 @@ impl FaceTable {
 
     /// Number of defined faces.
     pub fn len(&self) -> usize {
-        self.faces.len()
+        self.faces.map.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.faces.is_empty()
+        self.faces.map.is_empty()
     }
 
     // pdump accessors
     pub(crate) fn dump_faces_by_sym_id(&self) -> Vec<(SymId, Face)> {
         self.faces
+            .map
             .iter()
             .filter_map(|(name, face)| name.as_bare_symbol_id().map(|id| (id, face.clone())))
             .collect()
@@ -2409,13 +2407,13 @@ impl FaceTable {
             // the first TTY frame's face sync installs one.
             tty_palette: std::rc::Rc::new(neomacs_display_protocol::TtyPalette::default()),
             lisp_face_refs: std::rc::Rc::new(HashMap::new()),
-            faces: std::rc::Rc::new(
-                faces
+            faces: std::rc::Rc::new(FaceStorage {
+                map: faces
                     .into_iter()
                     .map(|(name, face)| (face_symbol_value(&name), face))
                     .collect(),
-            ),
-            roots_memo: std::cell::RefCell::new(None),
+                roots: std::cell::OnceCell::new(),
+            }),
         }
     }
 
@@ -2423,13 +2421,13 @@ impl FaceTable {
         Self {
             tty_palette: std::rc::Rc::new(neomacs_display_protocol::TtyPalette::default()),
             lisp_face_refs: std::rc::Rc::new(HashMap::new()),
-            faces: std::rc::Rc::new(
-                faces
+            faces: std::rc::Rc::new(FaceStorage {
+                map: faces
                     .into_iter()
                     .map(|(name, face)| (Value::from_sym_id(name), face))
                     .collect(),
-            ),
-            roots_memo: std::cell::RefCell::new(None),
+                roots: std::cell::OnceCell::new(),
+            }),
         }
     }
 }
