@@ -39,7 +39,7 @@ fn definition_root_lease_is_reused_until_source_retirement_and_keeps_old_sources
     drop(retagged);
 
     let cache = &mut context.frames.get_mut(frame).unwrap().face_realization;
-    cache.definitions_changed(initial + 1, initial + 2);
+    cache.definitions_changed(initial + 1, initial + 2, None);
     assert!(cache.root_lease().is_none());
     cache.replace_definitions(crate::face::FaceTable::new());
     context.face_change_count = initial + 2;
@@ -480,4 +480,147 @@ fn face_frame_class_uses_live_terminal_output_kind() {
     );
     assert!(!context.frame_is_tty_face_target(bare));
     assert!(context.frame_is_tty_face_target(secondary));
+}
+
+#[test]
+fn same_value_face_set_marks_no_definitions_dirty() {
+    let mut context = crate::emacs_core::eval::Context::new();
+    let frame = crate::emacs_core::window_cmds::ensure_selected_frame_id(&mut context);
+    super::builtin_internal_set_lisp_face_attribute(
+        &mut context,
+        vec![
+            Value::symbol("incremental-same-face"),
+            Value::keyword("foreground"),
+            Value::string("red"),
+        ],
+    )
+    .expect("first set creates the face");
+    prepare_runtime_faces_result(&mut context, frame).expect("first refresh publishes");
+    super::builtin_internal_set_lisp_face_attribute(
+        &mut context,
+        vec![
+            Value::symbol("incremental-same-face"),
+            Value::keyword("foreground"),
+            Value::string("red"),
+        ],
+    )
+    .expect("same-value set is accepted");
+    let cache = &context
+        .frames
+        .get(frame)
+        .expect("selected frame")
+        .face_realization;
+    assert!(
+        cache
+            .reusable_definitions()
+            .expect("a published table exists")
+            .1
+            .is_empty(),
+        "GNU gates the change flag on Fequal (xfaces.c:3767-3773)"
+    );
+    assert!(!cache.definitions_all_dirty());
+    let changed = prepare_runtime_faces_result(&mut context, frame).expect("refresh runs");
+    assert!(!changed, "a clean generation cache-hits");
+}
+
+#[test]
+fn changed_face_marks_only_its_name_and_refresh_matches_a_full_rebuild() {
+    let mut context = crate::emacs_core::eval::Context::new();
+    let frame = crate::emacs_core::window_cmds::ensure_selected_frame_id(&mut context);
+    for (face, color) in [
+        ("incremental-face-a", "red"),
+        ("incremental-face-b", "blue"),
+    ] {
+        super::builtin_internal_set_lisp_face_attribute(
+            &mut context,
+            vec![
+                Value::symbol(face),
+                Value::keyword("foreground"),
+                Value::string(color),
+            ],
+        )
+        .expect("face definition lands");
+    }
+    prepare_runtime_faces_result(&mut context, frame).expect("first refresh publishes");
+    super::builtin_internal_set_lisp_face_attribute(
+        &mut context,
+        vec![
+            Value::symbol("incremental-face-b"),
+            Value::keyword("foreground"),
+            Value::string("green"),
+        ],
+    )
+    .expect("genuine change is accepted");
+    {
+        let cache = &context
+            .frames
+            .get(frame)
+            .expect("selected frame")
+            .face_realization;
+        let dirty = cache
+            .reusable_definitions()
+            .expect("previous table survives for reuse")
+            .1;
+        assert_eq!(dirty.iter().count(), 1);
+        assert!(dirty.contains("incremental-face-b"));
+        assert!(
+            cache.table(context.face_change_count).is_none(),
+            "a dirty definition cannot serve as current"
+        );
+    }
+    prepare_runtime_faces_result(&mut context, frame).expect("incremental refresh runs");
+    let incremental = context.face_table.clone();
+    let full = runtime_face_table_from_frame_lisp_faces(&context, frame, false);
+    for face in ["incremental-face-a", "incremental-face-b", "default"] {
+        assert_eq!(
+            incremental.get(face),
+            full.get(face),
+            "{face} must match a from-scratch derivation"
+        );
+    }
+    let cache = &context
+        .frames
+        .get(frame)
+        .expect("selected frame")
+        .face_realization;
+    assert!(
+        cache
+            .reusable_definitions()
+            .expect("refreshed table published")
+            .1
+            .is_empty()
+    );
+    assert!(cache.table(context.face_change_count).is_some());
+}
+
+#[test]
+fn unnamed_face_change_retires_every_reusable_definition() {
+    let mut context = crate::emacs_core::eval::Context::new();
+    let frame = crate::emacs_core::window_cmds::ensure_selected_frame_id(&mut context);
+    super::builtin_internal_set_lisp_face_attribute(
+        &mut context,
+        vec![
+            Value::symbol("incremental-unnamed-face"),
+            Value::keyword("foreground"),
+            Value::string("red"),
+        ],
+    )
+    .expect("face definition lands");
+    prepare_runtime_faces_result(&mut context, frame).expect("first refresh publishes");
+    record_face_change(&mut context, FaceChangeScope::Frames(&[frame]));
+    assert!(
+        context
+            .frames
+            .get(frame)
+            .expect("selected frame")
+            .face_realization
+            .definitions_all_dirty()
+    );
+    prepare_runtime_faces_result(&mut context, frame).expect("full refresh runs");
+    let refreshed = context.face_table.clone();
+    let full = runtime_face_table_from_frame_lisp_faces(&context, frame, false);
+    assert_eq!(
+        refreshed.get("incremental-unnamed-face"),
+        full.get("incremental-unnamed-face")
+    );
 }

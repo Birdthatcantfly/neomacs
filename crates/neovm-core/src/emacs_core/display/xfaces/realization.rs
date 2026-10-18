@@ -42,7 +42,7 @@ pub(crate) fn record_named_face_change(
     } else {
         scope
     };
-    record_face_change(context, scope);
+    record_face_change_for(context, scope, Some(face));
 }
 
 /// GNU sets one global `face_change` flag, or `f->face_change` on the frames
@@ -68,12 +68,49 @@ pub(crate) fn record_face_change(
     context: &mut super::super::eval::Context,
     scope: FaceChangeScope<'_>,
 ) {
+    record_face_change_for(context, scope, None);
+}
+
+/// Record a face change, optionally naming the face whose definition moved.
+/// The name lets each affected frame's cache re-derive only that face on the
+/// next definition refresh, instead of re-deriving every definition. GNU
+/// stores definitions as frame face vectors and rewrites just the changed
+/// slot (xfaces.c:3767-3773); an unnamed writer plays it safe and retires
+/// the whole derived snapshot for its frames.
+pub(crate) fn record_face_change_for(
+    context: &mut super::super::eval::Context,
+    scope: FaceChangeScope<'_>,
+    face: Option<&str>,
+) {
     let previous = context.face_change_count;
     context.face_change_count += 1;
     let current = context.face_change_count;
-    if !crate::face::realization::enabled()
-        || !other_frames_keep_realizations(&context.frames, scope)
-    {
+    if !crate::face::realization::enabled() {
+        return;
+    }
+    let mark_dirty = |frame: &mut crate::window::Frame| match face {
+        Some(name) => frame.face_realization.mark_definition_dirty(name),
+        None => frame.face_realization.mark_all_definitions_dirty(),
+    };
+    if !other_frames_keep_realizations(&context.frames, scope) {
+        // No walk runs here, so the affected frames' caches stay stale; mark
+        // their definitions dirty so a later refresh cannot reuse them.
+        match scope {
+            FaceChangeScope::AllFrames => {
+                for frame_id in context.frames.frame_list() {
+                    if let Some(frame) = context.frames.get_mut(frame_id) {
+                        mark_dirty(frame);
+                    }
+                }
+            }
+            FaceChangeScope::Frames(affected) | FaceChangeScope::DefinitionsOnly(affected) => {
+                for frame_id in affected {
+                    if let Some(frame) = context.frames.get_mut(*frame_id) {
+                        mark_dirty(frame);
+                    }
+                }
+            }
+        }
         return;
     }
     for frame_id in context.frames.frame_list() {
@@ -82,7 +119,9 @@ pub(crate) fn record_face_change(
         };
         match scope {
             FaceChangeScope::AllFrames => {}
-            FaceChangeScope::Frames(affected) if affected.contains(&frame_id) => {}
+            FaceChangeScope::Frames(affected) if affected.contains(&frame_id) => {
+                mark_dirty(frame);
+            }
             FaceChangeScope::Frames(_) => {
                 frame
                     .face_realization
@@ -91,7 +130,7 @@ pub(crate) fn record_face_change(
             FaceChangeScope::DefinitionsOnly(affected) if affected.contains(&frame_id) => {
                 frame
                     .face_realization
-                    .definitions_changed(previous, current);
+                    .definitions_changed(previous, current, face);
             }
             FaceChangeScope::DefinitionsOnly(_) => {
                 frame
@@ -525,7 +564,21 @@ pub(crate) fn prepare_runtime_faces_result(
         .get(frame)
         .is_some_and(|owner| owner.face_realization.generation_matches(generation));
     realize_default_lisp_face_for_frame(eval, frame);
-    let table = runtime_face_table_from_frame_lisp_faces(eval, frame, false);
+    // Purged realizations and a definitions-only refresh share the reuse
+    // rule: untouched definitions re-derive to the same content, so the
+    // previous entry passes through shared storage unchanged. Only names in
+    // the frame's dirty set -- and `default`, refreshed from live frame
+    // parameters just above -- pay a Lisp derivation.
+    let table = match eval.frames.get(frame).and_then(|owner| {
+        (!owner.face_realization.definitions_all_dirty())
+            .then(|| owner.face_realization.reusable_definitions())
+            .flatten()
+    }) {
+        Some((previous, dirty)) => {
+            runtime_face_table_from_frame_lisp_faces_incremental(eval, frame, previous, dirty)
+        }
+        None => runtime_face_table_from_frame_lisp_faces(eval, frame, false),
+    };
     if let Some(owner) = eval.frames.get_mut(frame) {
         if definitions_only {
             owner.face_realization.replace_definitions(table.clone());
@@ -704,7 +757,11 @@ pub(crate) fn realize_default_after_global_merge(
             .into_iter()
             .flatten(),
     );
-    record_face_change(eval, FaceChangeScope::DefinitionsOnly(&[frame]));
+    record_face_change_for(
+        eval,
+        FaceChangeScope::DefinitionsOnly(&[frame]),
+        Some("default"),
+    );
     let Some(cached_source) = cached_source else {
         return Ok(());
     };

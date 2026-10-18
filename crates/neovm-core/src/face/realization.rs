@@ -173,6 +173,13 @@ pub(crate) struct FrameFaceRealizationCache {
     default_lface: Option<Value>,
     default_predecessor: Option<(Face, Face)>,
     default_lookup_position: DefaultLookupPosition,
+    /// Face names whose frame-local Lisp vectors changed after `table` was
+    /// derived. GNU stores definitions as the frame's face vectors and never
+    /// re-derives an untouched one: a set writes one slot (xfaces.c:3767-3773)
+    /// and realization stays content-keyed (lookup_face, xfaces.c:5064-5093).
+    /// An unknown writer (no face name) sets `definitions_all_dirty` instead.
+    dirty_definitions: rustc_hash::FxHashSet<Box<str>>,
+    definitions_all_dirty: bool,
 }
 
 fn route_hash(face: &Face) -> u64 {
@@ -211,7 +218,9 @@ impl FrameFaceRealizationCache {
     }
 
     pub(crate) fn table(&self, generation: u64) -> Option<&FaceTable> {
-        (self.generation == Some(generation))
+        (self.generation == Some(generation)
+            && self.dirty_definitions.is_empty()
+            && !self.definitions_all_dirty)
             .then_some(self.table.as_ref())
             .flatten()
     }
@@ -221,6 +230,8 @@ impl FrameFaceRealizationCache {
         self.epoch = Some(RealizationEpoch::new());
         self.table = Some(table);
         self.root_lease = None;
+        self.dirty_definitions.clear();
+        self.definitions_all_dirty = false;
         self.entries.clear();
         self.basics = None;
         self.default_lface = None;
@@ -233,6 +244,31 @@ impl FrameFaceRealizationCache {
     pub(crate) fn replace_definitions(&mut self, table: FaceTable) {
         self.table = Some(table);
         self.root_lease = None;
+        self.dirty_definitions.clear();
+        self.definitions_all_dirty = false;
+    }
+
+    /// The last derived table plus the names that drifted from it. Callers
+    /// rebuild only those entries; the returned table shares copy-on-write
+    /// storage, so untouched entries keep their identity and content.
+    pub(crate) fn reusable_definitions(
+        &self,
+    ) -> Option<(&FaceTable, &rustc_hash::FxHashSet<Box<str>>)> {
+        self.table
+            .as_ref()
+            .map(|table| (table, &self.dirty_definitions))
+    }
+
+    pub(crate) fn mark_definition_dirty(&mut self, name: &str) {
+        self.dirty_definitions.insert(Box::from(name));
+    }
+
+    pub(crate) fn mark_all_definitions_dirty(&mut self) {
+        self.definitions_all_dirty = true;
+    }
+
+    pub(crate) fn definitions_all_dirty(&self) -> bool {
+        self.definitions_all_dirty
     }
 
     pub(crate) fn root_lease(&self) -> Option<std::sync::Arc<[SharedRoot]>> {
@@ -244,11 +280,17 @@ impl FrameFaceRealizationCache {
     }
 
     /// A no-purge mutation invalidates just the raw definition snapshot. The
-    /// generation remains valid for realized combinations and fixed basic roles.
-    pub(crate) fn definitions_changed(&mut self, previous: u64, current: u64) {
+    /// generation remains valid for realized combinations and fixed basic
+    /// roles. The retired table stays available for incremental reuse; the
+    /// dirty mark keeps `table` from serving stale entries. Passing no face
+    /// name retires the whole snapshot: an unknown writer cannot be scoped.
+    pub(crate) fn definitions_changed(&mut self, previous: u64, current: u64, face: Option<&str>) {
+        match face {
+            Some(name) => self.mark_definition_dirty(name),
+            None => self.definitions_all_dirty = true,
+        }
         if self.generation == Some(previous) {
             self.generation = Some(current);
-            self.table = None;
             self.root_lease = None;
         }
     }
@@ -320,6 +362,7 @@ impl FrameFaceRealizationCache {
         self.default_lookup_position = DefaultLookupPosition::Shadowed;
         self.default_lface = None;
         self.root_lease = None;
+        self.definitions_all_dirty = true;
     }
 
     pub(crate) fn realization_epoch(&self) -> Option<RealizationEpoch> {

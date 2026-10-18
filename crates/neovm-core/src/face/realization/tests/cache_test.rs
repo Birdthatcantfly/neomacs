@@ -157,7 +157,7 @@ fn definitions_only_refresh_retains_roles_and_old_realizations_while_new_attribu
     cache.prepare(1, table.clone());
     cache.insert_basic(BasicFace::Default, old_source.clone(), old_source.clone());
     cache.insert(old_source.clone(), old_source.clone());
-    cache.definitions_changed(1, 2);
+    cache.definitions_changed(1, 2, Some("no-purge-face"));
     assert!(cache.generation_matches(2));
     assert!(cache.table(2).is_none());
     assert_eq!(cache.lookup(&old_source), Some(&old_source));
@@ -181,7 +181,7 @@ fn realization_epoch_survives_definition_refresh_but_never_full_retirement() {
     let original = cache.realization_epoch().unwrap();
     cache.preserve_across_change(1, 2);
     assert!(cache.retains_epoch(&original));
-    cache.definitions_changed(2, 3);
+    cache.definitions_changed(2, 3, Some("epoch-face"));
     assert!(cache.retains_epoch(&original));
     cache.replace_definitions(FaceTable::new());
     assert!(cache.retains_epoch(&original));

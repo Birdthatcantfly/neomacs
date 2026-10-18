@@ -2116,6 +2116,43 @@ pub(crate) fn runtime_face_table_from_frame_lisp_faces_resolved(
     table
 }
 
+/// Refresh the runtime table by re-deriving only the names marked dirty,
+/// reusing every untouched entry from `previous` through shared copy-on-write
+/// storage. GNU never re-derives an unchanged definition: a set writes one
+/// vector slot (xfaces.c:3767-3773) and definitions live on as the frame's
+/// face vectors; realization is content-keyed (lookup_face, xfaces.c:5064).
+///
+/// `default` is always re-derived: `realize_default_lisp_face_for_frame`
+/// refreshes its vector from live frame parameters right before a refresh,
+/// outside any named change record.
+pub(crate) fn runtime_face_table_from_frame_lisp_faces_incremental(
+    eval: &super::eval::Context,
+    frame_id: FrameId,
+    previous: &crate::face::FaceTable,
+    dirty: &rustc_hash::FxHashSet<Box<str>>,
+) -> crate::face::FaceTable {
+    let mut table = previous.clone();
+    for (face_name, lisp_face_id, vector) in frame_lisp_face_table_entries(eval, frame_id) {
+        if face_name != "default"
+            && !dirty.contains(face_name.as_str())
+            && previous.get(&face_name).is_some()
+        {
+            continue;
+        }
+        let runtime_face = runtime_face_from_lisp_face_vector_resolved(
+            &face_name,
+            vector,
+            FaceColorResolver::Standard,
+        );
+        if let Some(lisp_face_id) = lisp_face_id {
+            table.define_lisp_face(lisp_face_id, &face_name, runtime_face);
+        } else {
+            table.define(&face_name, runtime_face);
+        }
+    }
+    table
+}
+
 /// Rebuild the display-facing runtime face cache from GNU-shaped frame-local
 /// Lisp face vectors.
 ///
