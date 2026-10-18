@@ -1786,13 +1786,15 @@ pub struct FaceTable {
 }
 
 /// Copy-on-write definition storage: the map plus the traced-root memo for
-/// exactly this immutable snapshot. Never mutated in place — every write
-/// publishes a fresh allocation (`update_faces`) — so the memo derived on
-/// first trace stays valid for every holder of the snapshot, and keeping it
-/// beside the map leaves `FaceTable`'s inline footprint (and the Context
-/// layout after it) untouched. GNU pays no equivalent walk — lface
-/// definitions live on symbol plists the obarray already roots
-/// (`Finternal_set_lisp_face_plist`, src/xfaces.c:1262-1280).
+/// exactly this snapshot. `update_faces` mutates through `Rc::make_mut`:
+/// in place while unshared, one reallocation when a resolver still pins the
+/// previous snapshot — so the memo beside a map can only ever be read
+/// alongside the content it was derived from (an in-place edit resets the
+/// cell first), and keeping it beside the map leaves `FaceTable`'s inline
+/// footprint (and the Context layout after it) untouched. GNU pays no
+/// equivalent walk — lface definitions live on symbol plists the obarray
+/// already roots (`Finternal_set_lisp_face_plist`, src/xfaces.c:1262-1280).
+#[derive(Clone)]
 struct FaceStorage {
     map: HashMap<Value, Face>,
     roots: std::cell::OnceCell<std::rc::Rc<[Value]>>,
@@ -1840,8 +1842,9 @@ impl FaceTable {
     /// The root list for the current immutable `faces` snapshot, derived on
     /// first trace and served from the storage's memo thereafter. A
     /// definition write can never change a shared allocation in place
-    /// (`update_faces` publishes fresh storage), so an entry beside the map
-    /// it was derived from can never go stale.
+    /// (`update_faces` reallocates as soon as the storage is shared, and an
+    /// unshared edit resets the cell), so an entry beside the map it was
+    /// derived from can never go stale.
     fn traced_roots(&self) -> std::rc::Rc<[Value]> {
         self.faces
             .roots
@@ -2188,16 +2191,18 @@ impl FaceTable {
     /// shared cells in place: holders of the previous snapshot keep their
     /// content, and storage identity (`same_snapshot`, the roots memo) stays
     /// a proof of content equality unconditionally, not only while a
-    /// resolver pins the old table. Definition writes are rare — a handful
-    /// per editing session plus load-time `defface`s — so the copy is
-    /// amortized to noise next to the per-collection walks it removes.
+    /// resolver pins the old table. Definition writes are one slot each,
+    /// like GNU's per-attribute ASET (`Finternal_set_lisp_face_plist`,
+    /// src/xfaces.c:1262-1280; the attribute write, xfaces.c:3767-3773):
+    /// `Rc::make_mut` edits in place while the storage is unshared and
+    /// reallocates only when a resolver still pins the previous snapshot,
+    /// so a font-lock burst of sets stays O(1) per set instead of paying
+    /// a full-map copy each time. Either way the memo restarts from the
+    /// edited content.
     fn update_faces(&mut self, edit: impl FnOnce(&mut HashMap<Value, Face>)) {
-        let mut storage = FaceStorage {
-            map: self.faces.map.clone(),
-            roots: std::cell::OnceCell::new(),
-        };
+        let storage = std::rc::Rc::make_mut(&mut self.faces);
+        storage.roots = std::cell::OnceCell::new();
         edit(&mut storage.map);
-        self.faces = std::rc::Rc::new(storage);
     }
 
     /// Define or update a face.
