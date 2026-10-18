@@ -709,9 +709,13 @@ impl ConsCatalog {
             .by_base
             .get(&base)
             .expect("batch grant has canonical base index");
+        // The carve age certifies the inline store sites' no-old-owner
+        // fast path; catalog owners publish their own cards instead, so
+        // only the young recording's error escapes to the batch unwind.
         state
             .allocator
             .note_carve(ConsBlockBase::of(&state.blocks[index]), young)
+            .map(|_| ())
     }
 
     /// Unwind a partially built batch after a failed young recording: every
