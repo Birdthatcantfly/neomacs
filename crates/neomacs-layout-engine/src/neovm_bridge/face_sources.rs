@@ -122,11 +122,16 @@ impl RootedFace {
     }
 
     /// The paint this source last realized for `frame` at binding generation
-    /// `face_change_count`, when `face` is still in the recorded entry state.
+    /// `face_change_count`, when `face` is still in the recorded probe state.
     ///
     /// A hit is GNU serving a repeated merged-lface lookup from the frame
     /// face cache without re-running `realize_tty_face` (`lookup_face`,
-    /// src/xfaces.c:5064-5093).
+    /// src/xfaces.c:5064-5093). Like `lookup_face`, which keys the frame
+    /// cache by the merged lface and never by the realized `struct face`,
+    /// the memo matches the PRE-realization state a probe arrives in: the
+    /// recorded key must be captured before `install_realized_tty_colors`
+    /// writes the realized paint into the face, or every probe of the
+    /// unrealized entry state misses by construction.
     pub(super) fn cached_tty_paint(
         &self,
         frame: FrameId,
@@ -140,17 +145,22 @@ impl RootedFace {
         .then(|| memo.paint)
     }
 
-    /// Retain one realized terminal paint beside its source.
+    /// Retain one realized terminal paint beside its source. `probe_key` is
+    /// the entry state the next probe of this source will arrive in — the
+    /// caller captures `TtyPaintKey::of(face)` BEFORE installing the
+    /// realized colors, since the paint stored here is read back only
+    /// through [`Self::cached_tty_paint`]'s unrealized-state match.
     pub(super) fn record_tty_paint(
         &self,
         frame: FrameId,
         face_change_count: u64,
+        probe_key: TtyPaintKey,
         face: &ResolvedFace,
     ) {
         self.tty_paint.set(Some(TtyPaintMemo {
             frame,
             face_change_count,
-            key: TtyPaintKey::of(face),
+            key: probe_key,
             paint: TtyPaint::snapshot(face),
         }));
     }

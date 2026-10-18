@@ -38,7 +38,7 @@ mod property_keys;
 use property_keys::PropertyKeyOrder;
 
 mod face_colors;
-use face_colors::{FaceColorAttributes, FaceColorState, TtyPaint};
+use face_colors::{FaceColorAttributes, FaceColorState, TtyPaint, TtyPaintKey};
 mod face_sources;
 use face_sources::{FaceTableRoots, RootedFace};
 
@@ -4485,8 +4485,17 @@ impl FaceResolver {
         else {
             return false;
         };
+        // The memo must answer probes of the UNREALIZED entry state, so the
+        // key is read before the install writes realized colors into `face`.
+        let probe_key = TtyPaintKey::of(face);
         face.install_realized_tty_colors(&realized);
-        self.record_tty_paint(face, attributes, frame_id, evaluator.face_change_count());
+        self.record_tty_paint(
+            probe_key,
+            face,
+            attributes,
+            frame_id,
+            evaluator.face_change_count(),
+        );
         true
     }
 
@@ -4515,12 +4524,16 @@ impl FaceResolver {
             }
             let realized =
                 evaluator.realize_display_face_for_frame(source.frame_id, attributes.attributes());
+            // See realize_cached_for_display: the memo key is the
+            // pre-realization entry state the next probe arrives in.
+            let probe_key = TtyPaintKey::of(face);
             face.install_realized_tty_colors(&realized);
             // A deferred or in-flight hook flow realized against a placeholder
             // (`realize_display_face_for_frame` returns the source unchanged);
             // such paint is transactional and must not seed the memo.
             if !evaluator.redisplay_hook_flow_pending() {
                 self.record_tty_paint(
+                    probe_key,
                     face,
                     attributes,
                     source.frame_id,
@@ -4761,14 +4774,17 @@ impl FaceResolver {
     /// Retain one realized terminal paint for reuse beside its source; the
     /// allocation holds the memo, so its address cannot be recycled under an
     /// entry and a retired source releases its paint with everything else.
+    /// `probe_key` is the face's PRE-realization entry state — see
+    /// [`RootedFace::record_tty_paint`].
     fn record_tty_paint(
         &self,
+        probe_key: TtyPaintKey,
         face: &ResolvedFace,
         source: std::sync::Arc<RootedFace>,
         frame: FrameId,
         face_change_count: u64,
     ) {
-        source.record_tty_paint(frame, face_change_count, face)
+        source.record_tty_paint(frame, face_change_count, probe_key, face)
     }
 
     /// The previously merged source for `overlay` over `base`, when this exact

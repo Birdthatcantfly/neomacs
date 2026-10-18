@@ -23,6 +23,39 @@ fn memo_face(resolver: &FaceResolver, source: &Arc<RootedFace>) -> ResolvedFace 
 }
 
 #[test]
+fn tty_paint_memo_answers_the_unrealized_entry_state() {
+    let _context = neovm_core::emacs_core::Context::new();
+    let table = FaceTable::new();
+    let resolver = FaceResolver::new(&table, 0x00FFFFFF, 0x00000000, 14.0, None);
+    let source = memo_source();
+    let mut entry = memo_face(&resolver, &source);
+    let frame = FrameId(9);
+
+    // The realize flow records AFTER installing realized colors, but the
+    // memo's key is the pre-install entry state the next probe arrives in
+    // (GNU `lookup_face` keys on the merged lface, never the realized
+    // `struct face`, src/xfaces.c:5064-5075).
+    let probe_key = TtyPaintKey::of(&entry);
+    let mut painted = entry.clone();
+    painted.terminal_fg = Some(TerminalColor::Indexed(9));
+    painted.underline_color = 0x00990099;
+    resolver.record_tty_paint(probe_key, &painted, Arc::clone(&source), frame, 41);
+
+    assert!(
+        resolver
+            .cached_tty_paint(&entry, &source, frame, 41)
+            .is_some(),
+        "a probe of the unrealized entry state must hit the memo"
+    );
+    assert!(
+        resolver
+            .cached_tty_paint(&painted, &source, frame, 41)
+            .is_none(),
+        "the realized state is not the state the memo answers for"
+    );
+}
+
+#[test]
 fn tty_paint_memo_installs_the_recorded_snapshot_verbatim() {
     let _context = neovm_core::emacs_core::Context::new();
     let table = FaceTable::new();
@@ -31,7 +64,7 @@ fn tty_paint_memo_installs_the_recorded_snapshot_verbatim() {
     let face = memo_face(&resolver, &source);
     let frame = FrameId(9);
 
-    resolver.record_tty_paint(&face, Arc::clone(&source), frame, 41);
+    resolver.record_tty_paint(TtyPaintKey::of(&face), &face, Arc::clone(&source), frame, 41);
 
     // Only paint fields outside the key are disturbed; the snapshot must
     // restore every field install_realized_tty_colors writes.
@@ -70,7 +103,7 @@ fn tty_paint_memo_is_scoped_to_frame_and_binding_generation() {
     let source = memo_source();
     let face = memo_face(&resolver, &source);
 
-    resolver.record_tty_paint(&face, Arc::clone(&source), FrameId(9), 41);
+    resolver.record_tty_paint(TtyPaintKey::of(&face), &face, Arc::clone(&source), FrameId(9), 41);
 
     // A different frame realizes against another frame's definitions, and a
     // bumped face_change_count retired them (GNU face_change,
@@ -101,7 +134,7 @@ fn tty_paint_memo_key_includes_entry_state_and_source_identity() {
     let face = memo_face(&resolver, &source);
     let frame = FrameId(9);
 
-    resolver.record_tty_paint(&face, Arc::clone(&source), frame, 41);
+    resolver.record_tty_paint(TtyPaintKey::of(&face), &face, Arc::clone(&source), frame, 41);
 
     // The entry color state feeds the merge the realization consumed.
     let mut seeded = face.clone();
