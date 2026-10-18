@@ -62,8 +62,33 @@ use std::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
 /// word they select ([`CellWrite::publish`]); a symbol's flags byte is not
 /// reachable mutably from outside it at all.
 #[repr(transparent)]
-#[derive(Copy, Clone, Debug, Default)]
-pub struct SymbolFlags(u8);
+pub struct SymbolFlags(AtomicU8);
+
+// Interior mutability is load-bearing: the concurrent GC obarray scan reads
+// this byte while the mutator rewrites it. A plain `u8` field accessed through
+// `&self`-derived pointers cannot support that: forming `&AtomicU8` from a
+// `SharedReadOnly` tag is invalid under Stacked Borrows (and the plain write
+// would race). An `AtomicU8` field gives every access the cell permission and
+// a Relaxed load/store, which is a plain `mov` on x86-64.
+impl Default for SymbolFlags {
+    #[inline(always)]
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl Clone for SymbolFlags {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        Self::new(self.load())
+    }
+}
+
+impl std::fmt::Debug for SymbolFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.load(), f)
+    }
+}
 
 /// `SymbolFlags::is_plain_untrapped_unprojected` reads the redirect and
 /// trapped-write fields as raw zero bits; that is only the (Plainval,
@@ -86,20 +111,31 @@ impl SymbolFlags {
     pub(super) const RUNTIME_PROJECTED_BIT: u8 = 0b1000_0000;
 
     #[inline(always)]
-    pub fn redirect(self) -> SymbolRedirect {
-        SymbolRedirect::try_from(self.0 & Self::REDIRECT_MASK)
+    pub const fn new(bits: u8) -> Self {
+        Self(AtomicU8::new(bits))
+    }
+
+    /// The whole byte, as one Relaxed atomic load.
+    #[inline(always)]
+    fn load(&self) -> u8 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    #[inline(always)]
+    pub fn redirect(&self) -> SymbolRedirect {
+        SymbolRedirect::try_from(self.load() & Self::REDIRECT_MASK)
             .expect("symbol redirect flag contains valid GNU symbol_redirect code")
     }
 
     /// Private: the redirect moves only with its word ([`CellWrite`]).
     #[inline]
     fn set_redirect(&mut self, r: SymbolRedirect) {
-        self.store_byte((self.0 & !Self::REDIRECT_MASK) | r.gnu_code());
+        self.store_byte((self.load() & !Self::REDIRECT_MASK) | r.gnu_code());
     }
 
     #[inline]
-    pub fn trapped_write(self) -> SymbolTrappedWrite {
-        let raw = (self.0 & Self::TRAPPED_WRITE_MASK) >> Self::TRAPPED_WRITE_SHIFT;
+    pub fn trapped_write(&self) -> SymbolTrappedWrite {
+        let raw = (self.load() & Self::TRAPPED_WRITE_MASK) >> Self::TRAPPED_WRITE_SHIFT;
         SymbolTrappedWrite::try_from(raw)
             .expect("symbol trapped-write flag contains valid GNU symbol_trapped_write code")
     }
@@ -107,33 +143,35 @@ impl SymbolFlags {
     #[inline]
     fn set_trapped_write(&mut self, t: SymbolTrappedWrite) {
         self.store_byte(
-            (self.0 & !Self::TRAPPED_WRITE_MASK) | (t.gnu_code() << Self::TRAPPED_WRITE_SHIFT),
+            (self.load() & !Self::TRAPPED_WRITE_MASK) | (t.gnu_code() << Self::TRAPPED_WRITE_SHIFT),
         );
     }
 
     #[inline]
-    pub fn interned(self) -> SymbolInterned {
-        let raw = (self.0 & Self::INTERNED_MASK) >> Self::INTERNED_SHIFT;
+    pub fn interned(&self) -> SymbolInterned {
+        let raw = (self.load() & Self::INTERNED_MASK) >> Self::INTERNED_SHIFT;
         SymbolInterned::try_from(raw)
             .expect("symbol interned flag contains valid GNU symbol_interned code")
     }
 
     #[inline]
     fn set_interned(&mut self, i: SymbolInterned) {
-        self.store_byte((self.0 & !Self::INTERNED_MASK) | (i.gnu_code() << Self::INTERNED_SHIFT));
+        self.store_byte(
+            (self.load() & !Self::INTERNED_MASK) | (i.gnu_code() << Self::INTERNED_SHIFT),
+        );
     }
 
     #[inline]
-    pub fn runtime_projected(self) -> bool {
-        self.0 & Self::RUNTIME_PROJECTED_BIT != 0
+    pub fn runtime_projected(&self) -> bool {
+        self.load() & Self::RUNTIME_PROJECTED_BIT != 0
     }
 
     #[inline]
     fn set_runtime_projected(&mut self, v: bool) {
         let byte = if v {
-            self.0 | Self::RUNTIME_PROJECTED_BIT
+            self.load() | Self::RUNTIME_PROJECTED_BIT
         } else {
-            self.0 & !Self::RUNTIME_PROJECTED_BIT
+            self.load() & !Self::RUNTIME_PROJECTED_BIT
         };
         self.store_byte(byte);
     }
@@ -144,21 +182,22 @@ impl SymbolFlags {
     /// projection.  One byte test, since `Plainval` and `Untrapped` are both
     /// the zero encoding.
     #[inline(always)]
-    pub fn is_plain_untrapped_unprojected(self) -> bool {
-        self.0 & (Self::REDIRECT_MASK | Self::TRAPPED_WRITE_MASK | Self::RUNTIME_PROJECTED_BIT) == 0
+    pub fn is_plain_untrapped_unprojected(&self) -> bool {
+        self.load() & (Self::REDIRECT_MASK | Self::TRAPPED_WRITE_MASK | Self::RUNTIME_PROJECTED_BIT)
+            == 0
     }
 
     #[inline]
-    pub fn declared_special(self) -> bool {
-        self.0 & Self::DECLARED_SPECIAL_BIT != 0
+    pub fn declared_special(&self) -> bool {
+        self.load() & Self::DECLARED_SPECIAL_BIT != 0
     }
 
     #[inline]
     fn set_declared_special(&mut self, v: bool) {
         let byte = if v {
-            self.0 | Self::DECLARED_SPECIAL_BIT
+            self.load() | Self::DECLARED_SPECIAL_BIT
         } else {
-            self.0 & !Self::DECLARED_SPECIAL_BIT
+            self.load() & !Self::DECLARED_SPECIAL_BIT
         };
         self.store_byte(byte);
     }
@@ -166,21 +205,17 @@ impl SymbolFlags {
     /// The raw byte, for a caller that packs it into a wider word (the
     /// symbol's write window).
     #[inline(always)]
-    pub(super) fn bits(self) -> u8 {
-        self.0
+    pub(super) fn bits(&self) -> u8 {
+        self.load()
     }
 
     /// Atomic (relaxed) store of the whole flags byte so a concurrent GC reader
-    /// (`load_redirect`) never observes a torn byte. Mirrors `ConsCell::set_car`:
-    /// the field stays a plain `u8`, accessed atomically via a raw cast. There is
-    /// a single mutator, so the caller's plain read of `self.0` to compute `byte`
-    /// does not race (the GC thread only ever reads this byte).
+    /// (`load_redirect`) never observes a torn byte. Relaxed is enough: this
+    /// byte only selects which word to read, and the cell's own publication
+    /// ordering carries the payload.
     #[inline]
     fn store_byte(&mut self, byte: u8) {
-        let p = std::ptr::from_mut(&mut self.0).cast::<AtomicU8>();
-        // SAFETY: `AtomicU8` has the size and alignment of `u8`, and `&mut
-        // self` makes this the only access from this thread.
-        unsafe { (*p).store(byte, Ordering::Relaxed) };
+        self.0.store(byte, Ordering::Relaxed);
     }
 
     /// Atomic (relaxed) read of [`Self::runtime_projected`], for a reader
@@ -188,11 +223,7 @@ impl SymbolFlags {
     /// byte read for the redirect dispatch is not kept live across it.
     #[inline(always)]
     fn load_runtime_projected(&self) -> bool {
-        let p = std::ptr::from_ref(&self.0).cast::<AtomicU8>();
-        // SAFETY: as in `store_byte`; a shared reference permits an atomic
-        // load.
-        let byte = unsafe { (*p).load(Ordering::Relaxed) };
-        byte & Self::RUNTIME_PROJECTED_BIT != 0
+        self.load() & Self::RUNTIME_PROJECTED_BIT != 0
     }
 
     /// Atomic (relaxed) read of the redirect tag, for the concurrent GC obarray
@@ -200,11 +231,7 @@ impl SymbolFlags {
     /// torn flags byte while the mutator changes a redirect/flag bit.
     #[inline]
     fn load_redirect(&self) -> SymbolRedirect {
-        let p = std::ptr::from_ref(&self.0).cast::<AtomicU8>();
-        // SAFETY: as in `store_byte`; a shared reference permits an atomic
-        // load.
-        let byte = unsafe { (*p).load(Ordering::Relaxed) };
-        SymbolRedirect::try_from(byte & Self::REDIRECT_MASK)
+        SymbolRedirect::try_from(self.load() & Self::REDIRECT_MASK)
             .expect("symbol redirect flag contains valid GNU symbol_redirect code")
     }
 }
@@ -432,7 +459,7 @@ impl Clone for LispSymbol {
     fn clone(&self) -> Self {
         Self {
             name: AtomicU32::new(self.name.load(Ordering::Relaxed)),
-            flags: self.flags,
+            flags: self.flags.clone(),
             val: self.val,
             function: self.function,
             plist: self.plist,
@@ -561,7 +588,7 @@ impl LispSymbol {
     #[inline]
     pub(super) fn publish_fill(&mut self, src: LispSymbol) {
         let published_name = src.name.load(Ordering::Relaxed);
-        self.flags = src.flags;
+        self.flags = src.flags.clone();
         self.val = src.val;
         self.function = src.function;
         self.plist = src.plist;
@@ -575,7 +602,7 @@ impl LispSymbol {
     /// The packed flags, by value.
     #[inline(always)]
     pub fn flags(&self) -> SymbolFlags {
-        self.flags
+        self.flags.clone()
     }
 
     /// [`SymbolFlags::runtime_projected`] read afresh from the cell, for a
