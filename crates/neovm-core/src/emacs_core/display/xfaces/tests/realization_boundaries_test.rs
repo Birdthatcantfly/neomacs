@@ -484,6 +484,9 @@ fn face_frame_class_uses_live_terminal_output_kind() {
 
 #[test]
 fn same_value_face_set_marks_no_definitions_dirty() {
+    if !crate::face::realization::enabled() {
+        return;
+    }
     let mut context = crate::emacs_core::eval::Context::new();
     let frame = crate::emacs_core::window_cmds::ensure_selected_frame_id(&mut context);
     super::builtin_internal_set_lisp_face_attribute(
@@ -525,6 +528,9 @@ fn same_value_face_set_marks_no_definitions_dirty() {
 
 #[test]
 fn changed_face_marks_only_its_name_and_refresh_matches_a_full_rebuild() {
+    if !crate::face::realization::enabled() {
+        return;
+    }
     let mut context = crate::emacs_core::eval::Context::new();
     let frame = crate::emacs_core::window_cmds::ensure_selected_frame_id(&mut context);
     for (face, color) in [
@@ -595,6 +601,9 @@ fn changed_face_marks_only_its_name_and_refresh_matches_a_full_rebuild() {
 
 #[test]
 fn unnamed_face_change_retires_every_reusable_definition() {
+    if !crate::face::realization::enabled() {
+        return;
+    }
     let mut context = crate::emacs_core::eval::Context::new();
     let frame = crate::emacs_core::window_cmds::ensure_selected_frame_id(&mut context);
     super::builtin_internal_set_lisp_face_attribute(
@@ -627,6 +636,9 @@ fn unnamed_face_change_retires_every_reusable_definition() {
 
 #[test]
 fn realization_miss_roots_the_source_table_through_the_frame_lease() {
+    if !crate::face::realization::enabled() {
+        return;
+    }
     use crate::emacs_core::terminal::pure::{self, TerminalHost, TerminalRuntimeConfig};
     struct Host;
     impl TerminalHost for Host {

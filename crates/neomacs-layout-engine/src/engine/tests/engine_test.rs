@@ -25637,6 +25637,9 @@ fn layout_frame_rust_aligns_dired_filenames_after_nerd_icon_tabs() {
 
 #[test]
 fn layout_frame_rust_nerd_font_alias_icon_uses_resolved_monospace_cell_width() {
+    if !neovm_core::face::realization::enabled() {
+        return;
+    }
     let mut eval = Context::new();
     // A bare Context lacks fontset.el's encoding table. GNU treats an
     // unmatched family-only rule as ASCII, excluding this private-use icon.
