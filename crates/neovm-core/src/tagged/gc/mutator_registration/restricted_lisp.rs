@@ -314,8 +314,8 @@ fn target_index(target: u16, len: usize) -> Result<usize, Reject> {
     }
 }
 
-fn prevalidate(ops: &[Op], nslots: usize, bound: u32) -> Result<(), Reject> {
-    prevalidate_with(ops, nslots, bound, &[])
+fn prevalidate(ops: &[Op], nslots: usize, bound: u32, step_cap: u32) -> Result<(), Reject> {
+    prevalidate_with(ops, nslots, bound, step_cap, &[])
 }
 
 /// Concrete execution of the constant program. Joining the head's nil and cons
@@ -325,6 +325,7 @@ fn prevalidate_with(
     ops: &[Op],
     nslots: usize,
     bound: u32,
+    step_cap: u32,
     initial: &[(u16, Abs)],
 ) -> Result<(), Reject> {
     let mut slots = vec![Abs::Nil; nslots];
@@ -336,7 +337,7 @@ fn prevalidate_with(
     let mut steps = 0u32;
     while pc < ops.len() {
         steps += 1;
-        if steps > STEP_CAP {
+        if steps > step_cap {
             return Err(Reject::Unbounded);
         }
         let from = u16::try_from(pc).map_err(|_| Reject::Slot)?;
@@ -462,7 +463,7 @@ fn try_admit(
     started: &AtomicUsize,
 ) -> Result<Vec<Op>, Reject> {
     let ops = lower(insns)?;
-    prevalidate_with(&ops, nslots, bound, initial)?;
+    prevalidate_with(&ops, nslots, bound, STEP_CAP, initial)?;
     // Activation is this flag. It moves only after the gate accepts the program.
     started.fetch_add(1, Ordering::Relaxed);
     Ok(ops)
@@ -1530,7 +1531,7 @@ fn assert_owned_conses(heap: &crate::tagged::gc::TaggedHeap, conses: &HashSet<us
 
 fn pass_gate(programs: &[Vec<Op>], nslots: usize, bound: u32, started: &AtomicUsize) {
     for program in programs {
-        prevalidate(program, nslots, bound)
+        prevalidate(program, nslots, bound, STEP_CAP)
             .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     }
     started.fetch_add(1, Ordering::Relaxed);
@@ -1775,7 +1776,7 @@ fn a6_runtime_refuses_foreign_cons_without_writing() {
     ];
     // Slot 0 is abstractly a cons, so the gate accepts the store. The runtime
     // owned-set is empty because this cons was not born from `cons_into`.
-    prevalidate_with(&program, 2, 0, &[(0, Abs::Cons)])
+    prevalidate_with(&program, 2, 0, STEP_CAP, &[(0, Abs::Cons)])
         .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     started.fetch_add(1, Ordering::Relaxed);
     assert_eq!(started.load(Ordering::Relaxed), 1);
@@ -2154,6 +2155,9 @@ fn tp_drive(
     // One slice executes the whole unrolled iteration, so the step cap must
     // cover both the per-program loop and the unrolled body.
     let step_cap: u32 = ((cells * 8 + 64).max(spacing * 16 + 64)) as u32;
+    // The validator walks the whole program concretely, so its step budget
+    // must scale with the row (STEP_CAP alone caps at ~10k steps).
+    let validate_cap: u32 = (cells * 16 + spacing * 32 + 1024) as u32;
     let programs: Vec<Vec<Op>> = (0..owners)
         .map(|index| {
             let _ = index;
@@ -2161,7 +2165,8 @@ fn tp_drive(
         })
         .collect();
     for program in &programs {
-        prevalidate(program, 11, step_cap).unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+        prevalidate(program, 11, step_cap, validate_cap)
+            .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     }
     // Each program builds `cells` loop conses plus one final cons for the
     // old-to-young SetCar edge.
