@@ -3434,7 +3434,7 @@ fn stipple_file_search_paths(name: &str) -> Vec<std::path::PathBuf> {
 ///
 /// This is the neovm-core equivalent of `FaceDataFFI`.  All attributes are
 /// fully realized (no `Option`s) so the layout engine can use them directly.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ResolvedFace {
     /// Foreground color (sRGB pixel: 0x00RRGGBB).
     pub fg: u32,
@@ -3565,6 +3565,59 @@ impl Default for ResolvedFace {
             lisp_name: None,
             stipple: None,
         }
+    }
+}
+
+/// GNU compares lface attributes `EQ` first and only falls back to `equal`
+/// per slot (`face_attr_equal_p`, src/xfaces.c:4483-4497), because a
+/// re-derived face re-reads the same definition objects and identical slots
+/// are the overwhelmingly common verdict. [`ResolvedFace`] carries the same
+/// shortcut structurally: `source_attributes` is the interned merged source,
+/// and every consumer of one composition shares one `Arc`, so allocation
+/// identity proves content identity and skips the whole `Face`/`Value` walk.
+/// Distinct allocations still compare by content -- a face id must stay
+/// stable for content-equal sources across transactions, and those re-fold
+/// into fresh allocations whenever a definition change retired the cache.
+impl PartialEq for ResolvedFace {
+    fn eq(&self, other: &Self) -> bool {
+        let shared_source = match (&self.source_attributes, &other.source_attributes) {
+            (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => return false,
+        };
+        self.fg == other.fg
+            && self.bg == other.bg
+            && self.terminal_fg == other.terminal_fg
+            && self.terminal_bg == other.terminal_bg
+            && self.use_default_foreground == other.use_default_foreground
+            && self.use_default_background == other.use_default_background
+            && self.font_family == other.font_family
+            && self.font_weight == other.font_weight
+            && self.italic == other.italic
+            && self.font_size == other.font_size
+            && self.underline_style == other.underline_style
+            && self.underline_position == other.underline_position
+            && self.underline_color == other.underline_color
+            && self.terminal_underline_color == other.terminal_underline_color
+            && self.strike_through == other.strike_through
+            && self.strike_through_color == other.strike_through_color
+            && self.overline == other.overline
+            && self.overline_color == other.overline_color
+            && self.box_type == other.box_type
+            && self.box_color == other.box_color
+            && self.box_line_width == other.box_line_width
+            && self.extend == other.extend
+            && self.overstrike == other.overstrike
+            && self.terminal_inverse_video == other.terminal_inverse_video
+            && self.color_state == other.color_state
+            && self.canonical_tty_role == other.canonical_tty_role
+            && self.font_char_width == other.font_char_width
+            && self.font_ascent == other.font_ascent
+            && self.font_line_height == other.font_line_height
+            && self.face_id == other.face_id
+            && self.lisp_name == other.lisp_name
+            && self.stipple == other.stipple
+            && (shared_source || self.source_attributes == other.source_attributes)
     }
 }
 
