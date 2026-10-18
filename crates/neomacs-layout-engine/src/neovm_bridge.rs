@@ -4047,7 +4047,11 @@ struct ComposedSourceCache {
 /// keeps exactly that shape — the fold path re-runs the name's `assq` miss
 /// check per lookup (a hit takes the remapping branch before the memo is
 /// consulted), so the entry only has to record which alist OBJECT the fold
-/// saw. `setq`-replacing the alist (the only mutation `face-remap.el` and
+/// saw. Top-level lookups may instead consult the memo before the `assq`
+/// (`resolve_buffer_named_face_overlay_spec_inner`): every recorded fold ran
+/// with an empty remap stack, so its own `assq` miss is part of what the
+/// entry encodes for that alist object. `setq`-replacing the alist (the only
+/// mutation `face-remap.el` and
 /// friends perform) produces a new list object, misses the recorded bits,
 /// and re-folds. In-place splicing an entry for one of the fold's
 /// *inherited* names is the one change an identity key cannot observe; the
@@ -5340,6 +5344,22 @@ impl FaceResolver {
             return None;
         }
 
+        let alist_bits = remapping.alist().map_or(0, Value::bits);
+
+        // A fold recorded for this exact alist object already encodes that
+        // alist's remapping decision for `name`, so a top-level lookup can
+        // consult it before walking the alist at all. Recursive resolutions
+        // keep the full order below: inside an active remap cycle the plain
+        // definition is what the guard must reach, not the completed fold.
+        if remap_stack.is_empty()
+            && let Some(shared) = self.cached_buffer_named_overlay_spec(name, alist_bits)
+        {
+            return Some(FaceSpecContribution {
+                face: (*shared).clone(),
+                identity: Some(shared),
+            });
+        }
+
         // GNU face remapping is non-recursive for the face being remapped:
         // `(FACE REMAP FACE)` applies REMAP over FACE's ordinary definition.
         if !remap_stack.iter().any(|active| active == name)
@@ -5373,8 +5393,8 @@ impl FaceResolver {
         // exactly GNU's per-lookup liveness check (merge_named_face,
         // src/xfaces.c:3269-3295). The fold below is then shared per name and
         // alist object identity; see [`NamedSpecEntry`] for the invalidation
-        // contract.
-        let alist_bits = remapping.alist().map_or(0, Value::bits);
+        // contract. This second probe still serves recursive resolutions,
+        // which skip the hoisted lookup above.
         if let Some(shared) = self.cached_buffer_named_overlay_spec(name, alist_bits) {
             return Some(FaceSpecContribution {
                 face: (*shared).clone(),
@@ -5403,7 +5423,15 @@ impl FaceResolver {
             Some(parent) => parent.face.merge(&face),
             None => face,
         };
-        let shared = self.record_named_overlay_spec_for_alist(name, folded, alist_bits);
+        // Only top-level folds enter the memo: one recorded inside an active
+        // remap cycle skipped this name's remapping by the guard, and the
+        // hoisted lookup above must never answer a remapped name with that
+        // plain fold. Cycle folds simply re-fold on their rare revisits.
+        let shared = if remap_stack.is_empty() {
+            self.record_named_overlay_spec_for_alist(name, folded, alist_bits)
+        } else {
+            std::sync::Arc::new(folded)
+        };
         Some(FaceSpecContribution {
             face: (*shared).clone(),
             identity: Some(shared),
