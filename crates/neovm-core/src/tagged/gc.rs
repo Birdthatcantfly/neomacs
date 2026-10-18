@@ -2559,7 +2559,13 @@ impl TaggedHeap {
             // concurrent mark this is allocate-black; otherwise it pre-arms
             // the bit so the next begin_collection flip reads it as white.
             (*header).gc.set_marked(self.mark_parity);
-            let gc_header = &mut (*header).gc as *mut GcHeader;
+            // `addr_of_mut!`, not `&mut (*header).gc as *mut GcHeader`: a
+            // reference to the field is retagged with just the GcHeader's
+            // extent, while the pointer names the whole VecLikeHeader and is
+            // read beyond that extent (the test probe reads `type_tag` at
+            // offset 0x10). The raw place projection keeps the allocation's
+            // full provenance.
+            let gc_header = std::ptr::addr_of_mut!((*header).gc);
             let inserted = self.non_cons_object_addrs.insert(gc_header as usize);
             debug_assert!(inserted, "veclike object linked twice");
             // Task #7 stage 2a (Fix A): maintain the incremental vector
