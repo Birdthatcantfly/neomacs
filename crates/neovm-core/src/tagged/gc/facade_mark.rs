@@ -610,10 +610,8 @@ mod tests {
         let mut heap = TaggedHeap::new();
         let image_child = heap.alloc_float(8.25);
         let image = Box::into_raw(Box::new(ConsCell {
-            car: image_child,
-            cdr_or_next: crate::tagged::header::ConsCdrOrNext {
-                cdr: TaggedValue::NIL,
-            },
+            car: crate::tagged::header::ConsWord::new(image_child),
+            cdr_or_next: crate::tagged::header::ConsCdrWord::new(TaggedValue::NIL),
         }));
         // SAFETY: the leaked aligned initialized cell acts as a writable
         // mapped image and remains live longer than this heap. The fixture is

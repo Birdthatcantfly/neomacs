@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::tagged::gc::ConsBlock;
-use crate::tagged::header::{ConsCdrOrNext, HeapObjectKind};
+use crate::tagged::header::{ConsCdrWord, ConsWord, HeapObjectKind};
 use crate::tagged::value::TaggedValue;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -14,10 +14,8 @@ fn unobserved_cons() -> (ConsBlock, usize) {
     // mutated or reclaimed while another thread queries its atomic metadata.
     unsafe {
         block.cells_ptr().write(ConsCell {
-            car: TaggedValue::NIL,
-            cdr_or_next: ConsCdrOrNext {
-                cdr: TaggedValue::NIL,
-            },
+            car: ConsWord::new(TaggedValue::NIL),
+            cdr_or_next: ConsCdrWord::new(TaggedValue::NIL),
         });
     }
     let bits = unsafe { TaggedValue::from_cons_ptr(block.cells_ptr()) }.bits();
@@ -85,10 +83,8 @@ fn compiled_cons_observation_word_survives_clear_and_reuse() {
     // Reinitialize the same retained free cell, then observe its new lifetime.
     unsafe {
         free_list.write(ConsCell {
-            car: TaggedValue::NIL,
-            cdr_or_next: ConsCdrOrNext {
-                cdr: TaggedValue::NIL,
-            },
+            car: ConsWord::new(TaggedValue::NIL),
+            cdr_or_next: ConsCdrWord::new(TaggedValue::NIL),
         });
     }
     let (reused_word, reused_mask) = cons_collection_observed_word(bits);

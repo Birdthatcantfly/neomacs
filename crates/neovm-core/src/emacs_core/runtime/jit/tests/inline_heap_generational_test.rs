@@ -472,17 +472,15 @@ fn blv_bind_and_restore_use_the_cons_gate_across_an_explicit_major() {
 #[test]
 fn mapped_blv_default_never_uses_the_owned_cons_trailer_or_a_baked_remembered_fact() {
     use super::shims::VARSET_SHIM_CALLS;
-    use crate::tagged::header::{ConsCdrOrNext, ConsCell};
+    use crate::tagged::header::{ConsCdrWord, ConsCell, ConsWord};
     let mut context = blv_fixture(false);
     let record = blv(&context);
     let old_default = blv_cell(&context, false);
     // One process-lifetime image cell keeps the mapped span exact. It has no
     // 64 KiB owned-block trailer and is registered like a pdump loader cell.
     let mapped = Box::leak(Box::new(ConsCell {
-        car: Value::symbol("u34-inline-blv"),
-        cdr_or_next: ConsCdrOrNext {
-            cdr: old_default.cons_cdr(),
-        },
+        car: ConsWord::new(Value::symbol("u34-inline-blv")),
+        cdr_or_next: ConsCdrWord::new(old_default.cons_cdr()),
     }));
     // SAFETY: leaked writable storage satisfies mapped range lifetime and
     // alignment. Both BLV pointers are updated while the collector is idle.

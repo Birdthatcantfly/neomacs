@@ -134,7 +134,7 @@ fn allocator_young_fixture_minor(
                 assert_eq!(owner.trailer().is_old(index), cell.rooted);
                 // SAFETY: owned storage and completed sweep determine this cell;
                 // every worker remains blocked and cannot write it concurrently.
-                let car = unsafe { (*(cell.address as *const ConsCell)).car };
+                let car = unsafe { (*(cell.address as *const ConsCell)).car.get() };
                 assert_eq!(
                     car.bits(),
                     if cell.rooted {
@@ -229,7 +229,7 @@ fn young_three_mutators_allocate_shared_blocks_across_eighty_minors() {
                                 // SAFETY: initialize privately before channel
                                 // publication, without any global test lock.
                                 unsafe {
-                                    (*cell).car = TaggedValue::T;
+                                    (*cell).car.set_plain(TaggedValue::T);
                                     (*cell).set_cdr(TaggedValue::NIL);
                                 }
                                 handed.push(HandedCell {
@@ -335,7 +335,7 @@ fn young_log_from_exited_worker_survives_until_minor_capture() {
                 for index in 0..2 {
                     // SAFETY: worker privately owns this reserved run.
                     unsafe {
-                        (*run.add(index)).car = TaggedValue::T;
+                        (*run.add(index)).car.set_plain(TaggedValue::T);
                         (*run.add(index)).set_cdr(TaggedValue::NIL);
                     }
                 }
@@ -394,7 +394,7 @@ fn young_admission_retains_preexisting_carve_for_next_minor() {
     for index in 0..2 {
         // SAFETY: initialize both handed cells before closing the grant.
         unsafe {
-            (*run.add(index)).car = TaggedValue::T;
+            (*run.add(index)).car.set_plain(TaggedValue::T);
             (*run.add(index)).set_cdr(TaggedValue::NIL);
         }
     }

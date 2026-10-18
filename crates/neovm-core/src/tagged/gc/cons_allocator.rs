@@ -1817,7 +1817,7 @@ impl ConsStopAll<'_> {
                 // SAFETY: this guard proves stopped mutators/closed regions,
                 // and its caller retains every listed block's storage.
                 let cell = unsafe { &*block.cells_ptr().add(index) };
-                if !cell.car.is_dead() && !block.trailer().is_old(index) {
+                if !cell.car.get().is_dead() && !block.trailer().is_old(index) {
                     assert!(
                         metadata.young.load(Ordering::Relaxed),
                         "allocated young cell missing flag"

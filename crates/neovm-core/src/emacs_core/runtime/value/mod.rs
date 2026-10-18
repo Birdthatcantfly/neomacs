@@ -5612,12 +5612,15 @@ fn cons_ptr_unchecked(value: Value) -> *const ConsCell {
 
 #[inline(always)]
 unsafe fn cons_car_unchecked(ptr: *const ConsCell) -> Value {
-    unsafe { std::ptr::addr_of!((*ptr).car).read() }
+    // SAFETY: caller proves `ptr` names a live cons cell; `get` is a plain
+    // owner load of the interior-mutable word.
+    unsafe { (*ptr).car.get() }
 }
 
 #[inline(always)]
 unsafe fn cons_cdr_unchecked(ptr: *const ConsCell) -> Value {
-    unsafe { std::ptr::addr_of!((*ptr).cdr_or_next.cdr).read() }
+    // SAFETY: as `cons_car_unchecked`; `cdr` is the active union member.
+    unsafe { (*ptr).cdr_or_next.get() }
 }
 
 /// Mutate a binding in place: set cdr of the `(sym . val)` cons cell.

@@ -174,7 +174,7 @@ fn closing_gives_the_unused_tail_back_where_it_came_from() {
     let after = free_list(&heap);
     assert_eq!(after, before[1..].to_vec(), "cells 4..8 back, in order");
     for &addr in &after {
-        let car = unsafe { (*(addr as *const ConsCell)).car };
+        let car = unsafe { (*(addr as *const ConsCell)).car.get() };
         assert_eq!(car, TaggedValue::DEAD, "a free cell's car is DEAD");
     }
 }

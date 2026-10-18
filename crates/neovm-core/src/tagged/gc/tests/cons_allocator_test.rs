@@ -140,7 +140,7 @@ fn cons_allocator_three_mutators_share_free_blocks_across_rebuilds() {
                                     // SAFETY: initialize privately owned cells.
                                     // No global test lock serializes cell writes.
                                     unsafe {
-                                        (*cell).car = TaggedValue::T;
+                                        (*cell).car.set_plain(TaggedValue::T);
                                         (*cell).set_cdr(TaggedValue::NIL);
                                     }
                                 }
@@ -367,7 +367,7 @@ fn sole_allocator_admission_preserves_free_run_inventory() {
     for index in 0..count {
         // SAFETY: all cells in the private run are initialized by its owner.
         unsafe {
-            (*first.add(index)).car = TaggedValue::T;
+            (*first.add(index)).car.set_plain(TaggedValue::T);
             (*first.add(index)).set_cdr(TaggedValue::NIL);
         }
     }

@@ -3296,10 +3296,8 @@ fn concurrent_first_cycle_keeps_weak_entries_keyed_by_live_image_objects() {
         // Fake image cons, registered exactly as the pdump loader registers
         // one (extends the dump span, turns the partition on).
         let cell = Box::into_raw(Box::new([ConsCell {
-            car: TaggedValue::fixnum(1),
-            cdr_or_next: crate::tagged::header::ConsCdrOrNext {
-                cdr: TaggedValue::NIL,
-            },
+            car: crate::tagged::header::ConsWord::new(TaggedValue::fixnum(1)),
+            cdr_or_next: crate::tagged::header::ConsCdrWord::new(TaggedValue::NIL),
         }])) as *mut ConsCell;
         unsafe { heap.register_mapped_cons_range(cell, 1) };
         let key = unsafe { TaggedValue::from_cons_ptr(cell) };
@@ -3384,17 +3382,15 @@ fn a_forced_collection_during_the_concurrent_first_cycle_keeps_image_held_object
     // Fake image cons X, registered exactly as the pdump loader registers
     // one; the roots never reach it.
     let x = Box::into_raw(Box::new([ConsCell {
-        car: TaggedValue::NIL,
-        cdr_or_next: crate::tagged::header::ConsCdrOrNext {
-            cdr: TaggedValue::NIL,
-        },
+        car: crate::tagged::header::ConsWord::new(TaggedValue::NIL),
+        cdr_or_next: crate::tagged::header::ConsCdrWord::new(TaggedValue::NIL),
     }])) as *mut ConsCell;
     unsafe { heap.register_mapped_cons_range(x, 1) };
     // `keeper` is rooted and keeps H's cons block from being released, so a
     // freed H reads as a dead cell rather than unmapped memory.
     let keeper = heap.alloc_cons(TaggedValue::fixnum(0), TaggedValue::NIL);
     let h = heap.alloc_cons(TaggedValue::fixnum(1), TaggedValue::fixnum(2));
-    unsafe { (*x).car = h };
+    unsafe { (*x).car.set_plain(h) };
     assert!(heap.is_partition_first_cycle());
 
     // The safe-point path arms and starts the concurrent first cycle.

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::tagged::gc::ConsBlock;
-use crate::tagged::header::ConsCdrOrNext;
+use crate::tagged::header::{ConsCdrWord, ConsWord};
 use crate::tagged::value::TaggedValue;
 
 fn make_block(count: usize) -> ConsBlock {
@@ -12,10 +12,8 @@ fn make_block(count: usize) -> ConsBlock {
         // No Lisp allocation or collector callback can interrupt this fixture.
         unsafe {
             block.cells_ptr().add(index).write(ConsCell {
-                car: TaggedValue::NIL,
-                cdr_or_next: ConsCdrOrNext {
-                    cdr: TaggedValue::NIL,
-                },
+                car: ConsWord::new(TaggedValue::NIL),
+                cdr_or_next: ConsCdrWord::new(TaggedValue::NIL),
             });
         }
     }
@@ -37,12 +35,10 @@ impl EightAlignedConses {
     fn new() -> Box<Self> {
         Box::new(Self {
             prefix: 0,
-            cells: [ConsCell {
-                car: TaggedValue::NIL,
-                cdr_or_next: ConsCdrOrNext {
-                    cdr: TaggedValue::NIL,
-                },
-            }; 2],
+            cells: std::array::from_fn(|_| ConsCell {
+                car: ConsWord::new(TaggedValue::NIL),
+                cdr_or_next: ConsCdrWord::new(TaggedValue::NIL),
+            }),
         })
     }
 

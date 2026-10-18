@@ -14,10 +14,8 @@ fn fill(block: &mut ConsBlock, count: usize) -> usize {
             std::ptr::write(
                 block.cells_ptr().add(index),
                 ConsCell {
-                    car: TaggedValue::fixnum(index as i64),
-                    cdr_or_next: ConsCdrOrNext {
-                        cdr: TaggedValue::NIL,
-                    },
+                    car: crate::tagged::header::ConsWord::new(TaggedValue::fixnum(index as i64)),
+                    cdr_or_next: crate::tagged::header::ConsCdrWord::new(TaggedValue::NIL),
                 },
             );
         }
@@ -33,7 +31,7 @@ fn free_indices(block: &ConsBlock, mut next: *mut ConsCell) -> BTreeSet<usize> {
             indices.insert(ConsBlock::index_of_ptr(next)),
             "free-list cycle"
         );
-        assert_eq!(unsafe { (*next).car }, TaggedValue::DEAD);
+        assert_eq!(unsafe { (*next).car.get() }, TaggedValue::DEAD);
         next = unsafe { (*next).free_next() };
     }
     indices

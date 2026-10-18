@@ -327,10 +327,8 @@ pub(super) unsafe fn initialize_next_cons(
     // SAFETY: caller proves the finite exclusive range has another cell.
     unsafe {
         cell.write(ConsCell {
-            car: TaggedValue::from_bits(car),
-            cdr_or_next: crate::tagged::header::ConsCdrOrNext {
-                cdr: TaggedValue::from_bits(cdr),
-            },
+            car: crate::tagged::header::ConsWord::new(TaggedValue::from_bits(car)),
+            cdr_or_next: crate::tagged::header::ConsCdrWord::new(TaggedValue::from_bits(cdr)),
         });
         *cursor = cell.add(1);
         TaggedValue::from_cons_ptr(cell)

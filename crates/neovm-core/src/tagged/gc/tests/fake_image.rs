@@ -27,10 +27,8 @@ impl FakeImage {
     pub(crate) fn leak(mapped_storage: bool) -> &'static mut FakeImage {
         let image = Box::leak(Box::new(FakeImage {
             cons: [ConsCell {
-                car: TaggedValue::fixnum(1),
-                cdr_or_next: ConsCdrOrNext {
-                    cdr: TaggedValue::NIL,
-                },
+                car: crate::tagged::header::ConsWord::new(TaggedValue::fixnum(1)),
+                cdr_or_next: crate::tagged::header::ConsCdrWord::new(TaggedValue::NIL),
             }],
             vector: VectorObj {
                 header: VecLikeHeader::new(VecLikeType::Vector),

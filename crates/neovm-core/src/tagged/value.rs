@@ -938,7 +938,7 @@ impl TaggedValue {
     /// Get the car of a cons cell. Panics if not a cons.
     #[inline(always)]
     pub fn cons_car(self) -> Self {
-        unsafe { (*self.xcons_ptr()).car }
+        unsafe { (*self.xcons_ptr()).car.get() }
     }
 
     /// Get the cdr of a cons cell. Panics if not a cons.
@@ -955,7 +955,7 @@ impl TaggedValue {
     #[inline(always)]
     pub(crate) fn cons_car_unobserved(self) -> Self {
         debug_assert!(self.is_cons());
-        unsafe { (*((self.0 & !TAG_MASK) as *const ConsCell)).car }
+        unsafe { (*((self.0 & !TAG_MASK) as *const ConsCell)).car.get() }
     }
 
     /// Same capture precondition as [`Self::cons_car_unobserved`].

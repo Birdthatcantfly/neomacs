@@ -15,16 +15,14 @@ use super::value::TaggedValue;
 use malachite::integer::Integer;
 use neomacs_display_protocol::{VideoId, WebViewId};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------------------
 // ConsCell — no header, minimal size
 // ---------------------------------------------------------------------------
 
-/// A cons cell: two tagged values, no header.
-///
-/// 16 bytes on 64-bit. GC marks cons cells via an external bitmap
-/// in the block allocator, not via an in-object flag.
+/// A cons cell word's cdr/next-free union.
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub union ConsCdrOrNext {
@@ -32,12 +30,216 @@ pub union ConsCdrOrNext {
     pub next_free: *mut ConsCell,
 }
 
-#[derive(Clone, Copy)]
+/// One cons cell word: an interior-mutable, atomically writable place.
+///
+/// See the [`ConsCell`] interior-mutability contract.
+#[repr(transparent)]
+pub struct ConsWord(UnsafeCell<TaggedValue>);
+
+impl ConsWord {
+    #[inline(always)]
+    pub const fn new(value: TaggedValue) -> Self {
+        Self(UnsafeCell::new(value))
+    }
+
+    /// Plain owner read.
+    ///
+    /// Sound while the only concurrent access is the marker's atomic load:
+    /// two reads never conflict. A thread that writes this word must also be
+    /// the thread that reads it plainly (the single-owner contract).
+    #[inline(always)]
+    pub fn get(&self) -> TaggedValue {
+        // SAFETY: reads through an UnsafeCell are always allowed; the owner
+        // contract above bounds concurrent writers.
+        unsafe { *self.0.get() }
+    }
+
+    /// Atomic (acquire) read for the concurrent marker. Acquire pairs with the
+    /// release publication stores (see the module's publication-ordering
+    /// contract on [`load_value_atomic`]): dereferencing a freshly-published
+    /// heap pointer loaded here observes the pointee's fully-written
+    /// `GcHeader`.
+    #[inline]
+    pub fn load_atomic(&self) -> TaggedValue {
+        // SAFETY: the cell is live and aligned; concurrent access is atomic.
+        let word =
+            unsafe { AtomicUsize::from_ptr(self.0.get().cast::<usize>()).load(Ordering::Acquire) };
+        TaggedValue::from_bits(word)
+    }
+
+    /// Atomic (release) store. Release-ordered: publishing a heap pointer into
+    /// a GC-visible cell must happen-after the pointee's header/constructor
+    /// writes (the publication-ordering contract on [`load_value_atomic`]).
+    /// On x86-TSO both release stores and plain stores compile to `mov`.
+    ///
+    /// Takes `&self`, not `&mut self`: the marker may hold shared provenance
+    /// to this cell concurrently, and taking `&mut` would invalidate it.
+    #[inline(always)]
+    pub fn store_atomic(&self, value: TaggedValue) {
+        // SAFETY: the cell is live and aligned, and all concurrent writes use
+        // this atomic path. `UnsafeCell` supplies the write permission.
+        unsafe {
+            AtomicUsize::from_ptr(self.0.get().cast::<usize>())
+                .store(value.bits(), Ordering::Release)
+        };
+    }
+
+    /// Plain store for a reclaimed free-list cell, which no marker can reach.
+    ///
+    /// `&mut self` proves the word is unshared, so this is an ordinary safe
+    /// write through the interior-mutable place.
+    #[inline]
+    pub fn set_plain(&mut self, value: TaggedValue) {
+        *self.0.get_mut() = value;
+    }
+}
+
+impl std::ops::Deref for ConsWord {
+    type Target = TaggedValue;
+    /// Plain owner read, exposed as a reference so the ordinary `TaggedValue`
+    /// method surface (`.as_fixnum()`, `.bits()`, ...) stays usable.
+    ///
+    /// The referenced word may be written atomically by the *owner*, never by
+    /// the marker, so this is the same read/read situation as
+    /// [`ConsWord::get`]. `TaggedValue` is `!Send`/`!Sync`, so the reference
+    /// cannot reach another thread through safe code.
+    #[inline(always)]
+    fn deref(&self) -> &TaggedValue {
+        // SAFETY: see above; the cell is live for `&self`'s lifetime.
+        unsafe { &*self.0.get() }
+    }
+}
+
+impl PartialEq<TaggedValue> for ConsWord {
+    #[inline(always)]
+    fn eq(&self, other: &TaggedValue) -> bool {
+        self.get() == *other
+    }
+}
+
+impl std::fmt::Debug for ConsWord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.get(), f)
+    }
+}
+
+/// The cons cell's cdr/next-free union word, with the same interior-mutability
+/// contract as [`ConsWord`].
+#[repr(transparent)]
+pub struct ConsCdrWord(UnsafeCell<ConsCdrOrNext>);
+
+impl ConsCdrWord {
+    #[inline(always)]
+    pub const fn new(cdr: TaggedValue) -> Self {
+        Self(UnsafeCell::new(ConsCdrOrNext { cdr }))
+    }
+
+    #[inline(always)]
+    pub const fn from_next(next: *mut ConsCell) -> Self {
+        Self(UnsafeCell::new(ConsCdrOrNext { next_free: next }))
+    }
+
+    /// Plain owner read of the live `cdr` member. See [`ConsWord::get`].
+    #[inline(always)]
+    pub fn get(&self) -> TaggedValue {
+        // SAFETY: the caller keeps `cdr` the active member; every bit pattern
+        // of the union's first word is a valid TaggedValue.
+        unsafe { (*self.0.get()).cdr }
+    }
+
+    /// Atomic (acquire) read of the cdr word for the concurrent marker.
+    #[inline]
+    pub fn load_atomic(&self) -> TaggedValue {
+        // SAFETY: the cell is live and aligned; concurrent access is atomic.
+        let word =
+            unsafe { AtomicUsize::from_ptr(self.0.get().cast::<usize>()).load(Ordering::Acquire) };
+        TaggedValue::from_bits(word)
+    }
+
+    /// Atomic (release) store of the cdr word. See [`ConsWord::store_atomic`].
+    #[inline(always)]
+    pub fn store_atomic(&self, value: TaggedValue) {
+        // SAFETY: as `ConsWord::store_atomic`.
+        unsafe {
+            AtomicUsize::from_ptr(self.0.get().cast::<usize>())
+                .store(value.bits(), Ordering::Release)
+        };
+    }
+
+    /// Plain read of the free-list link from a reclaimed cell.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a free cons cell, making `next_free` the active member.
+    #[inline]
+    pub unsafe fn free_next(&self) -> *mut ConsCell {
+        // SAFETY: the caller proves the union holds `next_free`.
+        unsafe { (*self.0.get()).next_free }
+    }
+
+    /// Plain overwrite of the whole union word for a reclaimed cell.
+    ///
+    /// As [`ConsWord::set_plain`]: `&mut self` proves the word is unshared.
+    #[inline]
+    pub fn set_plain(&mut self, word: ConsCdrOrNext) {
+        *self.0.get_mut() = word;
+    }
+}
+
+/// A cons cell: two tagged values, no header.
+///
+/// 16 bytes on 64-bit. GC marks cons cells via an external bitmap
+/// in the block allocator, not via an in-object flag.
+///
+/// # Interior mutability
+///
+/// A live cons cell is read by the concurrent marker while its owner mutator
+/// writes it, so both words are [`UnsafeCell`]s. That interior mutability is
+/// load-bearing, not stylistic:
+///
+/// - The marker holds **shared** provenance to the cell (`&ConsCell` or a
+///   `*const` derived from one). A store derived from that shared provenance
+///   would be UB under both Stacked and Tree Borrows *and* would be a data
+///   race against the owner's plain loads in the language memory model.
+/// - With the words in `UnsafeCell`s, every writer — the owner mutator and any
+///   GC helper mutator — stores atomically through the same interior-mutable
+///   place, and no writer needs `&mut` to the cell. Taking `&mut` would
+///   invalidate the marker's shared tag under Stacked Borrows even when the
+///   store itself is atomic.
+/// - The owner's own reads stay plain loads ([`ConsWord::get`]): the marker
+///   only ever reads, and read/read does not conflict.
+///
+/// Layout is byte-identical to the former `(TaggedValue, union)` pair
+/// (`UnsafeCell` is `repr(transparent)`); the static assertions below pin it.
+impl PartialEq<TaggedValue> for ConsCdrWord {
+    #[inline(always)]
+    fn eq(&self, other: &TaggedValue) -> bool {
+        self.get() == *other
+    }
+}
+
+impl std::fmt::Debug for ConsCdrWord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.get(), f)
+    }
+}
+
 #[repr(C)]
 pub struct ConsCell {
-    pub car: TaggedValue,
-    pub cdr_or_next: ConsCdrOrNext,
+    pub car: ConsWord,
+    pub cdr_or_next: ConsCdrWord,
 }
+
+// The words must stay bit-compatible with a bare `TaggedValue`: the JIT bakes
+// car/cdr offsets and reads the words as tagged values directly.
+static_assertions::assert_eq_size!(ConsCell, [usize; 2]);
+static_assertions::assert_eq_align!(ConsCell, usize);
+static_assertions::assert_eq_size!(ConsWord, TaggedValue);
+static_assertions::assert_eq_align!(ConsWord, TaggedValue);
+static_assertions::assert_eq_size!(ConsCdrWord, ConsCdrOrNext);
+static_assertions::assert_eq_align!(ConsCdrWord, ConsCdrOrNext);
+const _: () = assert!(std::mem::offset_of!(ConsCell, car) == 0);
+const _: () = assert!(std::mem::offset_of!(ConsCell, cdr_or_next) == std::mem::size_of::<usize>());
 
 impl ConsCell {
     /// Read the live cons cell's cdr union member.
@@ -48,7 +250,7 @@ impl ConsCell {
     /// the active union field rather than `next_free`.
     #[inline(always)]
     pub unsafe fn cdr(&self) -> TaggedValue {
-        unsafe { self.cdr_or_next.cdr }
+        self.cdr_or_next.get()
     }
 
     /// Atomic (acquire) read of `car` — used by GC tracing, which may run on a
@@ -64,10 +266,7 @@ impl ConsCell {
     /// the atomic load/store helpers while concurrent collection is possible.
     #[inline]
     pub unsafe fn load_car(&self) -> TaggedValue {
-        let p = &self.car as *const TaggedValue as *const AtomicUsize;
-        // SAFETY: the caller keeps this cons live and uses atomic slot access.
-        // TaggedValue's pinned word size/alignment admits the AtomicUsize view.
-        TaggedValue::from_bits(unsafe { (*p).load(Ordering::Acquire) })
+        self.car.load_atomic()
     }
 
     /// Atomic (acquire) read of `cdr` (the cdr/next-free union word).
@@ -78,10 +277,7 @@ impl ConsCell {
     /// field, and concurrent writes must use [`Self::set_cdr`].
     #[inline]
     pub unsafe fn load_cdr(&self) -> TaggedValue {
-        let p = &self.cdr_or_next as *const ConsCdrOrNext as *const AtomicUsize;
-        // SAFETY: the caller proves this live union contains `cdr` and all
-        // concurrent writes are atomic. Its word has AtomicUsize alignment.
-        TaggedValue::from_bits(unsafe { (*p).load(Ordering::Acquire) })
+        self.cdr_or_next.load_atomic()
     }
 
     /// Store `car` atomically so a concurrent GC read sees a whole value,
@@ -93,11 +289,11 @@ impl ConsCell {
     /// # Safety
     ///
     /// `self` must be a live cons cell and the supplied tagged value must obey
-    /// the GC publication contract described above.
+    /// the GC publication contract described above. Takes `&self` because the
+    /// word is interior-mutable and the marker may hold a shared tag.
     #[inline(always)]
-    pub unsafe fn set_car(&mut self, value: TaggedValue) {
-        let p = &self.car as *const TaggedValue as *const AtomicUsize;
-        unsafe { (*p).store(value.0, Ordering::Release) };
+    pub unsafe fn set_car(&self, value: TaggedValue) {
+        self.car.store_atomic(value);
     }
 
     /// Store the cdr using release ordering.
@@ -106,10 +302,10 @@ impl ConsCell {
     ///
     /// `self` must be a live cons cell and `value` must be a valid tagged value
     /// whose pointee, if any, has been fully initialized before publication.
+    /// Takes `&self`, like [`Self::set_car`].
     #[inline(always)]
-    pub unsafe fn set_cdr(&mut self, value: TaggedValue) {
-        let p = &self.cdr_or_next as *const ConsCdrOrNext as *const AtomicUsize;
-        unsafe { (*p).store(value.0, Ordering::Release) };
+    pub unsafe fn set_cdr(&self, value: TaggedValue) {
+        self.cdr_or_next.store_atomic(value);
     }
 
     /// Read the free-list link from a reclaimed cons cell.
@@ -120,7 +316,7 @@ impl ConsCell {
     /// field.
     #[inline]
     pub unsafe fn free_next(&self) -> *mut ConsCell {
-        unsafe { self.cdr_or_next.next_free }
+        unsafe { self.cdr_or_next.free_next() }
     }
 
     /// Convert a reclaimed cons cell into a free-list node.
@@ -140,8 +336,9 @@ impl ConsCell {
         // perfectly ordinary Lisp value; `dead_object` is one no live object
         // can hold, so the car answers "this cell is on the free list" in O(1)
         // (GNU's `deadp`, src/alloc.c:425-429).
-        self.car = TaggedValue::DEAD;
-        self.cdr_or_next.next_free = next;
+        self.car.set_plain(TaggedValue::DEAD);
+        self.cdr_or_next
+            .set_plain(ConsCdrOrNext { next_free: next });
     }
 }
 
@@ -1138,7 +1335,12 @@ impl LispValueVec {
     #[inline]
     pub fn store_atomic(&mut self, i: usize, value: TaggedValue) {
         let data = self.ensure_owned();
-        let p = &data[i] as *const TaggedValue as *const AtomicUsize;
+        // `addr_of_mut!` (not a `&data[i]` reborrow) preserves the writable
+        // provenance: a store derived from a shared reference is UB under
+        // Tree Borrows and under Stacked Borrows once the shared tag is
+        // invalidated. Reads may use the shared-derived form above; writes
+        // must not.
+        let p = std::ptr::addr_of_mut!(data[i]).cast::<AtomicUsize>();
         unsafe { (*p).store(value.0, Ordering::Release) };
     }
 
@@ -1404,7 +1606,8 @@ pub fn load_value_atomic(slot: &TaggedValue) -> TaggedValue {
 /// publication-ordering contract on [`load_value_atomic`].
 #[inline]
 pub fn store_value_atomic(slot: &mut TaggedValue, value: TaggedValue) {
-    let p = slot as *const TaggedValue as *const AtomicUsize;
+    // Write provenance, not a shared reborrow; see `LispValueVec::store_atomic`.
+    let p = std::ptr::addr_of_mut!(*slot).cast::<AtomicUsize>();
     unsafe { (*p).store(value.0, Ordering::Release) };
 }
 
