@@ -125,7 +125,6 @@ impl<'rows, 'emit, 'surface> BufferSourceLoopMutableState<'rows, 'emit, 'surface
                 &mut route_refusals,
             ) {
                 PlainRowRouteOutcome::Rendered => continue,
-                PlainRowRouteOutcome::Stopped => break,
                 PlainRowRouteOutcome::NotRouted => {}
             }
 

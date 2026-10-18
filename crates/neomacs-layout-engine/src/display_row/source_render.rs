@@ -737,6 +737,13 @@ impl<'a> TextRowOutputRenderState<'a> {
             .apply_current_row_mutation(MarkVisualContinuation);
     }
 
+    /// Rewind the current output row to `snapshot`; see
+    /// [`DisplayRowCurrentRowOutput::restore_current_row_snapshot`].
+    pub(crate) fn restore_current_row_snapshot(&mut self, snapshot: GlyphRow) -> bool {
+        self.current_row_output()
+            .restore_current_row_snapshot(snapshot)
+    }
+
     pub(crate) fn note_query_row_advance(&mut self, height: f32, line_spacing: f32) {
         self.output_emitter
             .note_query_row_advance(height, line_spacing);
@@ -1045,6 +1052,13 @@ impl<'a> TextRowSourceRenderState<'a> {
             self.measurement_mode,
             self.faces.pipeline_resolver(),
         )
+    }
+
+    /// Restore a current output row captured by [`Self::current_row_snapshot`]
+    /// — the row-side half of the routed-row rewind. See
+    /// [`DisplayRowCurrentRowOutput::restore_current_row_snapshot`].
+    pub(crate) fn restore_current_row_snapshot(&mut self, snapshot: GlyphRow) -> bool {
+        self.output_render.restore_current_row_snapshot(snapshot)
     }
 
     pub(crate) fn bind_resolved_face(

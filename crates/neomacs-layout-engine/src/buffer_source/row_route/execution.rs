@@ -1,8 +1,16 @@
-//! Execution: the render loop's routed-row attempt. Plans the row, probes and
-//! commits it through the item renderer, and hands the line end back to the
-//! buffer pipeline's own lifecycle.
+//! Execution: the render loop's routed-row attempt. Plans the row, renders it
+//! ONCE through the item renderer behind a rewindable checkpoint, and hands
+//! the line end back to the buffer pipeline's own lifecycle.
 
 use super::*;
+
+use crate::display_cursor::CursorCaptureState;
+use crate::display_row::face_state::DisplayRowActiveFaceState;
+use crate::display_row::geometry::{DisplayRowExtendState, DisplayRowGeometryState};
+use crate::display_row::walk_state::{
+    BoxFaceRowState, DisplayRowSourceStart, FaceScanCheckpoint, LineNumberRenderState,
+};
+use neomacs_display_protocol::glyph_matrix::GlyphRow;
 
 /// Everything a routed row acquisition reads that does not change during the
 /// walk, bundled because the render loop passes exactly these four together on
@@ -49,9 +57,117 @@ pub(crate) enum PlainRowRouteOutcome {
     /// pipeline's own overflow machinery: truncation skip or continuation
     /// transition) for an overflow-prefix plan.
     Rendered,
-    /// The renderer reported a stop; the visible loop must end (mirrors the
-    /// buffer pipeline mapping a failed append to Stop).
-    Stopped,
+}
+
+/// Everything one routed-row attempt mutates between standing at the row's
+/// start and PROVING the row fits.
+///
+/// GNU keeps the display iterator saveable around exactly this decision —
+/// `SAVE_IT` / `RESTORE_IT` (src/xdisp.c:840-861) — so a row that turns out
+/// not to fit is produced again from the saved iterator. The route uses the
+/// same shape for the row producer: it appends every planned part ONCE
+/// through the real writer, and the first refusal rewinds to this snapshot so
+/// the buffer pipeline produces the row, instead of predicting each part's
+/// advance with a throwaway render and then rendering it again.
+///
+/// The snapshot is TOTAL by construction: the output row is replaced
+/// wholesale from its captured copy (glyphs, side tables and every scalar
+/// field), the emitted display points are truncated back to their captured
+/// count, and the walk-side state a rendered part can touch is captured by
+/// value. Adding a new piece of loop state that the commit mutates means
+/// adding it here — the fields below are the complete set the render pass
+/// writes.
+struct RoutedRowCheckpoint {
+    byte_idx: usize,
+    charpos: i64,
+    row_x: f32,
+    row_col: usize,
+    row_geometry: DisplayRowGeometryState,
+    row_extend: DisplayRowExtendState,
+    box_face: BoxFaceRowState,
+    active_face: DisplayRowActiveFaceState,
+    row_source_start: DisplayRowSourceStart,
+    face_scan: FaceScanCheckpoint,
+    line_numbers: LineNumberRenderState,
+    cursor_info: CursorCaptureState,
+    row: GlyphRow,
+    /// Display points emitted into the window's geometry so far. The routed
+    /// render emits them per part (the same `..._and_emit` seam the buffer
+    /// pipeline uses), so a refused attempt must truncate back to this count —
+    /// the producer half of the pipeline's own word-wrap rewind
+    /// (`truncate_display_points` + restored row display positions/pen,
+    /// overflow.rs `restore_row_output_progress`).
+    display_point_len: usize,
+    row_display_positions: (
+        Option<neovm_core::buffer::LispCharPos1>,
+        Option<neovm_core::buffer::LispCharPos1>,
+    ),
+}
+
+impl RoutedRowCheckpoint {
+    /// Capture the walk and row state an attempt mutates. `None` when no
+    /// output row is open — the route has nothing to render into and the
+    /// buffer pipeline owns the row.
+    fn capture(
+        state: &mut crate::buffer_source::loop_state::BufferSourceLoopMutableState<'_, '_, '_>,
+        active_face: &DisplayRowActiveFaceState,
+    ) -> Option<Self> {
+        let row = state.source_render.current_row_snapshot()?;
+        let position = state.progress.row_position();
+        let emitter = state.source_render.output_emitter_ref();
+        Some(Self {
+            byte_idx: state.progress.byte_idx(),
+            charpos: state.progress.charpos(),
+            row_x: position.x_px(),
+            row_col: position.col(),
+            row_geometry: *state.row_build.row_geometry,
+            row_extend: state.row_build.row_extend.clone(),
+            box_face: *state.row_build.box_face,
+            active_face: active_face.clone(),
+            row_source_start: *state.row_source_start,
+            face_scan: *state.face_scan,
+            line_numbers: *state.row_carryover.line_numbers,
+            cursor_info: state.cursor_info.clone(),
+            row,
+            display_point_len: emitter.display_point_len(),
+            row_display_positions: emitter.current_row_display_positions(),
+        })
+    }
+
+    /// Rewind every mutation the attempt made. Consuming the checkpoint
+    /// keeps the rewind single-shot: the next attempt captures a fresh one.
+    fn restore(
+        self,
+        state: &mut crate::buffer_source::loop_state::BufferSourceLoopMutableState<'_, '_, '_>,
+        active_face: &mut DisplayRowActiveFaceState,
+    ) {
+        assert!(
+            state.source_render.restore_current_row_snapshot(self.row),
+            "a routed-row checkpoint always belongs to an open output row"
+        );
+        {
+            let emitter = state.source_render.output_emitter();
+            emitter.truncate_display_points(self.display_point_len);
+            emitter.restore_current_row_display_positions(
+                self.row_display_positions.0,
+                self.row_display_positions.1,
+            );
+            emitter.restore_current_row_pen(DisplayRowPosition::new(self.row_x, self.row_col));
+        }
+        *state.row_build.row_geometry = self.row_geometry;
+        *state.row_build.row_extend = self.row_extend;
+        *state.row_build.box_face = self.box_face;
+        *state.row_source_start = self.row_source_start;
+        *state.face_scan = self.face_scan;
+        *state.row_carryover.line_numbers = self.line_numbers;
+        *state.cursor_info = self.cursor_info;
+        *active_face = self.active_face;
+        state.progress.set_charpos(self.charpos);
+        state.progress.set_byte_idx(self.byte_idx);
+        state
+            .progress
+            .apply_row_position(DisplayRowPosition::new(self.row_x, self.row_col));
+    }
 }
 
 impl<'rows, 'emit, 'surface>
@@ -61,12 +177,11 @@ impl<'rows, 'emit, 'surface>
     /// position through the whole-row fast path. Only rows
     /// [`classify_row_acquisition`] approves are
     /// taken; every candidate face segment is probed (checkpoint face,
-    /// per-run face-chain agreement, box-free, natural-measurement fit — the
-    /// same measurement the buffer pipeline's whole-run decision uses)
-    /// BEFORE any loop state is mutated; everything else falls back to the
-    /// buffer pipeline. The only probe-side effects are content-addressed
-    /// stable-id mints, which the pipeline performs identically for the same
-    /// row.
+    /// per-run face-chain agreement, box-free) BEFORE any loop state is
+    /// mutated, and the row's fit is then decided by the real append itself:
+    /// every part is produced ONCE and a refusal rewinds the attempt. The
+    /// only probe-side effects are content-addressed stable-id mints, which
+    /// the pipeline performs identically for the same row.
     ///
     /// The bookkeeping the buffer pipeline performs per item is either
     /// replicated (per-segment face checkpoint via `resolve_at_checkpoint`,
@@ -182,10 +297,9 @@ impl<'rows, 'emit, 'surface>
 
         let start = CharPos0::new(row.charpos.max(0) as usize);
         // The routed row renders as an ordered sequence of PARTS: visible
-        // text segments and (increment 2i) display-replacement spans, merged
-        // by char position. A replacement part renders through the
-        // pipeline's OWN replacement session at commit; the probe phase
-        // predicts its advance with the session's base-face resolution.
+        // text segments, (increment 2i) display-replacement spans and (P4.6)
+        // overlay-string insertions, merged by char position. Every part is
+        // appended by its own pipeline session during the single render pass.
         enum RoutedRowPartKind<'plan> {
             Text,
             Replacement(&'plan RoutedRowReplacement),
@@ -244,9 +358,6 @@ impl<'rows, 'emit, 'surface>
             "a routed row never starts with a replacement or an insertion \
              (row-start anchors refuse)"
         );
-        let ranges: Vec<(CharPos0, CharPos0)> =
-            parts.iter().map(|part| (part.start, part.end)).collect();
-        let _ = &ranges;
         // The walk resumes at the end of the ROUTED COVERAGE — the newline
         // for a whole-line plan (not the last visible segment's end: with a
         // trailing elision they differ, the hidden span sits between them
@@ -256,21 +367,22 @@ impl<'rows, 'emit, 'surface>
         // after).
         let line_end = start.add_len(CharLen::new(plan.line_char_len()));
 
-        // ---- Probe phase: no loop-state mutation. Resolve every segment's
-        // checkpoint face (the loop already resolved segment 0's), refuse
-        // divergent per-run face chains and box faces on the NEW multi-face
-        // class, and verify the strict natural-measurement fit segment by
-        // segment at its running position.
+        // ---- Face probe phase: no loop-state mutation. Resolve every
+        // segment's checkpoint face (the loop already resolved segment 0's)
+        // and refuse divergent per-run face chains and box faces on the NEW
+        // multi-face class. The row's ADVANCE is not predicted here: the
+        // single render pass below produces every part once through the real
+        // append writer, which stops at the row's right edge and reports it
+        // (GNU `move_it_in_display_line_to`, src/xdisp.c:10422-10451), and a
+        // refused row rewinds to the checkpoint.
         struct ProbedSegment<'plan> {
             start: CharPos0,
             end: CharPos0,
             kind: RoutedRowPartKind<'plan>,
             active: crate::display_row::face_state::DisplayRowActiveFaceState,
-            // Measurement and commit consume the same captured text. Source
-            // resolution does not run Lisp between these phases.
-            text_source: Option<BufferPlainItemSource>,
         }
-        let mut probed: Vec<ProbedSegment> = Vec::with_capacity(ranges.len());
+        let part_count = parts.len();
+        let mut probed: Vec<ProbedSegment> = Vec::with_capacity(part_count);
         let mut carried_active: Option<crate::display_row::face_state::DisplayRowActiveFaceState> =
             None;
         for (index, part) in parts.into_iter().enumerate() {
@@ -325,153 +437,134 @@ impl<'rows, 'emit, 'surface>
                 end: *seg_end,
                 kind: part.kind,
                 active,
-                text_source: None,
             });
         }
 
-        let geometry = *self.row_build.row_geometry;
-        let mut probe_position = position;
-        for segment in &mut probed {
-            // Advance-based measurement: tab expansion depends on the pen x
-            // and 2-col chars advance two cells, so the measured END position
-            // (x AND col) seeds the next segment's probe exactly as the
-            // pipeline's own natural walk would. A replacement part measures
-            // the SESSION's shape: the string's chars as one covered
-            // SourceMappedText run in the session's base face (the same
-            // resolution `DisplayPropertyReplacementAppendPlanItemRequest`
-            // performs at commit; content-addressed mints only).
-            let measured = match &segment.kind {
-                // P4.6: the strings the retained session will append at this
-                // anchor, measured one after another from the running pen.
-                // The base face is resolved through
-                // `DisplayOrigin::OverlayString` — GNU
-                // `face_for_overlay_string` (xfaces.c:7034-7092) "simply
-                // disregards the `face' properties of all overlays", so
-                // resolving through `DisplayPropertyString` here would tint
-                // the string with the overlay's own face and mis-measure a
-                // box or a different font. Resolution only (no pending-face
-                // install): the session performs its own at commit.
-                RoutedRowPartKind::OverlayStrings(anchor) => {
-                    let mut position = Some(probe_position);
-                    for overlay_string in anchor.strings() {
-                        let Some(at) = position else {
-                            break;
-                        };
-                        let Some(text) = overlay_string.string.as_utf8_str() else {
-                            position = None;
-                            break;
-                        };
-                        let origin = DisplayOrigin::OverlayString {
-                            overlay_id: overlay_string.overlay_id,
-                            anchor_charpos: segment.start,
-                            kind: if overlay_string.after_string_p {
-                                crate::display_origin::OverlayStringKind::After
-                            } else {
-                                crate::display_origin::OverlayStringKind::Before
-                            },
-                        };
-                        let base_face = face_resolution_context.resolve_display_string_base_face(
-                            origin,
-                            origin.default_base_face_policy(),
-                            None,
-                            crate::display_source_resolver::DisplayDefaultFaceInstallPolicy::ReuseInstalledDefaultFace,
-                            self.face_ids,
+        // ---- Rewindable checkpoint: everything the render pass below can
+        // mutate, captured before its first write. GNU keeps its display
+        // iterator saveable for exactly this decision (SAVE_IT / RESTORE_IT,
+        // src/xdisp.c:840-861).
+        let Some(checkpoint) = RoutedRowCheckpoint::capture(self, active_face_state) else {
+            // No open output row: the buffer pipeline renders this row.
+            note_route_refusal(RouteRefusal::CommitRefused);
+            return PlainRowRouteOutcome::NotRouted;
+        };
+
+        // ---- Single render pass: every planned part is appended ONCE
+        // through the real writer, replaying the pipeline's per-iteration
+        // bookkeeping. Segment 0's face checkpoint already ran in the visible
+        // loop; each later segment start IS the next property change, so
+        // `resolve_at_checkpoint` fires there exactly as the pipeline's next
+        // iteration would (installing the measured face, including row
+        // extents, scoping row-extend/box).
+        //
+        // The writer is the fit authority: it stops at the row's right edge
+        // and reports the stop, exactly as GNU's `move_it_in_display_line_to`
+        // keeps a character only while
+        // `it->current_x + pixel_width <= it->last_visible_x`
+        // (src/xdisp.c:10422-10451). A part the row cannot hold — a clipped
+        // append, a replacement the session refuses whole, or a row end that
+        // misses the plan's fit bound — rewinds the whole attempt and leaves
+        // the row to the buffer pipeline, which produces it from its own
+        // source. Nothing here predicts an advance with a throwaway render.
+        let rendered: Result<(), ()> = (|| -> Result<(), ()> {
+            let mut render_position = position;
+            for (index, segment) in probed.into_iter().enumerate() {
+                // Test-only fault injection: refuse with the previous part's
+                // glyphs already in the row, so the rewind is exercised
+                // against a PARTIAL row. `RoutedRowRefusalInjection::arm`
+                // never exists in production builds.
+                #[cfg(test)]
+                if index > 0 && take_forced_commit_refusal() {
+                    return Err(());
+                }
+                // P4.6: DELEGATE the anchor's strings to the pipeline's own
+                // session — the identical call `render.rs`'s loop-level element
+                // arm makes, with the loop state this commit already owns. The
+                // producer decided WHERE and in WHICH order (its collection is
+                // what the plan carries); this side owns only the append.
+                //
+                // No face checkpoint runs first: an insertion consumes no chars,
+                // so the position's checkpoint belongs to the text segment that
+                // starts here, and it fires on the next iteration. The strings
+                // resolve their own base face regardless.
+                if let RoutedRowPartKind::OverlayStrings(anchor) = &segment.kind {
+                    self.progress.apply_row_position(render_position);
+                    let positions = crate::display_row::overlay_string::OverlayStringRenderPositions::from_attachment_and_layout_point(
+                            segment.start,
+                            loop_context.point_charpos(),
                         );
-                        // The insertion has its own GNU
-                        // `face_for_overlay_string` base. It can be boxed even
-                        // when an overlay makes the surrounding buffer run
-                        // unboxed, so the earlier carried-face probe is not a
-                        // sufficient admission check. Keep every boxed string
-                        // on the canonical affine-topology source path.
-                        if base_face.face().box_type != 0 {
-                            note_route_refusal(RouteRefusal::ProbeBoxFace);
-                            return PlainRowRouteOutcome::NotRouted;
-                        }
-                        // The session appends the string's chars one by one
-                        // through the Lisp-string source; measuring them as
-                        // one text item in the same face gives the same pen
-                        // advance for the routable class (no tabs, no
-                        // newlines, no per-char property changes), and the
-                        // commit re-reads the session's OWN end position, so
-                        // this prediction only has to keep the fit check
-                        // honest.
-                        let item = DisplayItem::new(
-                            SourceSpan::new(
-                                DisplaySourcePosition::buffer(
-                                    loop_context.buffer_id(),
-                                    segment.start,
-                                    buffer.layout_char_pos_to_emacs_byte_pos(segment.start),
-                                ),
-                                DisplaySourcePosition::buffer(
-                                    loop_context.buffer_id(),
-                                    segment.start,
-                                    buffer.layout_char_pos_to_emacs_byte_pos(segment.start),
-                                ),
-                            ),
-                            RenderFaceRef::FaceId(base_face.face_id()),
-                            DisplayItemKind::SourceMappedText(
-                                crate::display_item::DisplaySourceMappedText::new(text),
-                            ),
-                        );
-                        let append_context = BufferSourceRowAppendContext::from_active_face_row(
+                    let (x, col) = self.progress.row_progress_mut().coordinates_mut();
+                    let continuation = self
+                        .surface
+                        .overlay_context
+                        .render_produced_strings_at_text_row(
                             buffer,
-                            loop_context.buffer_id(),
-                            self.surface.append_surface,
-                            &segment.active,
-                            0.0,
-                            loop_context.char_height(),
-                            self.face_ids.clone(),
-                        )
-                        .with_resolved_item_face(base_face.face_id(), base_face.face().clone());
-                        let mut measure = self.source_render.measure_state();
-                        position = append_context.measure_source_display_item_advance_naturally(
-                            &geometry,
-                            &mut measure,
-                            &item,
-                            at,
-                            DisplayRowAppendKind::SourceText,
+                            positions,
+                            anchor.strings(),
+                            crate::display_item::DisplayStringBoxBoundaries::known(false, false),
+                            self.source_render.reborrow(),
+                            x,
+                            col,
+                            self.row_build.row_geometry,
+                            self.cursor_info,
+                            self.row_source_start,
+                            self.row_y_positions,
+                            self.face_ids,
+                            self.row_carryover.line_numbers,
+                            self.face_scan,
                         );
+                    // A routable overlay string holds no newline and the plan
+                    // refused every anchor an overflow prefix reaches, so the
+                    // session should report neither a row break nor a clip.
+                    // If it does, the row does not fit as planned: rewind.
+                    if continuation.should_break() {
+                        return Err(());
                     }
-                    position
-                }
-                RoutedRowPartKind::Text => {
-                    let source = segment.text_source.insert(BufferPlainItemSource::text_only(
-                        loop_context.buffer_id(),
-                        buffer,
-                        segment.start,
-                        segment.end,
-                        RenderFaceRef::FaceId(segment.active.face_id()),
-                    ));
-                    let Some(text_item) = source.text_item() else {
-                        note_route_refusal(RouteRefusal::ProbeMeasure);
-                        return PlainRowRouteOutcome::NotRouted;
-                    };
-                    let append_context = BufferSourceRowAppendContext::from_active_face_row(
-                        buffer,
-                        loop_context.buffer_id(),
-                        self.surface.append_surface,
-                        &segment.active,
-                        0.0,
-                        loop_context.char_height(),
-                        self.face_ids.clone(),
+                    let committed = self.progress.row_position();
+                    debug_assert_eq!(
+                        committed.col(),
+                        render_position.col() + anchor.advance_cols(),
+                        "the classifier's fit walk credited a different advance than \
+                         the session appended"
                     );
-                    let mut measure = self.source_render.measure_state();
-                    append_context.measure_source_display_item_advance_naturally(
-                        &geometry,
-                        &mut measure,
-                        text_item,
-                        probe_position,
-                        DisplayRowAppendKind::SourceText,
-                    )
+                    render_position = committed;
+                    continue;
                 }
-                RoutedRowPartKind::Replacement(replacement)
-                    if matches!(replacement.content, RoutedReplacementContent::SpaceWidth) =>
-                {
-                    // Rung 3 probe: resolve the spec through the SAME request
-                    // the session renders (resolution only — metric queries,
-                    // no append) and take its stretch width; the commit's
-                    // append advances by exactly this width, with the column
-                    // advance mirroring the builder's rounding.
+
+                if index > 0 {
+                    face_resolution_context.resolve_at_checkpoint_with_source_state(
+                        &mut self.source_render.reborrow(),
+                        self.face_scan,
+                        self.face_ids,
+                        active_face_state,
+                        self.row_build.row_geometry,
+                        self.row_build.row_extend,
+                        self.row_build.box_face,
+                        render_position.x_px(),
+                        segment.start.get() as i64,
+                    );
+                    debug_assert_eq!(
+                        active_face_state.face_id(),
+                        segment.active.face_id(),
+                        "probe and checkpoint face resolution must agree"
+                    );
+                }
+
+                // A replacement part (increment 2i): render through the
+                // pipeline's OWN replacement session — the same context
+                // `render.rs` consume_replacement builds — so glyph provenance
+                // (covered-start charpos), string base-face policy, and the
+                // walk/progress bookkeeping are the session's, verbatim. The
+                // pipeline performs no remember-face/row-extend bookkeeping for
+                // a consumed replacement, so neither does the routed commit.
+                if let RoutedRowPartKind::Replacement(replacement) = &segment.kind {
+                    use crate::buffer_source::display_property_render::{
+                        BufferDisplayPropertyTextReplacementApplyOutcome,
+                        BufferDisplayPropertyTextReplacementRenderContext,
+                        BufferDisplayPropertyTextReplacementRenderState,
+                    };
+                    use crate::display_row::replacement::DisplayReplacementStringRowStop;
                     let start_byte_pos = buffer.layout_char_pos_to_emacs_byte_pos(segment.start);
                     let end_byte_pos = buffer.layout_char_pos_to_emacs_byte_pos(segment.end);
                     let replacement_item =
@@ -493,421 +586,223 @@ impl<'rows, 'emit, 'surface>
                             start_byte_pos,
                             end_byte_pos,
                             replacement.covered,
-                        );
-                    let fallback_metrics =
-                        crate::buffer_source::item_append::BufferSourceActiveFaceRowMetrics::from_active_face_row(
-                            &segment.active,
-                            loop_context.char_height(),
                         )
-                        .fallback_metrics();
-                    replacement_item
-                        .source_text(loop_context.text_start_byte(), text)
-                        .and_then(|source_text| {
-                            self.source_render
-                                .resolve_display_property_replacement_row_request(
-                                    replacement_item.descriptor(),
-                                    source_text,
-                                    &segment.active,
-                                    probe_position.x_px(),
-                                    loop_context.content_x(),
-                                    params,
-                                    0.0,
-                                    fallback_metrics,
-                                    probe_position,
-                                )
-                        })
-                        .and_then(|request| request.stretch_width_px())
-                        .map(|width_px| {
-                            if width_px <= 0.0 {
-                                // A non-positive stretch appends nothing
-                                // (the session's from_stretch Empty arm).
-                                probe_position
-                            } else {
-                                probe_position.at_screen_position(
-                                    probe_position.x_px() + width_px,
-                                    probe_position.col()
-                                        + (width_px / params.char_width.max(1.0)).round() as usize,
-                                )
-                            }
-                        })
-                }
-                RoutedRowPartKind::Replacement(replacement) => {
-                    let base_face = face_resolution_context.resolve_display_string_base_face(
-                        DisplayOrigin::DisplayPropertyString {
-                            anchor_charpos: segment.start,
-                            source: crate::display_origin::DisplayPropertySource::TextProperty,
-                        },
-                        DisplayOrigin::DisplayPropertyString {
-                            anchor_charpos: segment.start,
-                            source: crate::display_origin::DisplayPropertySource::TextProperty,
-                        }
-                        .default_base_face_policy(),
-                        Some(crate::display_source_resolver::ActiveDisplayStringBaseFace::new(
-                            segment.active.face_id(),
-                            segment.active.resolved_face(),
-                        )),
-                        crate::display_source_resolver::DisplayDefaultFaceInstallPolicy::ReuseInstalledDefaultFace,
-                        self.face_ids,
-                    );
-                    let item = DisplayItem::new(
-                        SourceSpan::new(
-                            DisplaySourcePosition::buffer(
-                                loop_context.buffer_id(),
-                                segment.start,
-                                buffer.layout_char_pos_to_emacs_byte_pos(segment.start),
-                            ),
-                            DisplaySourcePosition::buffer(
-                                loop_context.buffer_id(),
-                                segment.end,
-                                buffer.layout_char_pos_to_emacs_byte_pos(segment.end),
-                            ),
-                        ),
-                        RenderFaceRef::FaceId(base_face.face_id()),
-                        DisplayItemKind::SourceMappedText(
-                            crate::display_item::DisplaySourceMappedText::new(
-                                match &replacement.content {
-                                    RoutedReplacementContent::String { text } => text.as_ref(),
-                                    RoutedReplacementContent::SpaceWidth => unreachable!(
-                                        "space replacements probe through the resolved request"
-                                    ),
-                                },
-                            ),
-                        ),
-                    );
-                    let append_context = BufferSourceRowAppendContext::from_active_face_row(
-                        buffer,
-                        loop_context.buffer_id(),
-                        self.surface.append_surface,
-                        &segment.active,
-                        0.0,
-                        loop_context.char_height(),
-                        self.face_ids.clone(),
-                    )
-                    .with_resolved_item_face(base_face.face_id(), base_face.face().clone());
-                    let mut measure = self.source_render.measure_state();
-                    append_context.measure_source_display_item_advance_naturally(
-                        &geometry,
-                        &mut measure,
-                        &item,
-                        probe_position,
-                        DisplayRowAppendKind::SourceText,
-                    )
-                }
-            };
-            let Some(end_position) = measured else {
-                note_route_refusal(RouteRefusal::ProbeMeasure);
-                return PlainRowRouteOutcome::NotRouted;
-            };
-            probe_position = end_position;
-            // Fit re-verification with the pipeline's OWN natural
-            // measurement. Whole-line plans stay strict (any borderline row
-            // — exact fill — keeps the buffer pipeline). Overflow-prefix
-            // plans allow the prefix to end exactly AT the right edge: the
-            // pipeline's fit rule is `x + advance <= right_edge`, and pen x
-            // is monotonic over the run, so a measured end at or inside the
-            // edge proves every routed char individually fits — the same
-            // chars the flag-off pipeline would append before its overflow
-            // decision fires at the handoff char. End-of-source tail plans
-            // (phase 2h rung 2) share the `<=` bound: with no char after
-            // the tail there is no continuation/truncation edge, the walk
-            // simply ends at the source end.
-            let fits = if plan.is_overflow_handoff() || plan.is_end_of_source() {
-                probe_position.x_px() <= self.surface.append_surface.right_edge()
-            } else {
-                probe_position.x_px() < self.surface.append_surface.right_edge()
-            };
-            if !fits {
-                note_route_refusal(RouteRefusal::ProbeMeasure);
-                return PlainRowRouteOutcome::NotRouted;
-            }
-        }
-
-        // ---- Commit phase: render segment by segment, replaying the
-        // pipeline's per-iteration bookkeeping. Segment 0's face checkpoint
-        // already ran in the visible loop; each later segment start IS the
-        // next property change, so `resolve_at_checkpoint` fires there
-        // exactly as the pipeline's next iteration would (installing the
-        // measured face, including row extents, scoping row-extend/box).
-        let mut render_position = position;
-        for (index, segment) in probed.into_iter().enumerate() {
-            // P4.6: DELEGATE the anchor's strings to the pipeline's own
-            // session — the identical call `render.rs`'s loop-level element
-            // arm makes, with the loop state this commit already owns. The
-            // producer decided WHERE and in WHICH order (its collection is
-            // what the plan carries); this side owns only the append.
-            //
-            // No face checkpoint runs first: an insertion consumes no chars,
-            // so the position's checkpoint belongs to the text segment that
-            // starts here, and it fires on the next iteration. The strings
-            // resolve their own base face regardless.
-            if let RoutedRowPartKind::OverlayStrings(anchor) = &segment.kind {
-                self.progress.apply_row_position(render_position);
-                let positions = crate::display_row::overlay_string::OverlayStringRenderPositions::from_attachment_and_layout_point(
-                        segment.start,
-                        loop_context.point_charpos(),
-                    );
-                let (x, col) = self.progress.row_progress_mut().coordinates_mut();
-                let continuation = self
-                    .surface
-                    .overlay_context
-                    .render_produced_strings_at_text_row(
-                        buffer,
-                        positions,
-                        anchor.strings(),
-                        crate::display_item::DisplayStringBoxBoundaries::known(false, false),
-                        self.source_render.reborrow(),
-                        x,
-                        col,
-                        self.row_build.row_geometry,
-                        self.cursor_info,
-                        self.row_source_start,
-                        self.row_y_positions,
-                        self.face_ids,
-                        self.row_carryover.line_numbers,
-                        self.face_scan,
-                    );
-                // A routable overlay string holds no newline and the plan
-                // refused every anchor an overflow prefix reaches, so the
-                // session has neither a row break nor a clip to report.
-                debug_assert!(
-                    !continuation.should_break(),
-                    "routed overlay strings are single-line and fit the row"
-                );
-                if continuation.should_break() {
-                    return note_route_stopped(PlainRowRouteOutcome::Stopped);
-                }
-                let committed = self.progress.row_position();
-                debug_assert_eq!(
-                    committed.col(),
-                    render_position.col() + anchor.advance_cols(),
-                    "the classifier's fit walk credited a different advance than \
-                     the session appended"
-                );
-                render_position = committed;
-                continue;
-            }
-
-            if index > 0 {
-                face_resolution_context.resolve_at_checkpoint_with_source_state(
-                    &mut self.source_render.reborrow(),
-                    self.face_scan,
-                    self.face_ids,
-                    active_face_state,
-                    self.row_build.row_geometry,
-                    self.row_build.row_extend,
-                    self.row_build.box_face,
-                    render_position.x_px(),
-                    segment.start.get() as i64,
-                );
-                debug_assert_eq!(
-                    active_face_state.face_id(),
-                    segment.active.face_id(),
-                    "probe and checkpoint face resolution must agree"
-                );
-            }
-
-            // A replacement part (increment 2i): render through the
-            // pipeline's OWN replacement session — the same context
-            // `render.rs` consume_replacement builds — so glyph provenance
-            // (covered-start charpos), string base-face policy, and the
-            // walk/progress bookkeeping are the session's, verbatim. The
-            // pipeline performs no remember-face/row-extend bookkeeping for
-            // a consumed replacement, so neither does the routed commit.
-            if let RoutedRowPartKind::Replacement(replacement) = &segment.kind {
-                use crate::buffer_source::display_property_render::{
-                    BufferDisplayPropertyTextReplacementApplyOutcome,
-                    BufferDisplayPropertyTextReplacementRenderContext,
-                    BufferDisplayPropertyTextReplacementRenderState,
-                };
-                use crate::display_row::replacement::DisplayReplacementStringRowStop;
-                let start_byte_pos = buffer.layout_char_pos_to_emacs_byte_pos(segment.start);
-                let end_byte_pos = buffer.layout_char_pos_to_emacs_byte_pos(segment.end);
-                let replacement_item =
-                    crate::display_item::BufferDisplayPropertyReplacementItem::new(
-                        replacement.value,
-                        crate::display_property::classify_display_property(
-                            replacement.value,
-                            &buffer.layout_display_when_conditions(),
-                            crate::display_property::DisplayPropertyObject::Buffer,
-                            buffer.layout_display_target(),
-                        ),
-                        crate::display_item::BufferDisplayReplacementSource::spanning(
-                            loop_context.buffer_id(),
-                            segment.start,
-                            start_byte_pos,
-                            segment.end,
-                            end_byte_pos,
-                        ),
-                        start_byte_pos,
-                        end_byte_pos,
-                        replacement.covered,
-                    )
-                    // Every admitted fast-route face is proven box-free. The
-                    // canonical cursor owns boxed replacement topology.
-                    .with_box_vertical_edges(
-                        neomacs_display_protocol::face::BoxVerticalEdges::Neither,
-                    );
-                self.progress.apply_row_position(render_position);
-                let replacement_context = BufferDisplayPropertyTextReplacementRenderContext::new(
-                    replacement_item,
-                    loop_context.text_start_byte(),
-                    text,
-                    loop_context.content_x(),
-                    params,
-                    0.0,
-                    loop_context.char_height(),
-                    active_face_state,
-                    self.progress.row_progress().x(),
-                    self.progress.row_position(),
-                );
-                match replacement_context.render_and_apply(
-                    buffer,
-                    BufferDisplayPropertyTextReplacementRenderState::new(
-                        self.source_render.reborrow(),
-                        self.face_ids,
-                        self.surface.append_surface,
-                        self.row_build.row_geometry,
-                        active_face_state,
-                        self.row_carryover.line_numbers,
-                    ),
-                    &mut self.progress,
-                    self.cursor_info,
-                    loop_context.point_charpos(),
-                ) {
-                    BufferDisplayPropertyTextReplacementApplyOutcome::Applied => {
-                        render_position = self.progress.row_position();
-                    }
-                    BufferDisplayPropertyTextReplacementApplyOutcome::RefusedWhole => {
-                        // The fit proof admits only replacements that fit, and
-                        // a refused one is by definition a replacement that did
-                        // not fit; a row that reaches here must not be treated
-                        // as routed.
-                        debug_assert!(
-                            false,
-                            "the routed-row fit proof must exclude a replacement the row refuses"
+                        // Every admitted fast-route face is proven box-free. The
+                        // canonical cursor owns boxed replacement topology.
+                        .with_box_vertical_edges(
+                            neomacs_display_protocol::face::BoxVerticalEdges::Neither,
                         );
-                        return note_route_stopped(PlainRowRouteOutcome::Stopped);
-                    }
-                    BufferDisplayPropertyTextReplacementApplyOutcome::String(mut session) => {
-                        let Some(outcome) = session.render_next_row(
-                            &mut self.source_render.reborrow(),
+                    self.progress.apply_row_position(render_position);
+                    let replacement_context =
+                        BufferDisplayPropertyTextReplacementRenderContext::new(
+                            replacement_item,
+                            loop_context.text_start_byte(),
+                            text,
+                            loop_context.content_x(),
+                            params,
+                            0.0,
+                            loop_context.char_height(),
+                            active_face_state,
+                            self.progress.row_progress().x(),
+                            self.progress.row_position(),
+                        );
+                    // `render_and_report_refusal`: a replacement the row
+                    // refuses whole is REPORTED (nothing drawn, covered text
+                    // unconsumed) instead of silently consumed, which is what
+                    // lets this attempt rewind and the pipeline produce the
+                    // row.
+                    match replacement_context.render_and_report_refusal(
+                        buffer,
+                        BufferDisplayPropertyTextReplacementRenderState::new(
+                            self.source_render.reborrow(),
                             self.face_ids,
                             self.surface.append_surface,
                             self.row_build.row_geometry,
                             active_face_state,
-                            self.progress.row_position(),
-                        ) else {
-                            return note_route_stopped(PlainRowRouteOutcome::Stopped);
-                        };
-                        self.progress.apply_row_position(outcome.end_position());
-                        if !matches!(
-                            outcome.stop(),
-                            DisplayReplacementStringRowStop::SourceExhausted
-                        ) {
-                            debug_assert!(
-                                false,
-                                "the routed-row fit proof must exclude clipped or multiline display strings"
-                            );
-                            return note_route_stopped(PlainRowRouteOutcome::Stopped);
-                        }
-                        replacement_context.apply_completed_string(
-                            session.finish(outcome.end_position()),
-                            &mut self.progress,
                             self.row_carryover.line_numbers,
-                        );
-                        render_position = self.progress.row_position();
-                    }
-                    BufferDisplayPropertyTextReplacementApplyOutcome::Fallback(_) => {
-                        // Unreachable for a classified plain string (the
-                        // resolver only falls back when the spec is not a
-                        // utf8 string). Render the covered text literally —
-                        // the same glyphs the pipeline's fallback appends.
-                        debug_assert!(false, "a classified replacement string must resolve");
-                        let mut source = BufferPlainItemSource::text_only(
-                            loop_context.buffer_id(),
-                            buffer,
-                            segment.start,
-                            segment.end,
-                            RenderFaceRef::FaceId(active_face_state.face_id()),
-                        );
-                        let append_context = BufferSourceRowAppendContext::from_active_face_row(
-                            buffer,
-                            loop_context.buffer_id(),
-                            self.surface.append_surface,
-                            active_face_state,
-                            0.0,
-                            loop_context.char_height(),
-                            self.face_ids.clone(),
-                        );
-                        let mut render_policy = DisplaySourceAppendRenderPolicy::natural();
-                        let mut source_state =
-                            crate::display_row::source_state::DisplayRowSourceState::frame_local();
-                        let Some(append_progress) = append_context
-                            .render_display_item_source_to_text_row(
-                                self.row_build.row_geometry,
+                        ),
+                        &mut self.progress,
+                        self.cursor_info,
+                        loop_context.point_charpos(),
+                    ) {
+                        BufferDisplayPropertyTextReplacementApplyOutcome::Applied => {
+                            render_position = self.progress.row_position();
+                        }
+                        BufferDisplayPropertyTextReplacementApplyOutcome::RefusedWhole => {
+                            // The row refused the replacement whole (GNU
+                            // display_line's "doesn't fit" branch for a
+                            // display element, src/xdisp.c:26448-26475):
+                            // nothing was drawn, and the covered text must
+                            // not be consumed. Rewind; the pipeline produces
+                            // this row.
+                            return Err(());
+                        }
+                        BufferDisplayPropertyTextReplacementApplyOutcome::String(mut session) => {
+                            let Some(outcome) = session.render_next_row(
                                 &mut self.source_render.reborrow(),
-                                &mut source,
-                                &mut source_state,
-                                render_position,
-                                DisplayRowAppendKind::SourceText,
-                                &mut render_policy,
-                            )
-                        else {
-                            return note_route_stopped(PlainRowRouteOutcome::Stopped);
-                        };
-                        render_position = append_progress.end();
-                        self.progress.apply_row_position(render_position);
+                                self.face_ids,
+                                self.surface.append_surface,
+                                self.row_build.row_geometry,
+                                active_face_state,
+                                self.progress.row_position(),
+                            ) else {
+                                return Err(());
+                            };
+                            self.progress.apply_row_position(outcome.end_position());
+                            if !matches!(
+                                outcome.stop(),
+                                DisplayReplacementStringRowStop::SourceExhausted
+                            ) {
+                                // A clipped or multiline display string ends
+                                // its own row; this row cannot carry it.
+                                return Err(());
+                            }
+                            replacement_context.apply_completed_string(
+                                session.finish(outcome.end_position()),
+                                &mut self.progress,
+                                self.row_carryover.line_numbers,
+                            );
+                            render_position = self.progress.row_position();
+                        }
+                        BufferDisplayPropertyTextReplacementApplyOutcome::Fallback(_) => {
+                            // Unreachable for a classified plain string (the
+                            // resolver only falls back when the spec is not a
+                            // utf8 string). Render the covered text literally —
+                            // the same glyphs the pipeline's fallback appends —
+                            // and let the writer's own clip decision below
+                            // refuse a row that cannot hold it.
+                            let mut source = BufferPlainItemSource::text_only(
+                                loop_context.buffer_id(),
+                                buffer,
+                                segment.start,
+                                segment.end,
+                                RenderFaceRef::FaceId(active_face_state.face_id()),
+                            );
+                            let append_context = BufferSourceRowAppendContext::from_active_face_row(
+                                buffer,
+                                loop_context.buffer_id(),
+                                self.surface.append_surface,
+                                active_face_state,
+                                0.0,
+                                loop_context.char_height(),
+                                self.face_ids.clone(),
+                            );
+                            let mut render_policy = DisplaySourceAppendRenderPolicy::natural();
+                            let mut source_state =
+                                crate::display_row::source_state::DisplayRowSourceState::frame_local();
+                            let Some(append_progress) = append_context
+                                .render_display_item_source_to_text_row(
+                                    self.row_build.row_geometry,
+                                    &mut self.source_render.reborrow(),
+                                    &mut source,
+                                    &mut source_state,
+                                    render_position,
+                                    DisplayRowAppendKind::SourceText,
+                                    &mut render_policy,
+                                )
+                            else {
+                                return Err(());
+                            };
+                            if append_progress.status()
+                                != crate::display_row::builder::DisplayRowAppendStatus::Complete
+                            {
+                                return Err(());
+                            }
+                            render_position = append_progress.end();
+                            self.progress.apply_row_position(render_position);
+                        }
+                        BufferDisplayPropertyTextReplacementApplyOutcome::Stop => {
+                            return Err(());
+                        }
                     }
-                    BufferDisplayPropertyTextReplacementApplyOutcome::Stop => {
-                        return note_route_stopped(PlainRowRouteOutcome::Stopped);
-                    }
+                    continue;
                 }
-                continue;
-            }
 
-            // Per-item bookkeeping the buffer pipeline would perform for
-            // this run (item_render.rs): remember the resolved active face
-            // for later splits, and scope the row-extend fill to the row.
-            source_walk.remember_resolved_source_face_if_absent(
-                active_face_state.face_id(),
-                active_face_state.resolved_face(),
-            );
-            if let Some(fill) = active_face_state.row_extend_fill() {
-                self.row_build
-                    .row_extend
-                    .activate(self.row_build.row_geometry.current_row_marker(), fill);
+                // Per-item bookkeeping the buffer pipeline would perform for
+                // this run (item_render.rs): remember the resolved active face
+                // for later splits, and scope the row-extend fill to the row.
+                source_walk.remember_resolved_source_face_if_absent(
+                    active_face_state.face_id(),
+                    active_face_state.resolved_face(),
+                );
+                if let Some(fill) = active_face_state.row_extend_fill() {
+                    self.row_build
+                        .row_extend
+                        .activate(self.row_build.row_geometry.current_row_marker(), fill);
+                } else {
+                    self.row_build.row_extend.clear();
+                }
+
+                // The segment's text becomes ONE `TextRun` item and is pushed
+                // through the shared writer once: no separate measurement
+                // pass consumed the same captured text before this render.
+                let mut source = BufferPlainItemSource::text_only(
+                    loop_context.buffer_id(),
+                    buffer,
+                    segment.start,
+                    segment.end,
+                    RenderFaceRef::FaceId(segment.active.face_id()),
+                );
+                let append_context = BufferSourceRowAppendContext::from_active_face_row(
+                    buffer,
+                    loop_context.buffer_id(),
+                    self.surface.append_surface,
+                    active_face_state,
+                    0.0,
+                    loop_context.char_height(),
+                    self.face_ids.clone(),
+                );
+                let mut render_policy = DisplaySourceAppendRenderPolicy::natural();
+                let mut source_state =
+                    crate::display_row::source_state::DisplayRowSourceState::frame_local();
+                let Some(append_progress) = append_context.render_display_item_source_to_text_row(
+                    self.row_build.row_geometry,
+                    &mut self.source_render.reborrow(),
+                    &mut source,
+                    &mut source_state,
+                    render_position,
+                    DisplayRowAppendKind::SourceText,
+                    &mut render_policy,
+                ) else {
+                    return Err(());
+                };
+                // `Complete` is the writer's own statement that the WHOLE run
+                // reached the row; a Clipped append stopped at the right edge
+                // and left this segment's tail unrendered, so the row is not
+                // the one the plan promised. `RowBreak` cannot come from a
+                // text-only source.
+                if append_progress.status()
+                    != crate::display_row::builder::DisplayRowAppendStatus::Complete
+                {
+                    return Err(());
+                }
+                render_position = append_progress.end();
+                self.progress.apply_row_position(render_position);
+            }
+            // Test-only fault injection for the LAST appended part (the
+            // single-part row shape, where the mid-loop hook never fires).
+            #[cfg(test)]
+            if take_forced_commit_refusal() {
+                return Err(());
+            }
+            // The pen only ever advances, so the row's END position decides
+            // every part's fit: a whole-line plan must end strictly inside
+            // the right edge (an exact fill belongs to the pipeline's
+            // continuation/truncation policy), while an overflow-prefix or
+            // end-of-source plan may end exactly at it.
+            let fits = if plan.is_overflow_handoff() || plan.is_end_of_source() {
+                render_position.x_px() <= self.surface.append_surface.right_edge()
             } else {
-                self.row_build.row_extend.clear();
-            }
-
-            let mut source = segment
-                .text_source
-                .expect("a committed text segment passed source measurement");
-            let append_context = BufferSourceRowAppendContext::from_active_face_row(
-                buffer,
-                loop_context.buffer_id(),
-                self.surface.append_surface,
-                active_face_state,
-                0.0,
-                loop_context.char_height(),
-                self.face_ids.clone(),
-            );
-            let mut render_policy = DisplaySourceAppendRenderPolicy::natural();
-            let mut source_state =
-                crate::display_row::source_state::DisplayRowSourceState::frame_local();
-            let Some(append_progress) = append_context.render_display_item_source_to_text_row(
-                self.row_build.row_geometry,
-                &mut self.source_render.reborrow(),
-                &mut source,
-                &mut source_state,
-                render_position,
-                DisplayRowAppendKind::SourceText,
-                &mut render_policy,
-            ) else {
-                return note_route_stopped(PlainRowRouteOutcome::Stopped);
+                render_position.x_px() < self.surface.append_surface.right_edge()
             };
-            render_position = append_progress.end();
-            self.progress.apply_row_position(render_position);
+            if fits { Ok(()) } else { Err(()) }
+        })();
+        if rendered.is_err() {
+            checkpoint.restore(self, active_face_state);
+            #[cfg(test)]
+            ROUTE_REWIND_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            note_route_refusal(RouteRefusal::CommitRefused);
+            return PlainRowRouteOutcome::NotRouted;
         }
 
         self.progress.max_charpos(line_end.get() as i64);

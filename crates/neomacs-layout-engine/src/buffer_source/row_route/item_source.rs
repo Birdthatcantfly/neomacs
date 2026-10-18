@@ -172,14 +172,6 @@ impl BufferPlainItemSource {
 
         Self { items }
     }
-
-    /// The next `TextRun` item without consuming the source (the routed
-    /// production render measures the run before committing to the route).
-    pub(crate) fn text_item(&self) -> Option<&DisplayItem> {
-        self.items
-            .front()
-            .filter(|item| matches!(item.kind, DisplayItemKind::TextRun(_)))
-    }
 }
 
 impl crate::display_source::DisplayItemSource for BufferPlainItemSource {

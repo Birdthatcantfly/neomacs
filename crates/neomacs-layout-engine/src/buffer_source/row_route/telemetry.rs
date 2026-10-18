@@ -90,7 +90,7 @@ impl RouteRefusal {
             | RouteRefusal::Boundary
             | RouteRefusal::ComposedSeam
             | RouteRefusal::ProbeFaceDiverges
-            | RouteRefusal::ProbeMeasure => RouteRefusalClass::Other,
+            | RouteRefusal::CommitRefused => RouteRefusalClass::Other,
         }
     }
 }
@@ -117,19 +117,6 @@ pub(super) static ROUTE_STAT_SKIPPED: std::sync::atomic::AtomicUsize =
 pub(super) static ROUTE_STAT_ROUTED: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// Attempts that took the route and then ran out of window mid-row, so the
-/// walk terminated inside the commit.
-///
-/// P4.8(d): this outcome had no counter, which is why `attempts` did not
-/// conserve. Every `NotRouted` exit notes a refusal and both success paths
-/// note a routed row, but an `PlainRowRouteOutcome::Stopped` did neither. It
-/// is the walk's own termination, roughly once per redisplay pass: the corpus
-/// gap was 137 of 70341 attempts and the tty-typing gap was ~6002 against
-/// ~6004 redisplays. Counting it makes the line conservation-complete —
-/// attempts == routed + stopped + sum(refusals).
-pub(super) static ROUTE_STAT_STOPPED: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
 pub(super) static ROUTE_STAT_REFUSALS: [std::sync::atomic::AtomicUsize; RouteRefusalClass::COUNT] =
     [const { std::sync::atomic::AtomicUsize::new(0) }; RouteRefusalClass::COUNT];
 
@@ -144,17 +131,6 @@ pub(super) fn note_route_refusal(reason: RouteRefusal) {
         ROUTE_STAT_REFUSALS[reason.class().index()]
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-}
-
-/// The route committed a row and the walk then ran out of window. See
-/// [`ROUTE_STAT_STOPPED`]; returns its argument so the exits can stay
-/// single-expression.
-pub(super) fn note_route_stopped(outcome: PlainRowRouteOutcome) -> PlainRowRouteOutcome {
-    debug_assert_eq!(outcome, PlainRowRouteOutcome::Stopped);
-    if route_stats_file().is_some() {
-        ROUTE_STAT_STOPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-    outcome
 }
 
 pub(super) fn note_route_skipped() {
@@ -180,16 +156,16 @@ pub(crate) fn route_stats_append_report() {
         return;
     };
     // `skipped` is reported alongside `attempts`, not inside it: a skipped
-    // position never became an attempt (the refusal window answered for it),
-    // so the conserving identity is attempts == routed + stopped +
-    // sum(refuse_*), with skipped accounted separately.
+    // position never became an attempt (the refusal window answered for it).
+    // An attempt now ends either routed or as a noted refusal: there is no
+    // separate "stopped the walk" outcome any more, because a refused row is
+    // rewound and left to the buffer pipeline.
     let mut line = format!(
-        "row_route pid={} attempts={} skipped={} routed={} stopped={}",
+        "row_route pid={} attempts={} skipped={} routed={}",
         std::process::id(),
         ROUTE_STAT_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed),
         ROUTE_STAT_SKIPPED.load(std::sync::atomic::Ordering::Relaxed),
         ROUTE_STAT_ROUTED.load(std::sync::atomic::Ordering::Relaxed),
-        ROUTE_STAT_STOPPED.load(std::sync::atomic::Ordering::Relaxed),
     );
     for class in RouteRefusalClass::ALL {
         let count = ROUTE_STAT_REFUSALS[class.index()].load(std::sync::atomic::Ordering::Relaxed);
@@ -217,6 +193,54 @@ pub(crate) fn route_stats_append_report() {
 #[cfg(test)]
 pub(crate) static ROUTED_ROW_COUNT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+
+/// Test-only engagement proof for the rewind: routed-row attempts that
+/// appended at least one part and then restored their checkpoint.
+#[cfg(test)]
+pub(crate) static ROUTE_REWIND_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Test-only fault injection: attempts armed to refuse AFTER appending their
+/// first part, which is what exercises the rewind with real glyphs already in
+/// the row. `cargo nextest` runs one test per process, so this process-wide
+/// counter cannot leak between tests.
+#[cfg(test)]
+static ROUTE_FORCED_COMMIT_REFUSALS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Arms [`ROUTE_FORCED_COMMIT_REFUSALS`] for `count` route attempts. The guard
+/// disarms on drop, so a panicking test cannot leak the injection into a
+/// later layout in the same process.
+#[cfg(test)]
+#[must_use = "dropping the guard disarms the injection"]
+pub(crate) struct RoutedRowRefusalInjection(());
+
+#[cfg(test)]
+impl RoutedRowRefusalInjection {
+    pub(crate) fn arm(count: usize) -> Self {
+        ROUTE_FORCED_COMMIT_REFUSALS.store(count, std::sync::atomic::Ordering::Relaxed);
+        Self(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for RoutedRowRefusalInjection {
+    fn drop(&mut self) {
+        ROUTE_FORCED_COMMIT_REFUSALS.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Consume one armed forced refusal, if any. Called only from the route's
+/// single render pass.
+#[cfg(test)]
+pub(crate) fn take_forced_commit_refusal() -> bool {
+    let armed = ROUTE_FORCED_COMMIT_REFUSALS.load(std::sync::atomic::Ordering::Relaxed);
+    if armed == 0 {
+        return false;
+    }
+    ROUTE_FORCED_COMMIT_REFUSALS.store(armed - 1, std::sync::atomic::Ordering::Relaxed);
+    true
+}
 
 /// Test-only engagement proof for the multi-face extension: routed rows that
 /// rendered as MORE than one face segment.

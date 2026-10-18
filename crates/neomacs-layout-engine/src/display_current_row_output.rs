@@ -96,12 +96,42 @@ impl<'builder> DisplayRowCurrentRowOutput<'builder> {
         self.apply_current_row_mutation(MarkTextRowEndsAtZvMutation);
     }
 
+    /// Replace the current output row with a previously captured snapshot,
+    /// dropping every glyph and row-state change an abandoned render made.
+    ///
+    /// The routed-row route renders a row ONCE through the real append writer
+    /// and rewinds it on a refusal; GNU keeps the same ability by saving and
+    /// restoring the display iterator around a row attempt (SAVE_IT /
+    /// RESTORE_IT, src/xdisp.c:840-861). Returns `false` when no row is
+    /// open — a checkpoint is only ever captured against an open row, so the
+    /// false arm means the row was closed underneath it.
+    pub(crate) fn restore_current_row_snapshot(&mut self, snapshot: GlyphRow) -> bool {
+        self.apply_current_row_mutation(RestoreCurrentRowSnapshotMutation { snapshot })
+            .is_some()
+    }
+
     pub(crate) fn cluster_tail(&self) -> Option<(char, bool)> {
         // This is inspected before each source character. Borrow the row;
         // cloning its growing glyph vectors makes a line quadratic to walk.
         self.builder
             .current_row_for_render()
             .and_then(last_text_cluster_tail_in_row)
+    }
+}
+
+/// Wholesale row restore for an abandoned render. Replacing the entire row —
+/// rather than truncating glyph areas and patching known fields — is what
+/// makes the restore TOTAL: a refusal can happen between any two appended
+/// glyphs, and no future row-state field may silently escape the rewind.
+struct RestoreCurrentRowSnapshotMutation {
+    snapshot: GlyphRow,
+}
+
+impl DisplayCurrentRowMutation for RestoreCurrentRowSnapshotMutation {
+    type Output = ();
+
+    fn apply(self, row: &mut GlyphRow) {
+        *row = self.snapshot;
     }
 }
 

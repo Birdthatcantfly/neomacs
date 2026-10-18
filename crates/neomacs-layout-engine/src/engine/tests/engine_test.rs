@@ -111,6 +111,8 @@ mod posn_frame_pool_guard_test;
 mod query_source_horizon_test;
 #[path = "replay_cursor_on_tab_test.rs"]
 mod replay_cursor_on_tab_test;
+#[path = "row_route_rewind_engine_test.rs"]
+mod row_route_rewind_engine_test;
 #[path = "scroll_back_engine_test.rs"]
 mod scroll_back_engine_test;
 #[path = "scroll_input_policy_test.rs"]

@@ -536,32 +536,6 @@ impl<'source, 'surface, B: LayoutBufferView + ?Sized>
         Some(outcome.into_append_progress(position))
     }
 
-    /// Natural measurement returning the END position (x AND col) the append
-    /// would reach; see
-    /// [`SingleDisplayItemAppendContext::measure_advance_naturally`].
-    pub(crate) fn measure_source_display_item_advance_naturally(
-        &self,
-        geometry: &DisplayRowGeometryState,
-        state: &mut TextRowSourceMeasureState<'_>,
-        item: &DisplayItem,
-        position: DisplayRowPosition,
-        fallback_kind: DisplayRowAppendKind,
-    ) -> Option<DisplayRowPosition> {
-        let frame = self.active_face_context(geometry).active_face_frame();
-        let item_face = self.source_item_face(item);
-        SingleDisplayItemAppendContext::for_source_walk(
-            item_face.resolved_face(),
-            item_face.face_id(),
-            frame,
-        )
-        .measure_advance_naturally(
-            state,
-            item_face.bind_item(item.clone()),
-            position,
-            fallback_kind,
-        )
-    }
-
     fn append_source_char_plan_to_text_row(
         &self,
         geometry: &DisplayRowGeometryState,
