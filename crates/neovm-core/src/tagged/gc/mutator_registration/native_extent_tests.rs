@@ -200,14 +200,26 @@ fn alloc(peer_tx: &Sender<PeerSignal>, count: usize) {
         .unwrap_or_else(|error| panic!("alloc reply: {error}"));
 }
 
+/// Ordinary ACKer thread: allocates on request and serves one keeper round
+/// per `Collect`.
+///
+/// The caller MUST receive `activated` before opening any keeper round: a
+/// peer that registers while a round is already active joins as
+/// `StartingStopped`, is excluded from that round's frozen membership, and
+/// shifts the one-`Collect`-per-round pairing so a trailing `Collect` can
+/// outlive the last activation and park in `wait_request` forever.
 fn peer_loop<'era>(
     permit: MutatorPermit<'era>,
     heap: HeapIdentity,
     id: u64,
     one: &SharedRoot,
     rx: &Receiver<PeerSignal>,
+    activated: &Sender<()>,
 ) {
     let mut owner = activate(permit, heap, id);
+    activated
+        .send(())
+        .unwrap_or_else(|_| panic!("activated channel closed"));
     let mut head = one.clone();
     while let Ok(signal) = rx.recv() {
         match signal {
@@ -470,9 +482,10 @@ fn a7_extent_blocks_while_peer_allocates_and_keeper_collects_repeatedly() {
         let (entered_tx, entered_rx) = channel();
         let (returned_tx, returned_rx) = channel();
         let (wake_tx, wake_rx) = channel();
+        let (activated_tx, activated_rx) = channel();
         let heap = era.heap_identity();
         thread::scope(|scope| {
-            scope.spawn(move || peer_loop(peer_permit, heap, 6701, one, &peer_rx));
+            scope.spawn(move || peer_loop(peer_permit, heap, 6701, one, &peer_rx, &activated_tx));
             scope.spawn(move || {
                 blocked_owner_thread(
                     native_permit,
@@ -486,6 +499,8 @@ fn a7_extent_blocks_while_peer_allocates_and_keeper_collects_repeatedly() {
                     &native_rx,
                 )
             });
+            // Gate on full peer membership before the first round.
+            recv(&activated_rx);
             alloc(&peer_tx, 3);
             let entered = recv(&entered_rx);
             assert_eq!(entered.words.len(), 3);
@@ -558,9 +573,10 @@ fn a7_wake_during_active_stop_cannot_run_until_resume() {
         let (entered_tx, entered_rx) = channel();
         let (returned_tx, returned_rx) = channel();
         let (wake_tx, wake_rx) = channel();
+        let (activated_tx, activated_rx) = channel();
         let heap = era.heap_identity();
         thread::scope(|scope| {
-            scope.spawn(move || peer_loop(peer_permit, heap, 6711, one, &peer_rx));
+            scope.spawn(move || peer_loop(peer_permit, heap, 6711, one, &peer_rx, &activated_tx));
             scope.spawn(move || {
                 blocked_owner_thread(
                     native_permit,
@@ -574,6 +590,8 @@ fn a7_wake_during_active_stop_cannot_run_until_resume() {
                     &native_rx,
                 )
             });
+            // Gate on full peer membership before the first round.
+            recv(&activated_rx);
             alloc(&peer_tx, 2);
             let entered = recv(&entered_rx);
             let mut next_epoch = 1u64;
@@ -624,9 +642,10 @@ fn a7_native_entry_races_request() {
         let (go_tx, go_rx) = channel();
         let (wake_tx, wake_rx) = channel();
         let (returned_tx, returned_rx) = channel();
+        let (activated_tx, activated_rx) = channel();
         let heap = era.heap_identity();
         thread::scope(|scope| {
-            scope.spawn(move || peer_loop(peer_permit, heap, 6721, one, &peer_rx));
+            scope.spawn(move || peer_loop(peer_permit, heap, 6721, one, &peer_rx, &activated_tx));
             scope.spawn(move || {
                 let mut owner = activate(racer_permit, heap, 6722);
                 let key = owner.key();
@@ -655,6 +674,8 @@ fn a7_native_entry_races_request() {
                 retry_rv(|| owner.enter_native(&[]));
                 retire(owner);
             });
+            // Gate on full peer membership before the first round.
+            recv(&activated_rx);
             let mut next_epoch = 1u64;
             for round in 0..100u64 {
                 let armed = recv(&armed_rx);
@@ -699,9 +720,10 @@ fn a7_native_return_races_request() {
         let (returned_tx, returned_rx) = channel();
         let (serve_tx, serve_rx) = channel();
         let (settled_tx, settled_rx) = channel();
+        let (activated_tx, activated_rx) = channel();
         let heap = era.heap_identity();
         thread::scope(|scope| {
-            scope.spawn(move || peer_loop(peer_permit, heap, 6731, one, &peer_rx));
+            scope.spawn(move || peer_loop(peer_permit, heap, 6731, one, &peer_rx, &activated_tx));
             scope.spawn(move || {
                 serving_racer_thread(
                     racer_permit,
@@ -717,6 +739,8 @@ fn a7_native_return_races_request() {
                     settled_tx,
                 )
             });
+            // Gate on full peer membership before the first round.
+            recv(&activated_rx);
             let mut next_epoch = 1u64;
             for round in 0..100u64 {
                 let armed = recv(&armed_rx);
@@ -804,9 +828,10 @@ fn a7_lost_wakeup_stress_rotating_schedules() {
         let (returned_tx, returned_rx) = channel();
         let (serve_tx, serve_rx) = channel();
         let (settled_tx, settled_rx) = channel();
+        let (activated_tx, activated_rx) = channel();
         let heap = era.heap_identity();
         thread::scope(|scope| {
-            scope.spawn(move || peer_loop(peer_permit, heap, 6741, one, &peer_rx));
+            scope.spawn(move || peer_loop(peer_permit, heap, 6741, one, &peer_rx, &activated_tx));
             scope.spawn(move || {
                 serving_racer_thread(
                     racer_permit,
@@ -822,6 +847,10 @@ fn a7_lost_wakeup_stress_rotating_schedules() {
                     settled_tx,
                 )
             });
+            // Gate on full peer membership before the first round: an
+            // ungated peer can register mid-round (StartingStopped) and
+            // strand a trailing Collect after the closing round.
+            recv(&activated_rx);
             let mut next_epoch = 1u64;
             for round in 0..100u64 {
                 let armed = recv(&armed_rx);
