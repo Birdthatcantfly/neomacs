@@ -1736,28 +1736,50 @@ pub fn note_heap_slot_write(
         // The missed real window and ALL mirror prove an installed GEN1
         // heap. Uninstall clears both mirrors, including this length.
         // No allocation, callback or safe point can change the installation.
+        // Only the zero-old-count certificate stays inline: the old-owner
+        // tail is outlined below, because every inline store site carrying
+        // it grew past the setters' outline thresholds and absorbed the
+        // whole barrier instead (b122: specbind_cached +133 instructions,
+        // setcdr call sites inlined away). Young-block stores — the hot
+        // generational case — still return without any call.
         let ptr = TAGGED_HEAP.with(Cell::get);
         debug_assert!(!ptr.is_null());
         // SAFETY: the protocol proof above establishes a live installed
         // heap, borrowed only for non-allocating atomic metadata accesses.
         let heap = unsafe { &*ptr };
-        if generation_only_cons_is_old(heap, owner) {
-            heap.mark_owner_card(addr);
+        if !heap.region_book.no_old_cons_block_contains(addr) {
+            generation_only_old_cons_store(heap, owner, addr);
         }
         return;
     }
     if barrier_gate(owner) {
         let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
-        // Preserve GEN0's persistent owner bookkeeping. A mirror hit
-        // outside the real window proves GEN1, where an immediate creates
-        // no old-to-young edge. Real-window writes retain full bookkeeping.
+        // Preserve GEN0's persistent owner bookkeeping. An ALL mirror
+        // length proves GEN1 installed (GEN0's mirror equals the real
+        // window, so its length is never ALL), where an immediate outside
+        // the real window creates no old-to-young edge and needs no
+        // bookkeeping. Real-window writes retain full bookkeeping. GEN0
+        // pays one length test; pointer values short-circuit before it.
         if value.is_fixnum()
-            && TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get().covers(addr))
+            && TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get().len()) == usize::MAX
             && !TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr))
         {
             return;
         }
         note_heap_write_slow(owner, kind, Some(slot), Some(value));
+    }
+}
+
+/// Old-owner tail of the generation-only cons store: prove ownership, read
+/// the age byte, mark the owner's card. Outlined from every store site —
+/// reached only when GEN1 is installed and the canonical zero-old-count
+/// certificate failed, so the owner's block may hold old cells. Scalar
+/// arguments travel in registers; nothing here constructs a record.
+#[cold]
+#[inline(never)]
+fn generation_only_old_cons_store(heap: &TaggedHeap, owner: TaggedValue, addr: usize) {
+    if generation_only_cons_is_old(heap, owner) {
+        heap.mark_owner_card(addr);
     }
 }
 
