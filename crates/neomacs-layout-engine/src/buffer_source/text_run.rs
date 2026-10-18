@@ -8,7 +8,9 @@ use crate::display_cursor::{
 };
 use crate::display_item::DisplaySourcePosition;
 use crate::display_row::append_context::DisplayRowAppendKind;
-use crate::display_row::builder::{DisplayRowAppendProgress, DisplayRowPosition};
+use crate::display_row::builder::{
+    DisplayRowAppendProgress, DisplayRowAppendStatus, DisplayRowPosition,
+};
 use crate::display_row::face_state::DisplayRowActiveFaceState;
 use crate::display_row::face_state::DisplayRowExtendFace;
 use crate::display_row::geometry::DisplayRowGeometryState;
@@ -18,99 +20,80 @@ use crate::display_source::{DisplaySourceStepItem, DisplaySourceTextOrigin};
 use crate::display_source_append_plan::DisplaySourceAppendRenderPolicy;
 use crate::display_source_progress::DisplaySourceProgressState;
 use crate::neovm_bridge::LayoutBufferView;
-use crate::types::LineWrapMode;
 
 #[derive(Clone, Copy)]
 pub(crate) struct BufferSourceTextRunRenderRequest {
     text_origin: DisplaySourceTextOrigin,
     point_charpos: i64,
-    right_edge_px: f32,
     position: DisplayRowPosition,
     geometry: DisplayRowGeometryState,
+}
+
+/// Where a clipped whole-run append stopped consuming the run: the position of
+/// the first character the row's right edge refused. `charpos` is
+/// buffer-absolute and `byte_idx` is relative to the walk's text origin — the
+/// [`crate::display_source::DisplaySourceTextPosition`] split the walk's own
+/// progress state uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ClippedRunResume {
+    charpos: i64,
+    byte_idx: usize,
+}
+
+impl ClippedRunResume {
+    fn charpos(self) -> i64 {
+        self.charpos
+    }
+
+    fn byte_idx(self) -> usize {
+        self.byte_idx
+    }
+}
+
+/// What the row's right edge did to a whole-run append.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WholeRunClip {
+    /// The append drew through the run's end.
+    Complete,
+    /// The append stopped inside the run; everything before `resume` is on
+    /// the row and the producer continues at `resume`.
+    Clipped(ClippedRunResume),
+    /// The row refused even the run's first glyph: it is already full. The
+    /// run consumed nothing, so the caller must NOT reseat (an empty prefix
+    /// would re-produce this run forever) — it drops to character
+    /// granularity so the refused character's own overflow decision ends
+    /// the row, the same element arm the former measure-then-split paths
+    /// deferred to.
+    RefusedAtEdge,
 }
 
 impl BufferSourceTextRunRenderRequest {
     pub(crate) fn new(
         text_start_byte: usize,
         point_charpos: i64,
-        right_edge_px: f32,
         position: DisplayRowPosition,
         geometry: DisplayRowGeometryState,
     ) -> Self {
         Self {
             text_origin: DisplaySourceTextOrigin::new(text_start_byte),
             point_charpos,
-            right_edge_px,
             position,
             geometry,
         }
     }
 
-    /// The largest prefix of `source_item` that fits the row, or `None` when no
-    /// proper prefix does.
-    ///
-    /// TRUNCATE MODE ONLY — the wrap modes reach their overflow machinery
-    /// instead, so this never builds a continuation row. The unrendered tail is
-    /// neither returned nor queued: the renderer reseats the producer at the
-    /// prefix end with `BufferElementProducer::consume_prefix_to`, so the next
-    /// element is produced from the first unfitting character.
-    pub(crate) fn prefix_to_fit<B: LayoutBufferView>(
-        self,
-        source_item: &DisplaySourceStepItem,
-        wrap_mode: LineWrapMode,
-        append_context: &BufferSourceRowAppendContext<'_, '_, B>,
-        source_render: &mut TextRowSourceRenderState<'_>,
-    ) -> Option<DisplaySourceStepItem> {
-        if wrap_mode != LineWrapMode::Truncate {
-            return None;
-        }
-        let text = source_item.text_run()?;
-        let start_charpos = source_item.source_step_char().start_charpos();
-        let end_charpos = source_item.source_end_charpos()?;
-        // Valid split offsets are 1..hi (exclusive): within the run's chars
-        // and strictly before its end charpos, exactly the range the former
-        // one-char-at-a-time loop probed.
-        let hi = (text.chars().count() as i64).min(end_charpos.saturating_sub(start_charpos));
-        if hi <= 1 {
-            return None;
-        }
-        // Binary-search the largest fitting prefix instead of remeasuring
-        // every growing prefix: the old loop cloned and measured the run
-        // once per character, O(w^2) measurement plus O(w*r) cloning on
-        // long truncated lines (logs, minified files). Prefix width is
-        // monotone in prefix length for the width policies in use, so the
-        // fits predicate crosses once; the search only ever returns an
-        // offset whose prefix was measured to fit. A split failure counts
-        // as not fitting, which reproduces the old loop's abort-to-None
-        // when the very first split fails and is unreachable otherwise.
-        let mut fits_at = |split_charpos: i64| -> bool {
-            source_item
-                .clone()
-                .split_text_run_at_charpos(split_charpos, self.text_origin.buffer_byte())
-                .is_some_and(|(prefix, _)| {
-                    self.source_display_item_fits_text_row(&prefix, append_context, source_render)
-                })
-        };
-        let mut lo = 0i64; // largest verified-fitting offset; 0 = none
-        let mut hi_bound = hi; // smallest known (or assumed) non-fitting offset
-        while lo + 1 < hi_bound {
-            let mid = lo + (hi_bound - lo) / 2;
-            if fits_at(start_charpos.saturating_add(mid)) {
-                lo = mid;
-            } else {
-                hi_bound = mid;
-            }
-        }
-        if lo == 0 {
-            return None;
-        }
-        source_item
-            .clone()
-            .split_text_run_at_charpos(
-                start_charpos.saturating_add(lo),
-                self.text_origin.buffer_byte(),
-            )
-            .map(|(prefix, _tail)| prefix)
+    /// Whether `source_item` is a run the single-pass whole-run append can
+    /// take: a multi-character non-composed `TextRun` whose source ends are
+    /// known. The row-edge decision is NOT part of this gate — the append
+    /// pipeline's writer itself stops at the right edge and reports the
+    /// refusal, the rule GNU's `move_it_in_display_line_to` applies
+    /// (it rejects a character once
+    /// `it->current_x + pixel_width > it->last_visible_x`,
+    /// src/xdisp.c:10422-10451).
+    pub(crate) fn admits_whole_run_render(source_item: &DisplaySourceStepItem) -> bool {
+        source_item.text_run().is_some()
+            && source_item.source_end_charpos().is_some()
+            && source_item.source_end_byte_idx().is_some()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -150,6 +133,7 @@ impl BufferSourceTextRunRenderRequest {
         ) else {
             return BufferSourceItemRenderOutcome::Stop;
         };
+        let clip = whole_run_clip(&append_progress, &source_text, self.text_origin);
         let row_glyph_checkpoint_after_append = source_render.capture_glyph_checkpoint();
         capture_whole_text_run_cursor_if_point(
             cursor_info,
@@ -158,6 +142,9 @@ impl BufferSourceTextRunRenderRequest {
             self.point_charpos,
             &append_progress,
         );
+        // The slot zip below covers exactly the characters the row kept, so a
+        // clipped append tracks (and records word-wrap candidates for) its
+        // fitting prefix only, like the split prefix this path replaced.
         apply_whole_text_run_trailing_whitespace_state(
             &source_text,
             trailing_whitespace,
@@ -177,52 +164,75 @@ impl BufferSourceTextRunRenderRequest {
             active_face_state.row_extend_fill(),
         );
         progress.apply_row_position(append_progress.end());
-        if let Some(end_charpos) = source_end_charpos {
-            progress.max_charpos(end_charpos);
+        match clip {
+            WholeRunClip::Complete => {
+                if let Some(end_charpos) = source_end_charpos {
+                    progress.max_charpos(end_charpos);
+                }
+                if let Some(end_byte_idx) = source_end_byte_idx {
+                    progress.set_byte_idx(end_byte_idx);
+                }
+                BufferSourceItemRenderOutcome::Rendered
+            }
+            WholeRunClip::Clipped(resume) => {
+                // Only the fitting prefix was consumed: the walk position and
+                // (via the caller's reseat) the producer both move to the
+                // first unfitting character, whose own element arm runs the
+                // row's overflow lifecycle from there.
+                progress.max_charpos(resume.charpos());
+                progress.set_byte_idx(resume.byte_idx());
+                BufferSourceItemRenderOutcome::RenderedToRowEdge {
+                    resume_charpos: resume.charpos(),
+                }
+            }
+            WholeRunClip::RefusedAtEdge => BufferSourceItemRenderOutcome::RunRefusedAtRowEdge,
         }
-        if let Some(end_byte_idx) = source_end_byte_idx {
-            progress.set_byte_idx(end_byte_idx);
-        }
-        BufferSourceItemRenderOutcome::Rendered
     }
+}
 
-    /// Inspect the run before transferring ownership to the renderer. A
-    /// rejected run is still needed by the character/overflow path.
-    pub(crate) fn can_render_whole_run<B: LayoutBufferView>(
-        self,
-        source_item: &DisplaySourceStepItem,
-        append_context: &BufferSourceRowAppendContext<'_, '_, B>,
-        source_render: &mut TextRowSourceRenderState<'_>,
-    ) -> bool {
-        if source_item.text_run().is_none() {
-            return false;
-        }
-        if source_item.source_end_charpos().is_none() || source_item.source_end_byte_idx().is_none()
-        {
-            return false;
-        }
-        self.source_display_item_fits_text_row(source_item, append_context, source_render)
+/// Classify the append against the row's right edge. The writer pushes one
+/// source slot per run character it keeps, so the last emitted slot names the
+/// last character on the row and the resume position is the one after it.
+///
+/// The resume follows the walk's coordinate split
+/// ([`DisplaySourceTextPosition`]): `charpos` buffer-absolute, `byte_idx`
+/// relative to the walk's text origin — the same conversion
+/// [`DisplaySourceStepItem::source_end_byte_idx`] applies to run ends.
+fn whole_run_clip(
+    append_progress: &DisplayRowAppendProgress,
+    source_text: &str,
+    text_origin: DisplaySourceTextOrigin,
+) -> WholeRunClip {
+    if append_progress.status() != DisplayRowAppendStatus::Clipped {
+        return WholeRunClip::Complete;
     }
-
-    fn source_display_item_fits_text_row<B: LayoutBufferView>(
-        self,
-        source_item: &DisplaySourceStepItem,
-        append_context: &BufferSourceRowAppendContext<'_, '_, B>,
-        source_render: &mut TextRowSourceRenderState<'_>,
-    ) -> bool {
-        let measured_width = {
-            let mut measure = source_render.measure_state();
-            append_context.measure_source_display_item_width_naturally(
-                &self.geometry,
-                &mut measure,
-                source_item.item(),
-                self.position,
-                DisplayRowAppendKind::SourceText,
-            )
-        };
-        measured_width
-            .map(|width| self.position.x_px() + width <= self.right_edge_px + f32::EPSILON)
-            .unwrap_or(false)
+    let Some(last) = append_progress.slots().last() else {
+        return WholeRunClip::RefusedAtEdge;
+    };
+    let DisplaySourcePosition::Buffer {
+        char_pos, byte_pos, ..
+    } = last.source()
+    else {
+        return WholeRunClip::RefusedAtEdge;
+    };
+    let emitted = append_progress.emitted_glyphs();
+    let (_, last_ch) = source_text
+        .char_indices()
+        .nth(emitted - 1)
+        .expect("a text run append emits at most one slot per run character");
+    // One past the last kept character, in buffer bytes; `position_from_buffer`
+    // maps it into the walk's slice the way every other resume position is
+    // mapped. A slot at or before the origin cannot happen for a kept prefix,
+    // but a None still degrades safely to the element arm.
+    match text_origin.position_from_buffer(
+        neovm_core::buffer::EmacsBytePos::new(byte_pos.get() + last_ch.len_utf8()),
+        neovm_core::buffer::CharPos0::new(char_pos.get() + 1),
+    ) {
+        Some(resume) => WholeRunClip::Clipped(ClippedRunResume {
+            charpos: resume.charpos(),
+            byte_idx: resume.byte_idx(),
+        }),
+        None => WholeRunClip::RefusedAtEdge,
     }
 }
 

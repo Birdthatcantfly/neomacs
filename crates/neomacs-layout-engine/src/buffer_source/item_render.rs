@@ -28,6 +28,21 @@ use neomacs_display_protocol::types::Color;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BufferSourceItemRenderOutcome {
     Rendered,
+    /// A whole-run append stopped at the row's right edge after drawing part
+    /// of the run; `resume_charpos` names the first unfitting character. The
+    /// caller reseats the producer there (the walk position already advanced
+    /// to it), so the next element is that character, whose own overflow
+    /// lifecycle ends the row. GNU's iterator holds the same boundary:
+    /// `move_it_in_display_line_to` keeps glyphs while
+    /// `it->current_x + pixel_width <= it->last_visible_x`
+    /// (src/xdisp.c:10422-10451).
+    RenderedToRowEdge {
+        resume_charpos: i64,
+    },
+    /// A whole-run append was refused with nothing drawn: the row is already
+    /// full. The caller drops the producer to character granularity so the
+    /// refused character's own overflow decision ends the row.
+    RunRefusedAtRowEdge,
     ContinueBufferWalk,
     Stop,
 }
@@ -317,7 +332,6 @@ impl<'a> BufferSourceItemRenderRequest<'a> {
         let text_run_request = BufferSourceTextRunRenderRequest::new(
             self.loop_context.text_start_byte(),
             self.loop_context.point_charpos(),
-            self.append_surface.right_edge(),
             append_position,
             append_geometry,
         );
@@ -325,12 +339,14 @@ impl<'a> BufferSourceItemRenderRequest<'a> {
         let target_glyph_query = self.params.query_target.is_some()
             && self.params.wrap_mode == crate::types::LineWrapMode::Truncate;
         if !target_glyph_query
-            && text_run_request.can_render_whole_run(
-                &source_item,
-                &buffer_row_append_context,
-                &mut source_render,
-            )
+            && BufferSourceTextRunRenderRequest::admits_whole_run_render(&source_item)
         {
+            // Single pass: the append pipeline's own writer stops the run at
+            // the row's right edge (GNU `move_it_in_display_line_to`,
+            // src/xdisp.c:10422-10451) and reports where it stopped, instead
+            // of the run being measured whole — a scratch clone of the
+            // growing row plus a full render — before being rendered again.
+            let source_end_charpos = source_item.source_end_charpos();
             let outcome = text_run_request.render_and_apply(
                 source_item,
                 &active_face_state,
@@ -342,48 +358,34 @@ impl<'a> BufferSourceItemRenderRequest<'a> {
                 &mut source_render,
                 &mut progress,
             );
-            source_render.include_current_row_metrics(row_build.row_geometry);
-            return outcome;
-        }
-
-        let fitting_prefix = if target_glyph_query {
-            None
-        } else {
-            text_run_request.prefix_to_fit(
-                &source_item,
-                self.params.wrap_mode,
-                &buffer_row_append_context,
-                &mut source_render,
-            )
-        };
-        if let Some(prefix) = fitting_prefix {
-            // Consume only this prefix: the producer is reseated at the first
-            // unfitting character, so the next element is produced from there.
-            // The tail used to be queued purely for the next iteration to pop
-            // it, find it does not fit, and have the truncation skip discard it.
-            if let Some(resume_charpos) = prefix.source_end_charpos() {
-                source_walk.consume_prefix_to(resume_charpos);
+            match outcome {
+                BufferSourceItemRenderOutcome::RenderedToRowEdge { resume_charpos } => {
+                    // Consume only the fitting prefix: the producer is
+                    // reseated at the first unfitting character, so the next
+                    // element is produced from there.
+                    source_walk.consume_prefix_to(resume_charpos);
+                }
+                BufferSourceItemRenderOutcome::RunRefusedAtRowEdge => {
+                    // The full row refused the run's first glyph. Stop
+                    // batching so the next element IS that character and its
+                    // own overflow decision ends the row.
+                    if let Some(end_charpos) = source_end_charpos {
+                        source_walk.request_char_granularity_until(end_charpos);
+                    }
+                }
+                _ => {}
             }
-            let outcome = text_run_request.render_and_apply(
-                prefix,
-                &active_face_state,
-                &buffer_row_append_context,
-                cursor_info,
-                row_carryover.trailing_whitespace,
-                row_carryover.word_wrap,
-                predecessor_row_extend,
-                &mut source_render,
-                &mut progress,
-            );
             source_render.include_current_row_metrics(row_build.row_geometry);
             return outcome;
         }
 
-        // Neither whole-run path could take this run, so it is rendered one
-        // character at a time from here on. Tell the producer to stop batching
-        // for the rest of it: otherwise every character re-reads and re-measures
-        // the whole remaining run, which measured 79x the run measurements on a
-        // 2000-character wrapped line. The hint expires by position.
+        // The run is not whole-run renderable (single char, composition,
+        // special char, or a truncate-mode target query), so it is rendered
+        // one character at a time from here on. Tell the producer to stop
+        // batching for the rest of it: otherwise every character re-reads and
+        // re-measures the whole remaining run, which measured 79x the run
+        // measurements on a 2000-character wrapped line. The hint expires by
+        // position.
         if let Some(end_charpos) = source_item.source_end_charpos() {
             source_walk.request_char_granularity_until(end_charpos);
         }

@@ -117,6 +117,8 @@ mod scroll_back_engine_test;
 mod scroll_input_policy_test;
 #[path = "scroll_surface_test.rs"]
 mod scroll_surface_test;
+#[path = "single_pass_whole_run_engine_test.rs"]
+mod single_pass_whole_run_engine_test;
 #[path = "text_snapshot_cow_test.rs"]
 mod text_snapshot_cow_test;
 

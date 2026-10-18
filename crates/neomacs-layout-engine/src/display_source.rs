@@ -528,10 +528,6 @@ impl DisplaySourceTextOrigin {
         Self { buffer_byte }
     }
 
-    pub(crate) const fn buffer_byte(self) -> usize {
-        self.buffer_byte
-    }
-
     pub(crate) fn position_from_buffer(
         self,
         byte_pos: EmacsBytePos,
@@ -881,6 +877,7 @@ impl DisplaySourceStepItem {
         Some((first, pending))
     }
 
+    #[cfg(test)]
     pub(crate) fn split_text_run_at_charpos(
         self,
         split_charpos: i64,
@@ -1050,6 +1047,7 @@ impl DisplaySourceItem {
         display_item_buffer_end_byte_idx(&self.item, text_start_byte)
     }
 
+    #[cfg(test)]
     pub(crate) fn is_multi_char_text_run(&self) -> bool {
         let DisplayItemKind::TextRun(run) = &self.item.kind else {
             return false;
@@ -1176,6 +1174,7 @@ impl DisplaySourceItem {
         Some((first, pending))
     }
 
+    #[cfg(test)]
     pub(crate) fn split_text_run_at_charpos(
         self,
         split_charpos: i64,
