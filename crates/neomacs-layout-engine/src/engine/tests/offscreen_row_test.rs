@@ -2198,6 +2198,37 @@ fn worker_long_unicode_capture_boundaries_preserve_rich_faces() {
     }
 }
 
+/// A rich-face line whose long Unicode run CLIPS at the row edge keeps the
+/// run's own mixed measurement for the kept prefix: the base of a combining
+/// cluster advances by the shaped cluster width, the same value fresh
+/// canonical layout gives it. Prepared worker rows used to re-measure a
+/// clipped run as scalar character elements, giving the base char its
+/// standalone font advance (11.0 px) where fresh layout kept the cluster
+/// advance (10.8 px) -- charpos 38404, the 'a' after 124 W's on the page's
+/// first line. GNU composes the cluster (src/composite.c) and
+/// `move_it_in_display_line_to` stops at the row edge without re-measuring
+/// (src/xdisp.c:10422-10451).
+#[test]
+fn worker_clipped_combining_cluster_keeps_the_whole_run_advance() {
+    let line = format!(
+        "{}a\u{301} 👩\u{200d}💻 سلام 好 {}\n",
+        "W".repeat(124),
+        "a\u{301} words ".repeat(20)
+    );
+    for wrap in ["nil", "t"] {
+        first_visit_with_setup(
+            Some(
+                "(:family \"serif\" :height 130 :weight bold :box (:line-width 2) :background \"red\" :extend t)",
+            ),
+            &line,
+            None,
+            0,
+            2,
+            Some(&format!("(setq word-wrap {wrap})")),
+        );
+    }
+}
+
 #[test]
 fn worker_prepares_owned_overlay_insertions() {
     let line = "ordinary offscreen text\n";

@@ -713,6 +713,37 @@ pub(crate) struct DisplaySourceStepItem {
     is_explicit_line_break: bool,
 }
 
+/// The text of a `TextRun` the buffer walk renders in ONE whole-run append:
+/// multi-character, not an automatic composition, and free of any character
+/// that needs a precluster Special substitute.
+///
+/// This is the text-shape half of the single-pass admission
+/// ([`DisplaySourceStepItem`]'s `text_run`); the whole-run append additionally
+/// needs known source ends. Prepared worker rows use the same predicate to
+/// decide whether a clipped run keeps its own (shaped) run measurement or
+/// falls back to scalar character elements, so the two paths stay identical.
+pub(crate) fn whole_run_text(item: &DisplayItem) -> Option<&str> {
+    let DisplayItemKind::TextRun(run) = &item.kind else {
+        return None;
+    };
+    if matches!(&run.composition, DisplayTextComposition::Automatic(_)) {
+        return None;
+    }
+    let text = &*run.text;
+    let mut chars = text.chars();
+    chars.next()?;
+    chars.next()?;
+    // Exclude any char that needs a precluster Special substitute (newline,
+    // CR, tab, and every nobreak space/hyphen GNU highlights). Such chars
+    // must break the multi-char fast path so they get their own single-char
+    // item -- their nobreak face is keyed on the per-item source char.
+    text.chars()
+        .all(|ch| {
+            !matches!(ch, '\n' | '\r' | '\t') && !nonascii_space_p(ch) && !nonascii_hyphen_p(ch)
+        })
+        .then_some(text)
+}
+
 impl DisplaySourceStepItem {
     pub(crate) fn new(source_item: DisplaySourceItem, text_start_byte: usize) -> Option<Self> {
         let is_explicit_line_break = source_item.is_explicit_line_break();
@@ -771,25 +802,7 @@ impl DisplaySourceStepItem {
     }
 
     pub(crate) fn text_run(&self) -> Option<&str> {
-        let DisplayItemKind::TextRun(run) = &self.item.kind else {
-            return None;
-        };
-        if matches!(&run.composition, DisplayTextComposition::Automatic(_)) {
-            return None;
-        }
-        let text = &*run.text;
-        let mut chars = text.chars();
-        chars.next()?;
-        chars.next()?;
-        // Exclude any char that needs a precluster Special substitute (newline,
-        // CR, tab, and every nobreak space/hyphen GNU highlights). Such chars
-        // must break the multi-char fast path so they get their own single-char
-        // item -- their nobreak face is keyed on the per-item source char.
-        text.chars()
-            .all(|ch| {
-                !matches!(ch, '\n' | '\r' | '\t') && !nonascii_space_p(ch) && !nonascii_hyphen_p(ch)
-            })
-            .then_some(text)
+        whole_run_text(&self.item)
     }
 
     pub(crate) fn raw_text_run(&self) -> Option<&str> {

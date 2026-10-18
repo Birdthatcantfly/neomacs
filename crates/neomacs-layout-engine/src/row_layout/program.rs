@@ -678,6 +678,12 @@ impl RowProgram {
                 }
             })
             .collect();
+        // Whole-run admission is a property of the source run, not of the
+        // visual row it is being placed on: resolve it once per operation.
+        let whole_run_operations: Vec<bool> = operations
+            .iter()
+            .map(|(item, _)| whole_run_render_admitted(item))
+            .collect();
         let mut operation_index = 0;
         let mut operation_offset = 0;
         let mut scalar_operations = rustc_hash::FxHashSet::default();
@@ -813,13 +819,23 @@ impl RowProgram {
             if self.measurements.missing {
                 return Err(RowProgramError::MissingMeasurement);
             }
-            if progress.status() == DisplayRowAppendStatus::Clipped
+            // The canonical walk renders a run it admits to the single-pass
+            // whole-run append from that run's OWN mixed measurement, keeps
+            // the measurement for the fitting prefix, and re-produces the
+            // remainder from the resume position as a fresh run (GNU produces
+            // glyphs once and stops at the row edge, src/xdisp.c:10422-10451,
+            // so a composed cluster keeps its shaped advance). Only a run the
+            // walk cannot admit that way -- or one whose FIRST glyph the row
+            // refused, which drops the producer to character granularity --
+            // is rendered as scalar character elements. Mirrored here so a
+            // clipped continuation row carries the same advances as fresh
+            // canonical layout.
+            let canonical_scalar_run = progress.status() == DisplayRowAppendStatus::Clipped
                 && !scalar_operations.contains(&operation_index)
                 && matches!(&render_item.source_item().kind, DisplayItemKind::TextRun(run)
                     if !run.text.is_ascii() && run.composition == DisplayTextComposition::Independent)
-            {
-                // Canonical buffer production falls back to scalar items for
-                // the rest of an overflowing run on this visual row.
+                && (!whole_run_operations[operation_index] || progress.slots().is_empty());
+            if canonical_scalar_run {
                 checkpoint.restore(&mut row);
                 scalar_operations.insert(operation_index);
                 continue;
@@ -1115,6 +1131,17 @@ fn item_measurement_face(item: &DisplayItem, paint_face: FaceId) -> FaceId {
         DisplayItemKind::SourceMappedText(text) => text.measurement_face.unwrap_or(paint_face),
         _ => paint_face,
     }
+}
+
+/// Whether the canonical buffer walk renders this source item in one
+/// whole-run append (the single-pass path): the item has the whole-run text
+/// shape and buffer source ends. The walk's admission is exactly this pair
+/// (`DisplaySourceStepItem::admits_whole_run_render`); prepared rows must use
+/// the same answer when deciding whether a clipped run falls back to scalar
+/// character elements.
+fn whole_run_render_admitted(item: &DisplayItem) -> bool {
+    crate::display_source::whole_run_text(item).is_some()
+        && matches!(item.span.end, DisplaySourcePosition::Buffer { .. })
 }
 
 fn text_byte_offset(item: &DisplayItem, chars: usize) -> Result<usize, RowProgramError> {
