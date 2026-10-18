@@ -659,8 +659,12 @@ impl FrameFaceAttempt {
 
     /// [`Self::stable_face_id`] with an attempt-local memo keyed by the
     /// resolved face, so repeated checkpoints of the same face skip building
-    /// the canonical protocol face. `canonical` is invoked only on a memo
-    /// miss and must produce the canonical identity projection of `face`.
+    /// the canonical protocol face. A memo entry is matched first by interned
+    /// source identity — the same key GNU's `lookup_face` uses
+    /// (src/xfaces.c:5064-5075) — falling back to full equality for
+    /// content-equal sources from distinct allocations. `canonical` is
+    /// invoked only on a memo miss and must produce the canonical identity
+    /// projection of `face`.
     pub(crate) fn face_id_for_resolved(
         &mut self,
         face: &crate::neovm_bridge::ResolvedFace,
@@ -670,9 +674,9 @@ impl FrameFaceAttempt {
         {
             let state = self.state.borrow();
             if let Some(id) = state.resolved_memo.get(&route).and_then(|bucket| {
-                bucket
-                    .iter()
-                    .find_map(|(memo_face, id)| (memo_face == face).then_some(*id))
+                bucket.iter().find_map(|(memo_face, id)| {
+                    (face.shares_resolved_identity(memo_face) || memo_face == face).then_some(*id)
+                })
             }) {
                 return id;
             }

@@ -3690,6 +3690,34 @@ impl ResolvedFace {
         FaceColorAttributes::from_base(self) == FaceColorAttributes::from_base(other)
     }
 
+    /// Identity fast path for repeated checkpoint probes: one interned
+    /// composed source shared by allocation, plus the entry state that
+    /// realization reads.
+    ///
+    /// GNU's frame face cache keys a realized face by its merged lface
+    /// vector — `lookup_face` hashes and compares the lface, never the
+    /// realized `struct face` (src/xfaces.c:5064-5075) — because every
+    /// realized field is a deterministic function of that merged lface.
+    /// Allocation identity of an interned source is the strict refinement of
+    /// the same key: the source IS the merged content. Two fields escape
+    /// that implication and carry their own comparison — `font_size` may
+    /// fold a relative `:height` against different base faces, and
+    /// `lisp_name` is assigned by the named-face resolver after interning.
+    /// Faces without a retained source answer `false`; callers fall back to
+    /// full equality.
+    pub(crate) fn shares_resolved_identity(&self, other: &Self) -> bool {
+        let (Some(left), Some(right)) = (&self.source_attributes, &other.source_attributes) else {
+            return false;
+        };
+        std::sync::Arc::ptr_eq(left, right)
+            && self.font_size == other.font_size
+            && self.lisp_name == other.lisp_name
+            && self.canonical_tty_role == other.canonical_tty_role
+            && self.color_state == other.color_state
+            && self.underline_color == other.underline_color
+            && self.terminal_underline_color == other.terminal_underline_color
+    }
+
     /// Typed view of this bridge-side face id. `ResolvedFace.face_id` stays a
     /// raw u32 (the neovm bridge boundary keeps raw reprs); this is THE
     /// conversion point where ids leave the bridge as [`FaceId`].
@@ -6066,6 +6094,10 @@ mod tests;
 #[cfg(test)]
 #[path = "neovm_bridge/tests/tty_paint_memo_test.rs"]
 mod tty_paint_memo_test;
+
+#[cfg(test)]
+#[path = "neovm_bridge/tests/resolved_identity_test.rs"]
+mod resolved_identity_test;
 
 #[cfg(test)]
 #[path = "neovm_bridge/tests/composed_source_pin_test.rs"]
