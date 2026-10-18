@@ -469,12 +469,15 @@ fn try_admit(
 }
 
 fn list_ops(base: i64) -> Vec<Op> {
-    tp_list_ops(base, 8)
+    tp_list_ops(base, 8, 1)
 }
 
 /// `list_ops` with a parameterized loop limit: the A8 throughput rows need
-/// longer lists than the oracle fixtures' eight cells.
-fn tp_list_ops(base: i64, limit: i64) -> Vec<Op> {
+/// longer lists than the oracle fixtures' eight cells. `spacing` unrolls the
+/// loop body so a Safepoint ends the slice only every `spacing` conses; the
+/// op sequence per cons is unchanged, so spacing=1 emits the classic
+/// one-safepoint-per-cell program exactly.
+fn tp_list_ops(base: i64, limit: i64, spacing: usize) -> Vec<Op> {
     // 0 nil, 1 base, 2 k, 3 limit, 4 head, 5 tail, 6 cell, 7 one, 8 cond, 9 car, 10 scratch
     let mut ops = vec![
         Op::ConstNil { dst: 0 },
@@ -495,24 +498,44 @@ fn tp_list_ops(base: i64, limit: i64) -> Vec<Op> {
     ops.push(Op::Lt { dst: 8, a: 2, b: 3 });
     let branch_at = ops.len();
     ops.push(Op::BranchIfNil { cond: 8, target: 0 });
-    ops.push(Op::Add { dst: 9, a: 1, b: 2 });
-    ops.push(Op::ConstNil { dst: 10 });
-    ops.push(Op::Cons {
-        dst: 6,
-        car: 9,
-        cdr: 10,
-    });
-    let head_branch = ops.len();
-    ops.push(Op::BranchIfNil { cond: 4, target: 0 });
-    ops.push(Op::SetCdr { cell: 5, value: 6 });
-    ops.push(Op::Move { dst: 5, src: 6 });
-    let jump_join = ops.len();
-    ops.push(Op::Jump { target: 0 });
-    let init = ops.len() as u16;
-    ops.push(Op::Move { dst: 4, src: 6 });
-    ops.push(Op::Move { dst: 5, src: 6 });
+    // One cons-build block: car fixnum, fresh nil cdr, cons, append to the
+    // tail (first cell initializes head+tail instead), advance k. Emitted
+    // `spacing` times per outer iteration so the Safepoint below ends a slice
+    // only every `spacing` conses.
+    let mut head_branches = Vec::with_capacity(spacing);
+    let mut jump_slots = Vec::with_capacity(spacing);
+    let mut copy_starts = Vec::with_capacity(spacing);
+    let mut init_at = 0u16;
+    for copy in 0..spacing {
+        copy_starts.push(ops.len() as u16);
+        ops.push(Op::Add { dst: 9, a: 1, b: 2 });
+        ops.push(Op::ConstNil { dst: 10 });
+        ops.push(Op::Cons {
+            dst: 6,
+            car: 9,
+            cdr: 10,
+        });
+        head_branches.push(ops.len());
+        ops.push(Op::BranchIfNil { cond: 4, target: 0 });
+        ops.push(Op::SetCdr { cell: 5, value: 6 });
+        ops.push(Op::Move { dst: 5, src: 6 });
+        jump_slots.push(ops.len());
+        ops.push(Op::Jump { target: 0 });
+        if copy == 0 {
+            // The first cons of the whole list initializes head and tail,
+            // then falls through into block 1 so every outer iteration still
+            // builds exactly `spacing` conses.
+            init_at = ops.len() as u16;
+            ops.push(Op::Move { dst: 4, src: 6 });
+            ops.push(Op::Move { dst: 5, src: 6 });
+        }
+    }
     let join = ops.len() as u16;
-    ops.push(Op::Add { dst: 2, a: 2, b: 7 });
+    // k advances once per cons, so an unrolled iteration advances it
+    // `spacing` times before the loop test sees it again.
+    for _ in 0..spacing {
+        ops.push(Op::Add { dst: 2, a: 2, b: 7 });
+    }
     ops.push(Op::Safepoint);
     ops.push(Op::Jump { target: loop_at });
     let done = ops.len() as u16;
@@ -529,11 +552,22 @@ fn tp_list_ops(base: i64, limit: i64) -> Vec<Op> {
         cond: 8,
         target: done,
     };
-    ops[head_branch] = Op::BranchIfNil {
-        cond: 4,
-        target: init,
-    };
-    ops[jump_join] = Op::Jump { target: join };
+    for head_branch in head_branches {
+        ops[head_branch] = Op::BranchIfNil {
+            cond: 4,
+            target: init_at,
+        };
+    }
+    for (index, jump_slot) in jump_slots.into_iter().enumerate() {
+        // Each block falls through to the next; only the last one reaches the
+        // k-advance + Safepoint that closes the slice.
+        let target = if index + 1 < spacing {
+            copy_starts[index + 1]
+        } else {
+            join
+        };
+        ops[jump_slot] = Op::Jump { target };
+    }
     ops
 }
 
@@ -2094,12 +2128,14 @@ where
 }
 
 /// Drive one row: `owners` executors, each running `reps` programs of
-/// `cells` cons builds. Returns the measured row.
+/// `cells` cons builds with a Safepoint every `spacing` conses. Returns the
+/// measured row.
 fn tp_drive(
     label: &str,
     owners: usize,
     cells: usize,
     reps: usize,
+    spacing: usize,
     stop: bool,
     threshold_override: Option<usize>,
 ) -> TpRow {
@@ -2110,7 +2146,14 @@ fn tp_drive(
             .unwrap_or(2048)
     });
     TP_THRESHOLD.store(if stop { threshold } else { 0 }, Ordering::Relaxed);
-    let program = tp_list_ops(owners as i64 * 1_000_000, cells as i64);
+    assert!(
+        cells % spacing == 0,
+        "cells ({cells}) must be a multiple of the safepoint spacing ({spacing})"
+    );
+    let program = tp_list_ops(owners as i64 * 1_000_000, cells as i64, spacing);
+    // One slice executes the whole unrolled iteration, so the step cap must
+    // cover both the per-program loop and the unrolled body.
+    let step_cap: u32 = ((cells * 8 + 64).max(spacing * 16 + 64)) as u32;
     let programs: Vec<Vec<Op>> = (0..owners)
         .map(|index| {
             let _ = index;
@@ -2118,8 +2161,7 @@ fn tp_drive(
         })
         .collect();
     for program in &programs {
-        prevalidate(program, 11, (cells as u32) * 8 + 64)
-            .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+        prevalidate(program, 11, step_cap).unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     }
     // Each program builds `cells` loop conses plus one final cons for the
     // old-to-young SetCar edge.
@@ -2163,7 +2205,7 @@ fn tp_drive(
                 &programs,
                 reps,
                 11,
-                (cells as u32) * 8 + 64,
+                step_cap,
                 2,
                 Some(&overlap),
                 &overlap.abort,
@@ -2290,50 +2332,78 @@ fn a8_throughput_rows() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(2048);
+    // Row-label suffix (e.g. "x20") so several row sizes can share one TSV
+    // stream without ambiguity; empty keeps the classic labels.
+    let tag = std::env::var("A8_TP_TAG").unwrap_or_default();
+    let tag_suffix = if tag.is_empty() {
+        String::new()
+    } else {
+        format!("-{tag}")
+    };
+    // Which row groups to run (comma list of pof,tf,ao); default all three.
+    // Attribution runs filter to one group so profilers see only that shape.
+    let groups = std::env::var("A8_TP_ROWS").unwrap_or_else(|_| "pof,tf,ao".to_string());
+    let want = |group: &str| groups.split(',').any(|entry| entry.trim() == group);
+    // Safepoints per slice: 1 keeps the classic one-slice-per-cell program;
+    // K>1 unrolls the loop body K times per Safepoint to quantify what an
+    // owner with amortized slices (R7's RunSlice fast path) would pay.
+    let spacing: usize = std::env::var("A8_TP_SPACING")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
     let mut tsv = String::new();
     let generational = std::env::var("NEOVM_GC_GENERATIONAL").as_deref() == Ok("1");
 
     // Identical per-owner work at 1..4 tokens.
-    for owners in [1usize, 2, 3, 4] {
-        let row = tp_drive(
-            &format!("per-owner-fixed-{owners}"),
-            owners,
-            cells,
-            reps_fixed,
-            true,
-            None,
-        );
-        tp_row_print(&row, generational, &mut Some(&mut tsv));
+    if want("pof") {
+        for owners in [1usize, 2, 3, 4] {
+            let row = tp_drive(
+                &format!("per-owner-fixed-{owners}{tag_suffix}"),
+                owners,
+                cells,
+                reps_fixed,
+                spacing,
+                true,
+                None,
+            );
+            tp_row_print(&row, generational, &mut Some(&mut tsv));
+        }
     }
     // Identical total work at 1..4 tokens: the driver splits the same total
     // into equal per-owner shares (rounded down to whole programs).
-    for owners in [1usize, 2, 3, 4] {
-        let reps = (total / owners) / (cells + 1);
-        assert!(reps >= 1, "total too small for {owners} owners");
-        // Scale the per-owner threshold by 1/N so every fixed-total row runs
-        // the same number of collection rounds, not total/N of them.
-        let row = tp_drive(
-            &format!("total-fixed-{owners}"),
-            owners,
-            cells,
-            reps,
-            true,
-            Some((threshold / owners).max(1)),
-        );
-        tp_row_print(&row, generational, &mut Some(&mut tsv));
+    if want("tf") {
+        for owners in [1usize, 2, 3, 4] {
+            let reps = (total / owners) / (cells + 1);
+            assert!(reps >= 1, "total too small for {owners} owners");
+            // Scale the per-owner threshold by 1/N so every fixed-total row runs
+            // the same number of collection rounds, not total/N of them.
+            let row = tp_drive(
+                &format!("total-fixed-{owners}{tag_suffix}"),
+                owners,
+                cells,
+                reps,
+                spacing,
+                true,
+                Some((threshold / owners).max(1)),
+            );
+            tp_row_print(&row, generational, &mut Some(&mut tsv));
+        }
     }
     // Bounded allocation-only rows with every collection disabled.
-    for owners in [1usize, 4] {
-        let row = tp_drive(
-            &format!("alloc-only-{owners}"),
-            owners,
-            cells,
-            reps_fixed,
-            false,
-            None,
-        );
-        assert_eq!(row.gcs, 0, "no collections inside the timed window");
-        tp_row_print(&row, generational, &mut Some(&mut tsv));
+    if want("ao") {
+        for owners in [1usize, 4] {
+            let row = tp_drive(
+                &format!("alloc-only-{owners}{tag_suffix}"),
+                owners,
+                cells,
+                reps_fixed,
+                spacing,
+                false,
+                None,
+            );
+            assert_eq!(row.gcs, 0, "no collections inside the timed window");
+            tp_row_print(&row, generational, &mut Some(&mut tsv));
+        }
     }
     if let Some(dir) = tsv_dir {
         let path = format!(
