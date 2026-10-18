@@ -4092,25 +4092,43 @@ const COMPOSED_SOURCE_CACHE_LIMIT: usize = 4096;
 /// table on every keystroke. GNU instead keeps each frame's face cache across
 /// redisplays and discards it only when a definition changes: `face_change` /
 /// `f->face_change` (src/xfaces.c:349, src/xfaces.c:746), set by the
-/// definition writers (src/xfaces.c:3098-3105). The pinned table snapshot is
-/// this cache's `face_change`: entries are keyed by merged content or by
-/// allocation identity, so only the folded named specifications can go stale,
-/// and a changed table is a different snapshot by construction — evaluation
-/// mutates through `Rc::make_mut`, which reallocates rather than disturb this
-/// pin.
+/// definition writers (src/xfaces.c:3098-3105). Entries are keyed by merged
+/// content or by allocation identity, so only the folded named specifications
+/// can go stale: [`ComposedSourcePin::apply_to`] adopts the cache across a
+/// changed-table refresh after dropping those folds. A changed table is a
+/// different snapshot by construction — evaluation mutates through
+/// `Rc::make_mut`, which reallocates rather than disturb this pin.
 pub(crate) struct ComposedSourcePin {
     table: FaceTable,
     cache: std::rc::Rc<std::cell::RefCell<ComposedSourceCache>>,
 }
 
 impl ComposedSourcePin {
-    /// Hand the cache to `resolver` when its table snapshot still matches the
-    /// one this pin was folded against; otherwise the pin is dropped and the
-    /// resolver keeps its fresh cache.
+    /// Hand the cache to `resolver`: wholesale when its table snapshot still
+    /// matches the one this pin was folded against, otherwise with the folded
+    /// named specifications dropped (see below).
     pub(crate) fn apply_to(&self, resolver: &mut FaceResolver) {
         if resolver.face_table.same_snapshot(&self.table) {
             resolver.composed_sources = std::rc::Rc::clone(&self.cache);
+            return;
         }
+        // A definitions refresh re-derived at least one face, so this pin's
+        // table snapshot is stale — but staleness is scoped. The folded named
+        // specifications are functions of the OLD table's definitions and must
+        // re-fold. The composition and identity entries are functions of their
+        // inputs: their keys name the base allocation and the overlay content
+        // or allocation, and an input the new table no longer produces simply
+        // never probes again — a definition change cannot corrupt a hit,
+        // because equal content realizes equal paint and unequal content
+        // misses by key. Keeping them preserves the merged-source allocations,
+        // so unchanged faces keep their source identity across the refresh,
+        // GNU's lface vectors surviving a `face_change` that re-realizes only
+        // what changed (src/xfaces.c:349, src/xfaces.c:3098-3105). Realized
+        // terminal paint stays retirement-stamped by `face_change_count`.
+        let mut cache = self.cache.borrow_mut();
+        cache.len = cache.len.saturating_sub(cache.named_specs.len());
+        cache.named_specs.clear();
+        resolver.composed_sources = std::rc::Rc::clone(&self.cache);
     }
 }
 
@@ -6075,6 +6093,10 @@ mod tests;
 #[cfg(test)]
 #[path = "neovm_bridge/tests/tty_paint_memo_test.rs"]
 mod tty_paint_memo_test;
+
+#[cfg(test)]
+#[path = "neovm_bridge/tests/composed_source_pin_test.rs"]
+mod composed_source_pin_test;
 
 #[cfg(test)]
 #[path = "neovm_bridge/tests/line_count_test.rs"]
