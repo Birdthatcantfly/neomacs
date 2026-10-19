@@ -6256,3 +6256,7 @@ mod allocation_tables;
 
 #[path = "restricted_lisp/copy_oracle.rs"]
 mod copy_oracle;
+
+mod weak_copy;
+
+mod weak_tables;
