@@ -3195,6 +3195,123 @@ pub(crate) fn builtin_next_single_property_change_in_state(
     Ok(outcome.into_value(limit))
 }
 
+/// Immutable fontification-only policy. This selects a scan implementation,
+/// never a retained proof or permission to skip a queried position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FontificationBoundaryMode {
+    Off,
+    On,
+}
+
+static_assertions::assert_impl_all!(FontificationBoundaryMode: Send, Sync);
+
+/// Keep raw and resolved outcomes distinct for refusal tests. UseGeneric
+/// means the original argument-level validation/path must still execute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub(crate) enum FontificationBoundaryAdmission {
+    UseGeneric,
+    Raw(LispCharPos1),
+    Resolved(LispCharPos1),
+}
+
+/// Exact bounded fontification request over the current buffer. No Lisp or
+/// GC runs while the resolver/Buffer borrows are live. Each call snapshots
+/// control variables exactly once; a refused raw proof feeds that SAME
+/// resolver to the generic buffer walker instead of taking another snapshot.
+/// No witness is stored, shared or carried across a callback or retry.
+#[inline]
+pub(crate) fn next_fontified_property_boundary_in_state(
+    vars: crate::emacs_core::eval::VariableView<'_>,
+    buffers: &BufferManager,
+    position: LispCharPos1,
+    end: LispCharPos1,
+    mode: FontificationBoundaryMode,
+) -> Result<FontificationBoundaryAdmission, Flow> {
+    match mode {
+        FontificationBoundaryMode::Off => return Ok(FontificationBoundaryAdmission::UseGeneric),
+        FontificationBoundaryMode::On => {}
+    }
+    let position = position.as_i64();
+    let end = end.as_i64();
+    let Some(buffer) = buffers.current_buffer() else {
+        return Ok(FontificationBoundaryAdmission::UseGeneric);
+    };
+    // A callback may have changed restrictions since ensure captured END.
+    // Refuse BEFORE snapshotting: the original builtin owns these unusual
+    // argument/validation semantics, and will still snapshot only once.
+    if position < buffer.point_min_lisp_char_pos().as_i64()
+        || position >= end
+        || end > buffer.point_max_lisp_char_pos().as_i64()
+    {
+        return Ok(FontificationBoundaryAdmission::UseGeneric);
+    }
+    let fontified = Value::symbol("fontified");
+    let resolver = CharPropertyResolver::snapshot(vars, buffers, fontified);
+    if resolver.supports_presence_coalescing()
+        && buffer.text_props_property_name_presence(Value::from_sym_id(category_sym_id()))
+            == crate::buffer::text_props::PropertyNamePresence::DefinitelyAbsent
+    {
+        // Identical to syntax::parse_cache's raw-resolution proof. The raw
+        // walker uses the actual END: its soft stop at END is exactly the
+        // LIMIT answer this caller requires, not a new fontification stop.
+        let position = LispCharPos1::new(position).to_char_pos();
+        let end = LispCharPos1::new(end);
+        let from_byte = buffer.char_pos_to_emacs_byte_pos_clamped(position);
+        let end_byte = buffer.char_pos_to_emacs_byte_pos_clamped(end.to_char_pos());
+        let next = buffer
+            .text_props_next_single_change_after_emacs_byte_pos_bounded(
+                from_byte, fontified, end_byte,
+            )
+            .map(|byte| buffer.emacs_byte_pos_to_char_pos_clamped(byte).to_lisp())
+            .unwrap_or(end);
+        return Ok(FontificationBoundaryAdmission::Raw(LispCharPos1::new(
+            next.as_i64().min(end.as_i64()),
+        )));
+    }
+
+    let outcome = walk_buffer_single_property_change(
+        &resolver,
+        buffer,
+        position,
+        Value::fixnum(position),
+        Some(end),
+    )?;
+    let next = match outcome {
+        SinglePropertyWalk::ChangedAt(next) => next,
+        SinglePropertyWalk::Exhausted => end,
+    };
+    Ok(FontificationBoundaryAdmission::Resolved(LispCharPos1::new(
+        next,
+    )))
+}
+
+/// Private fontification adapter to the existing resolved scan algorithm.
+/// The public builtin keeps its original adapter/closure type so sharing a
+/// monomorph does not introduce a second native scan frame on public queries.
+#[inline(always)]
+fn walk_buffer_single_property_change(
+    resolver: &CharPropertyResolver<'_>,
+    buffer: &Buffer,
+    position: i64,
+    position_arg: Value,
+    limit: Option<i64>,
+) -> Result<SinglePropertyWalk, Flow> {
+    let byte_pos =
+        validate_buffer_property_point_emacs_byte_pos_raw(buffer, position, position_arg)?;
+    let char_pos = buffer.emacs_byte_pos_to_char_pos_clamped(byte_pos);
+    let buffer_end =
+        buffer.emacs_byte_pos_to_char_pos_clamped(buffer.accessible_emacs_byte_region().end());
+    Ok(walk_single_property_change(
+        resolver,
+        char_pos,
+        buffer_end,
+        limit,
+        |pos| pos.to_lisp().as_i64(),
+        |pos, f| buffer.text_props_for_each_interval_from_char_pos(pos, f),
+    ))
+}
+
 /// Where a forward single-property walk stopped.
 enum SinglePropertyWalk {
     /// The property changed at this Lisp position.

@@ -19,6 +19,7 @@
 //!
 //! | Knob | Unset default | Values | Effect |
 //! | --- | --- | --- | --- |
+//! | `NEOMACS_FONTIFICATION_RAW_BOUNDARY` | `on` | `off`; `on`/`1`/`true`/`yes` | Reuse exact bounded raw fontified scans only when existing category/alias/default absence proofs hold |
 //! | `NEOMACS_POSN_BOUNDED_TEXT` | `on` | `off`; `on`/`1`/`true`/`yes` | Bound text copied by approximate window-position fallbacks |
 //! | `NEOMACS_MODE_LINE_PROP_SLICE` | `off` | `off`; `on`/`1`/`true`/`yes` | Clip and graft literal source intervals with one plist copy |
 //! | `NEOMACS_MODE_LINE_PROP_BORROW` | `off` | `off`; `on`/`1`/`true`/`yes` | Borrow source string intervals during synchronous mode-line property reads |
@@ -36,8 +37,10 @@ pub fn mode_line_flow_enabled() -> bool {
 mod text_measurement;
 use crate::emacs_core::eval::VariableView;
 use text_measurement::TextMeasurement;
+mod fontification_boundary;
 mod mode_line_gc;
 mod mode_line_numeric_padding;
+use fontification_boundary::{FontificationBoundaryAdmission, FontificationBoundaryMode};
 pub(crate) mod motion;
 
 use self::motion::MotionEngine;
@@ -8470,7 +8473,15 @@ fn next_fontified_property_change(
     ctx: &mut super::eval::Context,
     pos: i64,
     limit: i64,
+    mode: FontificationBoundaryMode,
 ) -> EvalResult {
+    match fontification_boundary::admit(ctx, pos, limit, mode)? {
+        FontificationBoundaryAdmission::Raw(next)
+        | FontificationBoundaryAdmission::Resolved(next) => {
+            return Ok(Value::fixnum(next.as_i64()));
+        }
+        FontificationBoundaryAdmission::UseGeneric => {}
+    }
     super::textprop::builtin_next_single_property_change(
         ctx,
         vec![
@@ -8601,6 +8612,23 @@ pub fn ensure_fontified_for_redisplay(
     from_char: i64,
     to_char: i64,
 ) -> Result<RedisplayFontificationOutcome, Flow> {
+    ensure_fontified_for_redisplay_with_mode(
+        ctx,
+        buf_id,
+        from_char,
+        to_char,
+        fontification_boundary::mode(),
+    )
+}
+
+// Explicit mode keeps tests independent of shared environment/TLS mutation.
+fn ensure_fontified_for_redisplay_with_mode(
+    ctx: &mut super::eval::Context,
+    buf_id: BufferId,
+    from_char: i64,
+    to_char: i64,
+    mode: FontificationBoundaryMode,
+) -> Result<RedisplayFontificationOutcome, Flow> {
     let Some((point_min, point_max)) = ctx.buffers.get(buf_id).map(|buffer| {
         (
             buffer.point_min_lisp_char_pos().as_i64(),
@@ -8678,7 +8706,7 @@ pub fn ensure_fontified_for_redisplay(
                 outcome = RedisplayFontificationOutcome::Fontified;
             }
 
-            let next = next_fontified_property_change(ctx, pos, end)?;
+            let next = next_fontified_property_change(ctx, pos, end, mode)?;
             let Some(next_pos) = next.as_int() else {
                 break;
             };
