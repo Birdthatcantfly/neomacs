@@ -1,9 +1,11 @@
 use neovm_core::tagged::gc::ConcurrentMarkCapture;
 
+#[path = "../thread_safety_ui/support/thread_bounds.rs"]
+mod thread_bounds;
+use thread_bounds::ThreadTransfer;
+
 fn transfer(capture: ConcurrentMarkCapture<'static>) {
-    std::thread::spawn(move || {
-        let _ = capture.launch();
-    });
+    ThreadTransfer::<ConcurrentMarkCapture<'static>>::transfer(capture);
 }
 
 fn main() {}
