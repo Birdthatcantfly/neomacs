@@ -127,13 +127,12 @@ pub(super) fn plan(
     dirty_start: i64,
     delta: i64,
     stop_charpos: usize,
+    shift_mode: super::candidate_rows::DeferShiftMode,
 ) -> Option<EditSyncPlan> {
     let indices = DenseRows::from_indices(candidates.iter().map(|(index, _)| *index))?;
     let (first_index, first_row) = candidates[0];
-    let rows = candidates
-        .iter()
-        .map(|&(index, row)| (index, super::shift_row_positions(row, dirty_start, delta)))
-        .collect();
+    let rows =
+        super::CandidateRows::prepare(candidates.iter().copied(), dirty_start, delta, shift_mode);
     let shift = |p: LispCharPos1| {
         LispCharPos1::from_one_based_usize((p.to_one_based_usize() as i64 + delta) as usize)
     };
@@ -198,8 +197,9 @@ pub(super) fn install(
     index_limit: usize,
 ) -> EditSyncInstall {
     let dy_px = dy.round() as i64;
-    let mut rows = Vec::with_capacity(plan.rows.len());
-    for (old_index, row) in plan.rows {
+    let candidate_rows = plan.rows.into_positioned();
+    let mut rows = Vec::with_capacity(candidate_rows.len());
+    for (old_index, row) in candidate_rows {
         let new_y = row.pixel_y + if shift_y { dy } else { 0.0 };
         let Ok(new_index) = usize::try_from(old_index as i64 + dvpos) else {
             continue;

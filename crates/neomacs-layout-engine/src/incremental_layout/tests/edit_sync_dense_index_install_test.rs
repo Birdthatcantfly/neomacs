@@ -61,7 +61,7 @@ fn dense_install_avoids_legacy_map_after_complete_snapshot_comparison() {
         if target.y == 50.0 {
             assert!(std::ptr::eq(
                 on.0.rows[0].1.as_ref(),
-                plan.rows[0].1.as_ref()
+                plan.rows.placement_rows()[0].1.as_ref()
             ));
         }
     }
@@ -71,7 +71,7 @@ fn dense_install_avoids_legacy_map_after_complete_snapshot_comparison() {
 fn sparse_and_duplicate_survivors_keep_original_map_and_snapshot_multiplicity() {
     for indices in [[5, 7, 8], [5, 5, 6], [6, 5, 7]] {
         let mut plan = duplicated_snapshots(populated_plan());
-        for ((index, _), replacement) in plan.rows.iter_mut().zip(indices) {
+        for ((index, _), replacement) in plan.rows.ready_for_test_mut().iter_mut().zip(indices) {
             *index = replacement;
         }
         let off = observed(plan.clone(), false, reached(5, 50.0), 200.0, usize::MAX);
@@ -95,7 +95,7 @@ fn non_monotone_clipping_and_all_dropped_rows_match_legacy_installer() {
         [50.0, 60.0, 70.0],
     ] {
         let mut plan = populated_plan();
-        for ((_, row), y) in plan.rows.iter_mut().zip(ys) {
+        for ((_, row), y) in plan.rows.ready_for_test_mut().iter_mut().zip(ys) {
             MatrixRow::make_mut(row).pixel_y = y;
         }
         for (bottom, limit) in [(80.0, usize::MAX), (80.0, 6), (0.0, usize::MAX)] {
@@ -123,8 +123,8 @@ fn signed_index_and_exclusive_end_boundaries_keep_legacy_installer() {
     };
     for index in [max_signed, usize::MAX] {
         let mut plan = populated_plan();
-        plan.rows.truncate(1);
-        plan.rows[0].0 = index;
+        plan.rows.ready_for_test_mut().truncate(1);
+        plan.rows.ready_for_test_mut()[0].0 = index;
         let off = observed(plan.clone(), false, reached(5, 50.0), 200.0, usize::MAX);
         let on = observed(plan, true, reached(5, 50.0), 200.0, usize::MAX);
         equal(&on.0, &off.0);

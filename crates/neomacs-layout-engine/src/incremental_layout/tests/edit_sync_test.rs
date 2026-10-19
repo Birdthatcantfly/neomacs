@@ -21,11 +21,11 @@ fn plan() -> EditSyncPlan {
         stop_charpos: 100,
         first_unchanged_index: 5,
         first_unchanged_y: 50.0,
-        rows: vec![
+        rows: CandidateRows::ready(vec![
             (5, row(100, 50.0)),
             (6, row(106, 60.0)),
             (7, row(112, 70.0)),
-        ],
+        ]),
         row_snapshots: Vec::new(),
         points: Vec::new(),
         point_rows: None,
@@ -76,7 +76,7 @@ fn installing_moves_every_row_and_drops_what_falls_off() {
 #[test]
 fn installing_in_place_keeps_the_shared_rows() {
     let plan = plan();
-    let original = plan.rows[0].1.clone();
+    let original = plan.rows.placement_rows()[0].1.clone();
     let placed = plan.install(
         EditSyncReached {
             display_row_index: 5,
@@ -123,6 +123,7 @@ fn populated_plan() -> EditSyncPlan {
     let mut plan = plan();
     plan.row_snapshots = plan
         .rows
+        .placement_rows()
         .iter()
         .map(|(index, row)| DisplayRowSnapshot {
             row: *index as i64,
@@ -137,6 +138,7 @@ fn populated_plan() -> EditSyncPlan {
         .collect();
     plan.points = plan
         .rows
+        .placement_rows()
         .iter()
         .flat_map(|(index, row)| {
             (0..2).map(move |col| DisplayPointSnapshot {
@@ -162,7 +164,7 @@ fn still_installation_keeps_geometry_storage_and_snapshot_answers() {
     let _still = StillGuard::on();
     let plan = populated_plan();
     let original = plan.clone();
-    let row_storage = plan.rows.as_ptr();
+    let row_storage = plan.rows.placement_rows().as_ptr();
     let snapshot_storage = plan.row_snapshots.as_ptr();
     let point_storage = plan.points.as_ptr();
     let point_row_storage = plan.point_rows.as_ref().unwrap().rows.as_ptr();
@@ -182,7 +184,9 @@ fn still_installation_keeps_geometry_storage_and_snapshot_answers() {
         placed.point_rows.as_ref().unwrap().rows.as_ptr(),
         point_row_storage
     );
-    for ((index, row), (old_index, old_row)) in placed.rows.iter().zip(&original.rows) {
+    for ((index, row), (old_index, old_row)) in
+        placed.rows.iter().zip(original.rows.placement_rows())
+    {
         assert_eq!(index, old_index);
         assert!(std::ptr::eq(row.as_ref(), old_row.as_ref()));
     }

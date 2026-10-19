@@ -1004,10 +1004,7 @@ impl CursorOnlyReplay {
 impl ScrollReplay {
     #[inline]
     pub(crate) fn extend_retained_face_ids(&self, ids: &mut std::collections::BTreeSet<FaceId>) {
-        let sync_rows = self
-            .sync
-            .iter()
-            .flat_map(|plan| plan.rows.iter().map(|(_, row)| row.as_ref()));
+        let sync_rows = self.sync.iter().flat_map(|plan| plan.face_rows());
         extend_referenced_face_ids(
             self.reused_rows
                 .iter()
@@ -1025,10 +1022,7 @@ impl ScrollReplay {
         // The rows an edit sync may install are retained rows too: their
         // faces must be admitted with the rest, whether or not the walk ends
         // up synchronizing.
-        let sync_rows = self
-            .sync
-            .iter()
-            .flat_map(|plan| plan.rows.iter().map(|(_, row)| row.as_ref()));
+        let sync_rows = self.sync.iter().flat_map(|plan| plan.face_rows());
         referenced_face_ids(
             self.reused_rows
                 .iter()

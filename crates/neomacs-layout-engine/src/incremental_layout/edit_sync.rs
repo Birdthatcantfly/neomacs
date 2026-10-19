@@ -40,10 +40,14 @@
 //! | `NEOMACS_EDIT_SYNC_STILL` | `off` | `off`, `on` | Transfer synchronized geometry without remapping when its placement and visibility are unchanged. |
 //! | `NEOMACS_EDIT_SYNC_PROVE_FIRST` | `off` | `off`, `on` | Prefer a completely admitted bounded prove producer inside GNU sync; rejected proofs still use general sync. |
 //! | `NEOMACS_EDIT_SYNC_LAZY_PROOF` | `on` | `off`, `on` | Defer source proof until bounded fallback is possible in general Sync with ProveFirst off. |
+//! | `NEOMACS_EDIT_SYNC_DEFER_SHIFT` | `off` | `off`, `on` | Materialize candidate buffer-position shifts only when an edit walk successfully synchronizes; face admission uses immutable source rows. |
 //! | `NEOMACS_EDIT_SYNC_SHIFT_SKIP` | `off` | `off`, `on` | Avoid synchronized-row shift provenance allocations when no row moved vertically. |
 //! | `NEOMACS_LAYOUT_SCROLL_BACK` | `on` | `off`, `on` | Synchronize backward scrolls with the retained body. |
 
+mod candidate_rows;
 mod dense_index;
+
+use candidate_rows::CandidateRows;
 
 use super::{EditDamage, EditReplayPositions, RetainedWindowMatrix};
 use crate::types::LayoutCharPos0;
@@ -332,7 +336,7 @@ pub(crate) fn backward_scroll_plan(
         stop_charpos: first_row.start_charpos,
         first_unchanged_index: first_index,
         first_unchanged_y: first_row.pixel_y,
-        rows,
+        rows: CandidateRows::ready(rows),
         row_snapshots,
         points,
         point_rows,
@@ -364,7 +368,8 @@ impl BelowReuse {
 }
 
 /// The rows below an edit that the walk may synchronize with, prepared at
-/// plan time in OLD placement with NEW (delta-shifted) buffer positions.
+/// plan time in OLD placement. Buffer positions are materialized only when
+/// consumed by an installer if deferred shifting is selected.
 #[derive(Clone, Debug)]
 pub struct EditSyncPlan {
     /// Where the walk stops: the first unchanged row's start plus the size
@@ -374,8 +379,8 @@ pub struct EditSyncPlan {
     pub(crate) first_unchanged_index: usize,
     /// Old window-relative y of the first unchanged row.
     pub(crate) first_unchanged_y: f32,
-    /// `(old matrix index, row)` for every candidate, cursor stripped.
-    pub(crate) rows: Vec<(usize, MatrixRow)>,
+    /// Attempt-owned candidates; source rows expose placement/face IDs only.
+    rows: CandidateRows,
     /// Their display-snapshot rows (old `row`/`y`, shifted positions).
     pub(crate) row_snapshots: Vec<DisplayRowSnapshot>,
     /// Their display points (old `row`/`y`, shifted positions).
@@ -402,6 +407,11 @@ pub(crate) struct EditSyncReached {
 }
 
 impl EditSyncPlan {
+    /// Phase-A face admission does not inspect buffer positions or cursor bits.
+    pub(crate) fn face_rows(&self) -> impl Iterator<Item = &GlyphRow> {
+        self.rows.face_rows()
+    }
+
     /// The walker's stop for this plan.
     pub(crate) fn stop(&self) -> EditSyncStop {
         EditSyncStop {
@@ -501,14 +511,20 @@ impl EditSyncPlan {
             && !shift_y
             && self
                 .rows
+                .placement_rows()
                 .iter()
                 .all(|(index, row)| row.pixel_y < bottom_y - 0.5 && *index < index_limit)
         {
             return self.install(reached, bottom_y, index_limit);
         }
-        let Some(kept) =
-            dense_index::installation_map(&self.rows, dvpos, dy, shift_y, bottom_y, index_limit)
-        else {
+        let Some(kept) = dense_index::installation_map(
+            self.rows.placement_rows(),
+            dvpos,
+            dy,
+            shift_y,
+            bottom_y,
+            index_limit,
+        ) else {
             return self.install(reached, bottom_y, index_limit);
         };
         dense_index::install(self, kept, dvpos, dy, shift_y, bottom_y, index_limit)
@@ -529,20 +545,20 @@ impl EditSyncPlan {
         let dvpos = reached.display_row_index as i64 - self.first_unchanged_index as i64;
         let dy = reached.y - self.first_unchanged_y;
         let shift_y = dy.abs() >= 0.5;
-        // plan() has already shifted the buffer positions and selected only
-        // snapshots belonging to these candidates. When GNU's dvpos/dy are
-        // zero and clipping removes nothing, their placement needs no second
+        let candidate_rows = self.rows.into_positioned();
+        // Candidate positions are now shifted; snapshots were selected eagerly.
+        // When GNU's dvpos/dy are zero and clipping removes nothing, their
+        // placement needs no second
         // pass: keep the vectors and immutable point cells as they are.
         if edit_sync_still_enabled()
             && dvpos == 0
             && !shift_y
-            && self
-                .rows
+            && candidate_rows
                 .iter()
                 .all(|(index, row)| row.pixel_y < bottom_y - 0.5 && *index < index_limit)
         {
             return EditSyncInstall {
-                rows: self.rows,
+                rows: candidate_rows,
                 row_snapshots: self.row_snapshots,
                 points: self.points,
                 point_rows: self.point_rows,
@@ -551,8 +567,8 @@ impl EditSyncPlan {
         }
         let dy_px = dy.round() as i64;
         let mut kept = rustc_hash::FxHashMap::<i64, i64>::default();
-        let mut rows = Vec::with_capacity(self.rows.len());
-        for (old_index, row) in self.rows {
+        let mut rows = Vec::with_capacity(candidate_rows.len());
+        for (old_index, row) in candidate_rows {
             let new_y = row.pixel_y + if shift_y { dy } else { 0.0 };
             let Ok(new_index) = usize::try_from(old_index as i64 + dvpos) else {
                 continue;
@@ -863,23 +879,33 @@ pub(crate) fn plan_positions(
     let (first_index, first_row) = candidates[0];
     let stop_charpos = first_row.start_charpos as i64 + delta;
     let stop_charpos = usize::try_from(stop_charpos).ok()?;
+    let shift_mode = candidate_rows::mode();
     if dense_index::enabled()
-        && let Some(plan) = dense_index::plan(prev, candidates, dirty_start, delta, stop_charpos)
+        && let Some(plan) = dense_index::plan(
+            prev,
+            candidates,
+            dirty_start,
+            delta,
+            stop_charpos,
+            shift_mode,
+        )
     {
         return Some(plan);
     }
     #[cfg(test)]
     dense_index_test_support::note_legacy_plan();
     let mut indices = rustc_hash::FxHashSet::default();
-    let rows = candidates
-        .iter()
-        .map(|&(index, row)| {
+    let rows = CandidateRows::prepare(
+        candidates.iter().map(|&(index, row)| {
             indices.insert(index as i64);
             #[cfg(test)]
             dense_index_test_support::note_plan_insertion();
-            (index, shift_row_positions(row, dirty_start, delta))
-        })
-        .collect();
+            (index, row)
+        }),
+        dirty_start,
+        delta,
+        shift_mode,
+    );
     let (row_snapshots, points, point_rows) = shifted_snapshots(prev, &indices, delta);
     Some(EditSyncPlan {
         stop_charpos,
