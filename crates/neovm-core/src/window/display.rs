@@ -546,14 +546,29 @@ impl crate::emacs_core::eval::Context {
                 .variable_value_in_buffer(Some(source_buffer), variable.sym_id())
                 .map(crate::window::WindowLayoutValueIdentity::of);
         }
+        // Keep the original native-read order. These projections own only
+        // immutable native snapshots and invoke no Lisp callbacks. Equal live
+        // and semantic source identities therefore need one buffer read here;
+        // cloning shares immutable payloads, never mutable Lisp source data.
+        let fontset_generation = crate::emacs_core::fontset::fontset_generation();
+        let context_instance_id = self.context_instance_id();
+        let window_topology_generation = self.frames.window_topology_generation();
+        let frame_inputs = frame.layout_inputs();
+        let window_inputs = frame.window_layout_inputs(window_id)?;
+        let live_buffer = self.buffer_layout_inputs(live_buffer_id)?;
+        let source_buffer = if live_buffer_id == source_buffer_id {
+            live_buffer.clone()
+        } else {
+            self.buffer_layout_inputs(source_buffer_id)?
+        };
         Some(crate::window::WindowLayoutAttemptFreshness {
-            fontset_generation: crate::emacs_core::fontset::fontset_generation(),
-            context_instance_id: self.context_instance_id(),
-            window_topology_generation: self.frames.window_topology_generation(),
-            frame: frame.layout_inputs(),
-            window: frame.window_layout_inputs(window_id)?,
-            live_buffer: self.buffer_layout_inputs(live_buffer_id)?,
-            source_buffer: self.buffer_layout_inputs(source_buffer_id)?,
+            fontset_generation,
+            context_instance_id,
+            window_topology_generation,
+            frame: frame_inputs,
+            window: window_inputs,
+            live_buffer,
+            source_buffer,
             source_layout_variables,
             selection: crate::window::WindowLayoutSelectionState {
                 selected_frame: self.frames.selected_frame().map(|frame| frame.id),
@@ -1377,3 +1392,7 @@ pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
     CHAR_TABLE_LAYOUT_MUTATION_EPOCH.with(|cell| slot.0 = cell.replace(slot.0));
     WINDOW_PARAMETERS_LAYOUT_GENERATION.with(|cell| slot.1 = cell.replace(slot.1));
 }
+
+#[cfg(test)]
+#[path = "tests/attempt_freshness_reuse_test.rs"]
+mod attempt_freshness_reuse_tests;
