@@ -870,6 +870,12 @@ impl Context {
                             // change; conditional slots already
                             // have the bit set (has_local check).
                         }
+                        // GNU's chrome-format watchers request redisplay on
+                        // let as well as set (frame.el). This direct slot
+                        // store bypasses the setter's publication.
+                        if crate::buffer::buffer::variable_affects_chrome_by_sym_id(resolved) {
+                            self.mark_redisplay_dirty_if_display_var_resolved(resolved);
+                        }
                         return Ok(());
                     } else {
                         // SPECPDL_LET_DEFAULT — save old default,
@@ -1764,6 +1770,11 @@ impl Context {
                     }
                     self.sync_cached_runtime_binding_by_id(sym_id, old_value);
                     self.sync_user_test_gc_binding_by_id(sym_id);
+                    // The matching direct restoration must also repaint
+                    // chrome within the current command, before later Lisp.
+                    if crate::buffer::buffer::variable_affects_chrome_by_sym_id(sym_id) {
+                        self.mark_redisplay_dirty_if_display_var_resolved(sym_id);
+                    }
                 }
             }
             SpecBinding::LetDefault {
@@ -2101,3 +2112,7 @@ impl<'a> RestrictionScope<'a> {
         self.0.finish(result)
     }
 }
+
+#[cfg(test)]
+#[path = "tests/specpdl_chrome_binding_test.rs"]
+mod chrome_binding_tests;
