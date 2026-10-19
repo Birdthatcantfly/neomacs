@@ -46,6 +46,81 @@ impl<'heap> OwnedParallelProjection<'heap> {
 }
 
 impl Context {
+    /// Keep private keeper minting within the Context module. Fence negatives
+    /// borrow the real serial keeper for one scope; no Baton can escape it.
+    #[cfg(test)]
+    pub(crate) fn with_weak_sweep_keeper_for_test<R>(
+        &mut self,
+        body: impl FnOnce(&mut Context, &super::Baton) -> R,
+    ) -> R {
+        let keeper = self.issue_green_baton().expect("weak-fence fixture keeper");
+        body(self, &keeper)
+    }
+
+    /// Explicit closed-fixture weak sweep admission. The caller supplies only
+    /// serially constructed weak table shells, never roots for their entries.
+    /// The production owned admission below retains its strict default fence.
+    #[cfg(test)]
+    pub(crate) fn admit_owned_parallel_with_weak_tables_for_test<R>(
+        &mut self,
+        tables: &[TaggedValue],
+        body: impl for<'heap> FnOnce(
+            OwnedParallelProjection<'heap>,
+        ) -> (QuiescentCollector<'heap>, super::Baton, R),
+    ) -> Result<R, OwnedParallelError> {
+        let retired = self.retire_empty_dead_windows_table();
+        let keeper = match self.issue_green_baton() {
+            Ok(keeper) => keeper,
+            Err(error) => {
+                self.recover_serial_context(retired);
+                return Err(map_start(error));
+            }
+        };
+        let frozen = match self.capture_parallel_legacy_roots(&keeper) {
+            Ok(frozen) => frozen,
+            Err(error) => {
+                drop(keeper);
+                self.recover_serial_context(retired);
+                return Err(map_rendezvous(error));
+            }
+        };
+        let heap: *mut crate::tagged::gc::TaggedHeap = &mut *self.tagged_heap;
+        // SAFETY: the same suspended serial Context, keeper exclusion and
+        // capture-before-exclusive-loan proof as ordinary owned admission.
+        let drained = unsafe {
+            (*heap).drain_to_quiescent(|heap| {
+                self.seed_registered_mutator_roots_world_stopped(heap);
+            })
+        };
+        let collector = match drained {
+            Ok(collector) => collector,
+            Err(_) => {
+                drop(frozen);
+                drop(keeper);
+                self.recover_serial_context(retired);
+                return Err(OwnedParallelError::Start);
+            }
+        };
+        clear_tagged_heap_if_installed(&self.tagged_heap);
+        let era = match ParallelHeapEra::admit_rooted_with_weak_tables_for_test(
+            collector, keeper, frozen, tables,
+        ) {
+            Ok(era) => era,
+            Err(failure) => {
+                let reason = map_registration(failure.reason);
+                drop(failure.collector);
+                drop(failure.keeper);
+                self.recover_serial_context(retired);
+                return Err(reason);
+            }
+        };
+        let (collector, keeper, output) = body(OwnedParallelProjection { era });
+        drop(collector);
+        drop(keeper);
+        self.recover_serial_context(retired);
+        Ok(output)
+    }
+
     /// Admit this suspended Context for owned overlap. `body` runs with the
     /// legacy heap TLS uninstalled and must return both finish capabilities.
     /// An admission refusal restores serial ownership before returning.

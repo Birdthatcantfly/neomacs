@@ -6,6 +6,10 @@ use super::image::{CollectionHistory, CollectionWork};
 use super::rendezvous::entry_state;
 use super::*;
 
+#[cfg(all(test, not(feature = "gc-memory-telemetry")))]
+#[path = "weak_policy_tests.rs"]
+mod weak_policy_tests;
+
 pub type CollectionError = RendezvousError;
 
 impl From<YoungRegistryError> for RendezvousError {
@@ -29,6 +33,13 @@ pub struct CollectionReport {
 }
 
 fn supported(heap: &TaggedHeap) -> Result<(), CollectionError> {
+    supported_with_weak(heap, None)
+}
+
+fn supported_with_weak(
+    heap: &TaggedHeap,
+    weak_sweep: Option<&WeakSweepPermit>,
+) -> Result<(), CollectionError> {
     // This optional inventory includes private buffer capacities, for which
     // A5 has no all-owner adapter. Refuse admission rather than emit partial data.
     if cfg!(feature = "gc-memory-telemetry") {
@@ -78,10 +89,23 @@ fn supported(heap: &TaggedHeap) -> Result<(), CollectionError> {
                 VecLikeType::HashTable => {
                     // Admission has exclusive serial authority; a stopped job
                     // installs its real AllStopped before reaching this visit.
-                    let weakness = heap
-                        .collector_tables()
-                        .inspect(ptr.cast_mut().cast(), |ht| ht.weakness);
-                    if weakness.is_some() {
+                    let (weakness, eligible) =
+                        heap.collector_tables()
+                            .inspect(ptr.cast_mut().cast(), |ht| {
+                                (
+                                    ht.weakness,
+                                    ht.data.pending_entries().is_none()
+                                        && ht.test_depth.load(Ordering::Acquire) == 0
+                                        && ht.data.authority.load(Ordering::Acquire) == 0,
+                                )
+                            });
+                    let allowed = weak_sweep.is_some_and(|permit| {
+                        permit.covers(heap, header as usize)
+                            && (*header).flags.boxed()
+                            && !(*header).generation.permanent()
+                            && eligible
+                    });
+                    if weakness.is_some() && !allowed {
                         #[cfg(test)]
                         eprintln!("A5 unsupported weak hash payload: {:?}", weakness);
                         Err(RendezvousError::Publication)
@@ -103,6 +127,51 @@ fn supported(heap: &TaggedHeap) -> Result<(), CollectionError> {
 }
 
 impl<'heap> ParallelHeapEra<'heap> {
+    #[cfg(test)]
+    pub(crate) fn admit_rooted_with_weak_tables_for_test(
+        mut collector: QuiescentCollector<'heap>,
+        keeper: Baton,
+        roots: FrozenLegacyRoots,
+        tables: &[TaggedValue],
+    ) -> Result<Self, EraAdmissionFailure<'heap>> {
+        let permission = if roots.heap_identity() != collector.heap_identity() {
+            Err(RegistrationError::WrongHeap)
+        } else {
+            WeakSweepPermit::mint(collector.registration_heap_mut(), &keeper, tables).and_then(
+                |permit| {
+                    supported_with_weak(collector.registration_heap_mut(), Some(&permit))
+                        .map(|()| permit)
+                        .map_err(|_| RegistrationError::Publication)
+                },
+            )
+        };
+        let permit = match permission {
+            Ok(permit) => permit,
+            Err(reason) => {
+                return Err(EraAdmissionFailure {
+                    reason,
+                    collector,
+                    keeper,
+                });
+            }
+        };
+        let mut era = Self::admit(collector, keeper)?;
+        era.weak_sweep = Some(permit.bind(era.registry.as_ref().expect("new era registry")));
+        era.legacy_roots = Some(roots);
+        Ok(era)
+    }
+
+    fn weak_sweep_permit(&self) -> Option<&WeakSweepPermit> {
+        #[cfg(test)]
+        {
+            self.weak_sweep.as_ref()
+        }
+        #[cfg(not(test))]
+        {
+            None
+        }
+    }
+
     #[cold]
     pub(crate) fn admit_rooted(
         mut collector: QuiescentCollector<'heap>,
@@ -225,7 +294,16 @@ impl<'heap> ParallelHeapEra<'heap> {
                 .registration_heap_mut();
             // Preserve the preflight-before-image-transfer boundary. This
             // short stop scope uses the same real guard as the full job below.
-            collector_tables::with_stopped_tables(heap, stopped, |heap| supported(heap))??;
+            if let Some(permit) = self.weak_sweep_permit() {
+                permit.validate_stopped(
+                    heap,
+                    stopped,
+                    self.registry.as_ref().expect("live era registry"),
+                )?;
+            }
+            collector_tables::with_stopped_tables(heap, stopped, |heap| {
+                supported_with_weak(heap, self.weak_sweep_permit())
+            })??;
             facade_mark::CollectorQuiescence::check(heap).map_err(|_| RendezvousError::Busy)?;
             crate::tagged::transport::collect_shared_root_gc_roots(heap, &mut roots);
         }
@@ -246,7 +324,13 @@ impl<'heap> ParallelHeapEra<'heap> {
                 collector.registration_heap_mut(),
                 guard,
                 |heap| {
-                    let job = StoppedCollectorJob::new(heap, proof, guard, registry)?;
+                    let job = StoppedCollectorJob::new(
+                        heap,
+                        proof,
+                        guard,
+                        registry,
+                        self.weak_sweep_permit().is_some(),
+                    )?;
                     let mut images = ImageSession::take(registry, &entries, &keys)?;
                     let report =
                         job.run(&mut images, roots, words, heads, root_count, keys.len())?;
@@ -269,6 +353,7 @@ struct StoppedCollectorJob<'heap, 'stop, 'era> {
     _proof: &'stop scan_contract::ParallelStoppedMutatorsProof<'stop>,
     _stopped: &'stop AllStopped<'era>,
     epoch: u64,
+    weak_sweep: bool,
 }
 impl<'heap, 'stop, 'era> StoppedCollectorJob<'heap, 'stop, 'era> {
     fn new(
@@ -276,6 +361,7 @@ impl<'heap, 'stop, 'era> StoppedCollectorJob<'heap, 'stop, 'era> {
         proof: &'stop scan_contract::ParallelStoppedMutatorsProof<'stop>,
         stopped: &'stop AllStopped<'era>,
         registry: &Registry,
+        weak_sweep: bool,
     ) -> Result<Self, CollectionError> {
         if !stopped.matches_registry(registry) || heap.heap_identity() != registry.heap {
             return Err(RendezvousError::Identity);
@@ -288,6 +374,7 @@ impl<'heap, 'stop, 'era> StoppedCollectorJob<'heap, 'stop, 'era> {
             _proof: proof,
             _stopped: stopped,
             epoch: stopped.epoch().get(),
+            weak_sweep,
         })
     }
     fn run(
@@ -350,6 +437,9 @@ impl<'heap, 'stop, 'era> StoppedCollectorJob<'heap, 'stop, 'era> {
         // Existing worker MarkAll remains exclusively on its serial path.
         let mark_started = std::time::Instant::now();
         heap.mark_all();
+        if self.weak_sweep {
+            heap.mark_and_sweep_weak_tables();
+        }
         if !heap.weak_hash_tables.is_empty() {
             return Err(RendezvousError::Publication);
         }

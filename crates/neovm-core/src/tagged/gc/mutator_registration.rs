@@ -21,6 +21,7 @@ mod root_slot;
 mod run_slice;
 mod table_allocation;
 mod table_authority;
+mod weak_policy;
 pub use collection::{CollectionError, CollectionReport};
 use gate::RegistryGuard;
 pub use root_slot::OwnerRootSlot;
@@ -60,6 +61,7 @@ use super::young_registry::{YoungRegistrationId, YoungRegistryError};
 use super::{HeapIdentity, QuiescentCollector};
 use crate::emacs_core::eval::world::{Baton, FrozenLegacyRoots};
 use image::{OwnerGcState, PublishedGcImage};
+use weak_policy::WeakSweepPermit;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistrationError {
@@ -279,6 +281,8 @@ pub struct ParallelHeapEra<'heap> {
     collector: RefCell<Option<QuiescentCollector<'heap>>>,
     suspended_cons: RefCell<Option<super::facade_mark::SuspendedConsCollector<'heap>>>,
     legacy_roots: Option<FrozenLegacyRoots>,
+    #[cfg(test)]
+    weak_sweep: Option<WeakSweepPermit>,
     keeper: Option<Baton>,
     registry: Option<Arc<Registry>>,
     _thread: PhantomData<Rc<()>>,
@@ -404,6 +408,8 @@ impl<'heap> ParallelHeapEra<'heap> {
             collector: RefCell::new(Some(collector)),
             suspended_cons: RefCell::new(None),
             legacy_roots: None,
+            #[cfg(test)]
+            weak_sweep: None,
             keeper: Some(keeper),
             registry: Some(Arc::new(Registry {
                 heap,

@@ -142,6 +142,10 @@ mod tests {
                 "collection",
                 include_str!("mutator_registration/collection.rs"),
             ),
+            (
+                "weak sweep policy",
+                include_str!("mutator_registration/weak_policy.rs"),
+            ),
             // Tier-H's mutation preparation remains excluded from the proof-2
             // extent; its serial snapshot/retirement protocol is unchanged.
             (

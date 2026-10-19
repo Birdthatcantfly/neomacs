@@ -353,11 +353,19 @@ impl<'access> TableRef<'access> {
     /// with no Lisp, safepoint or collection between snapshot and root install.
     /// GNU permits copying inside a user test; that copy starts mutable even
     /// while the original table remains guarded by its own nesting count.
-    pub(super) fn snapshot_for_copy(&self) -> LispHashTable {
-        let table = self.guarded_table().clone();
+    pub(super) fn snapshot_for_copy(&self) -> Result<LispHashTable, RegistrationError> {
+        let source = self.guarded_table();
+        // The stopped weak-sweep admission covers a closed set of serially
+        // prepared shells. A copied weak shell would escape that set. Refuse
+        // before cloning backing storage, allocating a shell or publishing it.
+        // The ordinary serial copy-hash-table primitive remains unchanged.
+        if source.weakness.is_some() {
+            return Err(RegistrationError::Publication);
+        }
+        let table = source.clone();
         table.test_depth.store(0, Ordering::Relaxed);
         debug_assert!(quiescent(&table.data.authority));
-        table
+        Ok(table)
     }
 
     /// The shell configuration a sealed read may observe (B3): the test and

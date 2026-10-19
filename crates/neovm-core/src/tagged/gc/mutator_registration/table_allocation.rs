@@ -70,7 +70,7 @@ impl RunAccess<'_, '_> {
         let table = {
             let lease = TableRef::enter(self, value)?;
             observe(&lease);
-            lease.snapshot_for_copy()
+            lease.snapshot_for_copy()?
         };
         // This run cannot ACK while the ordinary owned clone is temporarily
         // unrooted. No collection, Lisp callback or safepoint occurs here.
