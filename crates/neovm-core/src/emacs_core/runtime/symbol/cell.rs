@@ -39,6 +39,7 @@ use crate::emacs_core::forward::FwdRef;
 use crate::emacs_core::intern::{NameId, SymId, symbol_name_id};
 use crate::emacs_core::value::Value;
 use crate::tagged::header::load_value_atomic;
+use std::cell::UnsafeCell;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
@@ -62,14 +63,20 @@ use std::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
 /// word they select ([`CellWrite::publish`]); a symbol's flags byte is not
 /// reachable mutably from outside it at all.
 #[repr(transparent)]
-pub struct SymbolFlags(AtomicU8);
+pub struct SymbolFlags(UnsafeCell<u8>);
 
 // Interior mutability is load-bearing: the concurrent GC obarray scan reads
-// this byte while the mutator rewrites it. A plain `u8` field accessed through
-// `&self`-derived pointers cannot support that: forming `&AtomicU8` from a
-// `SharedReadOnly` tag is invalid under Stacked Borrows (and the plain write
-// would race). An `AtomicU8` field gives every access the cell permission and
-// a Relaxed load/store, which is a plain `mov` on x86-64.
+// this byte while the mutator rewrites it, through `&self`-derived pointers.
+// The UnsafeCell gives every access the cell permission (a plain `u8` field
+// would make the scan's atomic access UB under Stacked Borrows).
+//
+// Only the *cross-thread* accesses are atomic: the GC scan
+// (`load_redirect`/`load_runtime_projected`) and the mutator's store. The
+// owner's own flag reads are plain loads through the cell, which LLVM can CSE
+// and fold -- an `AtomicU8` load cannot, and the extra reloads cost +13
+// instructions in `read_var_cached` (measured by census + callgrind). A plain
+// owner read races only the owner's own store (same thread, sequenced) and
+// the GC's atomic read (read/read).
 impl Default for SymbolFlags {
     #[inline(always)]
     fn default() -> Self {
@@ -112,13 +119,23 @@ impl SymbolFlags {
 
     #[inline(always)]
     pub const fn new(bits: u8) -> Self {
-        Self(AtomicU8::new(bits))
+        Self(UnsafeCell::new(bits))
     }
 
-    /// The whole byte, as one Relaxed atomic load.
+    /// The whole byte, as one plain owner load (see the type's contract).
     #[inline(always)]
     fn load(&self) -> u8 {
-        self.0.load(Ordering::Relaxed)
+        // SAFETY: owner reads are sequenced with the owner's stores, and the
+        // GC only reads.
+        unsafe { *self.0.get() }
+    }
+
+    /// The whole byte, as one Relaxed atomic load for the GC scan.
+    #[inline(always)]
+    fn load_atomic(&self) -> u8 {
+        // SAFETY: the cell is live and aligned; `UnsafeCell` authorizes the
+        // atomic view, and concurrent access uses the atomic store below.
+        unsafe { AtomicU8::from_ptr(self.0.get()).load(Ordering::Relaxed) }
     }
 
     #[inline(always)]
@@ -215,7 +232,9 @@ impl SymbolFlags {
     /// ordering carries the payload.
     #[inline]
     fn store_byte(&mut self, byte: u8) {
-        self.0.store(byte, Ordering::Relaxed);
+        // Atomic: the GC scan may read this byte concurrently.
+        // SAFETY: as `load_atomic`.
+        unsafe { AtomicU8::from_ptr(self.0.get()).store(byte, Ordering::Relaxed) };
     }
 
     /// Atomic (relaxed) read of [`Self::runtime_projected`], for a reader
@@ -223,7 +242,7 @@ impl SymbolFlags {
     /// byte read for the redirect dispatch is not kept live across it.
     #[inline(always)]
     fn load_runtime_projected(&self) -> bool {
-        self.load() & Self::RUNTIME_PROJECTED_BIT != 0
+        self.load_atomic() & Self::RUNTIME_PROJECTED_BIT != 0
     }
 
     /// Atomic (relaxed) read of the redirect tag, for the concurrent GC obarray
@@ -231,7 +250,7 @@ impl SymbolFlags {
     /// torn flags byte while the mutator changes a redirect/flag bit.
     #[inline]
     fn load_redirect(&self) -> SymbolRedirect {
-        SymbolRedirect::try_from(self.load() & Self::REDIRECT_MASK)
+        SymbolRedirect::try_from(self.load_atomic() & Self::REDIRECT_MASK)
             .expect("symbol redirect flag contains valid GNU symbol_redirect code")
     }
 }
@@ -296,12 +315,14 @@ pub(crate) enum ValueCell {
 /// (an alias id is zero-extended), so a raw read of it never sees
 /// uninitialised bytes.
 #[repr(transparent)]
-struct CellWord(AtomicUsize);
+struct CellWord(UnsafeCell<usize>);
 
 // The word is the concurrent GC obarray scan's read target while the mutator
-// publishes a new one, so it is an atomic interior-mutable word, not a plain
-// `usize` read through a shared-derived `AtomicUsize` cast (that retag is
-// invalid under Stacked Borrows and a plain store would race the scan).
+// publishes a new one, through `&self`-derived pointers. The UnsafeCell is
+// load-bearing (a plain `usize` field would make the scan's atomic access UB
+// under Stacked Borrows). As for `SymbolFlags`, only the cross-thread accesses
+// are atomic -- the scan's Acquire load and the publish seam's Release store;
+// owner reads are plain loads the optimizer can fold.
 impl Clone for CellWord {
     #[inline(always)]
     fn clone(&self) -> Self {
@@ -312,13 +333,30 @@ impl Clone for CellWord {
 impl CellWord {
     #[inline(always)]
     fn new(bits: usize) -> Self {
-        Self(AtomicUsize::new(bits))
+        Self(UnsafeCell::new(bits))
     }
 
-    /// The whole word, as one Relaxed atomic load.
+    /// The whole word, as one plain owner load.
     #[inline(always)]
     fn load(&self) -> usize {
-        self.0.load(Ordering::Relaxed)
+        // SAFETY: owner reads are sequenced with the owner's stores, and the
+        // GC only reads.
+        unsafe { *self.0.get() }
+    }
+
+    /// The whole word, as one Acquire atomic load for the scan.
+    #[inline(always)]
+    fn load_acquire(&self) -> usize {
+        // SAFETY: the cell is live and aligned; `UnsafeCell` authorizes the
+        // atomic view, and the publish seam stores atomically.
+        unsafe { AtomicUsize::from_ptr(self.0.get()).load(Ordering::Acquire) }
+    }
+
+    /// Release atomic store at the one publish seam.
+    #[inline(always)]
+    fn store_release(&self, bits: usize) {
+        // SAFETY: as `load_acquire`.
+        unsafe { AtomicUsize::from_ptr(self.0.get()).store(bits, Ordering::Release) };
     }
 
     #[inline(always)]
@@ -705,9 +743,9 @@ impl LispSymbol {
 
     #[inline(always)]
     fn load_word_acquire(&self) -> usize {
-        // `CellWord` is an `AtomicUsize`: the scan may race the mutator's
-        // publication store, and both sides are atomic.
-        self.val.0.load(Ordering::Acquire)
+        // The scan may race the mutator's publication store; both sides are
+        // atomic.
+        self.val.load_acquire()
     }
 
     /// The value of a `Plainval` cell ([`Value::UNBOUND`] when void);
@@ -966,7 +1004,7 @@ impl<'a> CellWrite<'a> {
         {
             crate::tagged::gc::note_root_overwrite_while_marking(old);
         }
-        self.sym.val.0.store(word.load(), Ordering::Release);
+        self.sym.val.store_release(word.load());
         match tag {
             NewTag::Keep => {}
             NewTag::Set(redirect) => self.sym.flags.set_redirect(redirect),
