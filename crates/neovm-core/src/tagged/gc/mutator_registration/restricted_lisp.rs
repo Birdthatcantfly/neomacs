@@ -869,7 +869,7 @@ fn oracle_lines() -> Vec<&'static str> {
     let lines: Vec<_> = include_str!("restricted_lisp_oracle.expected")
         .lines()
         .collect();
-    assert_eq!(lines.len(), 39, "GNU 31.1 oracle fixture");
+    assert_eq!(lines.len(), 43, "GNU 31.1 oracle fixture");
     lines
 }
 
@@ -6260,3 +6260,5 @@ mod copy_oracle;
 mod weak_copy;
 
 mod weak_tables;
+
+mod weak_oracle;

@@ -37,3 +37,7 @@ nil
 (2 1 t (77) t 99 0 1 t (77))
 (2 1 t (77) t 99 0 1 t (77))
 ((hash 1 (t t t t t 2 (error "hash table test modifies table" t)) 1 2 1 absent) (compare 1 (t t t t t 2 (error "hash table test modifies table" t)) 1 2 1 absent))
+(key-and-value key value key-or-value nil (1 key-and-value) (2 weak-val stable-val))
+((2 0) (2 0) (3 0) (1 0))
+((2 2) 0 0)
+(((3 t gone) (3 t gone)) 0)
