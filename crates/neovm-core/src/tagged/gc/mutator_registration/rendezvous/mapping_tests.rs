@@ -23,7 +23,7 @@ struct Control {
     expectation: &'static str,
 }
 
-fn controls() -> [Control; 28] {
+fn controls() -> [Control; 31] {
     use MappingClass::*;
     let stale: fn() = stale_ack_identity_generation_duplicate_and_missing_image_are_refused;
     let forced: fn() = two_owners_pause_before_ack_and_while_restoring_across_two_epochs;
@@ -258,6 +258,32 @@ fn controls() -> [Control; 28] {
             check: Some(failure::lost_poison_notification_between_predicate_and_wait_fails_closed),
             expectation: "holder poison recognizes its tracked identity and wait rechecks it without recursive gate acquisition",
         },
+        Control {
+            model: "negative_missing_owner_fence_reorders_admission_past_the_scan",
+            witness: "ADMISSION_OWNER_FENCE_REORDER_MISSES_LIVE_SLICE",
+            class: FixedOrdering,
+            check_name: "admitted_slice",
+            check: None,
+            expectation: "owner admission store precedes its SeqCst fence and the following phase load, so a published stop or block is observed before the slice body runs",
+        },
+        Control {
+            model: "negative_unfenced_authority_scan_misses_live_slice",
+            witness: "ADMISSION_UNFENCED_SCAN_MISSES_LIVE_SLICE",
+            class: FixedOrdering,
+            check_name: "admitted_slice",
+            check: None,
+            expectation: "authority publishes the phase word Release then fences SeqCst before scanning admission words; guard-drop publication alone does not order the scan",
+        },
+        Control {
+            model: "negative_skipped_authority_scan_misses_live_slice",
+            witness: "ADMISSION_SKIPPED_SCAN_MISSES_LIVE_SLICE",
+            class: RuntimeRefusal,
+            check_name: "admission_scan",
+            check: Some(
+                crate::tagged::gc::mutator_registration::cons_allocation_tests::in_slice_admission_word_refuses_catalog_transition,
+            ),
+            expectation: "an IN_SLICE admission word refuses the catalog transition even when every gated precheck passes",
+        },
     ]
 }
 
@@ -287,12 +313,12 @@ fn every_a1_negative_control_has_an_explicit_production_correspondence() {
             );
         }
     }
-    assert_eq!(names.len(), 28);
+    assert_eq!(names.len(), 31);
     assert_eq!(
         rows.iter()
             .filter(|row| row.class == MappingClass::FixedOrdering)
             .count(),
-        5
+        7
     );
     assert_eq!(
         rows.iter()

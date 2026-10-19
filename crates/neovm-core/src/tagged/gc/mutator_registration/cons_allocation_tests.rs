@@ -156,6 +156,41 @@ impl Drop for PoisonOnUnwind<'_> {
 /// independent cell initialization. The ready/go phase witnesses two live run
 /// authorities; the stress itself does not claim a specific CPU instruction
 /// from each actor executes at precisely the same instant.
+/// Production correspondence of the admission scan controls: an IN_SLICE
+/// admission word refuses the catalog transition even when every gated
+/// precheck passes. A legally admitted slice can never reach the transition
+/// (Running entries are refused earlier), so the scan is verified by the
+/// exact condition it exists to catch: an admission word left IN_SLICE with
+/// the entry otherwise Starting. Clearing the word lets the same transition
+/// proceed.
+#[test]
+pub(super) fn in_slice_admission_word_refuses_catalog_transition() {
+    Context::with_test_collection_era(roots, |era, (_cars, _nil)| {
+        let permit = era.register(1731, 1).unwrap();
+        permit
+            .entry
+            .admission
+            .store(AdmissionWord::in_slice(0), Ordering::Release);
+        assert_eq!(
+            era.start_cons_storage(),
+            Err(RegistrationError::OutstandingLoan)
+        );
+        permit
+            .entry
+            .admission
+            .store(AdmissionWord::OUT, Ordering::Release);
+        era.start_cons_storage().unwrap();
+        let mut stopped = retry(|| era.stop());
+        retry_registration(|| era.return_cons_storage(&stopped));
+        era.collect_stopped(&mut stopped).unwrap();
+        complete(stopped);
+        drop(permit);
+        let (collector, keeper) = era.finish().unwrap();
+        drop(collector);
+        drop(keeper);
+    });
+}
+
 #[test]
 fn two_owner_cons_allocator_stress() {
     const PHASES: usize = 2;
