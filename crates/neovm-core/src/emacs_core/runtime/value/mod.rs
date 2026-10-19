@@ -29,7 +29,8 @@ use crate::buffer::text_props::{PropertyInterval, TextPropertyPlistRun, TextProp
 use crate::buffer::{CharPos0, CharRange, EmacsBytePos};
 use crate::heap_types::LispString;
 use crate::tagged::gc::{
-    HeapWriteKind, MEMORY_USE_COUNT_LEN, MemoryUseCountSlot, note_heap_write, with_tagged_heap,
+    HeapWriteKind, MEMORY_USE_COUNT_LEN, MemoryUseCountSlot, note_hash_table_storage_growth,
+    note_heap_write, with_tagged_heap,
 };
 use crate::tagged::header::{
     BoolVectorObj, BufferObj, ByteCodeObj, CHAR_TABLE_TOP_SLOTS, CharTableObj, ConsCell, FontObj,
@@ -1338,7 +1339,11 @@ impl HashTableStorage {
             slot
         } else {
             let slot = self.slots.len();
+            let before = self.slots.capacity();
             self.slots.push(Some(HashTableEntry { key, value }));
+            note_hash_table_storage_growth(
+                self.slots.capacity().saturating_sub(before) * size_of::<Option<HashTableEntry>>(),
+            );
             slot
         }
     }
@@ -1459,6 +1464,9 @@ impl HashTableStorage {
         self.user_hashes.keys().cloned().collect()
     }
 
+    /// Pre-size the backings. B5 leaves this uncharged: its callers are
+    /// construction and pdump-restore paths, not the shared growth sites
+    /// (`alloc_slot`/`insert_new`), so no sealed edit reaches it.
     pub fn reserve(&mut self, additional: usize) {
         self.index.reserve(additional);
         self.slots.reserve(additional);

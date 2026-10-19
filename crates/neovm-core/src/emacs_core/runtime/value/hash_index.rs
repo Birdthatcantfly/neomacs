@@ -147,8 +147,12 @@ impl HashIndex {
 
     /// File a NEW entry; the caller has established that no entry matches.
     pub(super) fn insert_new(&mut self, hash: u64, key: HashKey, slot: usize) {
+        let before = self.table.capacity();
         self.table
             .insert_unique(hash, IndexEntry { hash, key, slot }, |entry| entry.hash);
+        crate::tagged::gc::note_hash_table_storage_growth(
+            self.table.capacity().saturating_sub(before) * size_of::<IndexEntry>(),
+        );
     }
 
     /// The entry whose materialized key is `key`, when only the key is at

@@ -150,3 +150,17 @@
 (puthash 77 11 a6-tJ)
 (puthash 77 12 a6-tJ)
 (neovm-a6-out (gethash 77 a6-tJ))
+
+;; B5 twin P11: 130 puts grow a fresh table through several resizes, then
+;; count, get, two rems and the final count in one line (design §4 Rev R3).
+;; The sealed row runs the identical program as one owner; growth charging
+;; changes no answer, only the owner's byte counters.
+(setq a6-tK (make-hash-table :test 'eq))
+(let ((k 0))
+  (while (< k 130)
+    (puthash k (* k 3) a6-tK)
+    (setq k (+ k 1))))
+(neovm-a6-out
+ (list (hash-table-count a6-tK)
+       (gethash 129 a6-tK)
+       (progn (remhash 5 a6-tK) (remhash 6 a6-tK) (hash-table-count a6-tK))))

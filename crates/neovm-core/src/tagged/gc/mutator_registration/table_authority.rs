@@ -15,6 +15,8 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use super::super::mutator_gc::MutatorGcState;
+use super::acting_owner::{ActingOwnerGuard, owner_gc_ptr};
 use super::{AllStopped, RegistrationError, RunAccess};
 use crate::emacs_core::value::HashTableStorage;
 use crate::emacs_core::value::LispHashTable;
@@ -226,6 +228,11 @@ pub struct TableRef<'access> {
 pub struct TableMut<'access> {
     table: *mut HashTableObj,
     value: TaggedValue,
+    /// The minting owner's GC state, charged for storage growth the edit
+    /// causes (design §4 Rev R3). Null when the owner has no local state
+    /// yet; the exclusive `_access` borrow keeps the state's box alive and
+    /// immovable for the lease's whole lifetime.
+    owner_gc: *mut MutatorGcState,
     _access: PhantomData<&'access mut ()>,
     _thread: PhantomData<Rc<()>>,
 }
@@ -371,6 +378,9 @@ impl<'access> TableMut<'access> {
     ) -> Result<Self, RegistrationError> {
         access.owner.check_thread()?;
         let ptr = table_object(table)?;
+        // The exclusive `_access` borrow outlives the lease, so the owner's
+        // boxed GC state cannot move while this raw pointer is held.
+        let owner_gc = owner_gc_ptr(access.owner);
         // SAFETY: the mint validated the object; hydration happens inside
         // the serial edit body itself, under WRITER.
         unsafe {
@@ -379,6 +389,7 @@ impl<'access> TableMut<'access> {
         Ok(Self {
             table: ptr,
             value: table,
+            owner_gc,
             _access: PhantomData,
             _thread: PhantomData,
         })
@@ -395,8 +406,11 @@ impl<'access> TableMut<'access> {
     /// mint, so `f` is the table's only editor. The body reuses the serial
     /// choke point unchanged — `switch_epoch` bump, plan invalidation,
     /// hydration, heap-write note — one code path, not a fork (design
-    /// §2.2). No Lisp, no safepoint, no allocation inside `f`.
+    /// §2.2). No Lisp, no safepoint, no allocation inside `f`. Storage
+    /// growth inside the edit charges the minting owner (§4 Rev R3) via
+    /// the acting-owner TLS, at the same Vec sites the serial path uses.
     pub fn edit<R>(&mut self, f: impl FnOnce(&mut LispHashTable) -> R) -> R {
+        let _acting = ActingOwnerGuard::new(self.owner_gc);
         // SAFETY: WRITER is held, so no sealed reader is in flight and the
         // serial body's single-editor assumption holds; the table is rooted
         // for the lease's lifetime.

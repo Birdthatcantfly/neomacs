@@ -2814,6 +2814,7 @@ pub use mutator_registration::{
     Snapshot, StoppedSummaries, TableMut, TableRef, YoungWorkerLoan,
 };
 
+pub(crate) use mutator_registration::note_hash_table_storage_growth;
 pub(crate) use mutator_registration::{OwnerRootAdmission, StoppedRootAdmission};
 
 mod alloc_region;

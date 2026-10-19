@@ -14,7 +14,7 @@ use super::{
 };
 use crate::emacs_core::builtins::maybe_resize_hash_table_for_insert;
 use crate::emacs_core::eval::Context;
-use crate::emacs_core::value::{HashProbe, HashTableTest};
+use crate::emacs_core::value::{HashProbe, HashTableEntry, HashTableTest};
 use crate::tagged::transport::SharedRoot;
 use crate::tagged::value::{Fixnum, TaggedValue};
 use rustc_hash::FxHashSet;
@@ -837,7 +837,7 @@ fn oracle_lines() -> Vec<&'static str> {
     let lines: Vec<_> = include_str!("restricted_lisp_oracle.expected")
         .lines()
         .collect();
-    assert_eq!(lines.len(), 34, "GNU 31.1 oracle fixture");
+    assert_eq!(lines.len(), 35, "GNU 31.1 oracle fixture");
     lines
 }
 
@@ -1204,6 +1204,10 @@ struct HtEnv<'env> {
     /// timed against one user-test comparison window. `None` unless the
     /// session runs that row.
     editor: Option<&'env HtEditor>,
+    /// B5 growth witness: storage-growth accounting of every plain put,
+    /// charged to the acting owner (design §4 Rev R3, §7 B5). `None` for
+    /// every pre-B5 session.
+    growth: Option<&'env HtGrowth>,
     /// Per-owner count of completed top-level lease ops (design §6: per-owner
     /// progress counters). Empty for single-owner sessions.
     progress: &'env [AtomicUsize],
@@ -1220,6 +1224,7 @@ impl<'env> HtEnv<'env> {
             bump_before_cb: AtomicUsize::new(0),
             witness: None,
             editor: None,
+            growth: None,
             progress: &[],
         }
     }
@@ -1339,6 +1344,44 @@ impl HtEditor {
         }
         step();
         self.phase.store(to, Ordering::SeqCst);
+    }
+}
+
+/// B5 growth witness (design §4 Rev R3, §7 B5): what every plain put
+/// charged its acting owner's GC counters, and whether that charge agrees
+/// with the storage bytes the same edit grew. Per-put accounting is
+/// immune to the interleaving — each edit is serialized under WRITER and
+/// both sides of the comparison are read inside that one put's extent.
+struct HtGrowth {
+    /// Bytes charged per owner (its `hot.bytes_since_gc` delta across each
+    /// witnessed put's lease, summed).
+    charged: Vec<AtomicUsize>,
+    /// Puts whose charge was nonzero (a storage growth event), per owner.
+    events: Vec<AtomicUsize>,
+    /// Puts where the charged delta disagreed with the storage-bytes delta.
+    mismatches: AtomicUsize,
+}
+
+impl HtGrowth {
+    fn new(owners: usize) -> Self {
+        Self {
+            charged: (0..owners).map(|_| AtomicUsize::new(0)).collect(),
+            events: (0..owners).map(|_| AtomicUsize::new(0)).collect(),
+            mismatches: AtomicUsize::new(0),
+        }
+    }
+
+    /// Record one put's accounting: the owner-counter delta `charged_delta`
+    /// and the storage-bytes delta `(before, after)` measured inside the
+    /// same edit.
+    fn record(&self, owner: usize, charged_delta: usize, before: usize, after: usize) {
+        self.charged[owner].fetch_add(charged_delta, Ordering::Relaxed);
+        if charged_delta > 0 {
+            self.events[owner].fetch_add(1, Ordering::Relaxed);
+        }
+        if charged_delta != after.saturating_sub(before) {
+            self.mismatches.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -1688,6 +1731,8 @@ fn plain_get(
 /// witness, the writer first waits for the readers' barrier, then publishes
 /// its attempt — so `TableMut::enter`'s drain spin happens with the reader
 /// count provably live, and the word observed after it is WRITER alone.
+/// With a B5 growth witness, the put also measures what the edit charged
+/// the owner's GC counters against what the storage actually grew.
 fn plain_put(
     owner: &mut Mutator<'_>,
     table_tv: TaggedValue,
@@ -1695,6 +1740,7 @@ fn plain_put(
     value_tv: TaggedValue,
     test: HashTableTest,
     witness: Option<(&HtWitness<'_>, usize)>,
+    growth: Option<(&HtGrowth, usize)>,
 ) -> Result<(), ExecError> {
     with_run(owner, |run| {
         if let Some((w, _)) = witness {
@@ -1707,11 +1753,15 @@ fn plain_put(
             }
             w.writer_attempting.store(true, Ordering::SeqCst);
         }
+        // Read before the lease: fixnum keys cons nothing on the way in, so
+        // the delta across the lease is exactly the edit's own charges.
+        let charged_before = growth.map(|_| run.state().hot.bytes_since_gc);
         let mut lease = TableMut::enter(run, table_tv)?;
         if lease.user_test_mutation_refused() {
             return Err(ExecError::UserTestMutation);
         }
-        lease.edit(|ht| {
+        let storage = lease.edit(|ht| {
+            let before = ht.data.known_storage_bytes();
             match ht
                 .data
                 .try_probe_for_insert(key_tv, test, false)
@@ -1728,7 +1778,7 @@ fn plain_put(
                     ht.data.insert_absent(hash, key, key_tv, value_tv);
                 }
             }
-            Ok::<(), ExecError>(())
+            Ok::<(usize, usize), ExecError>((before, ht.data.known_storage_bytes()))
         })?;
         if let Some((w, _)) = witness {
             // Enter returned only after every reader count drained, so the
@@ -1737,6 +1787,12 @@ fn plain_put(
             // (a leaked count or bit fails the era's stop/complete).
             let word = lease.authority_word().load(Ordering::Acquire);
             w.writer_word.fetch_max(word, Ordering::SeqCst);
+        }
+        drop(lease);
+        if let Some((g, index)) = growth {
+            let charged_delta = run.state().hot.bytes_since_gc - charged_before.unwrap_or(0);
+            let (before, after) = storage;
+            g.record(index, charged_delta, before, after);
         }
         Ok(())
     })
@@ -1946,6 +2002,8 @@ fn ht_step<'era>(
     let witness = env
         .and_then(|env| env.witness.filter(|w| w.table_slot == table))
         .map(|w| (w, index));
+    // The B5 growth witness measures every plain put of a growth session.
+    let growth = env.and_then(|env| env.growth).map(|g| (g, index));
     match op {
         Op::HtGet {
             key, found, value, ..
@@ -1976,7 +2034,7 @@ fn ht_step<'era>(
                     words[1],
                     index,
                 ),
-                None => plain_put(owner, table_tv, words[0], words[1], test, witness),
+                None => plain_put(owner, table_tv, words[0], words[1], test, witness, growth),
             }
         }
         Op::HtRem { key, found, .. } => {
@@ -5375,6 +5433,7 @@ fn a6_ht_sealed_edit_triggers_jit_switch_stale_shim() {
                         TaggedValue::fixnum(offsets[j]),
                         HashTableTest::Eq,
                         None,
+                        None,
                     )
                     .unwrap_or_else(|error| panic!("sealed put: {error:?}"));
                 }
@@ -5599,4 +5658,511 @@ fn a6_ht_sealed_edit_triggers_jit_switch_stale_shim() {
         }
         other => panic!("expected the switch-stale signal, got {other:?}"),
     }
+}
+
+/// B5 row 1: growth racing readers (design §4 Rev R3, §7 B5). The shared
+/// table is seeded to exactly hashbrown capacity 14 in the serial world;
+/// three readers hold their sealed reader lease across the barrier while
+/// the writer's 15th distinct insert grows the index 14→28 under WRITER,
+/// after the drain. The growth charge lands on the writer's owner counters
+/// alone, agrees byte-for-byte with the storage the edit grew, and every
+/// answer stays the GNU answer.
+#[test]
+fn a6_ht_growth_races_readers() {
+    // slots: 0 shared seeded table; 15/16 operands; 17 count; 18/19 get.
+    const TR: u16 = 0;
+    const NSLOTS: usize = 20;
+    let setup = HtSetup {
+        source: r#"(progn
+  (setq a6-tR (make-hash-table :test 'eq))
+  (puthash 1 1 a6-tR)
+  (puthash 2 2 a6-tR)
+  (puthash 3 3 a6-tR)
+  (puthash 4 4 a6-tR)
+  (puthash 5 5 a6-tR)
+  (puthash 6 6 a6-tR)
+  (puthash 7 7 a6-tR)
+  (puthash 8 8 a6-tR)
+  (puthash 9 9 a6-tR)
+  (puthash 10 10 a6-tR)
+  (puthash 11 11 a6-tR)
+  (puthash 12 12 a6-tR)
+  (puthash 13 13 a6-tR)
+  (puthash 14 14 a6-tR)
+  (list a6-tR))"#,
+        facts: vec![(TR, Abs::Table)],
+        nslots: NSLOTS,
+    };
+    let reader = {
+        let mut ops = vec![Op::HtCount { table: TR, dst: 17 }];
+        ops.extend(finish_line(&[17]));
+        ops
+    };
+    let writer = {
+        let mut ops = vec![
+            Op::ConstFixnum { dst: 15, value: 90 },
+            Op::ConstFixnum { dst: 16, value: 91 },
+            Op::HtPut {
+                table: TR,
+                key: 15,
+                value: 16,
+            },
+            Op::HtGet {
+                table: TR,
+                key: 15,
+                found: 18,
+                value: 19,
+            },
+        ];
+        ops.extend(finish_line(&[18, 19]));
+        ops
+    };
+    let programs = vec![reader.clone(), reader.clone(), reader.clone(), writer];
+    let initial = setup.initial();
+    for program in &programs {
+        prevalidate_with(program, NSLOTS, 0, &initial)
+            .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+    }
+    let abort = AtomicBool::new(false);
+    let witness = HtWitness::new(TR, 3, 1, &abort);
+    let growth = HtGrowth::new(4);
+    let mut env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
+    env.witness = Some(&witness);
+    env.growth = Some(&growth);
+    let (lines, dumps) = run_ht_overlap_session(
+        &setup,
+        &programs,
+        1,
+        0,
+        &env,
+        6850,
+        &["(hash-table-count a6-tR)", "(gethash 90 a6-tR)"],
+    );
+    // Readers count inside their lease, before the writer can edit: the
+    // seeded 14, deterministically. The writer reads its own insert back.
+    for owner in 0..3 {
+        assert_eq!(lines[owner], vec!["(14)".to_string()], "reader {owner}");
+    }
+    assert_eq!(lines[3], vec!["(t 91)".to_string()], "writer read-back");
+    assert_eq!(dumps[0], "15", "seed plus one insert");
+    assert_eq!(dumps[1], "91", "the writer's entry survived the era");
+    // The B4 witness held for the growth edit too: three live readers, the
+    // drain observed, WRITER alone once acquired.
+    assert_eq!(witness.max_readers.load(Ordering::SeqCst), 3);
+    assert!(witness.drain_observed.load(Ordering::SeqCst));
+    assert_eq!(witness.writer_word.load(Ordering::SeqCst), HT_WRITER_BIT);
+    // Growth accounting: exactly one event, on the writer, agreeing with
+    // the storage bytes (the mismatch counter is the identity).
+    for owner in 0..3 {
+        assert_eq!(
+            growth.charged[owner].load(Ordering::Relaxed),
+            0,
+            "reader {owner} charged for growth"
+        );
+    }
+    assert!(
+        growth.charged[3].load(Ordering::Relaxed) > 0,
+        "the growing edit charged the acting owner"
+    );
+    assert_eq!(growth.events[3].load(Ordering::Relaxed), 1);
+    assert_eq!(growth.mismatches.load(Ordering::Relaxed), 0);
+}
+
+/// B5 row 2: bounded-growth stress (§7 B5). Four owners each insert 40
+/// owner-distinct keys into one shared table — 160 racing inserts, several
+/// resizes on both backings — until the final state is exactly 160
+/// entries. Every put's charge must equal its own storage growth however
+/// the edits interleave, and the total charge stays within the amortized
+/// bound (≤ 8× the final entry footprint).
+#[test]
+fn a6_ht_bounded_growth_many_owners() {
+    // slots: 0 shared table; 15 one; 16 count; 17 limit; 18 k; 19 cond;
+    // 20 owner key base; 21 key.
+    const TB: u16 = 0;
+    const NSLOTS: usize = 22;
+    let setup = HtSetup {
+        source: r#"(progn
+  (setq a6-tB (make-hash-table :test 'eq))
+  (list a6-tB))"#,
+        facts: vec![(TB, Abs::Table)],
+        nslots: NSLOTS,
+    };
+    let owners = 4;
+    let per_owner: usize = 40;
+    let mut programs = Vec::with_capacity(owners);
+    for owner in 0..owners {
+        let base = 1000 * (owner as i64 + 1);
+        let mut ops = vec![
+            Op::ConstFixnum {
+                dst: 17,
+                value: per_owner as i64,
+            },
+            Op::ConstFixnum { dst: 18, value: 0 },
+            Op::ConstFixnum { dst: 15, value: 1 },
+            Op::ConstFixnum {
+                dst: 20,
+                value: base,
+            },
+        ];
+        let loop_at = ops.len() as u16;
+        ops.push(Op::Lt {
+            dst: 19,
+            a: 18,
+            b: 17,
+        });
+        let branch_at = ops.len();
+        ops.push(Op::BranchIfNil {
+            cond: 19,
+            target: 0,
+        });
+        ops.push(Op::Add {
+            dst: 21,
+            a: 20,
+            b: 18,
+        });
+        ops.push(Op::HtPut {
+            table: TB,
+            key: 21,
+            value: 21,
+        });
+        ops.push(Op::Add {
+            dst: 18,
+            a: 18,
+            b: 15,
+        });
+        ops.push(Op::Jump { target: loop_at });
+        let done = ops.len() as u16;
+        ops.push(Op::HtCount { table: TB, dst: 16 });
+        ops[branch_at] = Op::BranchIfNil {
+            cond: 19,
+            target: done,
+        };
+        ops.extend(finish_line(&[16]));
+        programs.push(ops);
+    }
+    let initial = setup.initial();
+    for program in &programs {
+        prevalidate_with(program, NSLOTS, per_owner as u32, &initial)
+            .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+    }
+    let growth = HtGrowth::new(owners);
+    let mut env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
+    env.growth = Some(&growth);
+    let (lines, dumps) = run_ht_overlap_session(
+        &setup,
+        &programs,
+        1,
+        per_owner as u32,
+        &env,
+        6860,
+        &[
+            "(hash-table-count a6-tB)",
+            "(gethash 1000 a6-tB)",
+            "(gethash 4039 a6-tB)",
+        ],
+    );
+    assert_eq!(lines.len(), owners);
+    assert_eq!(dumps[0], "160", "every racing insert landed exactly once");
+    assert_eq!(dumps[1], "1000", "owner 0's first key");
+    assert_eq!(dumps[2], "4039", "owner 3's last key");
+    let total = owners * per_owner;
+    let events: usize = (0..owners)
+        .map(|o| growth.events[o].load(Ordering::Relaxed))
+        .sum();
+    assert!(
+        events >= 3,
+        "160 inserts must cross several resizes (events: {events})"
+    );
+    assert_eq!(
+        growth.mismatches.load(Ordering::Relaxed),
+        0,
+        "every racing put charged exactly its own storage growth"
+    );
+    let charged: usize = (0..owners)
+        .map(|o| growth.charged[o].load(Ordering::Relaxed))
+        .sum();
+    assert!(charged > 0);
+    let entry_bytes = total * size_of::<Option<HashTableEntry>>();
+    assert!(
+        charged <= 8 * entry_bytes,
+        "amortized bound: charged {charged} > 8x {entry_bytes}"
+    );
+}
+
+/// B5 row 3: memory overhead (§7 B5). One owner grows a table through 100
+/// inserts and shrinks it by 20 rems: the charge must be at least the
+/// final entry footprint (the backings really were allocated) and within
+/// the amortized 8× bound. The serial arm then proves the other half of
+/// Rev R3: the identical put loop on a fresh versus an already-grown
+/// table, in plain serial Sim, charges the heap identically — growth in
+/// Sim stays the current code path, byte for byte.
+#[test]
+fn a6_ht_growth_memory_overhead() {
+    // slots: 0 table; 15 one; 16 value/count/found; 17 limit/key; 18 k;
+    // 19 cond.
+    const TM: u16 = 0;
+    const NSLOTS: usize = 20;
+    let puts: usize = 100;
+    let rems: usize = 20;
+    let setup = HtSetup {
+        source: r#"(progn
+  (setq a6-tM2 (make-hash-table :test 'eq))
+  (list a6-tM2))"#,
+        facts: vec![(TM, Abs::Table)],
+        nslots: NSLOTS,
+    };
+    let mut ops = vec![
+        Op::ConstFixnum {
+            dst: 17,
+            value: puts as i64,
+        },
+        Op::ConstFixnum { dst: 18, value: 0 },
+        Op::ConstFixnum { dst: 15, value: 1 },
+    ];
+    let loop_at = ops.len() as u16;
+    ops.push(Op::Lt {
+        dst: 19,
+        a: 18,
+        b: 17,
+    });
+    let branch_at = ops.len();
+    ops.push(Op::BranchIfNil {
+        cond: 19,
+        target: 0,
+    });
+    ops.push(Op::Add {
+        dst: 16,
+        a: 18,
+        b: 18,
+    });
+    ops.push(Op::Add {
+        dst: 16,
+        a: 16,
+        b: 18,
+    });
+    ops.push(Op::HtPut {
+        table: TM,
+        key: 18,
+        value: 16,
+    });
+    ops.push(Op::Add {
+        dst: 18,
+        a: 18,
+        b: 15,
+    });
+    ops.push(Op::Jump { target: loop_at });
+    let done = ops.len() as u16;
+    ops.push(Op::ConstFixnum {
+        dst: 17,
+        value: rems as i64,
+    });
+    ops.push(Op::ConstFixnum { dst: 18, value: 0 });
+    let loop2_at = ops.len() as u16;
+    ops.push(Op::Lt {
+        dst: 19,
+        a: 18,
+        b: 17,
+    });
+    let branch2_at = ops.len();
+    ops.push(Op::BranchIfNil {
+        cond: 19,
+        target: 0,
+    });
+    ops.push(Op::HtRem {
+        table: TM,
+        key: 18,
+        found: 16,
+    });
+    ops.push(Op::Add {
+        dst: 18,
+        a: 18,
+        b: 15,
+    });
+    ops.push(Op::Jump { target: loop2_at });
+    let done2 = ops.len() as u16;
+    ops.push(Op::HtCount { table: TM, dst: 16 });
+    ops[branch_at] = Op::BranchIfNil {
+        cond: 19,
+        target: done,
+    };
+    ops[branch2_at] = Op::BranchIfNil {
+        cond: 19,
+        target: done2,
+    };
+    ops.extend(finish_line(&[16]));
+    let initial = setup.initial();
+    prevalidate_with(&ops, NSLOTS, (puts + rems) as u32, &initial)
+        .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+    let growth = HtGrowth::new(1);
+    let mut env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
+    env.growth = Some(&growth);
+    let (lines, _dumps) = run_ht_session(
+        &setup,
+        vec![ops],
+        (puts + rems) as u32,
+        &env,
+        &["(hash-table-count a6-tM2)"],
+    );
+    assert_eq!(lines[0], format!("({})", puts - rems), "inserts minus rems");
+    assert!(
+        growth.events[0].load(Ordering::Relaxed) >= 3,
+        "100 inserts cross several resizes"
+    );
+    assert_eq!(growth.mismatches.load(Ordering::Relaxed), 0);
+    let charged = growth.charged[0].load(Ordering::Relaxed);
+    let entry_bytes = (puts - rems) * size_of::<Option<HashTableEntry>>();
+    assert!(
+        charged >= entry_bytes,
+        "the backings were really allocated: charged {charged} < {entry_bytes}"
+    );
+    assert!(
+        charged <= 8 * entry_bytes,
+        "amortized bound: charged {charged} > 8x {entry_bytes}"
+    );
+
+    // Serial arm: the same closure putting 100 fresh keys (growing) versus
+    // 100 overwrites (no growth) charges the serial heap identically.
+    let mut context = Context::new();
+    context
+        .eval_str(
+            r#"(progn
+  (setq a6-tZ1 (make-hash-table :test 'eq))
+  (setq a6-tZ2 (make-hash-table :test 'eq))
+  (fset 'a6-arm (lambda (tbl)
+    (let ((k 0))
+      (while (< k 100)
+        (puthash k 0 tbl)
+        (setq k (+ k 1))))))
+  (a6-arm a6-tZ2))"#,
+        )
+        .unwrap_or_else(|error| panic!("serial arm setup: {error:?}"));
+    let before_growing = context.tagged_heap.bytes_since_gc();
+    context
+        .eval_str("(a6-arm a6-tZ1)")
+        .unwrap_or_else(|error| panic!("growing arm: {error:?}"));
+    let growing = context.tagged_heap.bytes_since_gc() - before_growing;
+    let before_steady = context.tagged_heap.bytes_since_gc();
+    context
+        .eval_str("(a6-arm a6-tZ2)")
+        .unwrap_or_else(|error| panic!("steady arm: {error:?}"));
+    let steady = context.tagged_heap.bytes_since_gc() - before_steady;
+    assert_eq!(
+        growing, steady,
+        "serial growth stays uncharged: Sim is byte-for-byte the current path"
+    );
+}
+
+/// B5 row 4: the serial twin of the growth program against the GNU 31.1
+/// oracle (§7 B5). One owner runs the twin's P11 exactly — 130 inserts,
+/// count, get, two rems, count — through sealed leases; the answers match
+/// the oracle line, and the growth accounting holds underneath.
+#[test]
+fn a6_ht_growth_serial_twin_matches_gnu_oracle() {
+    // slots: 0 tK; 15 one; 16 value/count; 17 limit/key; 18 k/found; 19
+    // cond/get-value.
+    const TK: u16 = 0;
+    const NSLOTS: usize = 20;
+    let puts: usize = 130;
+    let setup = HtSetup {
+        source: r#"(progn
+  (setq a6-tK (make-hash-table :test 'eq))
+  (list a6-tK))"#,
+        facts: vec![(TK, Abs::Table)],
+        nslots: NSLOTS,
+    };
+    let mut ops = vec![
+        Op::ConstFixnum {
+            dst: 17,
+            value: puts as i64,
+        },
+        Op::ConstFixnum { dst: 18, value: 0 },
+        Op::ConstFixnum { dst: 15, value: 1 },
+    ];
+    let loop_at = ops.len() as u16;
+    ops.push(Op::Lt {
+        dst: 19,
+        a: 18,
+        b: 17,
+    });
+    let branch_at = ops.len();
+    ops.push(Op::BranchIfNil {
+        cond: 19,
+        target: 0,
+    });
+    ops.push(Op::Add {
+        dst: 16,
+        a: 18,
+        b: 18,
+    });
+    ops.push(Op::Add {
+        dst: 16,
+        a: 16,
+        b: 18,
+    });
+    ops.push(Op::HtPut {
+        table: TK,
+        key: 18,
+        value: 16,
+    });
+    ops.push(Op::Add {
+        dst: 18,
+        a: 18,
+        b: 15,
+    });
+    ops.push(Op::Jump { target: loop_at });
+    let done = ops.len() as u16;
+    // The first count keeps its own slot: the second HtCount would
+    // otherwise overwrite it before the line is built.
+    ops.push(Op::HtCount { table: TK, dst: 10 });
+    ops.push(Op::ConstFixnum {
+        dst: 17,
+        value: 129,
+    });
+    ops.push(Op::HtGet {
+        table: TK,
+        key: 17,
+        found: 18,
+        value: 19,
+    });
+    ops.push(Op::ConstFixnum { dst: 17, value: 5 });
+    ops.push(Op::HtRem {
+        table: TK,
+        key: 17,
+        found: 18,
+    });
+    ops.push(Op::ConstFixnum { dst: 17, value: 6 });
+    ops.push(Op::HtRem {
+        table: TK,
+        key: 17,
+        found: 18,
+    });
+    ops.push(Op::HtCount { table: TK, dst: 16 });
+    ops[branch_at] = Op::BranchIfNil {
+        cond: 19,
+        target: done,
+    };
+    ops.extend(finish_line(&[10, 19, 16]));
+    let initial = setup.initial();
+    prevalidate_with(&ops, NSLOTS, puts as u32, &initial)
+        .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+    let growth = HtGrowth::new(1);
+    let mut env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
+    env.growth = Some(&growth);
+    let (lines, _dumps) = run_ht_session(
+        &setup,
+        vec![ops],
+        puts as u32,
+        &env,
+        &["(hash-table-count a6-tK)"],
+    );
+    let oracle = oracle_lines();
+    assert_eq!(lines[0], oracle[34], "P11 growth twin, GNU 31.1");
+    assert!(
+        growth.events[0].load(Ordering::Relaxed) >= 3,
+        "130 inserts cross several resizes"
+    );
+    assert_eq!(growth.mismatches.load(Ordering::Relaxed), 0);
+    let charged = growth.charged[0].load(Ordering::Relaxed);
+    let entry_bytes = 128 * size_of::<Option<HashTableEntry>>();
+    assert!(charged >= entry_bytes && charged <= 8 * entry_bytes);
 }
