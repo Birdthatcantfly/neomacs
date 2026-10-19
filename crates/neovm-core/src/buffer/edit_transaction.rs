@@ -336,7 +336,6 @@ impl Buffer {
         DeleteTextPlan::new(
             range,
             build.then(|| self.buffer_region_lisp_string(range.byte_range())),
-            self.text.marker_adjustments_for_delete(range),
         )
     }
 
@@ -395,9 +394,8 @@ impl Buffer {
     /// Execute a fully measured deletion plan.
     ///
     /// GNU `del_range_2` records deletion undo before marker adjustment and
-    /// storage mutation.  The plan owns the pre-mutation deleted text and
-    /// marker-adjustment undo entries so this executor consumes one
-    /// transaction object instead of recomputing side inputs mid-edit.
+    /// storage mutation. The plan owns the measured range and optional deleted
+    /// text; undo-only marker metadata is read from the live chain at commit.
     pub(in crate::buffer) fn execute_delete_text_plan(
         &mut self,
         plan: DeleteTextPlan,
@@ -424,7 +422,11 @@ impl Buffer {
         self.undo_prepare_change(plan.range().char_start());
         let mut ul = self.get_undo_list();
         if !undo::undo_list_is_disabled(&ul) {
-            for &(marker, adjustment) in plan.marker_adjustments() {
+            // GNU record_delete (undo.c:163-186) gates the marker walk on the
+            // live undo list, after record_point and before recording deletion.
+            // Markers may move, attach or detach after preparation. Required
+            // relocation remains in apply_byte_delete_side_effects below.
+            for (marker, adjustment) in self.text.marker_adjustments_for_delete(plan.range()) {
                 undo::undo_list_record_marker_adjustment(&mut ul, marker, adjustment);
             }
             // Undo was disabled when the plan was made only if something
@@ -1835,17 +1837,15 @@ impl MeasuredDeleteEdit {
 
 /// Backend-neutral storage plan for deleting a measured range.
 ///
-/// GNU deletion records both the deleted text and per-marker undo adjustments
-/// before the storage mutation.  Keep those precomputed side inputs with the
-/// measured delete so the executor does not pass independent range, text, and
-/// marker-adjustment values through the pipeline.
+/// GNU deletion records deleted text and live per-marker undo adjustments
+/// before storage mutation. Only range and optional text belong to this plan:
+/// undo eligibility and marker-chain state remain live commit-time inputs.
 #[derive(Clone, Debug)]
 pub(in crate::buffer) struct DeleteTextPlan {
     edit: MeasuredDeleteEdit,
     /// The deleted text with its properties, built only when a caller wants
     /// it or undo will record it (see [`DeletionString`]).
     deleted_text: Option<LispString>,
-    marker_adjustments: Vec<(Value, i64)>,
 }
 
 /// Whether a delete must produce its deleted text as a string: GNU
@@ -1858,15 +1858,10 @@ pub(in crate::buffer) enum DeletionString {
 }
 
 impl DeleteTextPlan {
-    pub(in crate::buffer) fn new(
-        range: TextEditRange,
-        deleted_text: Option<LispString>,
-        marker_adjustments: Vec<(Value, i64)>,
-    ) -> Self {
+    pub(in crate::buffer) fn new(range: TextEditRange, deleted_text: Option<LispString>) -> Self {
         Self {
             edit: MeasuredDeleteEdit::new(range),
             deleted_text,
-            marker_adjustments,
         }
     }
 
@@ -1884,10 +1879,6 @@ impl DeleteTextPlan {
 
     pub(in crate::buffer) fn take_deleted_text(&mut self) -> Option<LispString> {
         self.deleted_text.take()
-    }
-
-    pub(in crate::buffer) fn marker_adjustments(&self) -> &[(Value, i64)] {
-        &self.marker_adjustments
     }
 }
 
@@ -2521,3 +2512,7 @@ mod transpose_gnu;
 #[cfg(test)]
 #[path = "edit_transaction/tests/casify_extent.rs"]
 mod casify_extent_tests;
+
+#[cfg(test)]
+#[path = "edit_transaction/tests/delete_live_undo.rs"]
+mod delete_live_undo_tests;
