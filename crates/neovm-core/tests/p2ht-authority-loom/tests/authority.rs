@@ -294,3 +294,116 @@ fn word_layout_constants() {
     assert_eq!(WRITER & model::COUNT_MASK, 0);
     assert_eq!(WRITER | (model::COUNT_MASK & 3), WRITER | 3);
 }
+
+/// B4: three readers overlap on one table — the entry order is chained
+/// (A, then B once A is in, then C once B is in) over blocking latches, the
+/// same sequencing `keeper_quiescent_after_all_actors_stop` and the guard
+/// cases use, because the racing concurrent-entry coverage already lives in
+/// `readers_overlap_without_serialising`; this case is about the
+/// three-reader count and the drain. A writer then publishes its attempt
+/// and waits in the drain. C observes the writer's wait with a nonzero
+/// reader count and no WRITER bit (the design §6 drain witness), the three
+/// readers leave, and only then does the writer's edit run on the fully
+/// drained word. Four actors plus the main thread are beyond exhaustive
+/// reach (an earlier spin-wait draft ran >30 min unbounded), so this one
+/// case runs preemption-bounded (support::check_bounded, bound 2).
+#[test]
+fn three_readers_overlap_then_writer_drains_all() {
+    support::check_bounded(5, 2, || {
+        let table = Arc::new(Table::new());
+        let a_in = Arc::new(model::Latch::new());
+        let b_in = Arc::new(model::Latch::new());
+        let c_in = Arc::new(model::Latch::new());
+        let w_attempting = Arc::new(model::Latch::new());
+        let overlap = Arc::new(AtomicBool::new(false));
+        let drain = Arc::new(AtomicBool::new(false));
+
+        let (t, a, c) = (
+            Arc::clone(&table),
+            Arc::clone(&a_in),
+            Arc::clone(&c_in),
+        );
+        let reader_a = thread::spawn(move || {
+            let lease = model::ReaderLease::enter(&t);
+            a.set();
+            c.wait();
+            drop(lease);
+        });
+
+        let (t, a, b, c) = (
+            Arc::clone(&table),
+            Arc::clone(&a_in),
+            Arc::clone(&b_in),
+            Arc::clone(&c_in),
+        );
+        let reader_b = thread::spawn(move || {
+            a.wait();
+            // Enter must succeed under A's live reader count.
+            let lease = model::ReaderLease::enter(&t);
+            b.set();
+            c.wait();
+            drop(lease);
+        });
+
+        let (t, b, c, w, seen, drain_seen) = (
+            Arc::clone(&table),
+            Arc::clone(&b_in),
+            Arc::clone(&c_in),
+            Arc::clone(&w_attempting),
+            Arc::clone(&overlap),
+            Arc::clone(&drain),
+        );
+        let reader_c = thread::spawn(move || {
+            b.wait();
+            // Enter must succeed under two live readers.
+            let lease = model::ReaderLease::enter(&t);
+            if t.reader_count_now() >= 3 {
+                seen.store(true, Ordering::Release);
+            }
+            c.set();
+            w.wait();
+            // The drain witness: the writer is waiting to acquire while
+            // this reader still holds its count.
+            let word = t.authority.load(Ordering::Acquire);
+            drain_seen.store(
+                word & model::COUNT_MASK >= 1 && word & WRITER == 0,
+                Ordering::Release,
+            );
+            drop(lease);
+        });
+
+        let (t, c, w) = (
+            Arc::clone(&table),
+            Arc::clone(&c_in),
+            Arc::clone(&w_attempting),
+        );
+        let writer = thread::spawn(move || {
+            c.wait();
+            w.set();
+            let lease = WriterLease::enter(&t);
+            lease.mutate();
+            drop(lease);
+        });
+
+        reader_a.join().unwrap();
+        reader_b.join().unwrap();
+        reader_c.join().unwrap();
+        writer.join().unwrap();
+        assert!(
+            overlap.load(Ordering::Acquire),
+            "no execution overlapped three readers"
+        );
+        assert!(
+            drain.load(Ordering::Acquire),
+            "no execution saw the writer waiting on a nonzero reader count"
+        );
+        assert_eq!(table.reader_count_now(), 0);
+        assert_eq!(
+            (
+                table.key_word.load(Ordering::Acquire),
+                table.val_word.load(Ordering::Acquire)
+            ),
+            (K2, V2)
+        );
+    });
+}

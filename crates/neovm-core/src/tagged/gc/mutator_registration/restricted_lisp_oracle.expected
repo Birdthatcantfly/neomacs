@@ -26,3 +26,9 @@ nil
 (((7 . 7)) ((8 . 8)))
 (nil nil 1)
 "hash table test modifies table"
+(t nil 1)
+t
+nil
+((("a6-alpha" . 66048837)))
+22
+12

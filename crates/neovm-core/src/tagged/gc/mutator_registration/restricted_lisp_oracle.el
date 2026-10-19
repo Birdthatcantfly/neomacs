@@ -118,3 +118,35 @@
      (progn (gethash 43 a6-tM) 'no-error)
    (error (let ((message (error-message-string error-info)))
             (substring message 0 (string-match ":" message))))))
+
+;; B4 twin P9: string keys on an equal table (design §4 Rev R3) -> (t nil 1),
+;; then presence checks and buckets. No string is printed; the found flags
+;; come from sentinel presence checks (GNU's remhash says nil
+;; unconditionally, as P5 established).
+(setq a6-tS (make-hash-table :test 'equal))
+(puthash "a6-alpha" 101 a6-tS)
+(puthash "a6-beta" 102 a6-tS)
+(gethash "a6-alpha" a6-tS)
+(gethash "a6-gamma" a6-tS 'a6-miss)
+(neovm-a6-out
+ (list (not (eq (gethash "a6-beta" a6-tS 'a6-miss) 'a6-miss))
+       (progn (remhash "a6-beta" a6-tS)
+              (not (eq (gethash "a6-beta" a6-tS 'a6-miss) 'a6-miss)))
+       (hash-table-count a6-tS)))
+(neovm-a6-out (not (eq (gethash "a6-alpha" a6-tS 'a6-miss) 'a6-miss)))
+(neovm-a6-out (not (eq (gethash "a6-beta" a6-tS 'a6-miss) 'a6-miss)))
+(neovm-a6-out (internal--hash-table-buckets a6-tS))
+;; B4 twin P10: both serial orders of the two-owner overlap program -- the
+;; legal final values of the shared key are exactly these two lines.
+(setq a6-tI (make-hash-table :test 'eq))
+(puthash 77 11 a6-tI)
+(puthash 77 12 a6-tI)
+(puthash 77 21 a6-tI)
+(puthash 77 22 a6-tI)
+(neovm-a6-out (gethash 77 a6-tI))
+(setq a6-tJ (make-hash-table :test 'eq))
+(puthash 77 21 a6-tJ)
+(puthash 77 22 a6-tJ)
+(puthash 77 11 a6-tJ)
+(puthash 77 12 a6-tJ)
+(neovm-a6-out (gethash 77 a6-tJ))

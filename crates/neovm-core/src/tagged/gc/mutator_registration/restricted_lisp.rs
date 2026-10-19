@@ -18,7 +18,7 @@ use crate::emacs_core::value::{HashProbe, HashTableTest};
 use crate::tagged::transport::SharedRoot;
 use crate::tagged::value::{Fixnum, TaggedValue};
 use rustc_hash::FxHashSet;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -837,7 +837,7 @@ fn oracle_lines() -> Vec<&'static str> {
     let lines: Vec<_> = include_str!("restricted_lisp_oracle.expected")
         .lines()
         .collect();
-    assert_eq!(lines.len(), 28, "GNU 31.1 oracle fixture");
+    assert_eq!(lines.len(), 34, "GNU 31.1 oracle fixture");
     lines
 }
 
@@ -854,6 +854,17 @@ fn prin1(bits: usize) -> String {
         }
         if let Some(number) = value.as_fixnum() {
             out.push_str(&number.to_string());
+            return;
+        }
+        if let Some(string) = value.as_lisp_string() {
+            let bytes = string.as_bytes();
+            assert!(
+                bytes.iter().all(|byte| (0x20..0x7f).contains(byte)),
+                "prin1 of a string needing escapes"
+            );
+            out.push('"');
+            out.push_str(&String::from_utf8_lossy(bytes));
+            out.push('"');
             return;
         }
         assert!(value.is_cons(), "prin1 of {:#x}", value.bits());
@@ -1186,11 +1197,148 @@ struct HtEnv<'env> {
     /// single-owner session can observe the retry this provokes; by design
     /// the guard itself makes a same-table edit by the callback impossible.
     bump_before_cb: AtomicUsize,
+    /// B4 overlap witness: reader rendezvous and writer-drain observation on
+    /// one designated table slot. `None` for every pre-B4 session.
+    witness: Option<&'env HtWitness<'env>>,
+    /// B4 editor handshake: a second owner's refused-then-allowed edits
+    /// timed against one user-test comparison window. `None` unless the
+    /// session runs that row.
+    editor: Option<&'env HtEditor>,
+    /// Per-owner count of completed top-level lease ops (design §6: per-owner
+    /// progress counters). Empty for single-owner sessions.
+    progress: &'env [AtomicUsize],
 }
 
 impl<'env> HtEnv<'env> {
+    fn new(users: &'env [UserTestProg<'env>], cb_key: u16, cb_cand: u16, cb_out: u16) -> Self {
+        Self {
+            users,
+            cb_key,
+            cb_cand,
+            cb_out,
+            revalidations: AtomicUsize::new(0),
+            bump_before_cb: AtomicUsize::new(0),
+            witness: None,
+            editor: None,
+            progress: &[],
+        }
+    }
+
     fn user_prog(&self, slot: u16) -> Option<&'env UserTestProg<'env>> {
         self.users.iter().find(|prog| prog.slot == slot)
+    }
+}
+
+/// Bit 63 of the authority word (the writer license); the low 47 bits count
+/// in-flight sealed readers. Mirrors the B1 model the leases implement —
+/// kept as local constants because the executor may not name the lease
+/// module. The witnesses assert the live values, so a drift is a test
+/// failure, not a silent copy.
+const HT_WRITER_BIT: u64 = 1 << 63;
+const HT_READER_MASK: u64 = (1 << 47) - 1;
+
+/// B4 overlap witness (design §6): a reader rendezvous inside one sealed
+/// reader lease, the word values observed there, and the writer-drain
+/// handshake. Every field is written only from owner threads inside lease
+/// windows; the test asserts from the coordinator after the era.
+struct HtWitness<'env> {
+    /// The owner slot whose table the witnessed ops target. Ops on any other
+    /// table ignore the witness entirely.
+    table_slot: u16,
+    /// Reader barrier size: the number of owners that must hold their reader
+    /// lease simultaneously.
+    readers: usize,
+    /// 0 for a pure reader-overlap session; 1 when one owner runs the
+    /// witnessed writer op, so the readers wait for its attempt and observe
+    /// the drain.
+    writers: usize,
+    /// `arrive`'s barrier: fetch_add arrivals, seen receipts per owner.
+    flag: AtomicUsize,
+    seen: Vec<AtomicUsize>,
+    abort: &'env AtomicBool,
+    /// Max READER_COUNT observed by any reader while inside its lease.
+    max_readers: AtomicU64,
+    /// A reader observed the word with a nonzero count, no WRITER bit, while
+    /// the writer was pre-acquisition: the writer's drain wait.
+    drain_observed: AtomicBool,
+    /// Set by the witnessed writer op before it attempts WRITER; readers in
+    /// the barrier wait for it so the drain observation cannot race past.
+    writer_attempting: AtomicBool,
+    /// The word the writer observed once WRITER was acquired (the whole bit).
+    writer_word: AtomicU64,
+}
+
+impl<'env> HtWitness<'env> {
+    fn new(table_slot: u16, readers: usize, writers: usize, abort: &'env AtomicBool) -> Self {
+        assert!(writers <= 1, "one witnessed writer op per session");
+        let mut seen = Vec::with_capacity(readers);
+        for _ in 0..readers {
+            seen.push(AtomicUsize::new(0));
+        }
+        Self {
+            table_slot,
+            readers,
+            writers,
+            flag: AtomicUsize::new(0),
+            seen,
+            abort,
+            max_readers: AtomicU64::new(0),
+            drain_observed: AtomicBool::new(false),
+            writer_attempting: AtomicBool::new(false),
+            writer_word: AtomicU64::new(0),
+        }
+    }
+}
+
+/// B4 editor handshake: the state machine one other owner (the editor) and
+/// the owner running a user-test comparison (the reader) step through, so
+/// the refused and allowed edits land at exact points of the window.
+/// 0 idle → 1 comparison hold taken → 2 editor's same-table edit attempted
+/// (and refused by the depth guard) → 3 hold dropped → 4 editor's edit
+/// landed (epoch moved). `armed` makes the sequence one-shot: later
+/// comparison windows (revalidation rounds) run undisturbed.
+struct HtEditor {
+    phase: AtomicUsize,
+    armed: AtomicBool,
+    /// The editor observed the §3.1 depth guard refusing its same-table edit.
+    refusal_seen: AtomicBool,
+    /// The editor's post-window edit completed under WRITER.
+    edit_landed: AtomicBool,
+}
+
+impl HtEditor {
+    fn new() -> Self {
+        Self {
+            phase: AtomicUsize::new(0),
+            armed: AtomicBool::new(true),
+            refusal_seen: AtomicBool::new(false),
+            edit_landed: AtomicBool::new(false),
+        }
+    }
+
+    /// The reader side of one step: publish `from` done, wait for `to`.
+    fn step(&self, from: usize, to: usize) {
+        self.phase.store(from, Ordering::SeqCst);
+        let deadline = Instant::now() + SPIN_WAIT;
+        while self.phase.load(Ordering::SeqCst) != to {
+            if Instant::now() >= deadline {
+                panic!("editor handshake stalled at {from}, waiting for {to}");
+            }
+            thread::yield_now();
+        }
+    }
+
+    /// The editor side: wait for `from`, run one bounded step, publish `to`.
+    fn wait_then(&self, from: usize, to: usize, step: impl FnOnce()) {
+        let deadline = Instant::now() + SPIN_WAIT;
+        while self.phase.load(Ordering::SeqCst) != from {
+            if Instant::now() >= deadline {
+                panic!("editor handshake stalled waiting for {from}");
+            }
+            thread::yield_now();
+        }
+        step();
+        self.phase.store(to, Ordering::SeqCst);
     }
 }
 
@@ -1247,6 +1395,7 @@ fn run_cb<'era>(
     env: &HtEnv<'_>,
     ops: &[Op],
     args: &[(u16, usize)],
+    index: usize,
 ) -> Result<usize, ExecError> {
     let mut machine = Machine::new();
     loop {
@@ -1276,7 +1425,7 @@ fn run_cb<'era>(
             Flow::Lease => {
                 let op = ops[machine.pc];
                 machine.pc += 1;
-                ht_step(owner, slots, op, Some(env))?;
+                ht_step(owner, slots, op, Some(env), index)?;
             }
         }
     }
@@ -1323,6 +1472,7 @@ fn user_wanted_hash<'era>(
     prog: &UserTestProg<'_>,
     table_tv: TaggedValue,
     key_tv: TaggedValue,
+    index: usize,
 ) -> Result<i64, ExecError> {
     let hold = with_run(owner, |run| {
         let lease = TableRef::enter(run, table_tv)?;
@@ -1334,6 +1484,7 @@ fn user_wanted_hash<'era>(
         env,
         prog.hash_ops,
         &[(env.cb_key, key_tv.bits())],
+        index,
     )?;
     drop(hold);
     TaggedValue::from_bits(out)
@@ -1352,6 +1503,7 @@ fn user_keys_equal<'era>(
     table_tv: TaggedValue,
     key_bits: usize,
     cand_bits: usize,
+    index: usize,
 ) -> Result<bool, ExecError> {
     if env.bump_before_cb.load(Ordering::Acquire) > 0 {
         env.bump_before_cb.fetch_sub(1, Ordering::AcqRel);
@@ -1365,14 +1517,30 @@ fn user_keys_equal<'era>(
         let lease = TableRef::enter(run, table_tv)?;
         Ok(lease.hold_user_test()?)
     })?;
+    // B4: the one armed editor window. Phases 1→2 bracket the hold — the
+    // editor's same-table edit attempt lands (refused by the §3.1 guard)
+    // while this hold is live. Phases 3→4 bracket the return — the editor's
+    // now-allowed edit lands before the scan's epoch re-read, so the
+    // revalidation it provokes is a real other-owner edit.
+    let editor = match env.editor {
+        Some(hs) if hs.armed.swap(false, Ordering::SeqCst) => Some(hs),
+        _ => None,
+    };
+    if let Some(hs) = editor {
+        hs.step(1, 2);
+    }
     let out = run_cb(
         owner,
         slots,
         env,
         prog.cmp_ops,
         &[(env.cb_key, key_bits), (env.cb_cand, cand_bits)],
+        index,
     )?;
     drop(hold);
+    if let Some(hs) = editor {
+        hs.step(3, 4);
+    }
     Ok(!TaggedValue::from_bits(out).is_nil())
 }
 
@@ -1407,9 +1575,10 @@ fn user_lookup<'era>(
     prog: &UserTestProg<'_>,
     table_tv: TaggedValue,
     key_tv: TaggedValue,
+    index: usize,
 ) -> Result<(usize, Option<usize>), ExecError> {
     for _ in 0..HT_RETRY_ROUNDS {
-        let wanted = user_wanted_hash(owner, slots, env, prog, table_tv, key_tv)?;
+        let wanted = user_wanted_hash(owner, slots, env, prog, table_tv, key_tv, index)?;
         let (before, candidates) = user_candidates(owner, table_tv, wanted)?;
         let mut matched: Option<usize> = None;
         for &(cand_bits, value_bits) in &candidates {
@@ -1419,7 +1588,16 @@ fn user_lookup<'era>(
                 matched = Some(value_bits);
                 break;
             }
-            if user_keys_equal(owner, slots, env, prog, table_tv, key_tv.bits(), cand_bits)? {
+            if user_keys_equal(
+                owner,
+                slots,
+                env,
+                prog,
+                table_tv,
+                key_tv.bits(),
+                cand_bits,
+                index,
+            )? {
                 matched = Some(value_bits);
                 break;
             }
@@ -1447,9 +1625,10 @@ fn user_scan<'era>(
     prog: &UserTestProg<'_>,
     table_tv: TaggedValue,
     key_tv: TaggedValue,
+    index: usize,
 ) -> Result<Option<usize>, ExecError> {
     for _ in 0..HT_RETRY_ROUNDS {
-        let wanted = user_wanted_hash(owner, slots, env, prog, table_tv, key_tv)?;
+        let wanted = user_wanted_hash(owner, slots, env, prog, table_tv, key_tv, index)?;
         let (before, candidates) = user_candidates(owner, table_tv, wanted)?;
         let mut matched: Option<usize> = None;
         for &(cand_bits, _) in &candidates {
@@ -1459,7 +1638,16 @@ fn user_scan<'era>(
                 matched = Some(cand_bits);
                 break;
             }
-            if user_keys_equal(owner, slots, env, prog, table_tv, key_tv.bits(), cand_bits)? {
+            if user_keys_equal(
+                owner,
+                slots,
+                env,
+                prog,
+                table_tv,
+                key_tv.bits(),
+                cand_bits,
+                index,
+            )? {
                 matched = Some(cand_bits);
                 break;
             }
@@ -1496,15 +1684,29 @@ fn plain_get(
 }
 
 /// `puthash` on a plain table: the serial builtin's storage steps, executed
-/// inside one writer lease instead of the serial choke point.
+/// inside one writer lease instead of the serial choke point. With a B4
+/// witness, the writer first waits for the readers' barrier, then publishes
+/// its attempt — so `TableMut::enter`'s drain spin happens with the reader
+/// count provably live, and the word observed after it is WRITER alone.
 fn plain_put(
     owner: &mut Mutator<'_>,
     table_tv: TaggedValue,
     key_tv: TaggedValue,
     value_tv: TaggedValue,
     test: HashTableTest,
+    witness: Option<(&HtWitness<'_>, usize)>,
 ) -> Result<(), ExecError> {
     with_run(owner, |run| {
+        if let Some((w, _)) = witness {
+            let deadline = Instant::now() + SPIN_WAIT;
+            while w.flag.load(Ordering::SeqCst) != w.readers {
+                if w.abort.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                    panic!("writer waited past the readers' barrier");
+                }
+                thread::yield_now();
+            }
+            w.writer_attempting.store(true, Ordering::SeqCst);
+        }
         let mut lease = TableMut::enter(run, table_tv)?;
         if lease.user_test_mutation_refused() {
             return Err(ExecError::UserTestMutation);
@@ -1526,8 +1728,17 @@ fn plain_put(
                     ht.data.insert_absent(hash, key, key_tv, value_tv);
                 }
             }
-            Ok(())
-        })
+            Ok::<(), ExecError>(())
+        })?;
+        if let Some((w, _)) = witness {
+            // Enter returned only after every reader count drained, so the
+            // whole word is WRITER alone here — the drain's other half. The
+            // exit's return to quiescent is the collection's own accounting
+            // (a leaked count or bit fails the era's stop/complete).
+            let word = lease.authority_word().load(Ordering::Acquire);
+            w.writer_word.fetch_max(word, Ordering::SeqCst);
+        }
+        Ok(())
     })
 }
 
@@ -1556,10 +1767,47 @@ fn plain_rem(
     })
 }
 
-/// `hash-table-count` as one sealed read.
-fn plain_count(owner: &mut Mutator<'_>, table_tv: TaggedValue) -> Result<usize, ExecError> {
+/// `hash-table-count` as one sealed read. With a B4 witness, the read is
+/// also the reader rendezvous: the lease holds across the barrier, and the
+/// authority word observed there is the overlap evidence.
+fn plain_count(
+    owner: &mut Mutator<'_>,
+    table_tv: TaggedValue,
+    witness: Option<(&HtWitness<'_>, usize)>,
+) -> Result<usize, ExecError> {
     with_run(owner, |run| {
         let lease = TableRef::enter(run, table_tv)?;
+        if let Some((w, index)) = witness {
+            let word = lease.authority_word().load(Ordering::Acquire);
+            w.max_readers
+                .fetch_max(word & HT_READER_MASK, Ordering::SeqCst);
+            // All `readers` owners are inside their reader lease at once:
+            // each holds one count, so the word observed after the barrier
+            // is exactly the overlap witness (design §6).
+            arrive(&w.flag, &w.seen[index], w.readers, w.abort);
+            let word = lease.authority_word().load(Ordering::Acquire);
+            w.max_readers
+                .fetch_max(word & HT_READER_MASK, Ordering::SeqCst);
+            if w.writers > 0 {
+                // The writer publishes its attempt only after every reader
+                // is inside, so this wait cannot miss it; the writer cannot
+                // take WRITER while our count is live, so the word observed
+                // here IS its drain wait: nonzero readers, no writer bit.
+                let deadline = Instant::now() + SPIN_WAIT;
+                while !w.writer_attempting.load(Ordering::SeqCst) {
+                    if w.abort.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                        panic!("reader waited past the writer's attempt");
+                    }
+                    thread::yield_now();
+                }
+                let word = lease.authority_word().load(Ordering::Acquire);
+                assert!(
+                    word & HT_READER_MASK > 0 && word & HT_WRITER_BIT == 0,
+                    "a live reader count excludes the writer bit"
+                );
+                w.drain_observed.store(true, Ordering::SeqCst);
+            }
+        }
         Ok(lease.read(|s| s.len()))
     })
 }
@@ -1575,10 +1823,11 @@ fn user_put<'era>(
     table_tv: TaggedValue,
     key_tv: TaggedValue,
     value_tv: TaggedValue,
+    index: usize,
 ) -> Result<(), ExecError> {
     refuse_in_user_test(owner, table_tv)?;
-    let wanted = user_wanted_hash(owner, slots, env, prog, table_tv, key_tv)?;
-    let matched = user_scan(owner, slots, env, prog, table_tv, key_tv)?;
+    let wanted = user_wanted_hash(owner, slots, env, prog, table_tv, key_tv, index)?;
+    let matched = user_scan(owner, slots, env, prog, table_tv, key_tv, index)?;
     with_run(owner, |run| {
         let mut lease = TableMut::enter(run, table_tv)?;
         if lease.user_test_mutation_refused() {
@@ -1610,9 +1859,10 @@ fn user_rem<'era>(
     prog: &UserTestProg<'_>,
     table_tv: TaggedValue,
     key_tv: TaggedValue,
+    index: usize,
 ) -> Result<usize, ExecError> {
     refuse_in_user_test(owner, table_tv)?;
-    let matched = user_scan(owner, slots, env, prog, table_tv, key_tv)?;
+    let matched = user_scan(owner, slots, env, prog, table_tv, key_tv, index)?;
     let removed = with_run(owner, |run| {
         let mut lease = TableMut::enter(run, table_tv)?;
         if lease.user_test_mutation_refused() {
@@ -1649,12 +1899,15 @@ fn ht_operand<'era>(
 
 /// Perform one sealed table op between slice regions. The parameter is the
 /// owner (not a run access) because user tests run whole callback programs,
-/// which open slice regions and mint leases of their own.
+/// which open slice regions and mint leases of their own. `index` is the
+/// owner's session index: it names the per-owner progress counter and the
+/// witness barrier receipt.
 fn ht_step<'era>(
     owner: &mut Mutator<'era>,
     slots: &[OwnerRootSlot<'era>],
     op: Op,
     env: Option<&HtEnv<'_>>,
+    index: usize,
 ) -> Result<(), ExecError> {
     // The user-program dispatch table: a registered program for the table
     // slot selects the user path, and the harness invariant is that those
@@ -1688,6 +1941,11 @@ fn ht_step<'era>(
         }
     };
     let env_of = || env.expect("a registered user program implies an env");
+    // The B4 witness only sees plain ops on its designated table slot; every
+    // other op (and every session without a witness) runs unchanged.
+    let witness = env
+        .and_then(|env| env.witness.filter(|w| w.table_slot == table))
+        .map(|w| (w, index));
     match op {
         Op::HtGet {
             key, found, value, ..
@@ -1696,7 +1954,7 @@ fn ht_step<'era>(
             let (found_bits, value_bits) = match prog {
                 Some(prog) => {
                     let (found_bits, matched) =
-                        user_lookup(owner, slots, env_of(), prog, table_tv, key_tv)?;
+                        user_lookup(owner, slots, env_of(), prog, table_tv, key_tv, index)?;
                     (found_bits, matched.unwrap_or(TaggedValue::NIL.bits()))
                 }
                 None => plain_get(owner, table_tv, key_tv, test)?,
@@ -1708,21 +1966,30 @@ fn ht_step<'era>(
         Op::HtPut { key, value, .. } => {
             let words = ht_operand(owner, slots, &[key, value])?;
             match prog {
-                Some(prog) => user_put(owner, slots, env_of(), prog, table_tv, words[0], words[1]),
-                None => plain_put(owner, table_tv, words[0], words[1], test),
+                Some(prog) => user_put(
+                    owner,
+                    slots,
+                    env_of(),
+                    prog,
+                    table_tv,
+                    words[0],
+                    words[1],
+                    index,
+                ),
+                None => plain_put(owner, table_tv, words[0], words[1], test, witness),
             }
         }
         Op::HtRem { key, found, .. } => {
             let key_tv = ht_operand(owner, slots, &[key])?[0];
             let found_bits = match prog {
-                Some(prog) => user_rem(owner, slots, env_of(), prog, table_tv, key_tv)?,
+                Some(prog) => user_rem(owner, slots, env_of(), prog, table_tv, key_tv, index)?,
                 None => plain_rem(owner, table_tv, key_tv, test)?,
             };
             with_run(owner, |run| plant_words(run, slots, &[(found, found_bits)]))
         }
         Op::HtCount { dst, .. } => {
             // Counting never consults the test: one sealed read either way.
-            let count = plain_count(owner, table_tv)?;
+            let count = plain_count(owner, table_tv, witness)?;
             let number = i64::try_from(count).map_err(|_| ExecError::Overflow)?;
             let fix = Fixnum::try_from(number).map_err(|_| ExecError::Overflow)?;
             let bits = TaggedValue::from_fixnum(fix).bits();
@@ -1788,7 +2055,15 @@ fn one_slice<'era>(
             Flow::Lease => {
                 let op = ops[machine.pc];
                 machine.pc += 1;
-                ht_step(owner, slots, op, ht)?;
+                ht_step(owner, slots, op, ht, index)?;
+                // Design §6: per-owner progress counter — one increment per
+                // completed top-level lease op. An empty `progress` means
+                // the session does not track it (the B3 single-owner rows).
+                if let Some(env) = ht {
+                    if let Some(counter) = env.progress.get(index) {
+                        counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
             }
         }
     }
@@ -3288,14 +3563,7 @@ fn a6_ht_ops_match_gnu_oracle() {
             cmp_ops: &cmp_other,
         },
     ];
-    let env = HtEnv {
-        users: &users,
-        cb_key: HT_CB_KEY,
-        cb_cand: HT_CB_CAND,
-        cb_out: HT_CB_OUT,
-        revalidations: AtomicUsize::new(0),
-        bump_before_cb: AtomicUsize::new(0),
-    };
+    let env = HtEnv::new(&users, HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
     let dump_forms = [
         "(internal--hash-table-buckets a6-tA)",
         "(internal--hash-table-histogram a6-tB)",
@@ -3400,14 +3668,7 @@ fn a6_ht_user_test_refuses_mutation_inside_the_test() {
     let table_root = unsafe { SharedRoot::new(&context.tagged_heap, table_value) };
     let mut planted: Vec<Option<SharedRoot>> = vec![None; setup.nslots];
     planted[0] = Some(table_root);
-    let env = HtEnv {
-        users: &users,
-        cb_key: 1,
-        cb_cand: 2,
-        cb_out: 3,
-        revalidations: AtomicUsize::new(0),
-        bump_before_cb: AtomicUsize::new(0),
-    };
+    let env = HtEnv::new(&users, 1, 2, 3);
     let abort = AtomicBool::new(false);
     let (report_tx, report_rx) = channel();
     context
@@ -3555,14 +3816,8 @@ fn a6_ht_user_test_revalidates_after_callback_window() {
             cmp_ops: &cmp_other,
         },
     ];
-    let env = HtEnv {
-        users: &users,
-        cb_key: HT_CB_KEY,
-        cb_cand: HT_CB_CAND,
-        cb_out: HT_CB_OUT,
-        revalidations: AtomicUsize::new(0),
-        bump_before_cb: AtomicUsize::new(1),
-    };
+    let env = HtEnv::new(&users, HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
+    env.bump_before_cb.store(1, Ordering::SeqCst);
     let (lines, _dumps) = run_ht_session(&setup, vec![program], 0, &env, &[]);
     assert_eq!(
         env.revalidations.load(Ordering::SeqCst),
@@ -4207,5 +4462,1141 @@ fn a8_throughput_rows() {
         );
         std::fs::write(&path, tsv).unwrap_or_else(|error| panic!("write {path}: {error:?}"));
         println!("tsv: {path}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B4: 2-4 owner overlap on shared tables (design §6/§7)
+// ---------------------------------------------------------------------------
+
+/// One B4 multi-owner session: the shared tables are planted into every
+/// owner's slots from the same transport roots, all permits register before
+/// any owner thread exists (design §3.3), every owner runs its program list
+/// concurrently through the restricted executor (`no_stop`: no mid-run
+/// collection, so lease windows really overlap), and the coordinator drives
+/// the one collection round after every owner reported. Returns each owner's
+/// program lines, one list per owner.
+fn run_ht_overlap_session(
+    setup: &HtSetup,
+    programs: &[Vec<Op>],
+    reps: usize,
+    bound: u32,
+    env: &HtEnv<'_>,
+    id_base: u64,
+    dump_forms: &[&str],
+) -> (Vec<Vec<String>>, Vec<String>) {
+    let mut context = Context::new();
+    let plant_values = context
+        .eval_str(setup.source)
+        .unwrap_or_else(|error| panic!("ht setup eval: {error:?}"));
+    // SAFETY: every planted word belongs to this Context's heap; the roots
+    // keep the shared tables alive for the whole era, and `SharedRoot` is
+    // `Sync`, so every owner seeds from the same roots.
+    let nil = unsafe { SharedRoot::new(&context.tagged_heap, TaggedValue::NIL) };
+    let mut planted: Vec<Option<SharedRoot>> = vec![None; setup.nslots];
+    {
+        let mut cursor = plant_values;
+        for &(slot, _fact) in &setup.facts {
+            assert!(cursor.is_cons(), "setup list shorter than its facts");
+            let root =
+                unsafe { SharedRoot::new(&context.tagged_heap, cursor.cons_car_unobserved()) };
+            planted[usize::from(slot)] = Some(root);
+            cursor = cursor.cons_cdr_unobserved();
+        }
+        assert!(cursor.is_nil(), "setup list longer than its facts");
+    }
+    let abort = AtomicBool::new(false);
+    let mut lines: Vec<Vec<String>> = Vec::new();
+    context
+        .admit_owned_parallel(|projection| {
+            {
+                let era = projection.era();
+                era.start_cons_storage()
+                    .unwrap_or_else(|error| panic!("cons catalog: {error:?}"));
+                thread::scope(|scope| {
+                    let _panic = PanicFlag {
+                        registry: era.registry(),
+                        abort: &abort,
+                    };
+                    let heap = era.heap_identity();
+                    let registry = era.registry();
+                    let n = programs.len();
+                    let (end_tx, end_rx) = channel();
+                    let (ready_tx, ready_rx) = channel();
+                    let (retired_tx, retired_rx) = channel();
+                    let mut done_txs = Vec::with_capacity(n);
+                    let mut permits = Vec::with_capacity(n);
+                    for index in 0..n {
+                        permits.push(retry_reg(|| {
+                            era.register(id_base + index as u64, setup.nslots)
+                        }));
+                    }
+                    for (index, permit) in permits.into_iter().enumerate() {
+                        let (done_tx, done_rx) = channel();
+                        done_txs.push(done_tx);
+                        let launch = OwnerLaunch {
+                            permit,
+                            heap,
+                            id: id_base + index as u64,
+                            nil: &nil,
+                            programs: vec![programs[index].clone(); reps],
+                            nslots: setup.nslots,
+                            bound,
+                            line_slot: usize::from(HT_LINE),
+                            stop_at: no_stop,
+                            overlap: None,
+                            index,
+                            pause_tx: channel().0,
+                            go_rx: channel().1,
+                            end_tx: end_tx.clone(),
+                            ready_tx: ready_tx.clone(),
+                            done_rx,
+                            retired_tx: retired_tx.clone(),
+                            registry,
+                            abort: &abort,
+                            planted: &planted,
+                            ht: Some(env),
+                        };
+                        scope.spawn(move || launch.run());
+                    }
+                    drop(end_tx);
+                    drop(ready_tx);
+                    drop(retired_tx);
+                    let ends = gather(&end_rx, n, |end| end.index);
+                    let _readies = gather(&ready_rx, n, |index| *index);
+                    let mut stopped = retry_rv(|| era.stop());
+                    assert_eq!(stopped.epoch().get(), 1);
+                    retry_reg(|| era.return_cons_storage(&stopped));
+                    assert!(retry_rv(|| era.collect_stopped(&mut stopped)).major);
+                    complete(stopped);
+                    for done in &done_txs {
+                        done.send(()).unwrap();
+                    }
+                    let _retired = gather(&retired_rx, n, |index| *index);
+                    lines = ends.into_iter().map(|end| end.lines).collect();
+                });
+            }
+            let (collector, keeper) = projection
+                .finish()
+                .unwrap_or_else(|error| panic!("finish: {error:?}"));
+            (collector, keeper, ())
+        })
+        .unwrap_or_else(|error| panic!("admit: {error:?}"));
+    let dumps = dump_forms
+        .iter()
+        .map(|form| {
+            let value = context
+                .eval_str(form)
+                .unwrap_or_else(|error| panic!("ht dump eval {form}: {error:?}"));
+            prin1(value.bits())
+        })
+        .collect();
+    (lines, dumps)
+}
+
+/// B4 reader overlap, parameterized over the owner count: every owner runs
+/// one sealed reader op on the shared witnessed table inside an `arrive`
+/// barrier — so all of them provably hold their reader lease simultaneously
+/// — with a disjoint-key writer op and read-back around it. The word the
+/// readers observe after the barrier is the design §6 witness, and the
+/// disjoint puts/gets check the concurrent answers and the exact final
+/// state (only owner `i` ever writes key `50+i`).
+fn overlap_ht_readers(owners: usize) {
+    // slots: 0 witnessed reader table, 1 disjoint-key table, 14 line.
+    const TW: u16 = 0;
+    const TX: u16 = 1;
+    const NSLOTS: usize = 20;
+    let setup = HtSetup {
+        source: r#"(progn
+  (setq a6-tW (make-hash-table :test 'eq))
+  (setq a6-tX (make-hash-table :test 'eq))
+  (puthash 1 10 a6-tW)
+  (puthash 2 20 a6-tW)
+  (puthash 3 30 a6-tW)
+  (puthash 4 40 a6-tW)
+  (list a6-tW a6-tX))"#,
+        facts: vec![(TW, Abs::Table), (TX, Abs::Table)],
+        nslots: NSLOTS,
+    };
+    let mut programs = Vec::with_capacity(owners);
+    for owner in 0..owners {
+        let key = 50 + owner as i64;
+        let value = 500 + owner as i64;
+        let mut ops = vec![
+            Op::ConstFixnum {
+                dst: 15,
+                value: key,
+            },
+            Op::ConstFixnum { dst: 16, value },
+            Op::HtPut {
+                table: TX,
+                key: 15,
+                value: 16,
+            },
+            // The witnessed reader op: its lease spans the barrier.
+            Op::HtCount { table: TW, dst: 17 },
+            Op::HtGet {
+                table: TX,
+                key: 15,
+                found: 18,
+                value: 19,
+            },
+        ];
+        ops.extend(finish_line(&[18, 19, 17]));
+        programs.push(ops);
+    }
+    let initial = setup.initial();
+    for program in &programs {
+        prevalidate_with(program, NSLOTS, 0, &initial)
+            .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+    }
+    let abort = AtomicBool::new(false);
+    let witness = HtWitness::new(TW, owners, 0, &abort);
+    let progress: Vec<AtomicUsize> = (0..owners).map(|_| AtomicUsize::new(0)).collect();
+    let mut env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
+    env.witness = Some(&witness);
+    env.progress = &progress;
+    let (lines, dumps) = run_ht_overlap_session(
+        &setup,
+        &programs,
+        1,
+        0,
+        &env,
+        6700,
+        &["(hash-table-count a6-tX)", "(hash-table-count a6-tW)"],
+    );
+    assert_eq!(lines.len(), owners);
+    for (owner, owner_lines) in lines.iter().enumerate() {
+        assert_eq!(owner_lines.len(), 1, "one program per owner");
+        assert_eq!(
+            owner_lines[0],
+            format!("(t {} 4)", 500 + owner),
+            "own key hit, stable shared-table count, for owner {owner}"
+        );
+    }
+    // The §6 witness: every one of the `owners` reader leases was live at
+    // once, observed on the authority word itself.
+    assert_eq!(
+        witness.max_readers.load(Ordering::SeqCst),
+        owners as u64,
+        "all {owners} readers held the table at once"
+    );
+    assert!(
+        witness.max_readers.load(Ordering::SeqCst) > 1,
+        "max observed concurrent readers > 1"
+    );
+    for (owner, counter) in progress.iter().enumerate() {
+        assert_eq!(counter.load(Ordering::Relaxed), 3, "owner {owner} progress");
+    }
+    // Exact final state: every disjoint key present, shared table untouched.
+    assert_eq!(dumps[0], format!("{owners}"), "every disjoint key landed");
+    assert_eq!(dumps[1], "4", "the witnessed table kept its seeded entries");
+}
+
+#[test]
+fn a6_ht_overlap_shared_readers_two_owners() {
+    overlap_ht_readers(2);
+}
+
+#[test]
+fn a6_ht_overlap_shared_readers_three_owners() {
+    overlap_ht_readers(3);
+}
+
+#[test]
+fn a6_ht_overlap_shared_readers_four_owners() {
+    overlap_ht_readers(4);
+}
+
+/// B4 writer drain: four readers hold their leases across the barrier while
+/// one writer owner publishes its attempt and waits in the writer's drain —
+/// a reader observes the wait (nonzero count, no WRITER bit), the readers
+/// leave, and only then does the writer's edit run on the whole word. The
+/// writer's put is a real sealed `HtPut`; the readers' counts are real
+/// sealed `HtCount`s.
+#[test]
+fn a6_ht_overlap_writer_drains_four_readers() {
+    const TW: u16 = 0;
+    const NSLOTS: usize = 20;
+    let readers = 4usize;
+    let setup = HtSetup {
+        source: r#"(progn
+  (setq a6-tW (make-hash-table :test 'eq))
+  (puthash 1 10 a6-tW)
+  (list a6-tW))"#,
+        facts: vec![(TW, Abs::Table)],
+        nslots: NSLOTS,
+    };
+    let mut programs = Vec::with_capacity(readers + 1);
+    for _ in 0..readers {
+        let mut ops = vec![Op::HtCount { table: TW, dst: 17 }];
+        ops.extend(finish_line(&[17]));
+        programs.push(ops);
+    }
+    let mut writer = vec![
+        Op::ConstFixnum { dst: 15, value: 90 },
+        Op::ConstFixnum { dst: 16, value: 91 },
+        Op::HtPut {
+            table: TW,
+            key: 15,
+            value: 16,
+        },
+    ];
+    writer.extend(finish_line(&[]));
+    programs.push(writer);
+    let initial = setup.initial();
+    for program in &programs {
+        prevalidate_with(program, NSLOTS, 0, &initial)
+            .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+    }
+    let abort = AtomicBool::new(false);
+    let witness = HtWitness::new(TW, readers, 1, &abort);
+    let progress: Vec<AtomicUsize> = (0..=readers).map(|_| AtomicUsize::new(0)).collect();
+    let mut env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
+    env.witness = Some(&witness);
+    env.progress = &progress;
+    let (lines, dumps) = run_ht_overlap_session(
+        &setup,
+        &programs,
+        1,
+        0,
+        &env,
+        6710,
+        &["(hash-table-count a6-tW)", "(gethash 90 a6-tW)"],
+    );
+    assert_eq!(lines.len(), readers + 1);
+    for (owner, owner_lines) in lines.iter().take(readers).enumerate() {
+        assert_eq!(owner_lines[0], "(1)", "reader {owner} counted the seed");
+    }
+    assert_eq!(
+        witness.max_readers.load(Ordering::SeqCst),
+        readers as u64,
+        "all four readers overlapped before the writer could enter"
+    );
+    assert!(
+        witness.drain_observed.load(Ordering::SeqCst),
+        "a reader observed the writer's drain wait: readers live, no WRITER bit"
+    );
+    assert_eq!(
+        witness.writer_word.load(Ordering::SeqCst),
+        HT_WRITER_BIT,
+        "the writer held the whole word: every reader had drained"
+    );
+    for (owner, counter) in progress.iter().enumerate() {
+        assert_eq!(counter.load(Ordering::Relaxed), 1, "owner {owner} progress");
+    }
+    assert_eq!(dumps[0], "2", "seed plus the writer's key");
+    assert_eq!(dumps[1], "91", "the drained writer's edit landed");
+}
+
+/// B4 final-state membership: two owners put the same key twice each with no
+/// witness (pure concurrent sealed writes). Whatever interleaving ran, the
+/// final state must be a member of the legal serial interleavings — the six
+/// per-owner-order-respecting orders of four puts — which the test
+/// enumerates exhaustively. Op atomicity shows as the count never leaving
+/// one: four puts, one key, no torn duplicate ever observed (each owner
+/// counts after its own puts).
+#[test]
+fn a6_ht_overlap_final_state_in_legal_serial_interleavings() {
+    const TI: u16 = 0;
+    const NSLOTS: usize = 20;
+    let setup = HtSetup {
+        source: r#"(progn
+  (setq a6-tI (make-hash-table :test 'eq))
+  (list a6-tI))"#,
+        facts: vec![(TI, Abs::Table)],
+        nslots: NSLOTS,
+    };
+    // (owner, key, value): owner A then owner B, two puts each on key 77.
+    let plan: [(usize, i64, i64); 4] = [(0, 77, 11), (0, 77, 12), (1, 77, 21), (1, 77, 22)];
+    let mut programs = Vec::new();
+    for owner in 0..2usize {
+        let mut ops = Vec::new();
+        for &(o, key, value) in &plan {
+            if o != owner {
+                continue;
+            }
+            ops.push(Op::ConstFixnum {
+                dst: 15,
+                value: key,
+            });
+            ops.push(Op::ConstFixnum { dst: 16, value });
+            ops.push(Op::HtPut {
+                table: TI,
+                key: 15,
+                value: 16,
+            });
+        }
+        ops.push(Op::HtCount { table: TI, dst: 17 });
+        ops.extend(finish_line(&[17]));
+        programs.push(ops);
+    }
+    let initial = setup.initial();
+    for program in &programs {
+        prevalidate_with(program, NSLOTS, 0, &initial)
+            .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+    }
+    // Exhaustive enumeration: choose A's two positions among the four op
+    // slots; B fills the rest in its own order. The final value is the last
+    // put of the interleaving; the count is always one (same key).
+    let mut legal_finals = HashSet::new();
+    for a1 in 0..4usize {
+        for a2 in (a1 + 1)..4usize {
+            let mut slots: [Option<usize>; 4] = [None; 4];
+            slots[a1] = Some(0);
+            slots[a2] = Some(1);
+            let mut next_b = 2usize;
+            for slot in slots.iter_mut() {
+                if slot.is_none() {
+                    *slot = Some(next_b);
+                    next_b += 1;
+                }
+            }
+            let mut final_value = 0;
+            for op_index in slots.iter().copied().flatten() {
+                final_value = plan[op_index].2;
+            }
+            legal_finals.insert(final_value);
+        }
+    }
+    assert_eq!(
+        legal_finals,
+        HashSet::from([12, 22]),
+        "each owner's second put can win, nothing else is serial-legal"
+    );
+    let env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
+    let (lines, dumps) = run_ht_overlap_session(
+        &setup,
+        &programs,
+        1,
+        0,
+        &env,
+        6720,
+        &["(gethash 77 a6-tI)", "(hash-table-count a6-tI)"],
+    );
+    assert_eq!(lines.len(), 2);
+    for (owner, owner_lines) in lines.iter().enumerate() {
+        assert_eq!(
+            owner_lines[0], "(1)",
+            "owner {owner}: four concurrent puts on one key never duplicate it"
+        );
+    }
+    let oracle = oracle_lines();
+    assert_eq!(
+        oracle[32].parse::<i64>().expect("serial order one final"),
+        22,
+        "GNU: owner B's second put wins when B runs last"
+    );
+    assert_eq!(
+        oracle[33].parse::<i64>().expect("serial order two final"),
+        12,
+        "GNU: owner A's second put wins when A runs last"
+    );
+    let final_value = dumps[0].parse::<i64>().expect("a fixnum");
+    assert!(
+        final_value == oracle[32].parse::<i64>().expect("serial order one")
+            || final_value == oracle[33].parse::<i64>().expect("serial order two"),
+        "observed final {final_value} is outside the GNU legal serial interleavings"
+    );
+    assert_eq!(dumps[1], "1");
+}
+
+/// B4 string keys (design §4 Rev R3): planted strings as `equal`-test keys
+/// through the sealed plain path — the puts materialize `HashKey` string
+/// content under WRITER (ordinary heap traffic), the gets/rem/count are
+/// sealed reads/edits — matching the GNU 31.1 oracle line for line. No
+/// string is ever printed into a line: found flags and counts only, exactly
+/// the P5 convention (GNU's `remhash` says nil unconditionally, so the
+/// oracle twin derives found flags from sentinel presence checks).
+#[test]
+fn a6_ht_string_keys_match_gnu_oracle() {
+    // slots: 0 string table, 5/6/7 planted keys, 14 line.
+    const TS: u16 = 0;
+    const S1: u16 = 5;
+    const S2: u16 = 6;
+    const S3: u16 = 7;
+    const NSLOTS: usize = 20;
+    let program = vec![
+        Op::ConstFixnum {
+            dst: 15,
+            value: 101,
+        },
+        Op::HtPut {
+            table: TS,
+            key: S1,
+            value: 15,
+        },
+        Op::ConstFixnum {
+            dst: 15,
+            value: 102,
+        },
+        Op::HtPut {
+            table: TS,
+            key: S2,
+            value: 15,
+        },
+        Op::HtGet {
+            table: TS,
+            key: S1,
+            found: 16,
+            value: 17,
+        },
+        Op::HtGet {
+            table: TS,
+            key: S3,
+            found: 18,
+            value: 19,
+        },
+        // (remhash "a6-beta" ..) — found flag from the op, then a post-rem
+        // presence check, so the twin can derive both from sentinels.
+        Op::HtRem {
+            table: TS,
+            key: S2,
+            found: 16,
+        },
+        Op::HtGet {
+            table: TS,
+            key: S2,
+            found: 18,
+            value: 19,
+        },
+        Op::HtCount { table: TS, dst: 15 },
+    ];
+    let ops = finish_line(&[16, 18, 15]);
+    let program = [program, ops].concat();
+    let setup = HtSetup {
+        source: r#"(progn
+  (setq a6-tS (make-hash-table :test 'equal))
+  (list a6-tS "a6-alpha" "a6-beta" "a6-gamma"))"#,
+        facts: vec![
+            (TS, Abs::Table),
+            (S1, Abs::Top),
+            (S2, Abs::Top),
+            (S3, Abs::Top),
+        ],
+        nslots: NSLOTS,
+    };
+    prevalidate_with(&program, NSLOTS, 0, &setup.initial())
+        .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+    let env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
+    let (lines, dumps) = run_ht_session(
+        &setup,
+        vec![program],
+        0,
+        &env,
+        &[
+            // The bare context has no `not` (a subr.el defun): the sentinel
+            // check spelled with `if` prints the same t/nil the GNU twin's
+            // `not` does.
+            "(if (eq (gethash \"a6-alpha\" a6-tS 'a6-miss) 'a6-miss) nil t)",
+            "(if (eq (gethash \"a6-beta\" a6-tS 'a6-miss) 'a6-miss) nil t)",
+            "(internal--hash-table-buckets a6-tS)",
+        ],
+    );
+    assert_eq!(lines.len(), 1);
+    let oracle = oracle_lines();
+    assert_eq!(lines[0], oracle[28], "P9 string-key op line");
+    assert_eq!(dumps[0], oracle[29], "P9 alpha still present");
+    assert_eq!(dumps[1], oracle[30], "P9 beta removed");
+    assert_eq!(dumps[2], oracle[31], "P9 buckets after the removal");
+}
+
+/// B4: another owner's edits around one user-test comparison window. While
+/// the comparison's §3.1 nesting hold is live, the editor's same-table edit
+/// is refused by the depth guard (the sealed mutating ops' own check);
+/// after the window closes, its edit lands under WRITER and bumps the epoch
+/// exactly between the scan's candidate copy and its re-read, so the lookup
+/// revalidates — a real other-owner provocation, not the P8 lever. The
+/// answer is the stable twin's either way.
+#[test]
+fn a6_ht_user_test_revalidates_under_another_owner() {
+    let started = AtomicUsize::new(0);
+    let program = ht_p8s();
+    let setup = ht_main_setup();
+    let initial = setup.initial();
+    prevalidate_with(&program, HT_NSLOTS, 0, &initial)
+        .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+    let hash_prog = [Op::Move {
+        dst: HT_CB_OUT,
+        src: HT_CB_KEY,
+    }];
+    let hash2_prog = [Op::ConstFixnum {
+        dst: HT_CB_OUT,
+        value: 7,
+    }];
+    let cmp_prog = [Op::Eq {
+        dst: HT_CB_OUT,
+        a: HT_CB_KEY,
+        b: HT_CB_CAND,
+    }];
+    let cmp_other = [
+        Op::ConstFixnum { dst: 15, value: 5 },
+        Op::ConstFixnum { dst: 16, value: 55 },
+        Op::HtPut {
+            table: HT_TO2,
+            key: 15,
+            value: 16,
+        },
+        Op::Eq {
+            dst: HT_CB_OUT,
+            a: HT_CB_KEY,
+            b: HT_CB_CAND,
+        },
+    ];
+    let mut facts = initial;
+    facts.extend([(HT_CB_KEY, Abs::Fix(0)), (HT_CB_CAND, Abs::Fix(0))]);
+    for ops in [
+        &hash_prog[..],
+        &hash2_prog[..],
+        &cmp_prog[..],
+        &cmp_other[..],
+    ] {
+        prevalidate_with(ops, HT_NSLOTS, 0, &facts)
+            .unwrap_or_else(|error| panic!("callback prevalidate: {error:?}"));
+    }
+    started.fetch_add(1, Ordering::Relaxed);
+    assert_eq!(started.load(Ordering::Relaxed), 1);
+    let users = [
+        UserTestProg {
+            slot: HT_TU,
+            hash_ops: &hash_prog,
+            cmp_ops: &cmp_prog,
+        },
+        UserTestProg {
+            slot: HT_TO,
+            hash_ops: &hash2_prog,
+            cmp_ops: &cmp_other,
+        },
+    ];
+    let editor = HtEditor::new();
+    let progress = [AtomicUsize::new(0), AtomicUsize::new(0)];
+    let mut env = HtEnv::new(&users, HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
+    // The P8 lever stays disarmed: this row's mutation is the editor's.
+    env.editor = Some(&editor);
+    env.progress = &progress;
+    let mut context = Context::new();
+    let plant_values = context
+        .eval_str(setup.source)
+        .unwrap_or_else(|error| panic!("ht setup eval: {error:?}"));
+    // SAFETY: the planted tables belong to this Context's heap; the roots
+    // keep them alive for the whole era and both owners seed from them.
+    let nil = unsafe { SharedRoot::new(&context.tagged_heap, TaggedValue::NIL) };
+    let mut planted: Vec<Option<SharedRoot>> = vec![None; setup.nslots];
+    {
+        let mut cursor = plant_values;
+        for &(slot, _fact) in &setup.facts {
+            let root =
+                unsafe { SharedRoot::new(&context.tagged_heap, cursor.cons_car_unobserved()) };
+            planted[usize::from(slot)] = Some(root);
+            cursor = cursor.cons_cdr_unobserved();
+        }
+        assert!(cursor.is_nil(), "setup list matches its facts");
+    }
+    let abort = AtomicBool::new(false);
+    let mut lines: Vec<String> = Vec::new();
+    context
+        .admit_owned_parallel(|projection| {
+            {
+                let era = projection.era();
+                era.start_cons_storage()
+                    .unwrap_or_else(|error| panic!("cons catalog: {error:?}"));
+                thread::scope(|scope| {
+                    let _panic = PanicFlag {
+                        registry: era.registry(),
+                        abort: &abort,
+                    };
+                    let heap = era.heap_identity();
+                    let registry = era.registry();
+                    let abort_flag = &abort;
+                    // Both permits exist before either owner thread (§3.3).
+                    let permit_r = retry_reg(|| era.register(6800, setup.nslots));
+                    let permit_e = retry_reg(|| era.register(6801, setup.nslots));
+                    let (end_tx, end_rx) = channel();
+                    let (ready_tx, ready_rx) = channel();
+                    let (done_tx_r, done_rx_r) = channel();
+                    let (done_tx_e, done_rx_e) = channel();
+                    let (retired_tx, retired_rx) = channel();
+                    let launch = OwnerLaunch {
+                        permit: permit_r,
+                        heap,
+                        id: 6800,
+                        nil: &nil,
+                        programs: vec![program],
+                        nslots: setup.nslots,
+                        bound: 0,
+                        line_slot: usize::from(HT_LINE),
+                        stop_at: no_stop,
+                        overlap: None,
+                        index: 0,
+                        pause_tx: channel().0,
+                        go_rx: channel().1,
+                        end_tx: end_tx.clone(),
+                        ready_tx: ready_tx.clone(),
+                        done_rx: done_rx_r,
+                        retired_tx: retired_tx.clone(),
+                        registry,
+                        abort: &abort,
+                        planted: &planted,
+                        ht: Some(&env),
+                    };
+                    scope.spawn(move || launch.run());
+                    // The editor owner: its two steps are the sealed
+                    // mutating ops' own — the §3.1 guard read exactly where
+                    // `plain_put` reads it, and the no-op WRITER edit that
+                    // bumps the epoch.
+                    let editor_ref = &editor;
+                    let planted_ref = &planted;
+                    let nil_ref = &nil;
+                    let ready_tx_e = ready_tx.clone();
+                    let retired_tx_e = retired_tx.clone();
+                    scope.spawn(move || {
+                        let _panic = PanicFlag {
+                            registry,
+                            abort: abort_flag,
+                        };
+                        let mut owner = activate_owner(permit_e, heap, 6801);
+                        let slots = seed_planted(&mut owner, nil_ref, planted_ref);
+                        let to_tv = must(with_run(&mut owner, |run| {
+                            Ok(TaggedValue::from_bits(
+                                slots[usize::from(HT_TO)].word_for_test(run),
+                            ))
+                        }));
+                        // Phases 1→2: while the reader's comparison hold is
+                        // live, the same-table edit must refuse — the word
+                        // is free (holds own no authority), so the writer
+                        // lease mints; only the depth check refuses.
+                        editor_ref.wait_then(1, 2, || {
+                            let refused = with_run(&mut owner, |run| {
+                                let lease = TableMut::enter(run, to_tv)?;
+                                Ok(lease.user_test_mutation_refused())
+                            });
+                            editor_ref
+                                .refusal_seen
+                                .store(matches!(refused, Ok(true)), Ordering::SeqCst);
+                        });
+                        // Phases 3→4: the hold is gone; the edit lands under
+                        // WRITER and bumps the epoch (the bump lever's edit).
+                        editor_ref.wait_then(3, 4, || {
+                            must(with_run(&mut owner, |run| {
+                                let mut lease = TableMut::enter(run, to_tv)?;
+                                lease.edit(|_| ());
+                                editor_ref.edit_landed.store(true, Ordering::SeqCst);
+                                Ok(())
+                            }));
+                        });
+                        shutdown_owner(owner, 1, &ready_tx_e, &done_rx_e, &retired_tx_e);
+                    });
+                    drop(end_tx);
+                    drop(ready_tx);
+                    drop(retired_tx);
+                    let ends = gather(&end_rx, 1, |end| end.index);
+                    let _readies = gather(&ready_rx, 2, |index| *index);
+                    let mut stopped = retry_rv(|| era.stop());
+                    assert_eq!(stopped.epoch().get(), 1);
+                    retry_reg(|| era.return_cons_storage(&stopped));
+                    assert!(retry_rv(|| era.collect_stopped(&mut stopped)).major);
+                    complete(stopped);
+                    done_tx_r.send(()).unwrap();
+                    done_tx_e.send(()).unwrap();
+                    let _retired = gather(&retired_rx, 2, |index| *index);
+                    lines = ends.into_iter().next().expect("reader end").lines;
+                });
+            }
+            let (collector, keeper) = projection
+                .finish()
+                .unwrap_or_else(|error| panic!("finish: {error:?}"));
+            (collector, keeper, ())
+        })
+        .unwrap_or_else(|error| panic!("admit: {error:?}"));
+    assert!(
+        editor.refusal_seen.load(Ordering::SeqCst),
+        "the depth guard refused the editor's edit inside the test window"
+    );
+    assert!(
+        editor.edit_landed.load(Ordering::SeqCst),
+        "the editor's edit landed once the window closed"
+    );
+    assert_eq!(
+        env.revalidations.load(Ordering::SeqCst),
+        1,
+        "the real other-owner edit moved the epoch under the scan exactly once"
+    );
+    assert_eq!(progress[0].load(Ordering::Relaxed), 3, "reader progress");
+    assert_eq!(progress[1].load(Ordering::Relaxed), 0, "editor progress");
+    let oracle = oracle_lines();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0], oracle[26], "same answer as the stable twin");
+    // Serial world back: the no-op edit changed no content.
+    let count = context
+        .eval_str("(hash-table-count a6-tO)")
+        .unwrap_or_else(|error| panic!("count eval: {error:?}"));
+    assert_eq!(prin1(count.bits()), "1");
+    assert_eq!(started.load(Ordering::Relaxed), 1);
+}
+
+/// B4 reader-scaling row (design §6, Rev R4): 1-4 owners, one shared
+/// prefilled `eq` table, nothing but sealed `HtGet`s — the per-op cost must
+/// not grow with the reader count (readers share the table under the
+/// authority word; there is no reader serialization to pay for). The row
+/// prints `ns/op` only under `NEOVM_P2HT_SCALE`, so the gates stay silent;
+/// the structural asserts (every owner's every answer, and the exact final
+/// state) hold in every run.
+#[test]
+fn a6_ht_reader_scaling_row() {
+    const TW: u16 = 0;
+    const NSLOTS: usize = 20;
+    const REPS: usize = 1500;
+    let setup = HtSetup {
+        source: r#"(progn
+  (setq a6-tW (make-hash-table :test 'eq))
+  (let ((k 0))
+    (while (< k 8)
+      (puthash k (* k 10) a6-tW)
+      (setq k (1+ k))))
+  (list a6-tW))"#,
+        facts: vec![(TW, Abs::Table)],
+        nslots: NSLOTS,
+    };
+    let program = {
+        let mut ops = vec![
+            Op::ConstFixnum { dst: 15, value: 7 },
+            Op::HtGet {
+                table: TW,
+                key: 15,
+                found: 16,
+                value: 17,
+            },
+        ];
+        ops.extend(finish_line(&[16, 17]));
+        ops
+    };
+    prevalidate_with(&program, NSLOTS, 0, &setup.initial())
+        .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
+    let env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
+    let want_scale_row = std::env::var("NEOVM_P2HT_SCALE").is_ok();
+    for owners in 1..=4usize {
+        let programs = vec![program.clone(); owners];
+        let started = Instant::now();
+        let (lines, dumps) = run_ht_overlap_session(
+            &setup,
+            &programs,
+            REPS,
+            0,
+            &env,
+            6820,
+            &["(hash-table-count a6-tW)"],
+        );
+        let elapsed = started.elapsed();
+        assert_eq!(lines.len(), owners);
+        for owner_lines in &lines {
+            assert_eq!(owner_lines.len(), REPS, "one line per repetition");
+            assert!(
+                owner_lines.iter().all(|line| line == "(t 70)"),
+                "every reader answered the shared hit"
+            );
+        }
+        assert_eq!(dumps[0], "8", "read-only owners left the table exact");
+        let ns_per_op = elapsed.as_nanos() as f64 / (owners * REPS) as f64;
+        if want_scale_row {
+            println!("p2ht-scale owners={owners} ns_per_op={ns_per_op:.1}");
+        }
+    }
+}
+
+/// B4 sim-side JIT regression row (design §7 risk 4): a real
+/// byte-compiler jump table (pcase) compiled inline, then edited through
+/// the sealed writer lease from a registered owner — the same serial edit
+/// body, now under the authority word. The compiled switch captured the
+/// table's epoch, so the next native dispatch must refuse the stale inline
+/// path and raise the shim's loud signal instead of jumping through a
+/// word the compiler never produced.
+#[test]
+fn a6_ht_sealed_edit_triggers_jit_switch_stale_shim() {
+    if !crate::emacs_core::jit::compile::jit_inline_switch_on() {
+        // The inline dispatch is off (family config `jitoff`): no captured
+        // epoch exists to go stale, and the shim row is vacuous.
+        return;
+    }
+    crate::test_utils::init_test_tracing();
+    use crate::emacs_core::bytecode::Op as ByteOp;
+    // A bare context admits (the bootstrapped runtime carries permanent
+    // weak tables A5 refuses); the switch body is the JIT tests' own
+    // `(lambda (x) (switch x TABLE))` lowering, and the jump table is
+    // BUILT through the sealed path before the compile captures it.
+    let mut ev = Context::new();
+    let keys = [
+        TaggedValue::from_sym_id(crate::emacs_core::intern::intern("a6-sw-a")),
+        TaggedValue::from_sym_id(crate::emacs_core::intern::intern("a6-sw-b")),
+        TaggedValue::from_sym_id(crate::emacs_core::intern::intern("a6-sw-c")),
+    ];
+    // Instruction index of arm j / its GNU byte offset in the body below.
+    let arm = |j: usize| 5 + 2 * j;
+    let offset = |j: usize| 8 + 4 * j as i64;
+    let table = ev
+        .eval_str("(make-hash-table :test 'eq)")
+        .unwrap_or_else(|error| panic!("jump table eval: {error:?}"));
+    // SAFETY: the table belongs to this Context's heap; the root keeps it
+    // alive across both eras.
+    let table_root = unsafe { SharedRoot::new(&ev.tagged_heap, table) };
+    // SAFETY: same heap as the context above.
+    let nil = unsafe { SharedRoot::new(&ev.tagged_heap, TaggedValue::NIL) };
+    // Era #1 — the sealed `put`s that build the jump table.
+    let abort = AtomicBool::new(false);
+    let planted_fill: Vec<Option<SharedRoot>> = vec![Some(table_root.clone())];
+    ev.admit_owned_parallel(|projection| {
+        let era = projection.era();
+        era.start_cons_storage()
+            .unwrap_or_else(|error| panic!("cons catalog: {error:?}"));
+        thread::scope(|scope| {
+            let _panic = PanicFlag {
+                registry: era.registry(),
+                abort: &abort,
+            };
+            let heap = era.heap_identity();
+            let permit = retry_reg(|| era.register(6831, 1));
+            let (ready_tx, ready_rx) = channel();
+            let (done_tx, done_rx) = channel();
+            let (retired_tx, retired_rx) = channel();
+            let nil_ref = &nil;
+            let planted_ref: &[Option<SharedRoot>] = &planted_fill;
+            let key_bits: Vec<usize> = keys.iter().map(|key| key.bits()).collect();
+            let offsets: Vec<i64> = (0..3).map(offset).collect();
+            scope.spawn(move || {
+                let mut owner = activate_owner(permit, heap, 6831);
+                let slots = seed_planted(&mut owner, nil_ref, planted_ref);
+                let table_tv = must(with_run(&mut owner, |run| {
+                    Ok(TaggedValue::from_bits(slots[0].word_for_test(run)))
+                }));
+                for (j, &bits) in key_bits.iter().enumerate() {
+                    plain_put(
+                        &mut owner,
+                        table_tv,
+                        TaggedValue::from_bits(bits),
+                        TaggedValue::fixnum(offsets[j]),
+                        HashTableTest::Eq,
+                        None,
+                    )
+                    .unwrap_or_else(|error| panic!("sealed put: {error:?}"));
+                }
+                // The full teardown `shutdown_owner` runs: clear the seeded
+                // root slot, enter native, then the ready/done/retired
+                // handshake — `era.stop()` below must not race these ops
+                // (a stop while the owner still runs leaves `run_access`
+                // answering Busy until the deadline; TSan's slowdown made
+                // exactly that wedge deterministic).
+                must(with_run(&mut owner, |run| {
+                    run.clear_root_slots()?;
+                    Ok(())
+                }));
+                retry_rv(|| owner.enter_native(&[]));
+                ready_tx
+                    .send(0)
+                    .unwrap_or_else(|_| panic!("ready channel closed"));
+                recv(&done_rx);
+                retire(owner);
+                retired_tx
+                    .send(0)
+                    .unwrap_or_else(|_| panic!("retired channel closed"));
+            });
+            assert_eq!(recv(&ready_rx), 0, "fill owner frozen");
+            let mut stopped = retry_rv(|| era.stop());
+            assert_eq!(stopped.epoch().get(), 1);
+            retry_reg(|| era.return_cons_storage(&stopped));
+            assert!(retry_rv(|| era.collect_stopped(&mut stopped)).major);
+            complete(stopped);
+            done_tx.send(()).unwrap();
+            assert_eq!(recv(&retired_rx), 0);
+        });
+        let (collector, keeper) = projection
+            .finish()
+            .unwrap_or_else(|error| panic!("fill finish: {error:?}"));
+        (collector, keeper, ())
+    })
+    .unwrap_or_else(|error| panic!("fill admit: {error:?}"));
+    // The JIT compile: `(lambda (x) (switch x TABLE))`, miss answers -1,
+    // arm j answers j — the jump table answered inline behind its epoch.
+    let ops = vec![
+        ByteOp::StackRef(0),
+        ByteOp::Constant(0),
+        ByteOp::Switch,
+        ByteOp::Constant(1),
+        ByteOp::Return,
+        ByteOp::Constant(2),
+        ByteOp::Return,
+        ByteOp::Constant(3),
+        ByteOp::Return,
+        ByteOp::Constant(4),
+        ByteOp::Return,
+    ];
+    let constants = vec![
+        table,
+        TaggedValue::fixnum(-1),
+        TaggedValue::fixnum(0),
+        TaggedValue::fixnum(1),
+        TaggedValue::fixnum(2),
+    ];
+    let map: Vec<crate::emacs_core::bytecode::chunk::GnuByteOffsetMapEntry> = (0..3)
+        .map(|j| {
+            crate::emacs_core::bytecode::chunk::GnuByteOffsetMapEntry::new(
+                offset(j) as usize,
+                arm(j),
+            )
+        })
+        .collect();
+    let before_sites =
+        crate::emacs_core::jit::compile::switch_dispatch::inline_switch_sites_for_test();
+    let leaf =
+        crate::emacs_core::jit::compile::lower_leaf_with_map(&ops, &constants, 1, Some(&map))
+            .expect("the switch body compiles");
+    assert!(
+        crate::emacs_core::jit::compile::switch_dispatch::inline_switch_sites_for_test()
+            > before_sites,
+        "the jump table is answered inline"
+    );
+    let ctx_ptr = &mut ev as *mut Context as *mut u8;
+    // Call #1: the fresh compile answers inline.
+    match leaf.call(ctx_ptr, &[keys[0]]) {
+        crate::emacs_core::jit::compile::NativeRun::Ok(bits) => {
+            assert_eq!(TaggedValue::from_bits(bits).as_fixnum(), Some(0));
+        }
+        other => panic!("fresh compile answered natively, got {other:?}"),
+    }
+    // The sealed edit, from a registered owner: retarget one existing key
+    // to a byte offset the compile never saw.
+    let (report_tx, report_rx) = channel();
+    let planted: Vec<Option<SharedRoot>> = vec![Some(table_root.clone())];
+    ev.admit_owned_parallel(|projection| {
+        {
+            let era = projection.era();
+            era.start_cons_storage()
+                .unwrap_or_else(|error| panic!("cons catalog: {error:?}"));
+            thread::scope(|scope| {
+                let _panic = PanicFlag {
+                    registry: era.registry(),
+                    abort: &abort,
+                };
+                let heap = era.heap_identity();
+                let permit = retry_reg(|| era.register(6830, 1));
+                let (ready_tx, ready_rx) = channel();
+                let (done_tx, done_rx) = channel();
+                let (retired_tx, retired_rx) = channel();
+                let nil_ref = &nil;
+                let planted_ref: &[Option<SharedRoot>] = &planted;
+                scope.spawn(move || {
+                    let mut owner = activate_owner(permit, heap, 6830);
+                    let slots = seed_planted(&mut owner, nil_ref, planted_ref);
+                    let table_tv = must(with_run(&mut owner, |run| {
+                        Ok(TaggedValue::from_bits(slots[0].word_for_test(run)))
+                    }));
+                    // Reader side: the epoch before, the table's test, one
+                    // victim entry, and every compiled target.
+                    let (epoch_before, test, victim_key, targets) =
+                        must(with_run(&mut owner, |run| {
+                            let lease = TableRef::enter(run, table_tv)?;
+                            let described = lease.describe();
+                            Ok(lease.read(|s| {
+                                let targets: Vec<i64> = s
+                                    .entries_in_slot_order()
+                                    .map(|entry| entry.value.as_fixnum().expect("byte offset"))
+                                    .collect();
+                                let victim = s
+                                    .entries_in_slot_order()
+                                    .next()
+                                    .expect("a jump-table entry");
+                                (s.switch_epoch, described.test, victim.key, targets)
+                            }))
+                        }));
+                    let stale_target = targets.iter().copied().max().expect("targets") + 1;
+                    assert!(
+                        !targets.contains(&stale_target),
+                        "the retarget is outside the compiled set"
+                    );
+                    // Writer side: one sealed edit — the same serial body
+                    // the builtins run, under the authority word.
+                    must(with_run(&mut owner, |run| {
+                        let mut lease = TableMut::enter(run, table_tv)?;
+                        lease.edit(|ht| {
+                            match ht
+                                .data
+                                .try_probe_for_insert(victim_key, test, false)
+                                .expect("the victim key probes")
+                            {
+                                HashProbe::Found(slot) => {
+                                    if let Some(stored) = ht.data.slot_value_mut(slot) {
+                                        *stored = TaggedValue::fixnum(stale_target);
+                                    }
+                                }
+                                HashProbe::Absent(_) => {
+                                    panic!("the victim key must already sit in the table")
+                                }
+                            }
+                        });
+                        Ok(())
+                    }));
+                    let epoch_after = must(with_run(&mut owner, |run| {
+                        let lease = TableRef::enter(run, table_tv)?;
+                        Ok(lease.read(|s| s.switch_epoch))
+                    }));
+                    report_tx
+                        .send((epoch_before, epoch_after, victim_key.bits()))
+                        .expect("report channel open");
+                    must(with_run(&mut owner, |run| {
+                        run.clear_root_slots()?;
+                        Ok(())
+                    }));
+                    retry_rv(|| owner.enter_native(&[]));
+                    // Same ready/done/retired handshake as the fill era:
+                    // the stop below waits for the freeze, the retire waits
+                    // for the completion.
+                    ready_tx
+                        .send(0)
+                        .unwrap_or_else(|_| panic!("ready channel closed"));
+                    recv(&done_rx);
+                    retire(owner);
+                    retired_tx
+                        .send(0)
+                        .unwrap_or_else(|_| panic!("retired channel closed"));
+                });
+                assert_eq!(recv(&ready_rx), 0, "corrupt owner frozen");
+                let mut stopped = retry_rv(|| era.stop());
+                assert_eq!(stopped.epoch().get(), 1);
+                retry_reg(|| era.return_cons_storage(&stopped));
+                assert!(retry_rv(|| era.collect_stopped(&mut stopped)).major);
+                complete(stopped);
+                done_tx.send(()).unwrap();
+                assert_eq!(recv(&retired_rx), 0);
+            });
+        }
+        let (collector, keeper) = projection
+            .finish()
+            .unwrap_or_else(|error| panic!("finish: {error:?}"));
+        (collector, keeper, ())
+    })
+    .unwrap_or_else(|error| panic!("admit: {error:?}"));
+    let (epoch_before, epoch_after, victim_key_bits) = recv(&report_rx);
+    let victim_key = TaggedValue::from_bits(victim_key_bits);
+    assert!(
+        epoch_after > epoch_before,
+        "the sealed edit moved the switch epoch ({epoch_before} -> {epoch_after})"
+    );
+    // Call #2: the captured epoch is stale, the retargeted key's address is
+    // not in the compiled set — the shim's loud signal, never a wild jump.
+    match leaf.call(ctx_ptr, &[victim_key]) {
+        crate::emacs_core::jit::compile::NativeRun::Signal => (),
+        other => panic!("the stale path must signal, got {other:?}"),
+    }
+    match crate::emacs_core::jit::compile::take_pending_flow()
+        .expect("the stale-table signal is stashed")
+        .into_kind()
+    {
+        crate::emacs_core::error::FlowKind::Signal(sig) => {
+            assert_eq!(sig.symbol_name(), "error");
+            assert!(
+                crate::emacs_core::print::print_value(&sig.data[0])
+                    .contains("jump table mutated at runtime"),
+                "the shim's own message"
+            );
+        }
+        other => panic!("expected the switch-stale signal, got {other:?}"),
     }
 }

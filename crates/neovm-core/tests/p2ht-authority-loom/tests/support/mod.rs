@@ -2,6 +2,19 @@
 #![allow(dead_code)]
 
 pub fn check(threads: usize, body: impl Fn() + Send + Sync + 'static) {
+    check_impl(threads, None, body)
+}
+
+/// Preemption-bounded exploration for the B4-sized schedules: four actors
+/// plus the main thread is beyond exhaustive reach (measured >30 min), so cap
+/// the preemption depth the way LOOM_MAX_PREEMPTIONS would. The flag gates
+/// inside those tests force the interesting schedules deterministically; the
+/// bound only trims redundant preemption permutations of those schedules.
+pub fn check_bounded(threads: usize, bound: usize, body: impl Fn() + Send + Sync + 'static) {
+    check_impl(threads, Some(bound), body)
+}
+
+fn check_impl(threads: usize, bound: Option<usize>, body: impl Fn() + Send + Sync + 'static) {
     let mut builder = loom::model::Builder::new();
     builder.max_threads = threads;
     builder.max_branches = 512;
@@ -9,7 +22,8 @@ pub fn check(threads: usize, body: impl Fn() + Send + Sync + 'static) {
     builder.max_duration = None;
     builder.checkpoint_file = None;
     builder.location = true;
-    // Preserve LOOM_MAX_PREEMPTIONS from Builder::new(). No time/iteration cap.
+    builder.preemption_bound = bound;
+    // check() preserves LOOM_MAX_PREEMPTIONS from Builder::new(). No time/iteration cap.
     struct Receipt(std::sync::Arc<std::sync::atomic::AtomicUsize>);
     impl Drop for Receipt {
         fn drop(&mut self) {
