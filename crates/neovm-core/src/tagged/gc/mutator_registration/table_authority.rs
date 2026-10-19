@@ -348,6 +348,18 @@ impl<'access> TableRef<'access> {
         f(storage)
     }
 
+    /// Take an independent storage snapshot while writers are excluded.
+    /// The unrooted copy is consumed immediately by the sealed shell allocator,
+    /// with no Lisp, safepoint or collection between snapshot and root install.
+    /// GNU permits copying inside a user test; that copy starts mutable even
+    /// while the original table remains guarded by its own nesting count.
+    pub(super) fn snapshot_for_copy(&self) -> LispHashTable {
+        let table = self.guarded_table().clone();
+        table.test_depth.store(0, Ordering::Relaxed);
+        debug_assert!(quiescent(&table.data.authority));
+        table
+    }
+
     /// The shell configuration a sealed read may observe (B3): the test and
     /// whether lookups run user-defined functions. Both are fixed at
     /// creation, so this races nothing a writer may edit.

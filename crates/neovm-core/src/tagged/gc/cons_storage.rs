@@ -1,6 +1,7 @@
 //! Cold cons catalog ownership for admitted mutators.
 //!
-//! The serial heap is an inert shell while this catalog owns its cons spine.
+//! The serial heap is an inert shell while this catalog owns its cons spine
+//! and residual-Box list/catalog (the latter admits hash-table shells only).
 //! Only disjoint raw cell grants leave the gate: neither a heap reference nor
 //! a vector/header reference is retained by a running owner. Collection first
 //! closes every region and restores the spine under stopped authority.
@@ -13,7 +14,9 @@ use super::cons_blocks::ConsBlock;
 use super::mutator_registration::{MutatorKey, RegistrationError};
 use super::young_registry::YoungBlockLog;
 use super::{ConsCell, HeapIdentity, TaggedHeap};
-use rustc_hash::FxHashMap;
+use crate::tagged::header::{GcHeader, HashTableObj, MarkParity};
+use crate::tagged::value::TaggedValue;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::rc::Rc;
@@ -238,6 +241,13 @@ struct CatalogState {
     live_count: usize,
     active_regions: usize,
     generational: bool,
+    /// Detached together with the cons spine, before the whole-heap loan is
+    /// suspended. Only new, unpublished hash-table headers are prepended.
+    all_objects: *mut GcHeader,
+    non_cons_object_addrs: FxHashSet<usize>,
+    /// No collection or marker runs while installed. Every resume snapshots
+    /// the collector's updated parity before owners acquire another run.
+    mark_parity: MarkParity,
     /// Detect replacement of the inert shell's unique placeholder allocator.
     placeholder: usize,
     #[cfg(test)]
@@ -247,6 +257,8 @@ struct CatalogState {
 // are not Rust references into another owner's cells. The catalog mutex guards
 // every spine/cursor mutation and the admitted allocator guards free links.
 // Outside the gate only exclusive CatalogRegions can touch their own cells.
+// The raw residual-Box list also moves as owned storage; only unpublished
+// headers are changed, under the same gate. No heap/Box reference is retained.
 // Storage is never freed until stopped restoration or is retained on failure.
 unsafe impl Send for CatalogState {}
 
@@ -462,6 +474,9 @@ impl ConsCatalog {
             live_count: std::mem::take(&mut heap.cons_live_count),
             active_regions: 0,
             generational: heap.generational.enabled,
+            all_objects: std::mem::replace(&mut heap.all_objects, std::ptr::null_mut()),
+            non_cons_object_addrs: std::mem::take(&mut heap.non_cons_object_addrs),
+            mark_parity: heap.mark_parity,
             placeholder,
             #[cfg(test)]
             source_grants: [0; 3],
@@ -500,6 +515,10 @@ impl ConsCatalog {
             || !heap.cons_block_index_by_base.is_empty()
             || heap.cons_block_index_by_base.capacity() != 0
             || heap.cons_live_count != 0
+            || !heap.all_objects.is_null()
+            || !heap.non_cons_object_addrs.is_empty()
+            || heap.non_cons_object_addrs.capacity() != 0
+            || heap.mark_parity != state.mark_parity
             || heap.cons_allocator.threads_admitted()
             || !heap.cons_allocator.free_counts().is_empty()
             || heap.generational.enabled != state.generational
@@ -515,10 +534,46 @@ impl ConsCatalog {
         heap.cons_blocks = state.blocks;
         heap.cons_block_index_by_base = state.by_base;
         heap.cons_live_count = state.live_count;
+        heap.all_objects = state.all_objects;
+        heap.non_cons_object_addrs = state.non_cons_object_addrs;
         if let Some(cards) = state.cards {
             *heap.card_slots_mut().expect("validated card carrier") = cards;
         }
         Ok(())
+    }
+
+    /// Publish one fully initialized, privately owned table shell into the
+    /// detached serial list/catalog. The caller retains a live RunAccess and
+    /// immediately installs the returned word into its prevalidated root home;
+    /// no callback, safepoint or other heap borrow intervenes.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn link_hash_table(
+        &self,
+        owner: MutatorKey,
+        mut object: Box<HashTableObj>,
+    ) -> Result<TaggedValue, RegistrationError> {
+        if owner.heap_identity() != self.heap {
+            return Err(RegistrationError::WrongHeap);
+        }
+        let mut gate = self.lock()?;
+        let state = gate.as_mut().ok_or(RegistrationError::Publication)?;
+        object.header.gc.next = state.all_objects;
+        object.header.gc.flags = object.header.gc.flags.with_boxed();
+        object.header.gc.set_marked(state.mark_parity);
+        let address = std::ptr::addr_of_mut!(object.header.gc) as usize;
+        let inserted = state.non_cons_object_addrs.insert(address);
+        assert!(inserted, "hash-table shell linked twice");
+        // No fallible action remains. Transfer ownership before publishing the
+        // list head; stopped restoration is the only path back to the sweeper.
+        let object = Box::into_raw(object);
+        // SAFETY: derive the persistent header pointer from the final owned
+        // raw allocation, rather than retaining a prior Box field reborrow.
+        let header = unsafe { std::ptr::addr_of_mut!((*object).header.gc) };
+        state.all_objects = header;
+        // SAFETY: constructor and all boxed/list/catalog metadata completed;
+        // the live run prevents collector reunion until the root is installed.
+        Ok(unsafe { TaggedValue::from_veclike_ptr(object.cast()) })
     }
 
     /// The caller's canonical registry has validated the full key and its

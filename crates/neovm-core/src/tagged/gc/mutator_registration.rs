@@ -19,6 +19,7 @@ mod image;
 mod native_extent;
 mod root_slot;
 mod run_slice;
+mod table_allocation;
 mod table_authority;
 pub use collection::{CollectionError, CollectionReport};
 use gate::RegistryGuard;
