@@ -1,19 +1,19 @@
-error[E0277]: `Rc<()>` cannot be shared between threads safely
- --> tests/p1rv_ui/all_stopped_cannot_be_shared.rs:6:20
+error[E0599]: the associated function or constant `check` exists for struct `ThreadSharing<AllStopped<'static>>`, but its trait bounds were not satisfied
+ --> tests/p1rv_ui/all_stopped_cannot_be_shared.rs:8:43
   |
-6 |     require_sync::<AllStopped<'static>>();
-  |                    ^^^^^^^^^^^^^^^^^^^ `Rc<()>` cannot be shared between threads safely
+8 |     ThreadSharing::<AllStopped<'static>>::check();
+  |                                           ^^^^^ associated function or constant cannot be called on `ThreadSharing<AllStopped<'static>>` due to unsatisfied trait bounds
   |
-  = help: within `AllStopped<'static>`, the trait `Sync` is not implemented for `Rc<()>`
-note: required because it appears within the type `PhantomData<Rc<()>>`
- --> $RUST/core/src/marker.rs
-note: required because it appears within the type `AllStopped<'static>`
- --> src/tagged/gc/mutator_registration/rendezvous/keeper.rs
+ ::: src/tagged/gc/mutator_registration/rendezvous/keeper.rs
   |
   | pub struct AllStopped<'era> {
-  |            ^^^^^^^^^^
-note: required by a bound in `require_sync`
- --> tests/p1rv_ui/all_stopped_cannot_be_shared.rs:3:20
+  | --------------------------- doesn't satisfy `AllStopped<'static>: Sync`
   |
-3 | fn require_sync<T: Sync>() {}
-  |                    ^^^^ required by this bound in `require_sync`
+ ::: tests/p1rv_ui/../thread_safety_ui/support/thread_bounds.rs
+  |
+  | pub struct ThreadSharing<T>(PhantomData<T>);
+  | --------------------------- associated function or constant `check` not found for this struct
+  |
+  = note: the following trait bounds were not satisfied:
+          `Rc<()>: Sync`
+          which is required by `AllStopped<'static>: Sync`

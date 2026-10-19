@@ -1,7 +1,9 @@
 use neovm_core::tagged::gc::NativeRoots;
 
-fn assert_sync<T: Sync>() {}
+#[path = "../thread_safety_ui/support/thread_bounds.rs"]
+mod thread_bounds;
+use thread_bounds::ThreadSharing;
 
 fn main() {
-    assert_sync::<NativeRoots<'static>>();
+    ThreadSharing::<NativeRoots<'static>>::check();
 }

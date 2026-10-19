@@ -1,11 +1,11 @@
 use neovm_core::tagged::gc::ParallelHeapEra;
 
-fn consume<T>(value: T) {
-    drop(value);
-}
+#[path = "../thread_safety_ui/support/thread_bounds.rs"]
+mod thread_bounds;
+use thread_bounds::ThreadTransfer;
 
 fn transfer(era: ParallelHeapEra<'static>) {
-    std::thread::spawn(move || consume(era));
+    ThreadTransfer::<ParallelHeapEra<'static>>::transfer(era);
 }
 
 fn main() {}

@@ -1,11 +1,11 @@
 use neovm_core::tagged::gc::NativeRoots;
 
-fn consume<T>(value: T) {
-    drop(value);
-}
+#[path = "../thread_safety_ui/support/thread_bounds.rs"]
+mod thread_bounds;
+use thread_bounds::ThreadTransfer;
 
 fn transfer(roots: NativeRoots<'static>) {
-    std::thread::spawn(move || consume(roots));
+    ThreadTransfer::<NativeRoots<'static>>::transfer(roots);
 }
 
 fn main() {}

@@ -1,197 +1,27 @@
-error[E0277]: `Rc<()>` cannot be shared between threads safely
- --> tests/p1rv_ui/resume_image_cannot_be_shared.rs:6:20
+error[E0599]: the associated function or constant `check` exists for struct `ThreadSharing<ResumeGcImage<'static, 'static>>`, but its trait bounds were not satisfied
+ --> tests/p1rv_ui/resume_image_cannot_be_shared.rs:8:55
   |
-6 |     require_sync::<ResumeGcImage<'static, 'static>>();
-  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Rc<()>` cannot be shared between threads safely
+8 |     ThreadSharing::<ResumeGcImage<'static, 'static>>::check();
+  |                                                       ^^^^^ associated function or constant cannot be called on `ThreadSharing<ResumeGcImage<'static, 'static>>` due to unsatisfied trait bounds
   |
-  = help: within `ResumeGcImage<'static, 'static>`, the trait `Sync` is not implemented for `Rc<()>`
-note: required because it appears within the type `PhantomData<Rc<()>>`
- --> $RUST/core/src/marker.rs
-note: required because it appears within the type `ResumeGcImage<'static, 'static>`
- --> src/tagged/gc/mutator_registration/rendezvous/resume.rs
+ ::: src/tagged/gc/mutator_registration/rendezvous/resume.rs
   |
   | pub struct ResumeGcImage<'owner, 'era> {
-  |            ^^^^^^^^^^^^^
-note: required by a bound in `require_sync`
- --> tests/p1rv_ui/resume_image_cannot_be_shared.rs:3:20
+  | -------------------------------------- doesn't satisfy `ResumeGcImage<'static, 'static>: Sync`
   |
-3 | fn require_sync<T: Sync>() {}
-  |                    ^^^^ required by this bound in `require_sync`
-
-error[E0277]: `Cell<usize>` cannot be shared between threads safely
- --> tests/p1rv_ui/resume_image_cannot_be_shared.rs:6:20
+ ::: tests/p1rv_ui/../thread_safety_ui/support/thread_bounds.rs
   |
-6 |     require_sync::<ResumeGcImage<'static, 'static>>();
-  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Cell<usize>` cannot be shared between threads safely
+  | pub struct ThreadSharing<T>(PhantomData<T>);
+  | --------------------------- associated function or constant `check` not found for this struct
   |
-  = help: within `gc::mutator_registration::image::OwnerGcState`, the trait `Sync` is not implemented for `Cell<usize>`
-  = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` or `std::sync::atomic::AtomicUsize` instead
-note: required because it appears within the type `gc::jit_state::JitHeapState`
- --> src/tagged/gc/jit_state.rs
-  |
-  | pub(crate) struct JitHeapState {
-  |                   ^^^^^^^^^^^^
-note: required because it appears within the type `gc::mutator_registration::image::OwnerGcState`
- --> src/tagged/gc/mutator_registration/image.rs
-  |
-  | pub(in crate::tagged::gc) struct OwnerGcState {
-  |                                  ^^^^^^^^^^^^
-  = note: required for `std::ptr::Unique<gc::mutator_registration::image::OwnerGcState>` to implement `Sync`
-note: required because it appears within the type `std::boxed::Box<gc::mutator_registration::image::OwnerGcState>`
- --> $RUST/alloc/src/boxed.rs
-note: required because it appears within the type `Option<std::boxed::Box<gc::mutator_registration::image::OwnerGcState>>`
- --> $RUST/core/src/option.rs
-note: required because it appears within the type `Mutator<'static>`
- --> src/tagged/gc/mutator_registration/token.rs
-  |
-  | pub struct Mutator<'era> {
-  |            ^^^^^^^
-  = note: required because it appears within the type `&'static mut Mutator<'static>`
-note: required because it appears within the type `ResumeGcImage<'static, 'static>`
- --> src/tagged/gc/mutator_registration/rendezvous/resume.rs
-  |
-  | pub struct ResumeGcImage<'owner, 'era> {
-  |            ^^^^^^^^^^^^^
-note: required by a bound in `require_sync`
- --> tests/p1rv_ui/resume_image_cannot_be_shared.rs:3:20
-  |
-3 | fn require_sync<T: Sync>() {}
-  |                    ^^^^ required by this bound in `require_sync`
-
-error[E0277]: `NonNull<ConsCell>` cannot be shared between threads safely
- --> tests/p1rv_ui/resume_image_cannot_be_shared.rs:6:20
-  |
-6 |     require_sync::<ResumeGcImage<'static, 'static>>();
-  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `NonNull<ConsCell>` cannot be shared between threads safely
-  |
-  = help: within `gc::mutator_registration::image::OwnerGcState`, the trait `Sync` is not implemented for `NonNull<ConsCell>`
-note: required because it appears within the type `gc::cons_storage::CatalogRegion`
- --> src/tagged/gc/cons_storage.rs
-  |
-  | pub(super) struct CatalogRegion {
-  |                   ^^^^^^^^^^^^^
-note: required because it appears within the type `Option<gc::cons_storage::CatalogRegion>`
- --> $RUST/core/src/option.rs
-note: required because it appears within the type `gc::mutator_registration::image::OwnerGcState`
- --> src/tagged/gc/mutator_registration/image.rs
-  |
-  | pub(in crate::tagged::gc) struct OwnerGcState {
-  |                                  ^^^^^^^^^^^^
-  = note: required for `std::ptr::Unique<gc::mutator_registration::image::OwnerGcState>` to implement `Sync`
-note: required because it appears within the type `std::boxed::Box<gc::mutator_registration::image::OwnerGcState>`
- --> $RUST/alloc/src/boxed.rs
-note: required because it appears within the type `Option<std::boxed::Box<gc::mutator_registration::image::OwnerGcState>>`
- --> $RUST/core/src/option.rs
-note: required because it appears within the type `Mutator<'static>`
- --> src/tagged/gc/mutator_registration/token.rs
-  |
-  | pub struct Mutator<'era> {
-  |            ^^^^^^^
-  = note: required because it appears within the type `&'static mut Mutator<'static>`
-note: required because it appears within the type `ResumeGcImage<'static, 'static>`
- --> src/tagged/gc/mutator_registration/rendezvous/resume.rs
-  |
-  | pub struct ResumeGcImage<'owner, 'era> {
-  |            ^^^^^^^^^^^^^
-note: required by a bound in `require_sync`
- --> tests/p1rv_ui/resume_image_cannot_be_shared.rs:3:20
-  |
-3 | fn require_sync<T: Sync>() {}
-  |                    ^^^^ required by this bound in `require_sync`
-
-error[E0277]: `*mut GcHeader` cannot be shared between threads safely
- --> tests/p1rv_ui/resume_image_cannot_be_shared.rs:6:20
-  |
-6 |     require_sync::<ResumeGcImage<'static, 'static>>();
-  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `*mut GcHeader` cannot be shared between threads safely
-  |
-  = help: within `gc::mutator_registration::image::OwnerGcState`, the trait `Sync` is not implemented for `*mut GcHeader`
-note: required because it appears within the type `PhantomData<*mut GcHeader>`
- --> $RUST/core/src/marker.rs
-note: required because it appears within the type `alloc::raw_vec::RawVec<*mut GcHeader>`
- --> $RUST/alloc/src/raw_vec/mod.rs
-note: required because it appears within the type `Vec<*mut GcHeader>`
- --> $RUST/alloc/src/vec/mod.rs
-note: required because it appears within the type `gc::mutator_gc::MutatorGcState`
- --> src/tagged/gc/mutator_gc.rs
-  |
-  | pub(super) struct MutatorGcState {
-  |                   ^^^^^^^^^^^^^^
-note: required because it appears within the type `gc::mutator_registration::image::OwnerGcState`
- --> src/tagged/gc/mutator_registration/image.rs
-  |
-  | pub(in crate::tagged::gc) struct OwnerGcState {
-  |                                  ^^^^^^^^^^^^
-  = note: required for `std::ptr::Unique<gc::mutator_registration::image::OwnerGcState>` to implement `Sync`
-note: required because it appears within the type `std::boxed::Box<gc::mutator_registration::image::OwnerGcState>`
- --> $RUST/alloc/src/boxed.rs
-note: required because it appears within the type `Option<std::boxed::Box<gc::mutator_registration::image::OwnerGcState>>`
- --> $RUST/core/src/option.rs
-note: required because it appears within the type `Mutator<'static>`
- --> src/tagged/gc/mutator_registration/token.rs
-  |
-  | pub struct Mutator<'era> {
-  |            ^^^^^^^
-  = note: required because it appears within the type `&'static mut Mutator<'static>`
-note: required because it appears within the type `ResumeGcImage<'static, 'static>`
- --> src/tagged/gc/mutator_registration/rendezvous/resume.rs
-  |
-  | pub struct ResumeGcImage<'owner, 'era> {
-  |            ^^^^^^^^^^^^^
-note: required by a bound in `require_sync`
- --> tests/p1rv_ui/resume_image_cannot_be_shared.rs:3:20
-  |
-3 | fn require_sync<T: Sync>() {}
-  |                    ^^^^ required by this bound in `require_sync`
-
-error[E0277]: `*const ()` cannot be shared between threads safely
- --> tests/p1rv_ui/resume_image_cannot_be_shared.rs:6:20
-  |
-6 |     require_sync::<ResumeGcImage<'static, 'static>>();
-  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `*const ()` cannot be shared between threads safely
-  |
-  = help: within `gc::mutator_registration::image::OwnerGcState`, the trait `Sync` is not implemented for `*const ()`
-note: required because it appears within the type `PhantomData<*const ()>`
- --> $RUST/core/src/marker.rs
-note: required because it appears within the type `TaggedValue`
- --> src/tagged/value.rs
-  |
-  | pub struct TaggedValue(pub(crate) usize, ThreadConfined);
-  |            ^^^^^^^^^^^
-note: required because it appears within the type `PhantomData<TaggedValue>`
- --> $RUST/core/src/marker.rs
-note: required because it appears within the type `alloc::raw_vec::RawVec<TaggedValue>`
- --> $RUST/alloc/src/raw_vec/mod.rs
-note: required because it appears within the type `Vec<TaggedValue>`
- --> $RUST/alloc/src/vec/mod.rs
-note: required because it appears within the type `gc::mutator_gc::MutatorGcState`
- --> src/tagged/gc/mutator_gc.rs
-  |
-  | pub(super) struct MutatorGcState {
-  |                   ^^^^^^^^^^^^^^
-note: required because it appears within the type `gc::mutator_registration::image::OwnerGcState`
- --> src/tagged/gc/mutator_registration/image.rs
-  |
-  | pub(in crate::tagged::gc) struct OwnerGcState {
-  |                                  ^^^^^^^^^^^^
-  = note: required for `std::ptr::Unique<gc::mutator_registration::image::OwnerGcState>` to implement `Sync`
-note: required because it appears within the type `std::boxed::Box<gc::mutator_registration::image::OwnerGcState>`
- --> $RUST/alloc/src/boxed.rs
-note: required because it appears within the type `Option<std::boxed::Box<gc::mutator_registration::image::OwnerGcState>>`
- --> $RUST/core/src/option.rs
-note: required because it appears within the type `Mutator<'static>`
- --> src/tagged/gc/mutator_registration/token.rs
-  |
-  | pub struct Mutator<'era> {
-  |            ^^^^^^^
-  = note: required because it appears within the type `&'static mut Mutator<'static>`
-note: required because it appears within the type `ResumeGcImage<'static, 'static>`
- --> src/tagged/gc/mutator_registration/rendezvous/resume.rs
-  |
-  | pub struct ResumeGcImage<'owner, 'era> {
-  |            ^^^^^^^^^^^^^
-note: required by a bound in `require_sync`
- --> tests/p1rv_ui/resume_image_cannot_be_shared.rs:3:20
-  |
-3 | fn require_sync<T: Sync>() {}
-  |                    ^^^^ required by this bound in `require_sync`
+  = note: the following trait bounds were not satisfied:
+          `Rc<()>: Sync`
+          which is required by `ResumeGcImage<'static, 'static>: Sync`
+          `Cell<usize>: Sync`
+          which is required by `ResumeGcImage<'static, 'static>: Sync`
+          `NonNull<ConsCell>: Sync`
+          which is required by `ResumeGcImage<'static, 'static>: Sync`
+          `*mut GcHeader: Sync`
+          which is required by `ResumeGcImage<'static, 'static>: Sync`
+          `*const (): Sync`
+          which is required by `ResumeGcImage<'static, 'static>: Sync`

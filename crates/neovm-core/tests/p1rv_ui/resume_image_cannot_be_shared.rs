@@ -1,7 +1,9 @@
 use neovm_core::tagged::gc::ResumeGcImage;
 
-fn require_sync<T: Sync>() {}
+#[path = "../thread_safety_ui/support/thread_bounds.rs"]
+mod thread_bounds;
+use thread_bounds::ThreadSharing;
 
 fn main() {
-    require_sync::<ResumeGcImage<'static, 'static>>();
+    ThreadSharing::<ResumeGcImage<'static, 'static>>::check();
 }

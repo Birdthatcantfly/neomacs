@@ -1,25 +1,19 @@
-error[E0277]: `Rc<()>` cannot be sent between threads safely
- --> tests/p1rv_ui/all_stopped_cannot_cross_threads.rs:8:24
+error[E0599]: the associated function or constant `transfer` exists for struct `ThreadTransfer<AllStopped<'static>>`, but its trait bounds were not satisfied
+ --> tests/p1rv_ui/all_stopped_cannot_cross_threads.rs:8:44
   |
-8 |     std::thread::spawn(move || consume(stopped));
-  |     ------------------ -------^^^^^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `Rc<()>` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/all_stopped_cannot_cross_threads.rs:8:24: 8:31}`
-  |     required by a bound introduced by this call
+8 |     ThreadTransfer::<AllStopped<'static>>::transfer(stopped);
+  |                                            ^^^^^^^^ associated function or constant cannot be called on `ThreadTransfer<AllStopped<'static>>` due to unsatisfied trait bounds
   |
-  = help: within `{closure@$DIR/tests/p1rv_ui/all_stopped_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `Rc<()>`
-note: required because it appears within the type `PhantomData<Rc<()>>`
- --> $RUST/core/src/marker.rs
-note: required because it appears within the type `AllStopped<'_>`
- --> src/tagged/gc/mutator_registration/rendezvous/keeper.rs
+ ::: src/tagged/gc/mutator_registration/rendezvous/keeper.rs
   |
   | pub struct AllStopped<'era> {
-  |            ^^^^^^^^^^
-note: required because it's used within this closure
- --> tests/p1rv_ui/all_stopped_cannot_cross_threads.rs:8:24
+  | --------------------------- doesn't satisfy `AllStopped<'static>: Send`
   |
-8 |     std::thread::spawn(move || consume(stopped));
-  |                        ^^^^^^^
-note: required by a bound in `spawn`
- --> $RUST/std/src/thread/functions.rs
+ ::: tests/p1rv_ui/../thread_safety_ui/support/thread_bounds.rs
+  |
+  | pub struct ThreadTransfer<T>(PhantomData<T>);
+  | ---------------------------- associated function or constant `transfer` not found for this struct
+  |
+  = note: the following trait bounds were not satisfied:
+          `Rc<()>: Send`
+          which is required by `AllStopped<'static>: Send`

@@ -1,11 +1,11 @@
 use neovm_core::tagged::gc::Mutator;
 
-fn consume<T>(value: T) {
-    drop(value);
-}
+#[path = "../thread_safety_ui/support/thread_bounds.rs"]
+mod thread_bounds;
+use thread_bounds::ThreadTransfer;
 
 fn transfer(mutator: Mutator<'static>) {
-    std::thread::spawn(move || consume(mutator));
+    ThreadTransfer::<Mutator<'static>>::transfer(mutator);
 }
 
 fn main() {}

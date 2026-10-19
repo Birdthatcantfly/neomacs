@@ -1,25 +1,19 @@
-error[E0277]: `Rc<()>` cannot be sent between threads safely
- --> tests/p1rv_ui/owner_root_slot_cannot_cross_threads.rs:8:24
+error[E0599]: the associated function or constant `transfer` exists for struct `ThreadTransfer<OwnerRootSlot<'static>>`, but its trait bounds were not satisfied
+ --> tests/p1rv_ui/owner_root_slot_cannot_cross_threads.rs:8:47
   |
-8 |     std::thread::spawn(move || consume(slot));
-  |     ------------------ -------^^^^^^^^^^^^^^
-  |     |                  |
-  |     |                  `Rc<()>` cannot be sent between threads safely
-  |     |                  within this `{closure@$DIR/tests/p1rv_ui/owner_root_slot_cannot_cross_threads.rs:8:24: 8:31}`
-  |     required by a bound introduced by this call
+8 |     ThreadTransfer::<OwnerRootSlot<'static>>::transfer(slot);
+  |                                               ^^^^^^^^ associated function or constant cannot be called on `ThreadTransfer<OwnerRootSlot<'static>>` due to unsatisfied trait bounds
   |
-  = help: within `{closure@$DIR/tests/p1rv_ui/owner_root_slot_cannot_cross_threads.rs:8:24: 8:31}`, the trait `Send` is not implemented for `Rc<()>`
-note: required because it appears within the type `PhantomData<Rc<()>>`
- --> $RUST/core/src/marker.rs
-note: required because it appears within the type `OwnerRootSlot<'_>`
- --> src/tagged/gc/mutator_registration/root_slot.rs
+ ::: src/tagged/gc/mutator_registration/root_slot.rs
   |
   | pub struct OwnerRootSlot<'era> {
-  |            ^^^^^^^^^^^^^
-note: required because it's used within this closure
- --> tests/p1rv_ui/owner_root_slot_cannot_cross_threads.rs:8:24
+  | ------------------------------ doesn't satisfy `OwnerRootSlot<'static>: Send`
   |
-8 |     std::thread::spawn(move || consume(slot));
-  |                        ^^^^^^^
-note: required by a bound in `spawn`
- --> $RUST/std/src/thread/functions.rs
+ ::: tests/p1rv_ui/../thread_safety_ui/support/thread_bounds.rs
+  |
+  | pub struct ThreadTransfer<T>(PhantomData<T>);
+  | ---------------------------- associated function or constant `transfer` not found for this struct
+  |
+  = note: the following trait bounds were not satisfied:
+          `Rc<()>: Send`
+          which is required by `OwnerRootSlot<'static>: Send`

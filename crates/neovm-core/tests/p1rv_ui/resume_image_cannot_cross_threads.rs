@@ -1,11 +1,11 @@
 use neovm_core::tagged::gc::ResumeGcImage;
 
-fn consume<T>(value: T) {
-    drop(value);
-}
+#[path = "../thread_safety_ui/support/thread_bounds.rs"]
+mod thread_bounds;
+use thread_bounds::ThreadTransfer;
 
 fn transfer(image: ResumeGcImage<'static, 'static>) {
-    std::thread::spawn(move || consume(image));
+    ThreadTransfer::<ResumeGcImage<'static, 'static>>::transfer(image);
 }
 
 fn main() {}
