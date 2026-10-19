@@ -17,6 +17,8 @@ impl PreparedViewports {
         window: WindowId,
         scope: WindowLayoutQueryScope,
     ) -> Option<WindowLayoutQuery> {
+        tracing::trace!(target: "neomacs_layout_engine::motion_geometry", ?scope,
+            entries = self.entries.len(), "prepared row candidates");
         let start = match scope {
             WindowLayoutQueryScope::Rows { start, .. }
             | WindowLayoutQueryScope::Pixels { start, .. } => start,
@@ -27,6 +29,8 @@ impl PreparedViewports {
             }
         };
         if !scroll_coverage::inactive_overlay_arrows(evaluator) {
+            tracing::trace!(target: "neomacs_layout_engine::motion_geometry",
+                "prepared rows declined: active overlay arrows");
             return None;
         }
         let buffer_id = evaluator
@@ -41,10 +45,24 @@ impl PreparedViewports {
             .buffer_local_value("fontification-functions")
             .or_else(|| evaluator.variable_value_by_name("fontification-functions"));
         if fontification.is_some_and(|value| !value.is_nil()) {
+            tracing::trace!(target: "neomacs_layout_engine::motion_geometry",
+                "prepared rows declined: fontification callbacks");
             return None;
         }
         let current = evaluator.window_display_snapshot_freshness(frame, window, buffer_id)?;
         self.entries.iter().rev().find_map(|entry| {
+            tracing::trace!(target: "neomacs_layout_engine::motion_geometry", ?scope,
+                computed = entry.computed,
+                collections_match = entry.reads.as_ref().is_none_or(|reads| reads.unchanged()),
+                fontset_matches = entry.retained.key.fontset_generation
+                    == neovm_core::emacs_core::fontset::fontset_generation(),
+                start_present = entry.retained.display_snapshot.rows.iter()
+                    .any(|row| row.start_buffer_pos == Some(start)),
+                owner_matches = entry.frame == frame && entry.window.get() == window.0 as i64,
+                point_matches = buffer.point_lisp_char_pos().as_i64() == entry.retained.key.point + 1,
+                freshness_matches = entry.query_freshness.as_ref()
+                    .is_some_and(|freshness| freshness.same_query_row_content(&current)),
+                "prepared row candidate");
             if !entry.computed
                 || entry.frame != frame
                 || entry.window.get() != window.0 as i64

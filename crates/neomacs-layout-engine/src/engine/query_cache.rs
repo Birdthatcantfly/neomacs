@@ -66,6 +66,12 @@ impl QueryCache {
             .buffer_manager()
             .get(buffer)?
             .point_lisp_char_pos();
+        tracing::trace!(target: "neomacs_layout_engine::query_cache", ?scope,
+            entries = self.entries.len(),
+            invisible_presence = ?evaluator.buffer_manager().get(buffer).map(|source|
+                source.text_props_property_name_presence(
+                    neovm_core::emacs_core::value::Value::symbol("invisible"))),
+            "query cache candidates");
         self.entries.iter().rev().find_map(|entry| {
             // Target-prefix metrics can differ from a completed row's metrics
             // when a later display element increases its height. Until the
@@ -114,6 +120,10 @@ impl QueryCache {
                     if cached_start < start && entry.restart_rows.iter()
                         .any(|(anchor, _)| *anchor == start)
             );
+            tracing::trace!(target: "neomacs_layout_engine::query_cache", ?scope,
+                entry_scope = ?entry.scope, covers_scope,
+                owner_matches = entry.frame == frame && entry.window == window,
+                "query cache coverage");
             if !(entry.frame == frame
                 && entry.window == window
                 && covers_scope

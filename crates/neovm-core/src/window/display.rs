@@ -876,8 +876,21 @@ impl crate::emacs_core::eval::Context {
         buffer_id: BufferId,
     ) -> Option<&WindowDisplaySnapshot> {
         let current = self.window_display_snapshot_freshness(frame_id, window_id, buffer_id)?;
-        let snapshot = self.frames.get(frame_id)?.redisplay_snapshot(window_id)?;
+        let Some(snapshot) = self.frames.get(frame_id)?.redisplay_snapshot(window_id) else {
+            tracing::trace!(target: "neovm_core::motion_geometry", ?frame_id, ?window_id,
+                "retained rows unavailable");
+            return None;
+        };
         if let Some(recorded) = &snapshot.layout_freshness {
+            tracing::trace!(target: "neovm_core::motion_geometry", ?frame_id, ?window_id,
+                freshness_matches = recorded == &current,
+                point_matches = recorded.window.point == current.window.point,
+                window_matches = recorded.window == current.window,
+                buffer_matches = recorded.buffer == current.buffer,
+                frame_matches = recorded.frame == current.frame,
+                presentation_matches = recorded.redisplay_generation == current.redisplay_generation,
+                body_matches = recorded.body_redisplay == current.body_redisplay,
+                "retained row freshness");
             return (recorded == &current).then_some(snapshot);
         }
         if let Some(recorded_modiff) = snapshot.buffer_modiff
