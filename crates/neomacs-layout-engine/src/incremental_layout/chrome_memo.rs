@@ -33,6 +33,13 @@
 //! * `verify`: a hit renders anyway and compares the two rows; a mismatch is
 //!   logged and counted, and the rendered row stands.
 
+mod source_projection;
+use source_projection::ChromeSourceProjection;
+pub(crate) use source_projection::{
+    ChromeSourceBindings, ChromeSourceProjectionMode, ChromeSourceSpan,
+    chrome_source_projection_mode,
+};
+
 use std::sync::Arc;
 
 use neomacs_display_protocol::frame_glyphs::GlyphRowRole;
@@ -166,37 +173,62 @@ struct ChromeSpanShape {
 impl ChromeRowFingerprint {
     /// `None` when the row cannot be memoized: a property value that is not
     /// plain data, a `display` property, or a structure too large to walk.
+    #[cfg(test)]
     pub(crate) fn capture(
         inputs: ChromeRowInputs,
         formatted: &ModeLineDisplayOutput,
     ) -> Option<Self> {
+        Self::capture_with_sources(inputs, formatted, ChromeSourceProjectionMode::Off)
+            .map(|(fingerprint, _)| fingerprint)
+    }
+
+    /// Build bindings only after the same plain-data admission succeeds. The
+    /// returned unrooted plan is consumed within this scratch-rooted render call.
+    pub(crate) fn capture_with_sources(
+        inputs: ChromeRowInputs,
+        formatted: &ModeLineDisplayOutput,
+        projection_mode: ChromeSourceProjectionMode,
+    ) -> Option<(Self, Option<ChromeSourceBindings>)> {
         let root = formatted.value();
         let string = root.as_lisp_string()?;
         let mut encoder = PlainEncoder::default();
         encoder.string_props(string, PropertyScope::Root, 0).ok()?;
-        let mut sources: Vec<Value> = Vec::new();
-        let spans = formatted
-            .source_spans()
-            .iter()
-            .map(|span| {
-                let source = span.source();
-                let source_index = match sources.iter().position(|seen| *seen == source) {
-                    Some(index) => index,
-                    None => {
-                        sources.push(source);
-                        sources.len() - 1
-                    }
-                };
-                ChromeSpanShape {
-                    output_start: span.output_start(),
-                    output_end: span.output_end(),
-                    source_start: span.source_start(),
-                    source_index: u32::try_from(source_index).unwrap_or(u32::MAX),
-                }
-            })
-            .collect();
-        // Whether a span's source IS the root string decides its string id.
-        let root_index = sources.iter().position(|source| *source == root);
+        let (spans, root_index, bindings) = match projection_mode {
+            ChromeSourceProjectionMode::On => {
+                let projection = ChromeSourceProjection::capture(formatted);
+                (
+                    projection.fingerprint_spans,
+                    projection.root_index,
+                    Some(projection.bindings),
+                )
+            }
+            ChromeSourceProjectionMode::Off => {
+                let mut sources: Vec<Value> = Vec::new();
+                let spans = formatted
+                    .source_spans()
+                    .iter()
+                    .map(|span| {
+                        let source = span.source();
+                        let source_index = match sources.iter().position(|seen| *seen == source) {
+                            Some(index) => index,
+                            None => {
+                                sources.push(source);
+                                sources.len() - 1
+                            }
+                        };
+                        ChromeSpanShape {
+                            output_start: span.output_start(),
+                            output_end: span.output_end(),
+                            source_start: span.source_start(),
+                            source_index: u32::try_from(source_index).unwrap_or(u32::MAX),
+                        }
+                    })
+                    .collect();
+                // Whether a span's source IS the root string decides its string id.
+                let root_index = sources.iter().position(|source| *source == root);
+                (spans, root_index, None)
+            }
+        };
         let mut text = Vec::with_capacity(string.as_bytes().len() + 8);
         text.extend_from_slice(string.as_bytes());
         text.extend_from_slice(
@@ -204,13 +236,16 @@ impl ChromeRowFingerprint {
                 .map_or(u64::MAX, |index| index as u64)
                 .to_le_bytes(),
         );
-        Some(Self {
-            inputs,
-            text: text.into_boxed_slice(),
-            multibyte: string.is_multibyte(),
-            props: encoder.finish(),
-            spans,
-        })
+        Some((
+            Self {
+                inputs,
+                text: text.into_boxed_slice(),
+                multibyte: string.is_multibyte(),
+                props: encoder.finish(),
+                spans,
+            },
+            bindings,
+        ))
     }
 
     pub(crate) fn kind(&self) -> WindowChromeKind {

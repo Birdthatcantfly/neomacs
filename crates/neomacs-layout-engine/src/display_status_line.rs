@@ -39,8 +39,8 @@ use crate::font::metrics::FontMetricsService;
 use crate::frame_face_arena::FrameFaceAttempt;
 use crate::incremental_layout::chrome_memo::{
     CHROME_MEMO_HITS, CHROME_MEMO_VERIFY_MISMATCHES, ChromeMemo, ChromeMemoMode,
-    ChromeRowFingerprint, ChromeRowInputs, chrome_memo_mode, encode_symbol_values,
-    record_fingerprint,
+    ChromeRowFingerprint, ChromeRowInputs, ChromeSourceBindings, ChromeSourceSpan,
+    chrome_memo_mode, chrome_source_projection_mode, encode_symbol_values, record_fingerprint,
 };
 use crate::neovm_bridge::LayoutVar;
 use crate::output::builder::DisplayOutputBuilder;
@@ -70,7 +70,7 @@ use neovm_core::emacs_core::eval::DisplayHost;
 use neovm_core::emacs_core::image_catalog::ImageScaleEnvironment;
 use neovm_core::emacs_core::keymap::{KeymapMarker, MenuItemProperty, is_list_keymap};
 use neovm_core::emacs_core::value::list_to_vec;
-use neovm_core::emacs_core::xdisp::{ModeLineDisplayOutput, ModeLineDisplaySourceSpan};
+use neovm_core::emacs_core::xdisp::ModeLineDisplayOutput;
 use neovm_core::keyboard::{PresentedMouseArea, PresentedMouseTarget};
 use neovm_core::window::DisplayRowSnapshot;
 use neovm_core::window::{FrameId, WindowId};
@@ -1023,36 +1023,6 @@ struct WindowChromeDisplayRowRenderRequest<'face> {
     chrome_strings: WindowChromeStringSources,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct WindowChromeSourceSpan {
-    output_start: usize,
-    output_end: usize,
-    source_start: usize,
-    string_id: GlyphStringId,
-}
-
-impl WindowChromeSourceSpan {
-    fn from_mode_line_span(span: ModeLineDisplaySourceSpan, string_id: GlyphStringId) -> Self {
-        Self {
-            output_start: span.output_start(),
-            output_end: span.output_end(),
-            source_start: span.source_start(),
-            string_id,
-        }
-    }
-
-    fn source_position(self, output_position: usize) -> Option<(GlyphStringId, usize)> {
-        if output_position < self.output_start || output_position >= self.output_end {
-            return None;
-        }
-        Some((
-            self.string_id,
-            self.source_start
-                .saturating_add(output_position - self.output_start),
-        ))
-    }
-}
-
 /// Joins formatter-owned Lisp sources to protocol-safe string ids for one
 /// chrome row. The root formatted string remains available for synthetic `%`
 /// expansions; direct leaf-string glyphs are remapped to their original
@@ -1060,10 +1030,29 @@ impl WindowChromeSourceSpan {
 struct WindowChromeStringSources {
     area: PresentedWindowChromeArea,
     presented: Vec<PresentedWindowChromeString>,
-    spans: Vec<WindowChromeSourceSpan>,
+    spans: Vec<ChromeSourceSpan>,
 }
 
 impl WindowChromeStringSources {
+    fn with_bindings(
+        area: PresentedWindowChromeArea,
+        formatted: &ModeLineDisplayOutput,
+        evaluator: &Context,
+        bindings: Option<ChromeSourceBindings>,
+    ) -> Result<Self, neovm_core::tagged::transport::SharedRootError> {
+        match bindings {
+            Some(bindings) => {
+                let (presented, spans) = bindings.into_rooted(area, evaluator)?;
+                Ok(Self {
+                    area,
+                    presented,
+                    spans,
+                })
+            }
+            None => Self::new(area, formatted, evaluator),
+        }
+    }
+
     fn new(
         area: PresentedWindowChromeArea,
         formatted: &ModeLineDisplayOutput,
@@ -1089,7 +1078,12 @@ impl WindowChromeStringSources {
                 string_ids.push(id);
                 id
             };
-            spans.push(WindowChromeSourceSpan::from_mode_line_span(span, string_id));
+            spans.push(ChromeSourceSpan::new(
+                span.output_start(),
+                span.output_end(),
+                span.source_start(),
+                string_id,
+            ));
         }
 
         // SAFETY: these formatter objects belong to `evaluator`'s installed
@@ -1267,14 +1261,16 @@ impl<'face> WindowChromeDisplayRowRequest<'face> {
         self,
         face_ids: &mut FrameFaceAttempt,
         evaluator: &Context,
+        source_bindings: Option<ChromeSourceBindings>,
     ) -> Result<
         WindowChromeDisplayRowRenderRequest<'face>,
         neovm_core::tagged::transport::SharedRootError,
     > {
-        let chrome_strings = WindowChromeStringSources::new(
+        let chrome_strings = WindowChromeStringSources::with_bindings(
             presented_window_chrome_area(self.kind),
             &self.formatted,
             evaluator,
+            source_bindings,
         )?;
         let composition_regions = self
             .formatted
@@ -1394,15 +1390,15 @@ impl<'state, 'services, 'face> WindowChromeRowsRenderState<'state, 'services, 'f
             neovm_core::window::WindowId(request.window_id),
         );
         let memo_mode = chrome_memo_mode();
-        let memo_hit = if memo_mode.enabled() {
+        let (memo_hit, source_bindings) = if memo_mode.enabled() {
             self.memoize_chrome_row(&request, rules.is_some())
         } else {
-            None
+            (None, None)
         };
         if memo_mode == ChromeMemoMode::On
             && let Some((index, row, snapshot)) = memo_hit
         {
-            let height = self.install_memo_row(&request, index, row, snapshot);
+            let height = self.install_memo_row(&request, index, row, snapshot, source_bindings);
             neovm_core::emacs_core::eval::restore_scratch_gc_roots(saved_roots);
             return match height {
                 Ok(height) => Some(height),
@@ -1412,14 +1408,17 @@ impl<'state, 'services, 'face> WindowChromeRowsRenderState<'state, 'services, 'f
                 }
             };
         }
-        let rendered =
-            match request.into_render_request(self.render_services.face_ids(), self.evaluator) {
-                Ok(request) => request.render_and_apply(self, anchor, rules),
-                Err(error) => {
-                    tracing::error!(?error, "failed to root chrome row sources");
-                    None
-                }
-            };
+        let rendered = match request.into_render_request(
+            self.render_services.face_ids(),
+            self.evaluator,
+            source_bindings,
+        ) {
+            Ok(request) => request.render_and_apply(self, anchor, rules),
+            Err(error) => {
+                tracing::error!(?error, "failed to root chrome row sources");
+                None
+            }
+        };
         if let Some((index, row, _)) = memo_hit {
             self.verify_memo_row(index, &row);
         }
@@ -1435,8 +1434,15 @@ impl<'state, 'services, 'face> WindowChromeRowsRenderState<'state, 'services, 'f
         &mut self,
         request: &WindowChromeDisplayRowRequest<'_>,
         automatic_composition: bool,
-    ) -> Option<(usize, MatrixRow, DisplayRowSnapshot)> {
-        let fingerprint = self.chrome_row_fingerprint(request, automatic_composition);
+    ) -> (
+        Option<(usize, MatrixRow, DisplayRowSnapshot)>,
+        Option<ChromeSourceBindings>,
+    ) {
+        let (fingerprint, bindings) =
+            match self.chrome_row_fingerprint(request, automatic_composition) {
+                Some((fingerprint, bindings)) => (Some(fingerprint), bindings),
+                None => (None, None),
+            };
         let hit = match (self.memo, fingerprint.as_ref()) {
             (Some(memo), Some(fingerprint)) => memo
                 .hit(fingerprint)
@@ -1460,21 +1466,21 @@ impl<'state, 'services, 'face> WindowChromeRowsRenderState<'state, 'services, 'f
             );
         }
         record_fingerprint(request.window_id as i64, request.kind, fingerprint);
-        hit
+        (hit, bindings)
     }
 
     fn chrome_row_fingerprint(
         &self,
         request: &WindowChromeDisplayRowRequest<'_>,
         automatic_composition: bool,
-    ) -> Option<ChromeRowFingerprint> {
+    ) -> Option<(ChromeRowFingerprint, Option<ChromeSourceBindings>)> {
         let symbol_values = encode_symbol_values(
             request
                 .symbol_values
                 .iter()
                 .map(|(name, value)| (name.as_str(), *value)),
         )?;
-        ChromeRowFingerprint::capture(
+        ChromeRowFingerprint::capture_with_sources(
             ChromeRowInputs {
                 kind: request.kind,
                 display_row_index: request.display_row_index,
@@ -1493,6 +1499,7 @@ impl<'state, 'services, 'face> WindowChromeRowsRenderState<'state, 'services, 'f
                 symbol_values,
             },
             &request.formatted,
+            chrome_source_projection_mode(),
         )
     }
 
@@ -1507,11 +1514,13 @@ impl<'state, 'services, 'face> WindowChromeRowsRenderState<'state, 'services, 'f
         index: usize,
         row: MatrixRow,
         snapshot: DisplayRowSnapshot,
+        source_bindings: Option<ChromeSourceBindings>,
     ) -> Result<f32, neovm_core::tagged::transport::SharedRootError> {
-        let chrome_strings = WindowChromeStringSources::new(
+        let chrome_strings = WindowChromeStringSources::with_bindings(
             presented_window_chrome_area(request.kind),
             &request.formatted,
             self.evaluator,
+            source_bindings,
         )?;
         self.output_emitter
             .replace_chrome_area_strings(chrome_strings.area, chrome_strings.presented);
