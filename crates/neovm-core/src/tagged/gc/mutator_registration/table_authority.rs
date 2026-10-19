@@ -12,16 +12,34 @@
 //! word.
 
 use std::marker::PhantomData;
+use std::ptr::addr_of_mut;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::super::mutator_gc::MutatorGcState;
-use super::acting_owner::{ActingOwnerGuard, owner_gc_ptr};
+use super::token::Mutator;
 use super::{AllStopped, RegistrationError, RunAccess};
 use crate::emacs_core::value::HashTableStorage;
 use crate::emacs_core::value::LispHashTable;
 use crate::tagged::header::HashTableObj;
 use crate::tagged::value::{TAG_MASK, TaggedValue};
+
+/// The owner-state pointer a [`TableMut`] mint keeps for growth charging.
+///
+/// Null when the owner carries no local GC state (it has not yet run): a
+/// growth charge during such an edit bills no one, matching how the
+/// registry sums only states that exist.
+fn owner_gc_ptr(owner: &mut Mutator<'_>) -> *mut MutatorGcState {
+    owner
+        .local
+        .as_deref_mut()
+        .map_or(std::ptr::null_mut(), |state| {
+            // SAFETY: `state` is a `&mut OwnerGcState` (the Box deref), so
+            // `hot` is initialized and the borrow excludes every other
+            // access for its duration.
+            unsafe { addr_of_mut!(state.hot) }
+        })
+}
 
 /// Bit 63: a writer holds the table across one Rust-side edit.
 pub(crate) const WRITER: u64 = 1 << 63;
@@ -407,16 +425,31 @@ impl<'access> TableMut<'access> {
     /// choke point unchanged — `switch_epoch` bump, plan invalidation,
     /// hydration, heap-write note — one code path, not a fork (design
     /// §2.2). No Lisp, no safepoint, no allocation inside `f`. Storage
-    /// growth inside the edit charges the minting owner (§4 Rev R3) via
-    /// the acting-owner TLS, at the same Vec sites the serial path uses.
+    /// growth inside the edit is charged to the minting owner (§4 Rev R3)
+    /// HERE, by measuring the table's `sealed_storage_bytes` around the
+    /// body in this same inactive window: the serial Vec growth sites stay
+    /// exactly main's code, so Sim's pacing is untouched and no TLS is
+    /// involved.
     pub fn edit<R>(&mut self, f: impl FnOnce(&mut LispHashTable) -> R) -> R {
-        let _acting = ActingOwnerGuard::new(self.owner_gc);
+        let owner_gc = self.owner_gc;
         // SAFETY: WRITER is held, so no sealed reader is in flight and the
         // serial body's single-editor assumption holds; the table is rooted
         // for the lease's lifetime.
         unsafe {
-            crate::tagged::mutate::with_hash_table_mut_inactive(self.value, f)
-                .expect("mint validated the table type")
+            crate::tagged::mutate::with_hash_table_mut_inactive(self.value, |ht| {
+                let before = ht.data.sealed_storage_bytes();
+                let result = f(ht);
+                let grown = ht.data.sealed_storage_bytes().saturating_sub(before);
+                if grown > 0 && !owner_gc.is_null() {
+                    // SAFETY: mint computed this pointer from the owner's
+                    // boxed GC state under the exclusive `_access` borrow,
+                    // which keeps the box alive and immovable for the
+                    // lease's lifetime.
+                    (*owner_gc).bytes_since_gc += grown;
+                }
+                result
+            })
+            .expect("mint validated the table type")
         }
     }
 }

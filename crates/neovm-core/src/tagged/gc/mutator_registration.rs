@@ -10,7 +10,6 @@
 //! a usable serial World after an abandoned owner.
 #![allow(dead_code)]
 
-mod acting_owner;
 mod admission;
 mod collection;
 mod cons_allocation;
@@ -21,7 +20,6 @@ mod native_extent;
 mod root_slot;
 mod run_slice;
 mod table_authority;
-pub(crate) use acting_owner::note_hash_table_storage_growth;
 pub use collection::{CollectionError, CollectionReport};
 use gate::RegistryGuard;
 pub use root_slot::OwnerRootSlot;

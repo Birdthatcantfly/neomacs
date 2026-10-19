@@ -29,8 +29,7 @@ use crate::buffer::text_props::{PropertyInterval, TextPropertyPlistRun, TextProp
 use crate::buffer::{CharPos0, CharRange, EmacsBytePos};
 use crate::heap_types::LispString;
 use crate::tagged::gc::{
-    HeapWriteKind, MEMORY_USE_COUNT_LEN, MemoryUseCountSlot, note_hash_table_storage_growth,
-    note_heap_write, with_tagged_heap,
+    HeapWriteKind, MEMORY_USE_COUNT_LEN, MemoryUseCountSlot, note_heap_write, with_tagged_heap,
 };
 use crate::tagged::header::{
     BoolVectorObj, BufferObj, ByteCodeObj, CHAR_TABLE_TOP_SLOTS, CharTableObj, ConsCell, FontObj,
@@ -1339,11 +1338,7 @@ impl HashTableStorage {
             slot
         } else {
             let slot = self.slots.len();
-            let before = self.slots.capacity();
             self.slots.push(Some(HashTableEntry { key, value }));
-            note_hash_table_storage_growth(
-                self.slots.capacity().saturating_sub(before) * size_of::<Option<HashTableEntry>>(),
-            );
             slot
         }
     }
@@ -1464,9 +1459,6 @@ impl HashTableStorage {
         self.user_hashes.keys().cloned().collect()
     }
 
-    /// Pre-size the backings. B5 leaves this uncharged: its callers are
-    /// construction and pdump-restore paths, not the shared growth sites
-    /// (`alloc_slot`/`insert_new`), so no sealed edit reaches it.
     pub fn reserve(&mut self, additional: usize) {
         self.index.reserve(additional);
         self.slots.reserve(additional);
@@ -1650,6 +1642,61 @@ impl HashTableStorage {
                     .capacity()
                     .saturating_mul(size_of::<usize>()),
             )
+    }
+
+    /// What a proof-2 sealed edit charges its owner for growth (§4 Rev R3):
+    /// [`Self::known_storage_bytes`] plus every growth source that escapes
+    /// the Vec-capacity accounting there — the user-hash memo maps (a
+    /// `define-hash-table-test` table's hash and bucket maps, plus their
+    /// `SmallVec` spill past one element per bucket) and the boxed
+    /// `HashKey` materialization behind `Bignum`/structural/text keys in
+    /// the index, the pending entries and the memo maps themselves.
+    ///
+    /// Called by the sealed lease wrapper around each edit body; the serial
+    /// path never measures this. The measurement is O(table size): the
+    /// wrapper runs it twice per edit, which is the accepted cost while
+    /// sealed leases target bounded tables — B6/B7 (make/copy) revisit
+    /// amortizing the key walk to capacity-growth events.
+    pub(crate) fn sealed_storage_bytes(&self) -> usize {
+        // Memo map slots: hashbrown allocates capacity * (K + V) plus one
+        // control byte per bucket (~capacity of them). The +1-per-entry
+        // control term is within the load-factor margin.
+        let memo_slot = self
+            .user_hashes
+            .capacity()
+            .saturating_mul(size_of::<HashKey>() + size_of::<i64>() + 1)
+            .saturating_add(self.user_buckets.capacity().saturating_mul(
+                size_of::<i64>() + size_of::<smallvec::SmallVec<[HashKey; 1]>>() + 1,
+            ));
+        // Bucket spill past each SmallVec's inline element. The maps'
+        // invariant (a key is in a bucket exactly when `user_hashes` holds
+        // it) makes the spilled-element count the difference of the two
+        // lengths, so no per-bucket walk is needed.
+        let spill = self
+            .user_hashes
+            .len()
+            .saturating_sub(self.user_buckets.len())
+            .saturating_mul(size_of::<HashKey>());
+        let key_bytes = self
+            .index
+            .iter()
+            .map(|entry| entry.key.heap_bytes())
+            .sum::<usize>()
+            .saturating_add(
+                self.pending
+                    .as_deref()
+                    .map_or(0, |p| p.iter().map(|(key, _, _)| key.heap_bytes()).sum()),
+            )
+            .saturating_add(
+                self.user_hashes
+                    .keys()
+                    .map(HashKey::heap_bytes)
+                    .sum::<usize>(),
+            );
+        self.known_storage_bytes()
+            .saturating_add(memo_slot)
+            .saturating_add(spill)
+            .saturating_add(key_bytes)
     }
 }
 
@@ -2190,6 +2237,42 @@ impl HashKey {
     /// The `equal` key for a Lisp string: its raw internal bytes and SCHARS.
     pub fn string_content(bytes: &[u8], schars: usize) -> Self {
         HashKey::StringContent(Box::new((bytes.into(), schars)))
+    }
+
+    /// Heap bytes this key's boxed variants own, beyond the enum's inline
+    /// footprint that `size_of::<HashKey>` already covers. Structural keys
+    /// recurse; `eq`-test keys (Nil/True/Int/Symbol/Keyword/Char/Float/Ptr)
+    /// answer 0 without boxing. Measured by the proof-2 sealed lease
+    /// wrapper only (§4 Rev R3); the serial path never calls this.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        match self {
+            HashKey::Bignum(limbs) => limbs.len() * size_of::<u64>(),
+            HashKey::EqualCons(car, cdr) => car.heap_bytes() + cdr.heap_bytes(),
+            HashKey::EqualVec(parts) => parts.iter().map(Self::heap_bytes).sum(),
+            HashKey::ByteCode(parts) => parts.iter().map(ByteCodeKeyPart::heap_bytes).sum(),
+            HashKey::Marker(body) => 0,
+            HashKey::Overlay(body) => body.3.heap_bytes(),
+            HashKey::BoolVector(body) => body.1.len() * size_of::<u64>(),
+            HashKey::SymbolWithPos(sym, pos) => sym.heap_bytes() + pos.heap_bytes(),
+            HashKey::Text(text) => text.len(),
+            HashKey::StringContent(body) => body.0.len(),
+            _ => 0,
+        }
+    }
+}
+
+impl ByteCodeKeyPart {
+    /// Heap bytes beyond the part's inline footprint (see
+    /// [`HashKey::heap_bytes`]).
+    pub(crate) fn heap_bytes(&self) -> usize {
+        match self {
+            ByteCodeKeyPart::Bytes(bytes) => bytes.len(),
+            ByteCodeKeyPart::Ops(ops) => ops.len() * size_of::<super::bytecode::Op>(),
+            ByteCodeKeyPart::Values(parts) => parts.iter().map(HashKey::heap_bytes).sum(),
+            ByteCodeKeyPart::Text { bytes, .. } => bytes.len(),
+            ByteCodeKeyPart::Value(key) => key.heap_bytes(),
+            _ => 0,
+        }
     }
 }
 

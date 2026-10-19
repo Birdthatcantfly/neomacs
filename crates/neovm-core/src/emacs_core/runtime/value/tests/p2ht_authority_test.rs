@@ -118,3 +118,40 @@ fn p2ht_fresh_constructions_are_quiescent() {
         0
     );
 }
+
+/// B5r: `sealed_storage_bytes` must count the growth sources that
+/// `known_storage_bytes`'s Vec-capacity accounting misses — the user-hash
+/// memo maps (slots, and the boxed content of their keys) and the boxed
+/// `HashKey` materialization behind index entries. These are the bytes a
+/// sealed lease charges its owner (§4 Rev R3); `eq`-test keys must stay at
+/// zero so the common tables charge exactly their Vec growth.
+#[test]
+fn p2ht_sealed_storage_bytes_counts_memo_maps_and_boxed_keys() {
+    let mut storage = HashTableStorage::default();
+    let base = storage.sealed_storage_bytes();
+    assert_eq!(base, storage.known_storage_bytes());
+
+    // An eq-test key never materializes heap bytes.
+    assert_eq!(HashKey::Int(7).heap_bytes(), 0);
+    assert_eq!(HashKey::Ptr(0x1234).heap_bytes(), 0);
+
+    // A boxed key in the index: 33 bignum limbs are 264 heap bytes the
+    // index's capacity accounting cannot see.
+    let bignum = HashKey::Bignum(vec![1u64; 33].into());
+    assert_eq!(bignum.heap_bytes(), 33 * 8);
+    storage.index.insert_new(7, bignum, 0);
+    let with_index = storage.sealed_storage_bytes();
+    assert!(with_index >= base + 33 * 8);
+
+    // The user-hash memo maps: their slots and the boxed content of their
+    // keys are both outside `known_storage_bytes` (a user-test table's
+    // growth source). One remembered Text key under one bucket.
+    let text = HashKey::Text("abcdefgh".into());
+    assert_eq!(text.heap_bytes(), 8);
+    storage.user_hashes.insert(text.clone(), 7);
+    storage.user_buckets.insert(7, smallvec::smallvec![text]);
+    let with_memos = storage.sealed_storage_bytes();
+    assert!(with_memos > with_index);
+    // The boxed text is present somewhere in the delta (memo key content).
+    assert!(with_memos >= with_index + 8);
+}
