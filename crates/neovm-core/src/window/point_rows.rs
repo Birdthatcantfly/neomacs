@@ -139,11 +139,29 @@ enum Cells {
 
 #[derive(Clone)]
 enum PointOrder {
+    /// Emission order already satisfies the exact stable index key. This proof
+    /// belongs to immutable row data and needs no allocated permutation.
+    Identity {
+        len: usize,
+    },
     Compact(Arc<[u32]>),
     Wide(Arc<[usize]>),
 }
 
 impl PointOrder {
+    fn for_points<K: Ord>(
+        points: &[DisplayPointSnapshot],
+        mut key: impl FnMut(&DisplayPointSnapshot) -> K,
+    ) -> Self {
+        if points.is_sorted_by_key(&mut key) {
+            return Self::Identity { len: points.len() };
+        }
+        let mut indices: Vec<_> = (0..points.len()).collect();
+        // Stable ties retain the producer's original walk order.
+        indices.sort_by_key(|&index| key(&points[index]));
+        Self::new(indices)
+    }
+
     fn new(indices: Vec<usize>) -> Self {
         if let Some(compact) = indices
             .iter()
@@ -159,6 +177,7 @@ impl PointOrder {
     #[inline]
     fn len(&self) -> usize {
         match self {
+            Self::Identity { len } => *len,
             Self::Compact(indices) => indices.len(),
             Self::Wide(indices) => indices.len(),
         }
@@ -167,6 +186,9 @@ impl PointOrder {
     #[inline]
     fn get(&self, index: usize) -> usize {
         match self {
+            // All private consumers bound their index by len(); point() also
+            // checks the authoritative cell array when the index is decoded.
+            Self::Identity { .. } => index,
             Self::Compact(indices) => indices[index] as usize,
             Self::Wide(indices) => indices[index],
         }
@@ -205,7 +227,16 @@ fn shifted(value: i64, original_base: i64, new_base: i64) -> Option<i64> {
 impl DisplayPointRow {
     /// Freeze one row. Points may be in visual or source order, including bidi.
     /// Empty rows contain no point cells and use an inert zero placement.
-    pub fn from_points(points: Vec<DisplayPointSnapshot>) -> Self {
+    pub fn from_points(mut points: Vec<DisplayPointSnapshot>) -> Self {
+        Self::from_points_reusing(&mut points)
+    }
+
+    /// Freeze one producer-owned row and leave its scratch vector empty.
+    /// Compact cells retain the vector's allocation for the next row; wide
+    /// geometry transfers its original points into immutable shared storage.
+    /// The caller exclusively owns scratch. Concurrent readers share only the
+    /// initialized immutable arrays, never a producer's mutable allocation.
+    pub fn from_points_reusing(points: &mut Vec<DisplayPointSnapshot>) -> Self {
         let row = points.first().map_or(0, |point| point.row);
         let y = points.first().map_or(0, |point| point.y);
         let base = points
@@ -213,30 +244,32 @@ impl DisplayPointRow {
             .map(|point| point.buffer_pos.as_i64())
             .min()
             .unwrap_or(0);
-        Self::from_placement(row, y, base, points)
+        Self::freeze_placement(row, y, base, points)
     }
 
     pub fn from_placement(
         row: i64,
         y: i64,
         buffer_base: i64,
-        points: Vec<DisplayPointSnapshot>,
+        mut points: Vec<DisplayPointSnapshot>,
+    ) -> Self {
+        Self::freeze_placement(row, y, buffer_base, &mut points)
+    }
+
+    fn freeze_placement(
+        row: i64,
+        y: i64,
+        buffer_base: i64,
+        points: &mut Vec<DisplayPointSnapshot>,
     ) -> Self {
         assert!(
             points.iter().all(|point| point.row == row),
             "point row must match descriptor"
         );
-        let mut source_order: Vec<_> = (0..points.len()).collect();
-        // Stable tie ordering preserves the producer's walk order.
-        source_order.sort_by_key(|&index| {
-            let point = &points[index];
-            (point.buffer_pos, point.col, point.x)
-        });
-        let mut x_order: Vec<_> = (0..points.len()).collect();
-        x_order.sort_by_key(|&index| {
-            let point = &points[index];
-            (point.x, point.col, point.buffer_pos)
-        });
+        let source_order =
+            PointOrder::for_points(points, |point| (point.buffer_pos, point.col, point.x));
+        let x_order =
+            PointOrder::for_points(points, |point| (point.x, point.col, point.buffer_pos));
         let source_min = points
             .iter()
             .map(|point| point.buffer_pos.as_i64())
@@ -270,8 +303,11 @@ impl DisplayPointRow {
             .map(|point| PointCell::encode(point, buffer_base, y))
             .collect::<Option<Vec<_>>>();
         let cells = match compact {
-            Some(cells) => Cells::Compact(cells.into()),
-            None => Cells::Wide(points.into()),
+            Some(cells) => {
+                points.clear();
+                Cells::Compact(cells.into())
+            }
+            None => Cells::Wide(std::mem::take(points).into()),
         };
         let frozen = Self {
             row,
@@ -279,8 +315,8 @@ impl DisplayPointRow {
             buffer_base,
             data: Arc::new(PointRowData {
                 cells,
-                source_order: PointOrder::new(source_order),
-                x_order: PointOrder::new(x_order),
+                source_order,
+                x_order,
                 original_y: y,
                 original_base: buffer_base,
                 source_min,
@@ -779,3 +815,7 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/point_rows_iterator_test.rs"]
 mod iterator_tests;
+
+#[cfg(test)]
+#[path = "tests/point_rows_scratch_test.rs"]
+mod scratch_tests;

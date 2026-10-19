@@ -637,9 +637,7 @@ impl WindowRowGeometry {
                 let index = point_rows.rows.len();
                 point_rows
                     .rows
-                    .push(DisplayPointRow::from_points(std::mem::take(
-                        &mut self.points,
-                    )));
+                    .push(DisplayPointRow::from_points_reusing(&mut self.points));
                 self.point_lookup_groups
                     .push(PointLookupGroup::FreshRow { index });
             }
