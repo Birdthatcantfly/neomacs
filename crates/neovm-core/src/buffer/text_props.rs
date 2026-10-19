@@ -4219,6 +4219,8 @@ impl TextPropertyTable {
     /// changes what is rendered, because the invisible/display status at each
     /// position is looked up exactly and independently. This turns the layout's
     /// per-redisplay invisible/display scan from O(buffer) into O(window).
+    /// A definitely absent raw name has no transition and returns `None`
+    /// without a soft stop, as in the unbounded method.
     ///
     /// Lisp `next-single-property-change` MUST return the exact boundary, so it
     /// keeps calling the unbounded method above (the `None` limit path).
@@ -4228,6 +4230,12 @@ impl TextPropertyTable {
         name: Value,
         limit: CharPos0,
     ) -> Option<CharPos0> {
+        // This is only the raw text-property half of the display scan. A
+        // never-assigned key cannot change, so no soft stop is needed; callers
+        // still combine overlay stops and resolve the value at each position.
+        if self.property_name_presence(name) == PropertyNamePresence::DefinitelyAbsent {
+            return None;
+        }
         self.next_single_property_change_after_char_pos_limited(pos, name, Some(limit))
     }
 
@@ -5177,6 +5185,10 @@ impl GcTrace for TextPropertyTable {
 #[cfg(test)]
 #[path = "text_props/tests/text_props_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "text_props/tests/bounded_absent_property_test.rs"]
+mod bounded_absent_property_test;
 
 #[path = "text_props/casing_insertion.rs"]
 mod casing_insertion;
