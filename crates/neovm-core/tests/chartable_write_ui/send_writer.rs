@@ -1,7 +1,9 @@
 use neovm_core::tagged::mutate::CharTableWrite;
 
-fn require_send<T: Send>() {}
+#[path = "../thread_safety_ui/support/thread_bounds.rs"]
+mod thread_bounds;
+use thread_bounds::ThreadTransfer;
 
 fn main() {
-    require_send::<CharTableWrite<'static>>();
+    ThreadTransfer::<CharTableWrite<'static>>::check();
 }

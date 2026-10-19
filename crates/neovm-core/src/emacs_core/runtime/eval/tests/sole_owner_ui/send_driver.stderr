@@ -1,25 +1,19 @@
-error[E0277]: `*mut ()` cannot be sent between threads safely
-  --> src/emacs_core/runtime/eval/tests/sole_owner_ui/send_driver.rs:10:24
+error[E0599]: the associated function or constant `transfer` exists for struct `ThreadTransfer<SoleOwnerDriver>`, but its trait bounds were not satisfied
+  --> src/emacs_core/runtime/eval/tests/sole_owner_ui/send_driver.rs:14:40
    |
-10 |     std::thread::spawn(move || drop(driver));
-   |     ------------------ -------^^^^^^^^^^^^^
-   |     |                  |
-   |     |                  `*mut ()` cannot be sent between threads safely
-   |     |                  within this `{closure@$DIR/src/emacs_core/runtime/eval/tests/sole_owner_ui/send_driver.rs:10:24: 10:31}`
-   |     required by a bound introduced by this call
+14 |     ThreadTransfer::<SoleOwnerDriver>::transfer(driver);
+   |                                        ^^^^^^^^ associated function or constant cannot be called on `ThreadTransfer<SoleOwnerDriver>` due to unsatisfied trait bounds
    |
-   = help: within `{closure@$DIR/src/emacs_core/runtime/eval/tests/sole_owner_ui/send_driver.rs:10:24: 10:31}`, the trait `Send` is not implemented for `*mut ()`
-note: required because it appears within the type `PhantomData<*mut ()>`
-  --> $RUST/core/src/marker.rs
-note: required because it appears within the type `SoleOwnerDriver`
-  --> src/emacs_core/runtime/eval/tests/sole_owner_ui/../../world/sole_owner.rs
+  ::: src/emacs_core/runtime/eval/tests/sole_owner_ui/../../world/sole_owner.rs
    |
    | pub(crate) struct SoleOwnerDriver {
-   |                   ^^^^^^^^^^^^^^^
-note: required because it's used within this closure
-  --> src/emacs_core/runtime/eval/tests/sole_owner_ui/send_driver.rs:10:24
+   | --------------------------------- doesn't satisfy `SoleOwnerDriver: Send`
    |
-10 |     std::thread::spawn(move || drop(driver));
-   |                        ^^^^^^^
-note: required by a bound in `spawn`
-  --> $RUST/std/src/thread/functions.rs
+  ::: src/emacs_core/runtime/eval/tests/sole_owner_ui/../../../../../../tests/thread_safety_ui/support/thread_bounds.rs
+   |
+   | pub struct ThreadTransfer<T>(PhantomData<T>);
+   | ---------------------------- associated function or constant `transfer` not found for this struct
+   |
+   = note: the following trait bounds were not satisfied:
+           `*mut (): Send`
+           which is required by `SoleOwnerDriver: Send`
