@@ -1,44 +1,44 @@
 error[E0308]: mismatched types
- --> tests/thread_safety_ui/symbol_reader_borrow.rs:6:5
+ --> tests/thread_safety_ui/symbol_reader_borrow.rs:7:5
   |
-5 | fn borrowed_global(owner: &Obarray) -> Option<&Value> {
-  |                                        -------------- expected `Option<&TaggedValue>` because of return type
-6 |     owner.symbol_value_copied("p74-no-slot-borrow")
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Option<&TaggedValue>`, found `Option<TaggedValue>`
+6 | fn borrowed_global(owner: &Obarray, access: CanonicalAccess) -> Option<&Value> {
+  |                                                                 -------------- expected `Option<&TaggedValue>` because of return type
+7 |     owner.canonical_value_by_name(access, "p74-no-slot-borrow")
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Option<&TaggedValue>`, found `Option<TaggedValue>`
   |
   = note: expected enum `Option<&TaggedValue>`
              found enum `Option<TaggedValue>`
 help: try using `.as_ref()` to convert `Option<TaggedValue>` to `Option<&TaggedValue>`
   |
-6 |     owner.symbol_value_copied("p74-no-slot-borrow").as_ref()
-  |                                                    +++++++++
+7 |     owner.canonical_value_by_name(access, "p74-no-slot-borrow").as_ref()
+  |                                                                +++++++++
 
 error[E0308]: mismatched types
-  --> tests/thread_safety_ui/symbol_reader_borrow.rs:10:5
+  --> tests/thread_safety_ui/symbol_reader_borrow.rs:11:5
    |
- 9 | fn borrowed_identity(owner: &Obarray, symbol: SymId) -> Option<&Value> {
-   |                                                         -------------- expected `Option<&TaggedValue>` because of return type
-10 |     owner.symbol_value_id_copied(symbol)
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Option<&TaggedValue>`, found `Option<TaggedValue>`
-   |
-   = note: expected enum `Option<&TaggedValue>`
-              found enum `Option<TaggedValue>`
-help: try using `.as_ref()` to convert `Option<TaggedValue>` to `Option<&TaggedValue>`
-   |
-10 |     owner.symbol_value_id_copied(symbol).as_ref()
-   |                                         +++++++++
-
-error[E0308]: mismatched types
-  --> tests/thread_safety_ui/symbol_reader_borrow.rs:14:5
-   |
-13 | fn borrowed_default(owner: &Obarray, symbol: SymId) -> Option<&Value> {
-   |                                                        -------------- expected `Option<&TaggedValue>` because of return type
-14 |     owner.default_value_id_copied(symbol)
+10 | fn borrowed_identity(owner: &Obarray, access: CanonicalAccess, symbol: SymId) -> Option<&Value> {
+   |                                                                                  -------------- expected `Option<&TaggedValue>` because of return type
+11 |     owner.canonical_value(access, symbol)
    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Option<&TaggedValue>`, found `Option<TaggedValue>`
    |
    = note: expected enum `Option<&TaggedValue>`
               found enum `Option<TaggedValue>`
 help: try using `.as_ref()` to convert `Option<TaggedValue>` to `Option<&TaggedValue>`
    |
-14 |     owner.default_value_id_copied(symbol).as_ref()
+11 |     owner.canonical_value(access, symbol).as_ref()
    |                                          +++++++++
+
+error[E0308]: mismatched types
+  --> tests/thread_safety_ui/symbol_reader_borrow.rs:15:5
+   |
+14 | fn borrowed_default(owner: &Obarray, access: CanonicalAccess, symbol: SymId) -> Option<&Value> {
+   |                                                                                 -------------- expected `Option<&TaggedValue>` because of return type
+15 |     owner.canonical_default_value(access, symbol)
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `Option<&TaggedValue>`, found `Option<TaggedValue>`
+   |
+   = note: expected enum `Option<&TaggedValue>`
+              found enum `Option<TaggedValue>`
+help: try using `.as_ref()` to convert `Option<TaggedValue>` to `Option<&TaggedValue>`
+   |
+15 |     owner.canonical_default_value(access, symbol).as_ref()
+   |                                                  +++++++++

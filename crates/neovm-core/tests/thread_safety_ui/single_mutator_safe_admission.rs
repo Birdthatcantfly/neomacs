@@ -1,10 +1,7 @@
-struct TaggedHeap;
-impl TaggedHeap {
-    fn identity(&self) -> usize { 1 }
-}
-#[path = "../../src/tagged/gc/scan_contract.rs"]
-mod scan_contract;
+#[path = "support/scan_contract_shim.rs"]
+mod tagged;
+use tagged::gc::{TaggedHeap, scan_contract};
 fn main() {
-    let mut heap = TaggedHeap;
+    let mut heap = TaggedHeap::default();
     let _world = scan_contract::SingleMutatorWorld::from_heap(&mut heap);
 }

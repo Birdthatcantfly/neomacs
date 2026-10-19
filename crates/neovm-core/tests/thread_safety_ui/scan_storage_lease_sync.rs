@@ -1,10 +1,11 @@
-struct TaggedHeap;
-impl TaggedHeap {
-    fn identity(&self) -> usize { 1 }
-}
-#[path = "../../src/tagged/gc/scan_contract.rs"]
-mod scan_contract;
-fn require_sync<T: Sync>() {}
+#[path = "support/scan_contract_shim.rs"]
+mod tagged;
+use tagged::gc::scan_contract;
+#[path = "support/thread_bounds.rs"]
+mod thread_bounds;
+use thread_bounds::ThreadSharing;
+
+// A lease may move to its reader, but cannot be shared among readers.
 fn main() {
-    require_sync::<scan_contract::ScanStorageLease>();
+    ThreadSharing::<scan_contract::ScanStorageLease>::check();
 }
