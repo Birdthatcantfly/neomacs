@@ -1,8 +1,10 @@
 use neovm_core::emacs_core::Obarray;
 
-fn require_sync<T: Sync>() {}
+#[path = "support/thread_bounds.rs"]
+mod thread_bounds;
+use thread_bounds::ThreadSharing;
 
+// Mutable BLVs and local Values are not made shareable by atomic cells.
 fn main() {
-    // Mutable BLVs and local Values are not made shareable by atomic cells.
-    require_sync::<Obarray>();
+    ThreadSharing::<Obarray>::check();
 }

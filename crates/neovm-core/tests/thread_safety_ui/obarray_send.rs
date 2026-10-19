@@ -1,8 +1,10 @@
 use neovm_core::emacs_core::Obarray;
 
-fn require_send<T: Send>() {}
+#[path = "support/thread_bounds.rs"]
+mod thread_bounds;
+use thread_bounds::ThreadTransfer;
 
+// The owner stays on its mutator; only its admitted scan snapshot moves.
 fn main() {
-    // The owner stays on its mutator; only its admitted scan snapshot moves.
-    require_send::<Obarray>();
+    ThreadTransfer::<Obarray>::check();
 }

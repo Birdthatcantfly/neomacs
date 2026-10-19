@@ -1,33 +1,16 @@
-error[E0277]: `*const ()` cannot be shared between threads safely
- --> tests/thread_safety_ui/raw_value_static_cache.rs:5:15
-  |
-5 | static CACHE: OnceLock<TaggedValue> = OnceLock::new();
-  |               ^^^^^^^^^^^^^^^^^^^^^ `*const ()` cannot be shared between threads safely
-  |
-  = help: within `TaggedValue`, the trait `Sync` is not implemented for `*const ()`
-note: required because it appears within the type `PhantomData<*const ()>`
- --> $RUST/core/src/marker.rs
-note: required because it appears within the type `TaggedValue`
- --> src/tagged/value.rs
-  |
-  | pub struct TaggedValue(pub(crate) usize, ThreadConfined);
-  |            ^^^^^^^^^^^
-  = note: required for `OnceLock<TaggedValue>` to implement `Sync`
-  = note: shared static variables must have a type that implements `Sync`
-
-error[E0277]: `*const ()` cannot be sent between threads safely
- --> tests/thread_safety_ui/raw_value_static_cache.rs:5:15
-  |
-5 | static CACHE: OnceLock<TaggedValue> = OnceLock::new();
-  |               ^^^^^^^^^^^^^^^^^^^^^ `*const ()` cannot be sent between threads safely
-  |
-  = help: within `TaggedValue`, the trait `Send` is not implemented for `*const ()`
-note: required because it appears within the type `PhantomData<*const ()>`
- --> $RUST/core/src/marker.rs
-note: required because it appears within the type `TaggedValue`
- --> src/tagged/value.rs
-  |
-  | pub struct TaggedValue(pub(crate) usize, ThreadConfined);
-  |            ^^^^^^^^^^^
-  = note: required for `OnceLock<TaggedValue>` to implement `Sync`
-  = note: shared static variables must have a type that implements `Sync`
+error[E0599]: the associated function or constant `check` exists for struct `ThreadSharing<OnceLock<TaggedValue>>`, but its trait bounds were not satisfied
+  --> tests/thread_safety_ui/raw_value_static_cache.rs:10:45
+   |
+10 |     ThreadSharing::<OnceLock<TaggedValue>>::check();
+   |                                             ^^^^^ associated function or constant cannot be called on `ThreadSharing<OnceLock<TaggedValue>>` due to unsatisfied trait bounds
+   |
+  ::: tests/thread_safety_ui/support/thread_bounds.rs
+   |
+   | pub struct ThreadSharing<T>(PhantomData<T>);
+   | --------------------------- associated function or constant `check` not found for this struct
+   |
+   = note: the following trait bounds were not satisfied:
+           `*const (): Sync`
+           which is required by `OnceLock<TaggedValue>: Sync`
+           `*const (): Send`
+           which is required by `OnceLock<TaggedValue>: Sync`

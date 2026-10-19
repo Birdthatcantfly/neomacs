@@ -6,8 +6,10 @@ struct WorkerPayload {
     _value: TaggedValue,
 }
 
-fn require_send<T: Send>() {}
+#[path = "support/thread_bounds.rs"]
+mod thread_bounds;
+use thread_bounds::ThreadTransfer;
 
 fn main() {
-    require_send::<WorkerPayload>();
+    ThreadTransfer::<WorkerPayload>::check();
 }

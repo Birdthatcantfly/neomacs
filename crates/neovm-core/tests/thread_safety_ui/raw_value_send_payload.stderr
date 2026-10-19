@@ -1,24 +1,17 @@
-error[E0277]: `*const ()` cannot be sent between threads safely
-  --> tests/thread_safety_ui/raw_value_send_payload.rs:12:20
-   |
-12 |     require_send::<WorkerPayload>();
-   |                    ^^^^^^^^^^^^^ `*const ()` cannot be sent between threads safely
-   |
-   = help: within `WorkerPayload`, the trait `Send` is not implemented for `*const ()`
-note: required because it appears within the type `PhantomData<*const ()>`
-  --> $RUST/core/src/marker.rs
-note: required because it appears within the type `TaggedValue`
-  --> src/tagged/value.rs
-   |
-   | pub struct TaggedValue(pub(crate) usize, ThreadConfined);
-   |            ^^^^^^^^^^^
-note: required because it appears within the type `WorkerPayload`
-  --> tests/thread_safety_ui/raw_value_send_payload.rs:5:8
+error[E0599]: the associated function or constant `check` exists for struct `ThreadTransfer<WorkerPayload>`, but its trait bounds were not satisfied
+  --> tests/thread_safety_ui/raw_value_send_payload.rs:14:38
    |
  5 | struct WorkerPayload {
-   |        ^^^^^^^^^^^^^
-note: required by a bound in `require_send`
-  --> tests/thread_safety_ui/raw_value_send_payload.rs:9:20
+   | -------------------- doesn't satisfy `WorkerPayload: Send`
+...
+14 |     ThreadTransfer::<WorkerPayload>::check();
+   |                                      ^^^^^ associated function or constant cannot be called on `ThreadTransfer<WorkerPayload>` due to unsatisfied trait bounds
    |
- 9 | fn require_send<T: Send>() {}
-   |                    ^^^^ required by this bound in `require_send`
+  ::: tests/thread_safety_ui/support/thread_bounds.rs
+   |
+   | pub struct ThreadTransfer<T>(PhantomData<T>);
+   | ---------------------------- associated function or constant `check` not found for this struct
+   |
+   = note: the following trait bounds were not satisfied:
+           `*const (): Send`
+           which is required by `WorkerPayload: Send`

@@ -1,7 +1,9 @@
 use neovm_core::tagged::transport::LocalRoot;
 
-fn require_send<T: Send>() {}
+#[path = "support/thread_bounds.rs"]
+mod thread_bounds;
+use thread_bounds::ThreadTransfer;
 
 fn main() {
-    require_send::<LocalRoot<'static>>();
+    ThreadTransfer::<LocalRoot<'static>>::check();
 }

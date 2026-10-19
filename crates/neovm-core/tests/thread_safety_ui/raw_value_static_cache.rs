@@ -1,9 +1,11 @@
 use neovm_core::tagged::value::TaggedValue;
 use std::sync::OnceLock;
 
-// A process-wide cache is shared by every thread; raw values cannot live in it.
-static CACHE: OnceLock<TaggedValue> = OnceLock::new();
+#[path = "support/thread_bounds.rs"]
+mod thread_bounds;
+use thread_bounds::ThreadSharing;
 
+// Shared statics require Sync: test exactly the bound on a process-wide cache.
 fn main() {
-    let _ = CACHE.get();
+    ThreadSharing::<OnceLock<TaggedValue>>::check();
 }
