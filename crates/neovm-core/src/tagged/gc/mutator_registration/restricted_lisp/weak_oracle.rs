@@ -47,9 +47,9 @@ pub(super) const CHAIN_FORM: &str = r#"(progn
   ;; evaluated arguments and let initializers until their C frame returns.
   (fset 'a6-b8-oracle-produce-chain
     (lambda (h0 h1)
-      (let ((a (cons 1 nil)) (b (cons 2 nil)) (c (cons 3 nil))
-            (d (cons 4 nil)) (e (cons 5 nil))
-            (x (cons 6 nil)) (y (cons 7 nil)))
+      (let ((a nil) (b nil) (c nil) (d nil) (e nil) (x nil) (y nil))
+        (setq a (cons 1 nil) b (cons 2 nil) c (cons 3 nil)
+              d (cons 4 nil) e (cons 5 nil) x (cons 6 nil) y (cons 7 nil))
         (puthash a b h0)
         (puthash c d h0)
         (puthash b c h1)
@@ -57,6 +57,9 @@ pub(super) const CHAIN_FORM: &str = r#"(progn
         (puthash x y h0)
         (puthash y x h1)
         (setq a6-b8-oracle-root-a a)
+        ;; Clear the lexical cells too: a suspended evaluator may retain the
+        ;; completed call environment until its next serial root census.
+        (setq a nil b nil c nil d nil e nil x nil y nil)
         nil)))
   (let ((h0 (make-hash-table :test 'eq :weakness 'key))
         (h1 (make-hash-table :test 'eq :weakness 'key)))
