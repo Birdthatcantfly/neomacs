@@ -17,7 +17,7 @@ error[E0599]: the associated function or constant `check` exists for struct `Thr
   = note: the following trait bounds were not satisfied:
           `NonNull<LispBufferLocalValue>: Send`
           which is required by `neovm_core::emacs_core::Obarray: Send`
-          `*const (): Sync`
+          `NonNull<LispFwd>: Send`
           which is required by `neovm_core::emacs_core::Obarray: Send`
           `*const (): Send`
           which is required by `neovm_core::emacs_core::Obarray: Send`

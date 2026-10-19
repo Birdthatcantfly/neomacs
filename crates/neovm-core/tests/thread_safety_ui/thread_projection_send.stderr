@@ -17,5 +17,5 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
           which is required by `ThreadProjectionDescriptor: Send`
           `NonNull<LispBufferLocalValue>: Send`
           which is required by `ThreadProjectionDescriptor: Send`
-          `*const (): Sync`
+          `NonNull<LispFwd>: Send`
           which is required by `ThreadProjectionDescriptor: Send`
