@@ -1,7 +1,7 @@
 //! Centralized tagged-heap mutation helpers.
 //!
-//! These functions are the single place to hook future generational or
-//! incremental write barriers into the tagged runtime.
+//! These functions apply generational and concurrent write barriers in the
+//! tagged runtime.
 
 use crate::buffer::text_props::TextPropertyTable;
 #[cfg(test)]

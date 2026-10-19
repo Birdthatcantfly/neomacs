@@ -16,12 +16,14 @@ fn gen0_compiled_face_plist_mutation_rebuilds_cached_realization() {
     let previous_generational = std::env::var_os("NEOVM_GC_GENERATIONAL");
     unsafe {
         std::env::remove_var("NEOVM_JIT_GEN0_COLLECTION_JOURNAL");
-        std::env::remove_var("NEOVM_GC_GENERATIONAL");
+        std::env::set_var("NEOVM_GC_GENERATIONAL", "0");
     }
     let mut context = Context::new();
     unsafe {
         if let Some(previous) = previous_generational {
             std::env::set_var("NEOVM_GC_GENERATIONAL", previous);
+        } else {
+            std::env::remove_var("NEOVM_GC_GENERATIONAL");
         }
     }
     let value = Value::list(vec![Value::symbol(":height"), Value::fixnum(120)]);

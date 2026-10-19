@@ -183,7 +183,7 @@ fn gen0_native_exact_cons_and_large_gap_both_survive_alternating_stores() {
     // This private Context retains its untouched bump-allocation sequence.
     let mut context = {
         let _restore = RestoreGeneration(std::env::var_os("NEOVM_GC_GENERATIONAL"));
-        unsafe { std::env::remove_var("NEOVM_GC_GENERATIONAL") };
+        unsafe { std::env::set_var("NEOVM_GC_GENERATIONAL", "0") };
         Context::new()
     };
     context.gc_stress = false;

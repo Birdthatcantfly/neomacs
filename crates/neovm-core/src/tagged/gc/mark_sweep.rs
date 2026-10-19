@@ -214,10 +214,9 @@ impl TaggedHeap {
         // Clearing at begin makes the tables hold only writes made SINCE this
         // cycle started, so no entry outlives the object it names into a
         // sweep+reuse. This is the exact ABA-safety argument the SATB sets rely
-        // on (per-cycle; no free during mark; cleared at begin). The tables are
-        // the seam for the future generational remembered set (task 06), whose
-        // consumer walks them per cycle and needs no cross-cycle accumulation;
-        // every reader today is a test.
+        // on (per-cycle; no free during mark; cleared at begin). These optional
+        // observation tables are separate from generational remembered sets;
+        // their readers are tests and introspection.
         self.clear_dirty_owners();
         self.clear_dirty_writes();
         self.seed_internal_runtime_roots();

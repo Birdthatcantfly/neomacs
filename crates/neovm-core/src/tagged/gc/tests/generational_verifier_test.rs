@@ -278,3 +278,37 @@ fn generational_verifier_knob_is_constructor_read_and_disabled_with_generations_
     assert!(!disabled.generational.enabled);
     assert!(!disabled.generational.verify);
 }
+
+fn constructor_generation_with_knob(value: Option<&str>) -> bool {
+    // Nextest isolates each constructor/environment contract in its own process.
+    let _restore = RestoreEnvironment(vec![(
+        "NEOVM_GC_GENERATIONAL",
+        std::env::var_os("NEOVM_GC_GENERATIONAL"),
+    )]);
+    unsafe {
+        match value {
+            Some(value) => std::env::set_var("NEOVM_GC_GENERATIONAL", value),
+            None => std::env::remove_var("NEOVM_GC_GENERATIONAL"),
+        }
+    }
+    TaggedHeap::new().generational_enabled()
+}
+
+#[test]
+fn generational_constructor_zero_selects_gen0() {
+    assert!(!constructor_generation_with_knob(Some("0")));
+}
+
+#[test]
+fn generational_constructor_unset_and_empty_select_gen1() {
+    for value in [None, Some("")] {
+        assert!(constructor_generation_with_knob(value), "{value:?}");
+    }
+}
+
+#[test]
+fn generational_constructor_other_values_select_gen1() {
+    for value in ["1", "off"] {
+        assert!(constructor_generation_with_knob(Some(value)), "{value:?}");
+    }
+}

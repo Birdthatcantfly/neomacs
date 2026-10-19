@@ -781,7 +781,7 @@ fn standalone_heap() -> TaggedHeap {
         }
     }
     let _restore = Restore(std::env::var_os("NEOVM_GC_GENERATIONAL"));
-    unsafe { std::env::remove_var("NEOVM_GC_GENERATIONAL") };
+    unsafe { std::env::set_var("NEOVM_GC_GENERATIONAL", "0") };
     TaggedHeap::new()
 }
 

@@ -26,7 +26,9 @@
 //!   (bitmap), and the intrusive list (GcHeader chain), freeing unmarked
 //!   objects.
 //!
-//! No ObjId. No generations. No stale references.
+//! Generational collection (GEN1) is enabled by default. Set
+//! `NEOVM_GC_GENERATIONAL=0` before heap construction to use full-heap-only
+//! collection (GEN0); an unset or empty value keeps GEN1 enabled.
 
 use super::header::*;
 use super::value::TaggedValue;
@@ -61,7 +63,7 @@ pub enum WriteTrackingMode {
 ///
 /// GNU Emacs performs direct object/cell writes (`XSETCAR`, `XSETCDR`, `ASET`,
 /// symbol value writes, etc.).  Neomacs keeps the same Lisp-visible semantics,
-/// but records mutation metadata here so future generational or incremental
+/// but records mutation metadata here so generational and concurrent
 /// collectors have a single write-barrier surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeapWriteKind {
@@ -618,9 +620,9 @@ pub struct TaggedHeap {
 
     /// Owners mutated since the last full collection.
     ///
-    /// This is the minimal remembered-set precursor for future generational
-    /// or incremental GC. We keep owner identity, not child edges, because the
-    /// current collector is still full-heap mark-sweep.
+    /// Optional write-observation metadata for tests and introspection.
+    /// Generational remembered sets and concurrent SATB logs are maintained
+    /// separately, independently of this tracking mode.
     write_tracking_mode: WriteTrackingMode,
     dirty_owners: Vec<TaggedValue>,
     /// FIRST-CYCLE-CONCURRENT: armed by the driver (`arm_first_cycle_concurrent`)
@@ -990,7 +992,7 @@ impl TaggedHeap {
         let identity = HeapIdentity::issue();
         let mut heap = Self {
             generational: generational::GenState::new(
-                std::env::var("NEOVM_GC_GENERATIONAL").as_deref() == Ok("1"),
+                std::env::var("NEOVM_GC_GENERATIONAL").as_deref() != Ok("0"),
             ),
             jit: JitHeapState::new(),
             region_book: RegionBook::new(),

@@ -38,7 +38,7 @@ fn context() -> Context {
     let _restore = RestoreGeneration(std::env::var_os("NEOVM_GC_GENERATIONAL"));
     // Each nextest case runs in its own process. The heap's generation mode
     // is immutable once constructed, and the environment is restored here.
-    unsafe { std::env::remove_var("NEOVM_GC_GENERATIONAL") };
+    unsafe { std::env::set_var("NEOVM_GC_GENERATIONAL", "0") };
     let mut context = Context::new();
     context.gc_stress = false;
     context.tagged_heap.set_gc_threshold(usize::MAX);

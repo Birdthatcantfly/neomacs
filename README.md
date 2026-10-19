@@ -59,6 +59,10 @@ the test oracle, so every rewritten subsystem is verified to behave identically.
 
 
 
+Generational garbage collection (GEN1) is enabled by default. Set
+`NEOVM_GC_GENERATIONAL=0` to opt out and use full-heap collection (GEN0).
+An unset or empty value keeps GEN1 enabled.
+
 ## Showcase
 
 ### Latest videos

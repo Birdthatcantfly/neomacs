@@ -85,7 +85,7 @@ fn heap_with_generation(generational: bool) -> Box<TaggedHeap> {
         if generational {
             std::env::set_var("NEOVM_GC_GENERATIONAL", "1");
         } else {
-            std::env::remove_var("NEOVM_GC_GENERATIONAL");
+            std::env::set_var("NEOVM_GC_GENERATIONAL", "0");
         }
     }
     let heap = Box::new(TaggedHeap::new());

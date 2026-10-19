@@ -32,7 +32,7 @@ fn context(generational: bool) -> Context {
             if generational {
                 std::env::set_var("NEOVM_GC_GENERATIONAL", "1");
             } else {
-                std::env::remove_var("NEOVM_GC_GENERATIONAL");
+                std::env::set_var("NEOVM_GC_GENERATIONAL", "0");
             }
         }
         Context::new()

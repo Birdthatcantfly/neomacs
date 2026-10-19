@@ -2204,7 +2204,7 @@ fn tp_drive(
     with_admitted(|era, generational, nil, _one| {
         assert_eq!(
             generational,
-            std::env::var("NEOVM_GC_GENERATIONAL").as_deref() == Ok("1"),
+            std::env::var("NEOVM_GC_GENERATIONAL").as_deref() != Ok("0"),
             "row must record the heap mode it ran under"
         );
         thread::scope(|scope| {
@@ -2365,7 +2365,7 @@ fn a8_throughput_rows() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(1);
     let mut tsv = String::new();
-    let generational = std::env::var("NEOVM_GC_GENERATIONAL").as_deref() == Ok("1");
+    let generational = std::env::var("NEOVM_GC_GENERATIONAL").as_deref() != Ok("0");
 
     // Identical per-owner work at 1..4 tokens.
     if want("pof") {

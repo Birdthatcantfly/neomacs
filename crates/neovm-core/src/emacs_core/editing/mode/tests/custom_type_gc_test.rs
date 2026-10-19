@@ -20,7 +20,7 @@ fn nested_custom_type_choices_survive_full_gc() {
     // is read at construction; the test never mutates process environment.
     assert_eq!(
         heap.generational_enabled(),
-        std::env::var("NEOVM_GC_GENERATIONAL").as_deref() == Ok("1")
+        std::env::var("NEOVM_GC_GENERATIONAL").as_deref() != Ok("0")
     );
 
     let mut stored = Vec::new();

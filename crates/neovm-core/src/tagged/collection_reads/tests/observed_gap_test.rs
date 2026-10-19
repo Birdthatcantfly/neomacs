@@ -44,7 +44,7 @@ fn context() -> Context {
         }
     }
     let _restore = RestoreGeneration(std::env::var_os("NEOVM_GC_GENERATIONAL"));
-    unsafe { std::env::remove_var("NEOVM_GC_GENERATIONAL") };
+    unsafe { std::env::set_var("NEOVM_GC_GENERATIONAL", "0") };
     let mut context = Context::new();
     context.gc_stress = false;
     context.tagged_heap.set_gc_threshold(usize::MAX);
