@@ -19,6 +19,7 @@ use crate::emacs_core::value::{HashProbe, HashTableEntry, HashTableTest};
 use crate::tagged::transport::SharedRoot;
 use crate::tagged::value::{Fixnum, TaggedValue};
 use rustc_hash::FxHashSet;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
@@ -3635,13 +3636,13 @@ fn a6_ht_ops_match_gnu_oracle() {
     // The gate runs before any owner: straight-line programs admit with no
     // backedge budget, the growth loop with exactly its 65.
     for program in &programs[..5] {
-        prevalidate_with(program, HT_NSLOTS, 0, &initial)
+        prevalidate_with(program, HT_NSLOTS, 0, STEP_CAP, &initial)
             .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     }
-    prevalidate_with(&programs[5], HT_NSLOTS, 65, &initial)
+    prevalidate_with(&programs[5], HT_NSLOTS, 65, STEP_CAP, &initial)
         .unwrap_or_else(|error| panic!("prevalidate p6: {error:?}"));
     for program in &programs[6..] {
-        prevalidate_with(program, HT_NSLOTS, 0, &initial)
+        prevalidate_with(program, HT_NSLOTS, 0, STEP_CAP, &initial)
             .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     }
     // Callback programs are gated too: the pure and other-mutating
@@ -3684,7 +3685,7 @@ fn a6_ht_ops_match_gnu_oracle() {
     ] {
         let mut facts = initial.clone();
         facts.extend([(HT_CB_KEY, Abs::Fix(0)), (HT_CB_CAND, Abs::Fix(0))]);
-        prevalidate_with(ops, HT_NSLOTS, 0, &facts)
+        prevalidate_with(ops, HT_NSLOTS, 0, STEP_CAP, &facts)
             .unwrap_or_else(|error| panic!("callback prevalidate: {error:?}"));
     }
     started.fetch_add(1, Ordering::Relaxed);
@@ -3770,10 +3771,10 @@ fn a6_ht_user_test_refuses_mutation_inside_the_test() {
     ];
     let hash_prog = [Op::ConstFixnum { dst: 3, value: 7 }];
     let initial = [(TM, Abs::Table), (1, Abs::Fix(0)), (2, Abs::Fix(0))];
-    prevalidate_with(&program, 7, 0, &initial)
+    prevalidate_with(&program, 7, 0, STEP_CAP, &initial)
         .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     for ops in [&hash_prog[..], &cmp_bad[..]] {
-        prevalidate_with(ops, 7, 0, &initial)
+        prevalidate_with(ops, 7, 0, STEP_CAP, &initial)
             .unwrap_or_else(|error| panic!("callback prevalidate: {error:?}"));
     }
     started.fetch_add(1, Ordering::Relaxed);
@@ -3900,7 +3901,7 @@ fn a6_ht_user_test_revalidates_after_callback_window() {
     let program = ht_p8s();
     let setup = ht_main_setup();
     let initial = setup.initial();
-    prevalidate_with(&program, HT_NSLOTS, 0, &initial)
+    prevalidate_with(&program, HT_NSLOTS, 0, STEP_CAP, &initial)
         .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     let hash_prog = [Op::Move {
         dst: HT_CB_OUT,
@@ -3937,7 +3938,7 @@ fn a6_ht_user_test_revalidates_after_callback_window() {
         &cmp_prog[..],
         &cmp_other[..],
     ] {
-        prevalidate_with(ops, HT_NSLOTS, 0, &facts)
+        prevalidate_with(ops, HT_NSLOTS, 0, STEP_CAP, &facts)
             .unwrap_or_else(|error| panic!("callback prevalidate: {error:?}"));
     }
     started.fetch_add(1, Ordering::Relaxed);
@@ -4785,7 +4786,7 @@ fn overlap_ht_readers(owners: usize) {
     }
     let initial = setup.initial();
     for program in &programs {
-        prevalidate_with(program, NSLOTS, 0, &initial)
+        prevalidate_with(program, NSLOTS, 0, STEP_CAP, &initial)
             .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     }
     let abort = AtomicBool::new(false);
@@ -4884,7 +4885,7 @@ fn a6_ht_overlap_writer_drains_four_readers() {
     programs.push(writer);
     let initial = setup.initial();
     for program in &programs {
-        prevalidate_with(program, NSLOTS, 0, &initial)
+        prevalidate_with(program, NSLOTS, 0, STEP_CAP, &initial)
             .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     }
     let abort = AtomicBool::new(false);
@@ -4971,7 +4972,7 @@ fn a6_ht_overlap_final_state_in_legal_serial_interleavings() {
     }
     let initial = setup.initial();
     for program in &programs {
-        prevalidate_with(program, NSLOTS, 0, &initial)
+        prevalidate_with(program, NSLOTS, 0, STEP_CAP, &initial)
             .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     }
     // Exhaustive enumeration: choose A's two positions among the four op
@@ -5114,7 +5115,7 @@ fn a6_ht_string_keys_match_gnu_oracle() {
         ],
         nslots: NSLOTS,
     };
-    prevalidate_with(&program, NSLOTS, 0, &setup.initial())
+    prevalidate_with(&program, NSLOTS, 0, STEP_CAP, &setup.initial())
         .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     let env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
     let (lines, dumps) = run_ht_session(
@@ -5152,7 +5153,7 @@ fn a6_ht_user_test_revalidates_under_another_owner() {
     let program = ht_p8s();
     let setup = ht_main_setup();
     let initial = setup.initial();
-    prevalidate_with(&program, HT_NSLOTS, 0, &initial)
+    prevalidate_with(&program, HT_NSLOTS, 0, STEP_CAP, &initial)
         .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     let hash_prog = [Op::Move {
         dst: HT_CB_OUT,
@@ -5189,7 +5190,7 @@ fn a6_ht_user_test_revalidates_under_another_owner() {
         &cmp_prog[..],
         &cmp_other[..],
     ] {
-        prevalidate_with(ops, HT_NSLOTS, 0, &facts)
+        prevalidate_with(ops, HT_NSLOTS, 0, STEP_CAP, &facts)
             .unwrap_or_else(|error| panic!("callback prevalidate: {error:?}"));
     }
     started.fetch_add(1, Ordering::Relaxed);
@@ -5408,7 +5409,7 @@ fn a6_ht_reader_scaling_row() {
         ops.extend(finish_line(&[16, 17]));
         ops
     };
-    prevalidate_with(&program, NSLOTS, 0, &setup.initial())
+    prevalidate_with(&program, NSLOTS, 0, STEP_CAP, &setup.initial())
         .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     let env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
     let want_scale_row = std::env::var("NEOVM_P2HT_SCALE").is_ok();
@@ -5800,7 +5801,7 @@ fn a6_ht_growth_races_readers() {
     let programs = vec![reader.clone(), reader.clone(), reader.clone(), writer];
     let initial = setup.initial();
     for program in &programs {
-        prevalidate_with(program, NSLOTS, 0, &initial)
+        prevalidate_with(program, NSLOTS, 0, STEP_CAP, &initial)
             .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     }
     let abort = AtomicBool::new(false);
@@ -5922,7 +5923,7 @@ fn a6_ht_bounded_growth_many_owners() {
     }
     let initial = setup.initial();
     for program in &programs {
-        prevalidate_with(program, NSLOTS, per_owner as u32, &initial)
+        prevalidate_with(program, NSLOTS, per_owner as u32, STEP_CAP, &initial)
             .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     }
     let growth = HtGrowth::new(owners);
@@ -6071,7 +6072,7 @@ fn a6_ht_growth_memory_overhead() {
     };
     ops.extend(finish_line(&[16]));
     let initial = setup.initial();
-    prevalidate_with(&ops, NSLOTS, (puts + rems) as u32, &initial)
+    prevalidate_with(&ops, NSLOTS, (puts + rems) as u32, STEP_CAP, &initial)
         .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     let growth = HtGrowth::new(1);
     let mut env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
@@ -6223,7 +6224,7 @@ fn a6_ht_growth_serial_twin_matches_gnu_oracle() {
     };
     ops.extend(finish_line(&[10, 19, 16]));
     let initial = setup.initial();
-    prevalidate_with(&ops, NSLOTS, puts as u32, &initial)
+    prevalidate_with(&ops, NSLOTS, puts as u32, STEP_CAP, &initial)
         .unwrap_or_else(|error| panic!("prevalidate: {error:?}"));
     let growth = HtGrowth::new(1);
     let mut env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);

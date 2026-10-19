@@ -369,7 +369,7 @@ fn a6_ht_b7_copy_while_another_owner_mutates() {
     reader.extend(finish_line(&outputs));
     let programs = vec![writer, reader.clone(), reader.clone(), reader];
     for ops in &programs {
-        prevalidate_with(ops, setup.nslots, 0, &setup.initial()).unwrap();
+        prevalidate_with(ops, setup.nslots, 0, STEP_CAP, &setup.initial()).unwrap();
     }
     let env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
     let (lines, _) = run_ht_overlap_session(&setup, &programs, REPS, 0, &env, 9800, &[]);

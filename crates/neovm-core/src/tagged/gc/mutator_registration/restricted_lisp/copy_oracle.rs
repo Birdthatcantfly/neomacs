@@ -84,7 +84,7 @@ fn a6_ht_make_copy_serial_twins_match_gnu_oracle() {
         .map(make_copy_program)
         .collect();
     for ops in &programs {
-        prevalidate_with(ops, setup.nslots, 0, &setup.initial())
+        prevalidate_with(ops, setup.nslots, 0, STEP_CAP, &setup.initial())
             .unwrap_or_else(|error| panic!("B7 copy twin prevalidate: {error:?}"));
     }
     let env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
