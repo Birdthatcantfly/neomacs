@@ -3454,6 +3454,61 @@ fn retained_display_rows_reject_window_system_changes() {
 }
 
 #[test]
+fn retained_display_rows_reject_local_tab_width_reset() {
+    crate::test_utils::init_test_tracing();
+    let (mut eval, selected_window) = pixel_size_tty_context();
+    eval.eval_str(
+        "(set-default 'tab-width 8)
+         (set (make-local-variable 'tab-width) 4)
+         (insert \"\\t\")",
+    )
+    .expect("local tab-width and tabbed text");
+    // GNU 31.1: current-column changes from 4 to 8 after resetting locals.
+    assert_eq!(eval.eval_str("(current-column)").unwrap(), Value::fixnum(4));
+    let buffer_id = eval.buffers.current_buffer_id().unwrap();
+    let frame_id = eval.frames.selected_frame().unwrap().id;
+    let window_id = crate::window::WindowId(selected_window as u64);
+    let recorded = eval
+        .window_display_snapshot_freshness(frame_id, window_id, buffer_id)
+        .unwrap();
+    eval.frames
+        .selected_frame_mut()
+        .unwrap()
+        .commit_redisplay_cache_for_test(vec![crate::window::WindowDisplaySnapshot {
+            window_id,
+            layout_freshness: Some(recorded.clone()),
+            ..Default::default()
+        }]);
+    assert!(
+        eval.fresh_window_display_snapshot(frame_id, window_id, buffer_id)
+            .is_some()
+    );
+
+    eval.eval_str("(kill-all-local-variables)").unwrap();
+    // Evict current-column's last-point cache before checking live tab stops.
+    eval.eval_str("(goto-char (point-min)) (current-column) (goto-char (point-max))")
+        .unwrap();
+    assert_eq!(eval.eval_str("(current-column)").unwrap(), Value::fixnum(8));
+    let current = eval
+        .window_display_snapshot_freshness(frame_id, window_id, buffer_id)
+        .unwrap();
+    let mut ignoring_presentation = current.clone();
+    ignoring_presentation.redisplay_generation = recorded.redisplay_generation;
+    // Diagnostic evidence, not a requirement that future freshness fixes
+    // must preserve today's missing tab-width invalidation.
+    tracing::warn!(
+        matches_ignoring_presentation = ignoring_presentation == recorded,
+        ?recorded,
+        ?current,
+        "local tab-width reset changes geometry without editing text"
+    );
+    assert!(
+        eval.fresh_window_display_snapshot(frame_id, window_id, buffer_id)
+            .is_none()
+    );
+}
+
+#[test]
 fn retained_display_rows_reject_window_margin_changes() {
     crate::test_utils::init_test_tracing();
     let (mut eval, selected_window) = pixel_size_tty_context();

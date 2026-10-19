@@ -928,13 +928,22 @@ impl crate::emacs_core::eval::Context {
         };
         if let Some(recorded) = &snapshot.layout_freshness {
             tracing::trace!(target: "neovm_core::motion_geometry", ?frame_id, ?window_id,
+                ?recorded, ?current,
                 freshness_matches = recorded == &current,
+                fontset_matches = recorded.fontset_generation == current.fontset_generation,
+                context_matches = recorded.context_instance_id == current.context_instance_id,
+                topology_matches = recorded.window_topology_generation == current.window_topology_generation,
                 point_matches = recorded.window.point == current.window.point,
                 window_matches = recorded.window == current.window,
                 buffer_matches = recorded.buffer == current.buffer,
                 frame_matches = recorded.frame == current.frame,
                 presentation_matches = recorded.redisplay_generation == current.redisplay_generation,
                 body_matches = recorded.body_redisplay == current.body_redisplay,
+                faces_match = recorded.face_change_count == current.face_change_count,
+                display_vars_match = recorded.display_var_change_count == current.display_var_change_count,
+                media_match = recorded.media_generation == current.media_generation,
+                functions_match = recorded.function_epoch == current.function_epoch,
+                symbol_properties_match = recorded.symbol_property_revision == current.symbol_property_revision,
                 "retained row freshness");
             return (recorded == &current).then_some(snapshot);
         }
