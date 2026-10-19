@@ -2406,3 +2406,7 @@ fn owned_spacing_matches_canonical_metrics_and_clipping_on_a_worker() {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "fixed_terminal_advance_test.rs"]
+mod fixed_terminal_advance;

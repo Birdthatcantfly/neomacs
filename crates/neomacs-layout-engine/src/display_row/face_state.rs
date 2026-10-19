@@ -1,4 +1,6 @@
-use crate::display_row::builder::{DisplayGeometryBackend, DisplayGlyphMeasurer, DisplayRowLayout};
+use crate::display_row::builder::{
+    DisplayGeometryBackend, DisplayGlyphMeasurer, DisplayRowLayout, FixedTerminalCellAdvances,
+};
 use crate::display_row::metrics::{DisplayRowFallbackMetrics, DisplayRowMeasuredFaceMetrics};
 use crate::display_row::width::DisplayRowCharWidthPolicy;
 use crate::display_text_run_measurement::{
@@ -678,6 +680,25 @@ impl<'a> DisplayRowGlyphMeasurer<'a> {
 }
 
 impl DisplayGlyphMeasurer for DisplayRowGlyphMeasurer<'_> {
+    fn fixed_terminal_cell_advances(
+        &self,
+        face_id: FaceId,
+        fallback_char_width_px: f32,
+    ) -> Option<FixedTerminalCellAdvances> {
+        if self.mode != DisplayRowMeasurementMode::LogicalCells || self.font_metrics.is_some() {
+            return None;
+        }
+        let face = self.face(face_id)?;
+        let face_width = face.char_width_px(self.fallback_char_width);
+        let advance = |columns: u8| {
+            let column_advance = f32::from(columns) * face_width;
+            let fallback = fallback_char_width_px.max(1.0) * f32::from(columns);
+            self.quantization
+                .resolve(None, fallback.max(column_advance), column_advance)
+        };
+        FixedTerminalCellAdvances::new(advance(1), advance(2))
+    }
+
     fn glyph_advance_px(
         &mut self,
         ch: char,

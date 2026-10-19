@@ -323,10 +323,23 @@ impl<'a> DisplayRowTextCharAdvanceRequest<'a> {
     fn resolve_for_admission(
         self,
         writer: &mut DisplayRowWriter<'_, '_, '_>,
+        fixed_terminal_advances: Option<FixedTerminalCellAdvances>,
     ) -> DisplayRowResolvedTextCharAdvance<'a> {
+        // TAB, contextual members, continuations and standalone zero-width
+        // characters preserve the existing policy and callback path.
+        let fixed = match self.kind() {
+            DisplayRowTextNaturalAdvanceKind::FaceColumns { columns } => {
+                fixed_terminal_advances.and_then(|advances| advances.advance_for_columns(columns))
+            }
+            DisplayRowTextNaturalAdvanceKind::Tab
+            | DisplayRowTextNaturalAdvanceKind::ClusterContinuation
+            | DisplayRowTextNaturalAdvanceKind::ComplexRunMember
+            | DisplayRowTextNaturalAdvanceKind::StandaloneZeroWidth => None,
+        };
         DisplayRowResolvedTextCharAdvance {
             request: self,
-            natural_advance_px: self.resolve_advance_px_with_writer(writer),
+            natural_advance_px: fixed
+                .unwrap_or_else(|| self.resolve_advance_px_with_writer(writer)),
         }
     }
 }
@@ -521,6 +534,36 @@ impl std::ops::Mul<i64> for TabGridPixel {
     }
 }
 
+/// Pure per-item proof from a concrete no-font terminal measurer. Values are
+/// resolved independently per column count, retaining fractional quantization.
+/// This owns no face/font/Lisp state and is never retained across an append.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FixedTerminalCellAdvances {
+    one_column_px: f32,
+    two_columns_px: f32,
+}
+
+impl FixedTerminalCellAdvances {
+    pub(crate) fn new(one_column_px: f32, two_columns_px: f32) -> Option<Self> {
+        (one_column_px.is_finite()
+            && one_column_px >= 0.0
+            && two_columns_px.is_finite()
+            && two_columns_px >= 0.0)
+            .then_some(Self {
+                one_column_px,
+                two_columns_px,
+            })
+    }
+
+    fn advance_for_columns(self, columns: usize) -> Option<f32> {
+        match columns {
+            1 => Some(self.one_column_px),
+            2 => Some(self.two_columns_px),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) trait DisplayGlyphMeasurer {
     fn glyph_advance_px(
         &mut self,
@@ -529,6 +572,24 @@ pub(crate) trait DisplayGlyphMeasurer {
         columns: u8,
         fallback_advance_px: f32,
     ) -> Option<f32>;
+
+    /// Certifies the exact `glyph_advance_px` results for every ordinary
+    /// one-/two-column character of this face for the complete append, using
+    /// the supplied writer fallback per column and this measurer's current
+    /// width/quantization policy. The pair must remain valid without further
+    /// lookups, mutation, or required per-character callbacks. Obtaining and
+    /// using it must preserve every required callback and its ordering.
+    ///
+    /// The scalar constructor checks finiteness, not this semantic promise.
+    /// A backend tag alone grants no proof. Custom/prepared measurers retain
+    /// their original character callbacks through the conservative None.
+    fn fixed_terminal_cell_advances(
+        &self,
+        _face_id: FaceId,
+        _fallback_char_width_px: f32,
+    ) -> Option<FixedTerminalCellAdvances> {
+        None
+    }
 
     fn glyph_vertical_metrics_px(
         &mut self,
@@ -2127,6 +2188,19 @@ impl<'layout, 'row, 'measurer> DisplayRowProgressWriter<'layout, 'row, 'measurer
         let glyph_start = self.area_len();
         let face_id = self.writer.face_id(face);
         let measurement = self.text_run_measurement(text, face_id);
+        // An explicit or supplied measured plan remains authoritative. Query
+        // a pure capability once for an unmeasured item, never per character.
+        let fixed_terminal_advances = if matches!(&measurement, DisplayTextRunMeasurement::PerChar)
+        {
+            self.writer.glyph_measurer.as_deref().and_then(|measurer| {
+                measurer.fixed_terminal_cell_advances(
+                    face_id,
+                    self.writer.layout.char_width_px.max(1.0),
+                )
+            })
+        } else {
+            None
+        };
         let glyph_pointer_appearance =
             pointer_appearance.and_then(|appearance| appearance.glyph_metadata());
         let mut pointer_metadata = None;
@@ -2146,7 +2220,8 @@ impl<'layout, 'row, 'measurer> DisplayRowProgressWriter<'layout, 'row, 'measurer
                 byte_offset,
                 &measurement,
             );
-            let resolved_advance = advance_request.resolve_for_admission(&mut self.writer);
+            let resolved_advance =
+                advance_request.resolve_for_admission(&mut self.writer, fixed_terminal_advances);
             let advance = self.writer.item_horizontal_advance_px(
                 ch,
                 face_id,

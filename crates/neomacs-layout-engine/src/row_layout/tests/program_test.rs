@@ -414,3 +414,133 @@ fn named_line_spacing_never_crosses_worker_boundary() {
         Err(RowProgramError::Unsupported)
     ));
 }
+
+#[test]
+fn fixed_terminal_prepared_per_char_program_replays_exact_captured_advances() {
+    struct CaptureOnly {
+        glyph_calls: Vec<(char, u8)>,
+        run_queries: usize,
+    }
+    impl DisplayGlyphMeasurer for CaptureOnly {
+        fn display_geometry_backend(&self) -> DisplayGeometryBackend {
+            DisplayGeometryBackend::TerminalCells
+        }
+        fn glyph_advance_px(&mut self, ch: char, _: FaceId, columns: u8, _: f32) -> Option<f32> {
+            self.glyph_calls.push((ch, columns));
+            let unit = match ch {
+                'm' => 12.0,
+                'i' => 4.0,
+                ' ' => 8.0,
+                _ => panic!("unexpected capture character"),
+            };
+            Some(unit * f32::from(columns))
+        }
+        fn text_run_advances_px(
+            &mut self,
+            _: &str,
+            _: FaceId,
+            _: f32,
+        ) -> DisplayTextRunMeasurement {
+            self.run_queries += 1;
+            DisplayTextRunMeasurement::PerChar
+        }
+        // The capture source and actual Measurements adapter both keep the
+        // trait's default None. No production replay hook is added.
+    }
+    let face = FaceId::new(1);
+    let faces = vec![DisplayRowFace::from_resolved(
+        face,
+        &ResolvedFace::default(),
+    )];
+    let text = DisplayItem::new(
+        SourceSpan::synthetic(1, 0, 2),
+        RenderFaceRef::FaceId(face),
+        DisplayItemKind::TextRun(DisplayTextRun::independent("mi")),
+    );
+    let newline = DisplayItem::new(
+        SourceSpan::synthetic(1, 2, 3),
+        RenderFaceRef::FaceId(face),
+        DisplayItemKind::RowBreak(DisplayRowBreak {
+            line_height: DisplayLineHeightPolicy::Default,
+            line_spacing: DisplayLineSpacingPolicy::Inherit,
+        }),
+    );
+    let mut capture = CaptureOnly {
+        glyph_calls: Vec::new(),
+        run_queries: 0,
+    };
+    let program = RowProgram::capture(
+        geometry(200.0),
+        [text, newline],
+        faces,
+        &mut capture,
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(capture.run_queries, 1);
+    assert_eq!(
+        capture.glyph_calls,
+        [
+            ('m', 0),
+            ('m', 1),
+            ('m', 2),
+            ('i', 0),
+            ('i', 1),
+            ('i', 2),
+            (' ', 0),
+            (' ', 1),
+            (' ', 2),
+        ]
+    );
+    assert!(matches!(
+        &program.operations[0].1,
+        DisplayTextRunMeasurement::PerChar
+    ));
+    assert!(
+        program
+            .measurements
+            .fixed_terminal_cell_advances(face, 8.0)
+            .is_none()
+    );
+    assert!(!program.measurements.missing);
+    drop(capture);
+
+    // Removing a recorded width must still reject replay, proving default
+    // None does not permit substituting a guessed fixed width on the worker.
+    let mut missing = program.clone();
+    assert!(
+        missing
+            .measurements
+            .advances
+            .remove(&('m', face, 1))
+            .is_some()
+    );
+    assert!(matches!(
+        missing.compute(|| false),
+        Err(RowProgramError::MissingMeasurement)
+    ));
+    let actual = std::thread::spawn(move || program.compute(|| false))
+        .join()
+        .unwrap()
+        .unwrap();
+    assert_eq!(actual.end, DisplayRowPosition::new(16.0, 2));
+    assert_eq!(actual.end_kind, ComputedRowEnd::Newline);
+    assert_eq!(
+        actual
+            .slots
+            .iter()
+            .map(|slot| slot.width_px())
+            .collect::<Vec<_>>(),
+        [12.0, 4.0]
+    );
+    let glyphs = &actual.row.glyphs[GlyphArea::Text.index()];
+    assert!(matches!(
+        glyphs[0].glyph_type,
+        neomacs_display_protocol::glyph_matrix::GlyphType::Char { ch: 'm' }
+    ));
+    assert!(matches!(
+        glyphs[1].glyph_type,
+        neomacs_display_protocol::glyph_matrix::GlyphType::Char { ch: 'i' }
+    ));
+    assert_eq!([glyphs[0].pixel_width, glyphs[1].pixel_width], [12.0, 4.0]);
+}
