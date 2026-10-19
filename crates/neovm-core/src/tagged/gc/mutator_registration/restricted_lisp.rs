@@ -111,6 +111,9 @@ enum Op {
         key: u16,
         found: u16,
     },
+    HtClear {
+        table: u16,
+    },
     HtCount {
         table: u16,
         dst: u16,
@@ -550,6 +553,10 @@ fn prevalidate_with(
                 table_must(slots.as_slice(), nslots, table)?;
                 key_may(slots.as_slice(), nslots, key)?;
                 slots[slot_index(found, nslots)?] = Abs::Top;
+                pc += 1;
+            }
+            Op::HtClear { table } => {
+                table_must(slots.as_slice(), nslots, table)?;
                 pc += 1;
             }
             Op::HtCount { table, dst } => {
@@ -1058,7 +1065,11 @@ fn exec<'brand>(
                 machine.pc += 1;
                 return Ok(Flow::Safepoint);
             }
-            Op::HtGet { .. } | Op::HtPut { .. } | Op::HtRem { .. } | Op::HtCount { .. } => {
+            Op::HtGet { .. }
+            | Op::HtPut { .. }
+            | Op::HtRem { .. }
+            | Op::HtClear { .. }
+            | Op::HtCount { .. } => {
                 // Leases mint from `&mut RunAccess`, and the open slice
                 // region is borrowing it: leave pc on the op and let the
                 // driver perform it between regions (design §6).
@@ -1972,6 +1983,7 @@ fn ht_step<'era>(
         Op::HtGet { table, .. }
         | Op::HtPut { table, .. }
         | Op::HtRem { table, .. }
+        | Op::HtClear { table }
         | Op::HtCount { table, .. } => {
             let prog = env.and_then(|env| env.user_prog(table));
             (table, prog)
@@ -1990,7 +2002,7 @@ fn ht_step<'era>(
         }
         None => {
             assert!(
-                !user_defined || matches!(op, Op::HtCount { .. }),
+                !user_defined || matches!(op, Op::HtCount { .. } | Op::HtClear { .. }),
                 "user-defined table without a registered test program"
             );
             None
@@ -2045,6 +2057,14 @@ fn ht_step<'era>(
             };
             with_run(owner, |run| plant_words(run, slots, &[(found, found_bits)]))
         }
+        Op::HtClear { .. } => with_run(owner, |run| {
+            let mut lease = TableMut::enter(run, table_tv)?;
+            if lease.user_test_mutation_refused() {
+                return Err(ExecError::UserTestMutation);
+            }
+            lease.edit(|ht| ht.data.clear());
+            Ok(())
+        }),
         Op::HtCount { dst, .. } => {
             // Counting never consults the test: one sealed read either way.
             let count = plain_count(owner, table_tv, witness)?;
@@ -6166,3 +6186,6 @@ fn a6_ht_growth_serial_twin_matches_gnu_oracle() {
     let entry_bytes = 128 * size_of::<Option<HashTableEntry>>();
     assert!(charged >= entry_bytes && charged <= 8 * entry_bytes);
 }
+
+#[path = "restricted_lisp/gc_tables.rs"]
+mod gc_tables;

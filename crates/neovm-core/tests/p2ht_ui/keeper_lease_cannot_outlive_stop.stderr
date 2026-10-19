@@ -1,0 +1,8 @@
+error: lifetime may not live long enough
+  --> tests/p2ht_ui/keeper_lease_cannot_outlive_stop.rs:10:9
+   |
+ 6 |     fn escape<'stop>(
+   |               ----- lifetime `'stop` defined here
+...
+10 |         KeeperTableMut::enter(stopped, table).unwrap()
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'stop` must outlive `'static`
