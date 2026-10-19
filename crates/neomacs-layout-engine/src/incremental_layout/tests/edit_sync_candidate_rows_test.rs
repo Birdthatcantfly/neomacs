@@ -114,8 +114,8 @@ fn assert_installed_equal(left: &EditSyncInstall, right: &EditSyncInstall) {
 }
 
 #[test]
-fn defer_shift_selector_is_default_off_and_accepts_only_explicit_on_values() {
-    assert_eq!(DeferShiftMode::parse(None), DeferShiftMode::Off);
+fn defer_shift_selector_is_default_on_and_preserves_explicit_controls() {
+    assert_eq!(DeferShiftMode::parse(None), DeferShiftMode::On);
     for value in ["", "off", "0", "false", "junk"] {
         assert_eq!(
             DeferShiftMode::parse(Some(value.as_ref())),

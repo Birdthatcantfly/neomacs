@@ -15,6 +15,9 @@ pub(super) enum DeferShiftMode {
 
 impl DeferShiftMode {
     fn parse(value: Option<&std::ffi::OsStr>) -> Self {
+        if value.is_none() {
+            return Self::On;
+        }
         match value.and_then(std::ffi::OsStr::to_str) {
             Some(value)
                 if matches!(

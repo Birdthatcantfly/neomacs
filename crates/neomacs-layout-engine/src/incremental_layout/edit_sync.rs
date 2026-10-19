@@ -40,7 +40,7 @@
 //! | `NEOMACS_EDIT_SYNC_STILL` | `off` | `off`, `on` | Transfer synchronized geometry without remapping when its placement and visibility are unchanged. |
 //! | `NEOMACS_EDIT_SYNC_PROVE_FIRST` | `off` | `off`, `on` | Prefer a completely admitted bounded prove producer inside GNU sync; rejected proofs still use general sync. |
 //! | `NEOMACS_EDIT_SYNC_LAZY_PROOF` | `on` | `off`, `on` | Defer source proof until bounded fallback is possible in general Sync with ProveFirst off. |
-//! | `NEOMACS_EDIT_SYNC_DEFER_SHIFT` | `off` | `off`, `on` | Materialize candidate buffer-position shifts only when an edit walk successfully synchronizes; face admission uses immutable source rows. |
+//! | `NEOMACS_EDIT_SYNC_DEFER_SHIFT` | `on` | `off`, `on` | Materialize candidate buffer-position shifts only when an edit walk successfully synchronizes; face admission uses immutable source rows. |
 //! | `NEOMACS_EDIT_SYNC_SHIFT_SKIP` | `off` | `off`, `on` | Avoid synchronized-row shift provenance allocations when no row moved vertically. |
 //! | `NEOMACS_LAYOUT_SCROLL_BACK` | `on` | `off`, `on` | Synchronize backward scrolls with the retained body. |
 
