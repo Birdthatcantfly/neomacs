@@ -72,3 +72,66 @@ fn local_chrome_unwind_repaints_the_restored_format_without_a_force() {
         );
     }
 }
+
+#[test]
+fn local_chrome_alias_binding_repaints_bound_and_restored_formats() {
+    let _policy = RedisplayHookPolicyGuard::legacy();
+    for name in ["mode-line-format", "header-line-format", "tab-line-format"] {
+        let (mut eval, rendered) = chrome_context(name);
+        eval.eval_str(&format!("(defvaralias 'ttykey-chrome-alias '{name})"))
+            .expect("alias to the local chrome variable");
+        eval.redisplay().expect("initial presentation");
+        eval.eval_str("(let ((ttykey-chrome-alias \"BOUND\")) (redisplay))")
+            .expect("aliased bound presentation");
+        eval.redisplay().expect("restored presentation");
+        assert_eq!(
+            &*rendered.borrow(),
+            &["\"OLD\"", "\"BOUND\"", "\"OLD\""],
+            "alias binding and restoration must publish resolved {name}"
+        );
+    }
+}
+
+#[test]
+fn non_chrome_local_bindings_do_not_publish_chrome() {
+    for (name, projected) in [
+        ("tab-width", true),
+        ("fill-column", false),
+        ("ttykey-local-control", false),
+    ] {
+        let mut eval = Context::new();
+        eval.eval_str(&format!("(set (make-local-variable '{name}) 8)"))
+            .expect("initial local value");
+        let sym = intern(name);
+        assert_eq!(eval.runtime_binding_has_projection(sym), projected);
+        let buffer = eval.buffers.current_buffer_id().expect("current buffer");
+        let old = eval
+            .variable_value_in_buffer(eval.buffers.get(buffer), sym)
+            .expect("old local value");
+        let bound = eval.eval_str("3").expect("bound value");
+        let before = (eval.redisplay_generation(), eval.display_var_change_count);
+        let scope = eval.specpdl.len();
+        eval.specbind_uncached(sym, bound).expect("local binding");
+        assert_eq!(
+            eval.variable_value_in_buffer(eval.buffers.get(buffer), sym),
+            Some(bound),
+            "the actual {name} binding must be installed"
+        );
+        assert_eq!(
+            (eval.redisplay_generation(), eval.display_var_change_count),
+            before,
+            "a conservative mask positive must still reject non-chrome {name}"
+        );
+        eval.unbind_to(scope);
+        assert_eq!(
+            eval.variable_value_in_buffer(eval.buffers.get(buffer), sym),
+            Some(old),
+            "the actual {name} binding must be restored"
+        );
+        assert_eq!(
+            (eval.redisplay_generation(), eval.display_var_change_count),
+            before,
+            "restoring non-chrome {name} must not publish chrome"
+        );
+    }
+}
