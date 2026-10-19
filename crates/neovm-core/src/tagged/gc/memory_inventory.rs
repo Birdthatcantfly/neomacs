@@ -372,7 +372,7 @@ fn note_header(
 ) {
     let h = unsafe { &*header };
     let age = header_age(h);
-    let pacing = TaggedHeap::object_bytes_from_header(header);
+    let pacing = heap.collector_object_bytes(header);
     let shared = shared_bytecode_bytes(header);
     let owned_payload = payload.capacity_bytes.saturating_sub(shared);
     let text_properties = text_property_storage(header);
@@ -520,7 +520,7 @@ fn object_struct_bytes(header: *const GcHeader) -> usize {
     }
 }
 
-fn header_payload(header: *const GcHeader) -> PayloadLayout {
+fn header_payload(heap: &TaggedHeap, header: *const GcHeader) -> PayloadLayout {
     unsafe {
         match (*header).kind {
             HeapObjectKind::String => {
@@ -534,10 +534,11 @@ fn header_payload(header: *const GcHeader) -> PayloadLayout {
                         bytecode_payload_with_text_properties(&*(v as *const ByteCodeObj))
                     }
                     VecLikeType::HashTable => PayloadLayout {
-                        capacity_bytes: (*(v as *const HashTableObj))
-                            .table
-                            .data
-                            .known_storage_bytes(),
+                        capacity_bytes: heap
+                            .collector_tables()
+                            .inspect(v.cast_mut().cast(), |table| {
+                                table.data.known_storage_bytes()
+                            }),
                         ..PayloadLayout::default()
                     },
                     VecLikeType::Bignum => {
@@ -554,7 +555,8 @@ fn header_payload(header: *const GcHeader) -> PayloadLayout {
                     }
                     VecLikeType::Font => {
                         let mut payload = TaggedHeap::veclike_payload_layout(v);
-                        payload.capacity_bytes = TaggedHeap::object_bytes_from_header(header)
+                        payload.capacity_bytes = heap
+                            .collector_object_bytes(header)
                             .saturating_sub(size_of::<FontObj>());
                         payload
                     }
@@ -584,7 +586,7 @@ fn boxed_inventory(
                 out.boxed.len() - 1
             }
         };
-        let payload = header_payload(header);
+        let payload = header_payload(heap, header);
         let struct_bytes = object_struct_bytes(header);
         let item = &mut out.boxed[index];
         add(
@@ -593,10 +595,7 @@ fn boxed_inventory(
         );
         item.objects += 1;
         add(&mut item.object_struct_bytes, struct_bytes);
-        add(
-            &mut item.pacing_bytes,
-            TaggedHeap::object_bytes_from_header(header),
-        );
+        add(&mut item.pacing_bytes, heap.collector_object_bytes(header));
         add(
             &mut item.known_owned_payload_capacity_bytes,
             payload
@@ -667,7 +666,7 @@ fn mapped_inventory(heap: &TaggedHeap, marks_final: bool) -> MappedInventory {
     for object in &heap.mapped_veclike_objects {
         add(&mut out.image_object_bytes, object.byte_len);
         let header = object.header.cast::<GcHeader>();
-        let payload = header_payload(header);
+        let payload = header_payload(heap, header);
         let text_properties = text_property_storage(header);
         add(
             &mut out.known_text_property_capacity_bytes,

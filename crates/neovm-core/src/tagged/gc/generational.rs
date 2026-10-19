@@ -356,7 +356,7 @@ impl TaggedHeap {
                 if !header.tenured {
                     debug_assert!(header.is_marked_at(self.mark_parity));
                     header.tenured = true;
-                    let bytes = Self::object_bytes_from_header(ptr);
+                    let bytes = self.collector_object_bytes(ptr);
                     self.generational.old_bytes = self.generational.old_bytes.saturating_add(bytes);
                     newly_promoted_header_bytes = newly_promoted_header_bytes.saturating_add(bytes);
                 }

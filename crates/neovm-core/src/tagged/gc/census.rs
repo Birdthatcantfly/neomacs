@@ -338,7 +338,7 @@ impl TaggedHeap {
                 } {
                     return;
                 }
-                let bytes = Self::object_bytes_from_header(header);
+                let bytes = self.collector_object_bytes(header);
                 let addr = header as usize;
                 if prev.contains(&addr) {
                     record.old_survivors.add_object(bytes);
@@ -387,7 +387,7 @@ impl TaggedHeap {
             }
             record
                 .promoted_dead
-                .add_object(Self::object_bytes_from_header(header));
+                .add_object(self.collector_object_bytes(header));
         }
         census.prev_objects = now;
         census.young_last_objects = young_now;
@@ -398,7 +398,7 @@ impl TaggedHeap {
         if census.remset_probe {
             record.remset_owners = census.remset.len();
             for owner in census.remset.drain(..) {
-                record.remset_children += Self::census_heap_child_count(owner);
+                record.remset_children += self.census_heap_child_count(owner);
             }
             census.remset_seen.clear();
         }
@@ -418,7 +418,7 @@ impl TaggedHeap {
     }
 
     /// Heap children of `owner` (immediates create no edge a minor traces).
-    fn census_heap_child_count(owner: TaggedValue) -> usize {
+    fn census_heap_child_count(&self, owner: TaggedValue) -> usize {
         let mut count = 0usize;
         if owner.is_cons() {
             let ptr = owner.xcons_ptr();
@@ -427,6 +427,7 @@ impl TaggedHeap {
             count += usize::from(car.is_heap_object()) + usize::from(cdr.is_heap_object());
         } else if let Some(ptr) = owner.as_veclike_ptr() {
             Self::for_each_veclike_child(
+                self.collector_tables(),
                 ptr as *mut VecLikeHeader,
                 &mut VisitChild(|child: TaggedValue| {
                     count += usize::from(child.is_heap_object());

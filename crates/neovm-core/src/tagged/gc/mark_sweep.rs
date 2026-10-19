@@ -305,7 +305,9 @@ impl TaggedHeap {
                     let vptr = obj as *mut VecLikeHeader;
                     if (*vptr).type_tag == VecLikeType::HashTable {
                         let ht_ptr = vptr as *mut HashTableObj;
-                        if (*ht_ptr).table.weakness.is_some()
+                        if self
+                            .collector_tables()
+                            .inspect(ht_ptr, |ht| ht.weakness.is_some())
                             && !self.permanent_weak_hash_tables_set.contains(&ht_ptr)
                         {
                             self.permanent_weak_hash_tables_set.insert(ht_ptr);
@@ -366,7 +368,10 @@ impl TaggedHeap {
                 unsafe {
                     if (*header).type_tag == VecLikeType::HashTable {
                         let ht_ptr = header as *mut HashTableObj;
-                        if (*ht_ptr).table.weakness.is_some() {
+                        if self
+                            .collector_tables()
+                            .inspect(ht_ptr, |ht| ht.weakness.is_some())
+                        {
                             return Some(ht_ptr);
                         }
                     }
@@ -558,6 +563,7 @@ impl TaggedHeap {
     fn veclike_has_young_child(&self, ptr: *mut VecLikeHeader) -> bool {
         let mut young = false;
         Self::for_each_veclike_child(
+            self.collector_tables(),
             ptr,
             &mut VisitChild(|child| {
                 if !young && self.permanent_child_needs_trace(child) {
@@ -840,6 +846,7 @@ impl TaggedHeap {
                     // permanent owner to be marked, or it is swept while still
                     // referenced (UAF).
                     Self::for_each_veclike_child(
+                        self.collector_tables(),
                         ptr as *mut VecLikeHeader,
                         &mut VisitChild(|child| {
                             self.mark_or_push_child(child, origin);
@@ -1364,12 +1371,13 @@ impl TaggedHeap {
             if (*ptr).type_tag != VecLikeType::HashTable {
                 return None;
             }
-            let ht = &(*ht_ptr).table;
-            (
-                ht.weakness.is_some(),
-                ht.user_cmp_function,
-                ht.user_hash_function,
-            )
+            self.collector_tables().inspect(ht_ptr, |ht| {
+                (
+                    ht.weakness.is_some(),
+                    ht.user_cmp_function,
+                    ht.user_hash_function,
+                )
+            })
         };
         if !is_weak {
             return None;
@@ -1390,7 +1398,7 @@ impl TaggedHeap {
     /// Direct children of a mapped vectorlike object (read-only) for the verifier.
     pub(super) fn collect_veclike_children(&self, ptr: *mut VecLikeHeader) -> Vec<TaggedValue> {
         let mut out = Vec::new();
-        Self::for_each_veclike_child(ptr, &mut out);
+        Self::for_each_veclike_child(self.collector_tables(), ptr, &mut out);
         out
     }
 
@@ -1398,7 +1406,11 @@ impl TaggedHeap {
     /// without collecting them: the remembered-set rescan and the SATB log
     /// visit ~80K children twice per cycle, and building a vector per owner
     /// cost more than the visits (jemalloc growth was most of it).
-    pub(super) fn for_each_veclike_child(ptr: *mut VecLikeHeader, sink: &mut impl ChildSink) {
+    pub(super) fn for_each_veclike_child(
+        tables: collector_tables::CollectorTables,
+        ptr: *mut VecLikeHeader,
+        sink: &mut impl ChildSink,
+    ) {
         unsafe {
             match (*ptr).type_tag {
                 VecLikeType::Vector => {
@@ -1428,30 +1440,31 @@ impl TaggedHeap {
                     sink.children((*(ptr as *const LambdaObj)).data.iter().copied());
                 }
                 VecLikeType::HashTable => {
-                    let ht = &(*(ptr as *const HashTableObj)).table;
-                    if let Some(pending) = ht.data.pending_entries() {
-                        // Un-hydrated dump table (see `trace_veclike`).
-                        for (_, value, snapshot) in pending {
-                            sink.child(*value);
-                            if let Some(snapshot) = snapshot {
-                                sink.child(*snapshot);
+                    tables.inspect(ptr.cast(), |ht| {
+                        if let Some(pending) = ht.data.pending_entries() {
+                            // Un-hydrated dump table (see `trace_veclike`).
+                            for (_, value, snapshot) in pending {
+                                sink.child(*value);
+                                if let Some(snapshot) = snapshot {
+                                    sink.child(*snapshot);
+                                }
                             }
                         }
-                    }
-                    sink.children(ht.data.values().copied());
-                    sink.children(ht.key_snapshots().copied());
-                    // Custom test/hash closures (`define-hash-table-test`) live
-                    // ONLY in these fields and are traced by `trace_veclike`; keep
-                    // the two enumerations in sync so the remembered/SATB strong-
-                    // trace (which uses this) and the dump-partition verifier both
-                    // cover them — otherwise a dumped/tenured custom-test table's
-                    // closures are swept while the table still calls them (UAF).
-                    if let Some(f) = ht.user_cmp_function {
-                        sink.child(f);
-                    }
-                    if let Some(f) = ht.user_hash_function {
-                        sink.child(f);
-                    }
+                        sink.children(ht.data.values().copied());
+                        sink.children(ht.key_snapshots().copied());
+                        // Custom test/hash closures (`define-hash-table-test`) live
+                        // ONLY in these fields and are traced by `trace_veclike`; keep
+                        // the two enumerations in sync so the remembered/SATB strong-
+                        // trace (which uses this) and the dump-partition verifier both
+                        // cover them — otherwise a dumped/tenured custom-test table's
+                        // closures are swept while the table still calls them (UAF).
+                        if let Some(f) = ht.user_cmp_function {
+                            sink.child(f);
+                        }
+                        if let Some(f) = ht.user_hash_function {
+                            sink.child(f);
+                        }
+                    });
                 }
                 VecLikeType::ByteCode => {
                     let obj = ptr as *const ByteCodeObj;
@@ -1774,23 +1787,27 @@ impl TaggedHeap {
                 // SAFETY: `tptr` was recorded this cycle from a live veclike; the
                 // heap is exclusively owned here (mutator stopped), and nothing
                 // below mutates the table.
-                let ht = unsafe { &(*tptr).table };
-                let weakness = ht.weakness;
-                for entry in ht.data.entries_in_slot_order() {
-                    let (key, value) = (entry.key, entry.value);
-                    let key_survives = self.is_value_marked(key);
-                    let value_survives = self.is_value_marked(value);
-                    if Self::keep_weak_entry(weakness, key_survives, value_survives) {
-                        if !key_survives {
-                            self.mark_or_push_child(key, "weak-hash-key");
-                            marked = true;
+                let tables = self.collector_tables();
+                unsafe {
+                    tables.inspect(tptr, |ht| {
+                        let weakness = ht.weakness;
+                        for entry in ht.data.entries_in_slot_order() {
+                            let (key, value) = (entry.key, entry.value);
+                            let key_survives = self.is_value_marked(key);
+                            let value_survives = self.is_value_marked(value);
+                            if Self::keep_weak_entry(weakness, key_survives, value_survives) {
+                                if !key_survives {
+                                    self.mark_or_push_child(key, "weak-hash-key");
+                                    marked = true;
+                                }
+                                if !value_survives {
+                                    self.mark_or_push_child(value, "weak-hash-value");
+                                    marked = true;
+                                }
+                            }
                         }
-                        if !value_survives {
-                            self.mark_or_push_child(value, "weak-hash-value");
-                            marked = true;
-                        }
-                    }
-                }
+                    })
+                };
             }
             // Drain whatever those surviving entries reached, then re-check.
             self.mark_all();
@@ -1805,15 +1822,19 @@ impl TaggedHeap {
         for tptr in tables {
             // SAFETY: as above; exclusive heap access. Mirrors `builtin_remhash`'s
             // removal, in the same order.
-            let ht = unsafe { &mut (*tptr).table };
-            let weakness = ht.weakness;
-            ht.data.retain_entries(|key, value| {
-                Self::keep_weak_entry(
-                    weakness,
-                    self.is_value_marked(key),
-                    self.is_value_marked(value),
-                )
-            });
+            let tables = self.collector_tables();
+            unsafe {
+                tables.edit(tptr, |ht| {
+                    let weakness = ht.weakness;
+                    ht.data.retain_entries(|key, value| {
+                        Self::keep_weak_entry(
+                            weakness,
+                            self.is_value_marked(key),
+                            self.is_value_marked(value),
+                        )
+                    });
+                })
+            };
         }
     }
 

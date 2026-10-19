@@ -397,7 +397,7 @@ impl TaggedHeap {
                     self.all_objects = current;
                     self.sweep_noncons_live_bytes = self
                         .sweep_noncons_live_bytes
-                        .saturating_add(Self::object_bytes_from_header(current));
+                        .saturating_add(self.collector_object_bytes(current));
                 } else {
                     self.non_cons_object_addrs.remove(&(current as usize));
                     self.unregister_vector_object(current);
@@ -944,61 +944,66 @@ impl TaggedHeap {
             }
             VecLikeType::HashTable => {
                 let obj = ptr as *const HashTableObj;
-                let ht = unsafe { &(*obj).table };
-                if ht.weakness.is_some() {
-                    // Weak table: DON'T trace its entries here — that would keep
-                    // every key/value alive and defeat weakness. Record it; the
-                    // per-entry survival decision happens in
-                    // `mark_and_sweep_weak_tables` at the stop-the-world
-                    // `complete_collection`, after the main mark drains (GNU
-                    // `mark_and_sweep_weak_table_contents`). The remembered-set /
-                    // SATB / permanent-scan paths now also defer weak entries
-                    // (`register_weak_hash_table_for_sweep` registers the table
-                    // and pushes only its non-weak closures), and a tenured/mapped
-                    // weak table is re-registered every cycle via
-                    // `permanent_weak_hash_tables`, so weak semantics hold for
-                    // young, tenured, and dumped tables alike. The weak sweep runs
-                    // before `verify_dump_partition`, so dead entries are removed
-                    // before the verifier enumerates — no UAF.
-                    let tptr = obj as *mut HashTableObj;
-                    if self.weak_hash_tables_set.insert(tptr) {
-                        self.weak_hash_tables.push(tptr);
-                    }
-                } else if let Some(pending) = ht.data.pending_entries() {
-                    // Un-hydrated dump table: its entries live in the parked
-                    // vec; trace exactly the set the hydrated arms below
-                    // would (values + key snapshots - HashKeys are not
-                    // walked in either form).
-                    for (_, value, snapshot) in pending {
-                        self.mark_or_push_child(*value, "hash-table-pending-value");
-                        if let Some(snapshot) = snapshot {
-                            self.mark_or_push_child(*snapshot, "hash-table-pending-key");
+                let tables = self.collector_tables();
+                // SAFETY: trace retains this live object and the current stop scope.
+                unsafe {
+                    tables.inspect(obj.cast_mut(), |ht| {
+                        if ht.weakness.is_some() {
+                            // Weak table: DON'T trace its entries here — that would keep
+                            // every key/value alive and defeat weakness. Record it; the
+                            // per-entry survival decision happens in
+                            // `mark_and_sweep_weak_tables` at the stop-the-world
+                            // `complete_collection`, after the main mark drains (GNU
+                            // `mark_and_sweep_weak_table_contents`). The remembered-set /
+                            // SATB / permanent-scan paths now also defer weak entries
+                            // (`register_weak_hash_table_for_sweep` registers the table
+                            // and pushes only its non-weak closures), and a tenured/mapped
+                            // weak table is re-registered every cycle via
+                            // `permanent_weak_hash_tables`, so weak semantics hold for
+                            // young, tenured, and dumped tables alike. The weak sweep runs
+                            // before `verify_dump_partition`, so dead entries are removed
+                            // before the verifier enumerates — no UAF.
+                            let tptr = obj as *mut HashTableObj;
+                            if self.weak_hash_tables_set.insert(tptr) {
+                                self.weak_hash_tables.push(tptr);
+                            }
+                        } else if let Some(pending) = ht.data.pending_entries() {
+                            // Un-hydrated dump table: its entries live in the parked
+                            // vec; trace exactly the set the hydrated arms below
+                            // would (values + key snapshots - HashKeys are not
+                            // walked in either form).
+                            for (_, value, snapshot) in pending {
+                                self.mark_or_push_child(*value, "hash-table-pending-value");
+                                if let Some(snapshot) = snapshot {
+                                    self.mark_or_push_child(*snapshot, "hash-table-pending-key");
+                                }
+                            }
+                        } else {
+                            // Trace all values in the hash table
+                            for slot in ht.data.values() {
+                                let val = load_value_atomic(slot);
+                                self.mark_or_push_child(val, "hash-table-value");
+                            }
+                            // Trace key snapshots (original key objects)
+                            for slot in ht.key_snapshots() {
+                                let val = load_value_atomic(slot);
+                                self.mark_or_push_child(val, "hash-table-key-snapshot");
+                            }
                         }
-                    }
-                } else {
-                    // Trace all values in the hash table
-                    for slot in ht.data.values() {
-                        let val = load_value_atomic(slot);
-                        self.mark_or_push_child(val, "hash-table-value");
-                    }
-                    // Trace key snapshots (original key objects)
-                    for slot in ht.key_snapshots() {
-                        let val = load_value_atomic(slot);
-                        self.mark_or_push_child(val, "hash-table-key-snapshot");
-                    }
-                }
-                // Custom test/hash closures (from `define-hash-table-test`) live
-                // ONLY in these fields. Without tracing them the closure is swept
-                // while the table is still live, and the next custom-test
-                // gethash/puthash calls a freed function (use-after-free). The
-                // fields are immutable after table creation, so a plain read is
-                // race-free during a concurrent mark.
-                if let Some(f) = ht.user_cmp_function {
-                    self.mark_or_push_child(f, "hash-table-user-cmp");
-                }
-                if let Some(f) = ht.user_hash_function {
-                    self.mark_or_push_child(f, "hash-table-user-hash");
-                }
+                        // Custom test/hash closures (from `define-hash-table-test`) live
+                        // ONLY in these fields. Without tracing them the closure is swept
+                        // while the table is still live, and the next custom-test
+                        // gethash/puthash calls a freed function (use-after-free). The
+                        // fields are immutable after table creation, so a plain read is
+                        // race-free during a concurrent mark.
+                        if let Some(f) = ht.user_cmp_function {
+                            self.mark_or_push_child(f, "hash-table-user-cmp");
+                        }
+                        if let Some(f) = ht.user_hash_function {
+                            self.mark_or_push_child(f, "hash-table-user-hash");
+                        }
+                    })
+                };
             }
             VecLikeType::Obarray => {
                 let obj = unsafe { &*(ptr as *const ObarrayObj) };
@@ -1606,7 +1611,7 @@ impl TaggedHeap {
                 debug_assert!(!(*current).tenured, "tenured object on the young list");
                 if (*current).is_marked_at(parity) {
                     // Keep it — advance prev
-                    live_bytes = live_bytes.saturating_add(Self::object_bytes_from_header(current));
+                    live_bytes = live_bytes.saturating_add(self.collector_object_bytes(current));
                     prev = &mut (*current).next;
                     current = next;
                 } else {

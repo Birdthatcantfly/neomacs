@@ -75,15 +75,19 @@ fn supported(heap: &TaggedHeap) -> Result<(), CollectionError> {
                     );
                     Err(RendezvousError::Publication)
                 }
-                VecLikeType::HashTable
-                    if (*(ptr.cast::<HashTableObj>())).table.weakness.is_some() =>
-                {
-                    #[cfg(test)]
-                    eprintln!(
-                        "A5 unsupported weak hash payload: {:?}",
-                        (*(ptr.cast::<HashTableObj>())).table.weakness
-                    );
-                    Err(RendezvousError::Publication)
+                VecLikeType::HashTable => {
+                    // Admission has exclusive serial authority; a stopped job
+                    // installs its real AllStopped before reaching this visit.
+                    let weakness = heap
+                        .collector_tables()
+                        .inspect(ptr.cast_mut().cast(), |ht| ht.weakness);
+                    if weakness.is_some() {
+                        #[cfg(test)]
+                        eprintln!("A5 unsupported weak hash payload: {:?}", weakness);
+                        Err(RendezvousError::Publication)
+                    } else {
+                        Ok(())
+                    }
                 }
                 _ => Ok(()),
             }
@@ -219,7 +223,9 @@ impl<'heap> ParallelHeapEra<'heap> {
                 .as_mut()
                 .ok_or(RendezvousError::Publication)?
                 .registration_heap_mut();
-            supported(heap)?;
+            // Preserve the preflight-before-image-transfer boundary. This
+            // short stop scope uses the same real guard as the full job below.
+            collector_tables::with_stopped_tables(heap, stopped, |heap| supported(heap))??;
             facade_mark::CollectorQuiescence::check(heap).map_err(|_| RendezvousError::Busy)?;
             crate::tagged::transport::collect_shared_root_gc_roots(heap, &mut roots);
         }
@@ -232,17 +238,23 @@ impl<'heap> ParallelHeapEra<'heap> {
                 .try_borrow_mut()
                 .map_err(|_| RendezvousError::Busy)?;
             let collector = slot.as_mut().ok_or(RendezvousError::Publication)?;
-            let job = StoppedCollectorJob::new(
+            // Validate stop authority while every publication is still in its
+            // registry entry. ImageSession::take temporarily removes those
+            // images, so a fresh verify_stopped after that transfer must fail.
+            // Retain this actual guard through the job and image restoration.
+            collector_tables::with_stopped_tables(
                 collector.registration_heap_mut(),
-                proof,
                 guard,
-                registry,
-            )?;
-            let mut images = ImageSession::take(registry, &entries, &keys)?;
-            let report = job.run(&mut images, roots, words, heads, root_count, keys.len())?;
-            // run consumes the scoped heap job before the final metadata gate.
-            images.restore()?;
-            Ok(report)
+                |heap| {
+                    let job = StoppedCollectorJob::new(heap, proof, guard, registry)?;
+                    let mut images = ImageSession::take(registry, &entries, &keys)?;
+                    let report =
+                        job.run(&mut images, roots, words, heads, root_count, keys.len())?;
+                    // Restore publications before releasing the table bridge.
+                    images.restore()?;
+                    Ok(report)
+                },
+            )?
         });
         #[cfg(test)]
         super::a8_probes::mark(super::a8_probes::MARK_SWEEP_DONE, stopped.epoch().get(), 0);
@@ -252,16 +264,17 @@ impl<'heap> ParallelHeapEra<'heap> {
 
 /// The unique stopped heap reborrow and its nonforgeable epoch authority.
 /// No Deref, raw designator, Send/Sync, cloning, or escaping callback exists.
-struct StoppedCollectorJob<'heap, 'stop> {
+struct StoppedCollectorJob<'heap, 'stop, 'era> {
     heap: &'heap mut TaggedHeap,
     _proof: &'stop scan_contract::ParallelStoppedMutatorsProof<'stop>,
+    _stopped: &'stop AllStopped<'era>,
     epoch: u64,
 }
-impl<'heap, 'stop> StoppedCollectorJob<'heap, 'stop> {
+impl<'heap, 'stop, 'era> StoppedCollectorJob<'heap, 'stop, 'era> {
     fn new(
         heap: &'heap mut TaggedHeap,
         proof: &'stop scan_contract::ParallelStoppedMutatorsProof<'stop>,
-        stopped: &AllStopped<'_>,
+        stopped: &'stop AllStopped<'era>,
         registry: &Registry,
     ) -> Result<Self, CollectionError> {
         if !stopped.matches_registry(registry) || heap.heap_identity() != registry.heap {
@@ -273,6 +286,7 @@ impl<'heap, 'stop> StoppedCollectorJob<'heap, 'stop> {
         Ok(Self {
             heap,
             _proof: proof,
+            _stopped: stopped,
             epoch: stopped.epoch().get(),
         })
     }
@@ -285,6 +299,7 @@ impl<'heap, 'stop> StoppedCollectorJob<'heap, 'stop> {
         root_count: usize,
         frozen_owners: usize,
     ) -> Result<CollectionReport, CollectionError> {
+        let epoch = self.epoch;
         let heap = self.heap;
         images.work = images
             .images
@@ -369,7 +384,7 @@ impl<'heap, 'stop> StoppedCollectorJob<'heap, 'stop> {
             })
             .sum();
         let report = CollectionReport {
-            epoch: self.epoch,
+            epoch,
             major: true,
             roots: root_count + image_words,
             frozen_owners,
@@ -382,7 +397,7 @@ impl<'heap, 'stop> StoppedCollectorJob<'heap, 'stop> {
         Ok(report)
     }
 }
-static_assertions::assert_not_impl_any!(StoppedCollectorJob<'static, 'static>: Send, Sync, Clone, Copy);
+static_assertions::assert_not_impl_any!(StoppedCollectorJob<'static, 'static, 'static>: Send, Sync, Clone, Copy);
 
 struct ImageSession<'a> {
     registry: &'a Registry,
@@ -575,5 +590,76 @@ fn trace_work(heap: &mut TaggedHeap, work: &CollectionWork) {
             // SAFETY: the closed descriptor covers initialized float slots.
             heap.seed_root(unsafe { TaggedValue::from_float_ptr(header.cast()) });
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "gc-memory-telemetry")))]
+mod keeper_table_scope_tests {
+    use super::*;
+    use crate::emacs_core::eval::Context;
+
+    #[test]
+    fn keeper_table_scope_guard_test_clears_on_unwind_and_refuses_nested_install() {
+        Context::with_test_collection_era(
+            |context| {
+                use crate::emacs_core::value::{HashTableTest, LispHashTable};
+                let table = context
+                    .tagged_heap
+                    .alloc_hash_table(LispHashTable::new(HashTableTest::Eq));
+                context.set_variable("p2ht-keeper-scope-root", table);
+                table.bits()
+            },
+            |era, table_bits| {
+                let mut stopped = era.stop().unwrap();
+                {
+                    let mut slot = era.collector.try_borrow_mut().unwrap();
+                    let heap = slot.as_mut().unwrap().registration_heap_mut();
+                    assert!(heap._satb_layout_reserve.collector_tables().is_null());
+                    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        collector_tables::with_stopped_tables(heap, &stopped, |heap| {
+                            assert!(!heap._satb_layout_reserve.collector_tables().is_null());
+                            assert!(matches!(
+                                collector_tables::with_stopped_tables(heap, &stopped, |_| ()),
+                                Err(RendezvousError::Busy)
+                            ));
+                            let table = TaggedValue::from_bits(table_bits);
+                            let ptr = table.as_veclike_ptr().unwrap().cast_mut().cast();
+                            let lease = KeeperTableMut::enter(&stopped, table).unwrap();
+                            // Simulate a leaked reader while all real owners are
+                            // stopped. The installed adapter must mint a keeper
+                            // lease and refuse before invoking its callback.
+                            for word in [1, super::super::table_authority::WRITER] {
+                                lease.authority_word().store(word, Ordering::Release);
+                                let rejected =
+                                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                        // SAFETY: rooted table and active real stop scope.
+                                        unsafe { heap.collector_tables().inspect(ptr, |_| ()) };
+                                    }));
+                                lease.authority_word().store(0, Ordering::Release);
+                                assert!(
+                                    rejected.is_err(),
+                                    "active collector read bypassed keeper mint"
+                                );
+                            }
+                            // SAFETY: same rooted table and still-active stop scope.
+                            unsafe {
+                                heap.collector_tables()
+                                    .inspect(ptr, |ht| assert!(ht.data.is_empty()))
+                            };
+                            panic!("exercise scoped bridge cleanup");
+                        })
+                        .unwrap();
+                    }));
+                    assert!(panic.is_err());
+                    assert!(heap._satb_layout_reserve.collector_tables().is_null());
+                }
+                // The cleaned bridge allows a subsequent real collector job.
+                era.collect_stopped(&mut stopped).unwrap();
+                stopped.complete().unwrap();
+                let (collector, keeper) = era.finish().unwrap();
+                drop(collector);
+                drop(keeper);
+            },
+        );
     }
 }

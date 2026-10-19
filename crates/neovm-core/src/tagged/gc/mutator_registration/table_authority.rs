@@ -436,6 +436,14 @@ impl<'access> TableMut<'access> {
         // serial body's single-editor assumption holds; the table is rooted
         // for the lease's lifetime.
         unsafe {
+            // Parallel owners have no installed heap TLS. Route the ordinary
+            // owned non-cons remembered claim to the lease holder explicitly;
+            // the serial choke's TLS note cannot do this on their behalf.
+            // Admission excludes concurrent marking and mapped hash tables.
+            let header = &(*self.table).header.gc;
+            if !owner_gc.is_null() && header.tenured && header.claim_remembered() {
+                (*owner_gc).remset.push(self.value);
+            }
             crate::tagged::mutate::with_hash_table_mut_inactive(self.value, |ht| {
                 let before = ht.data.sealed_storage_bytes();
                 let result = f(ht);
@@ -467,22 +475,44 @@ impl<'stop> KeeperTableMut<'stop> {
     /// must already be quiescent — that assertion IS the safety argument
     /// for editing without the word protocol.
     pub fn enter(
-        _stopped: &AllStopped<'stop>,
+        _stopped: &'stop AllStopped<'_>,
         table: TaggedValue,
     ) -> Result<Self, RegistrationError> {
         let ptr = table_object(table)?;
         // SAFETY: the mint validated the object.
         let word = unsafe { &(*ptr).table.data.authority };
-        debug_assert!(
-            quiescent(word),
-            "keeper license on a table with live authority"
-        );
+        if !quiescent(word) {
+            // A retained owner lease is a broken stop invariant. Refuse before
+            // touching payload storage in release builds as well as debug.
+            return Err(RegistrationError::Busy);
+        }
         Ok(Self {
             table: ptr,
             value: table,
             _stop: PhantomData,
             _thread: PhantomData,
         })
+    }
+
+    /// Inspect collector storage without allowing a payload reference to escape.
+    pub(in crate::tagged::gc) fn inspect<R>(
+        &self,
+        f: impl for<'table> FnOnce(&'table LispHashTable) -> R,
+    ) -> R {
+        // SAFETY: the live AllStopped borrow retained by the lease excludes
+        // every owner; the collector retains this allocation during the visit.
+        unsafe { f(&(*self.table).table) }
+    }
+
+    /// Collector-only storage edit. Unlike a mutator edit, weak sweep has no
+    /// pre-store barrier, hydration, revision hook, or TLS access. This scopes
+    /// the existing collector retain body; it performs no Lisp or safepoint.
+    pub(in crate::tagged::gc) fn edit_storage<R>(
+        &mut self,
+        f: impl for<'table> FnOnce(&'table mut LispHashTable) -> R,
+    ) -> R {
+        // SAFETY: the live AllStopped borrow excludes all owners and workers.
+        unsafe { f(&mut (*self.table).table) }
     }
 
     /// One keeper edit without the word protocol: stop-all proves no

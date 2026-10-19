@@ -62,7 +62,7 @@ impl TaggedHeap {
         let mut visit = |ptr: *mut GcHeader| {
             let header = unsafe { &*ptr };
             if header.tenured && !header.generation.permanent() {
-                bytes = bytes.saturating_add(Self::object_bytes_from_header(ptr));
+                bytes = bytes.saturating_add(self.collector_object_bytes(ptr));
             }
         };
         self.float_arena.for_each_allocated_slot(&mut visit);

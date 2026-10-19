@@ -2269,7 +2269,11 @@ impl TaggedHeap {
         }
     }
 
-    fn note_boxed_list_layout(mut header: *const GcHeader, stats: &mut Vec<BoxedKindLayoutStats>) {
+    fn note_boxed_list_layout(
+        &self,
+        mut header: *const GcHeader,
+        stats: &mut Vec<BoxedKindLayoutStats>,
+    ) {
         while !header.is_null() {
             let class = Self::boxed_class(header);
             let index = stats
@@ -2286,7 +2290,7 @@ impl TaggedHeap {
             item.objects += 1;
             item.known_bytes = item
                 .known_bytes
-                .saturating_add(Self::object_bytes_from_header(header));
+                .saturating_add(self.collector_object_bytes(header));
             unsafe {
                 item.tenured_objects += usize::from((*header).tenured);
                 header = (*header).gc_link();
@@ -2415,10 +2419,10 @@ impl TaggedHeap {
         }
 
         let mut boxed = Vec::new();
-        Self::note_boxed_list_layout(self.all_objects, &mut boxed);
-        Self::note_boxed_list_layout(self.tenured_objects, &mut boxed);
-        Self::note_boxed_list_layout(self.generational.old_objects, &mut boxed);
-        Self::note_boxed_list_layout(self.generational.old_sweep_pending, &mut boxed);
+        self.note_boxed_list_layout(self.all_objects, &mut boxed);
+        self.note_boxed_list_layout(self.tenured_objects, &mut boxed);
+        self.note_boxed_list_layout(self.generational.old_objects, &mut boxed);
+        self.note_boxed_list_layout(self.generational.old_sweep_pending, &mut boxed);
         boxed.sort_by_key(|layout| std::cmp::Reverse(layout.known_bytes));
 
         let page_backing_bytes = cons
@@ -2695,6 +2699,7 @@ mod record_arena_tests;
 /// matters) VERIFY_PARTITION.
 mod allocation;
 
+mod collector_tables;
 mod mark_sweep;
 
 #[cfg(feature = "gc-memory-telemetry")]

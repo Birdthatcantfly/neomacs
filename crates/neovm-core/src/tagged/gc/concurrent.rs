@@ -979,6 +979,7 @@ impl TaggedHeap {
                 }
             } else {
                 Self::for_each_veclike_child(
+                    self.collector_tables(),
                     ptr as *mut VecLikeHeader,
                     &mut mark_sweep::VisitChild(|child| {
                         self.push_satb_child(child);

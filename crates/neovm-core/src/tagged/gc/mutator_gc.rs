@@ -278,6 +278,9 @@ struct MutatorSatbRegistry {
     last_termination_partial_words: usize,
     #[cfg(test)]
     registered: Vec<RegisteredMutatorGc>,
+    /// Scoped pointer to the actual AllStopped guard; never a manufactured proof.
+    /// Access and lifetime erasure are confined to collector_tables.
+    collector_tables: Option<std::rc::Rc<Cell<*const ()>>>,
 }
 
 #[repr(transparent)]
@@ -304,6 +307,21 @@ const _: () = {
 };
 
 impl MutatorSatbSlot {
+    pub(super) fn collector_tables(&self) -> *const () {
+        self.0
+            .collector_tables
+            .as_ref()
+            .map_or(std::ptr::null(), |slot| slot.get())
+    }
+
+    pub(super) fn collector_tables_slot(&mut self) -> std::rc::Rc<Cell<*const ()>> {
+        std::rc::Rc::clone(
+            self.0
+                .collector_tables
+                .get_or_insert_with(|| std::rc::Rc::new(Cell::new(std::ptr::null()))),
+        )
+    }
+
     #[inline]
     pub(super) fn young_heap_identity(&self) -> super::HeapIdentity {
         self.0.young_control.heap_identity()
@@ -324,6 +342,7 @@ impl MutatorSatbSlot {
             last_termination_partial_words: 0,
             #[cfg(test)]
             registered: Vec::new(),
+            collector_tables: None,
         }))
     }
 
