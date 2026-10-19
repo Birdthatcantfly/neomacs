@@ -1,13 +1,15 @@
-error[E0432]: unresolved import `neovm_core::emacs_core::forward::ThreadProjectionTable`
- --> tests/thread_safety_ui/thread_projection_issue.rs:2:5
+error[E0624]: method `issue` is private
+ --> tests/thread_safety_ui/thread_projection_issue.rs:8:19
   |
-2 | use neovm_core::emacs_core::forward::ThreadProjectionTable;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `ThreadProjectionTable` in `emacs_core::forward`
+8 |       let _ = table.issue(CanonicalArm::Plain, Value::UNBOUND, false);
+  |                     ^^^^^ private method
   |
-note: found an item that was configured out
- --> src/emacs_core/runtime/forward/mod.rs
+ ::: src/emacs_core/runtime/forward/thread_projection.rs
   |
-  | #[cfg(test)]
-  |       ---- the item is gated here
-  | pub use thread_projection::ThreadProjectionTable;
-  |                            ^^^^^^^^^^^^^^^^^^^^^
+  | /     pub(crate) fn issue(
+  | |         &mut self,
+  | |         arm: CanonicalArm,
+  | |         plain: Value,
+  | |         host_projected: bool,
+  | |     ) -> &'static ThreadProjectionDescriptor {
+  | |____________________________________________- private method defined here

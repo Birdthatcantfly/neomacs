@@ -1,6 +1,9 @@
-// Only test builds of the crate itself have a projection table to issue from.
-use neovm_core::emacs_core::forward::ThreadProjectionTable;
+// The production table is public, but only the owning World may issue a
+// descriptor and register its canonical plain root with the obarray.
+use neovm_core::emacs_core::forward::{CanonicalArm, ThreadProjectionTable};
+use neovm_core::emacs_core::value::Value;
 
 fn main() {
-    let _ = std::mem::size_of::<ThreadProjectionTable>();
+    let mut table = ThreadProjectionTable::default();
+    let _ = table.issue(CanonicalArm::Plain, Value::UNBOUND, false);
 }
