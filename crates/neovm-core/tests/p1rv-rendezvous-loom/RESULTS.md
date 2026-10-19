@@ -114,3 +114,32 @@ positive iterations and found the same controls in 38 searches.
 | `external_poison_in_predicate_wait_gap_acquires_gate_and_wakes` | 19 | 28 | — |
 | `holder_poison_between_predicate_and_wait_is_rechecked_without_self_lock` | 1 | 1 | — |
 | `ownership_changes_across_condvar_release_before_later_holder_poison` | 10 | 12 | — |
+
+## Turn-3 admission extension
+
+`tests/admission.rs` models the lock-free slice admission protocol (design:
+`tmp/peer-constail/admission-design.md`). Bound 2 passed 8/8 in 72.35s; bound 3
+passed 7/8 — the 4-thread deep positive was stopped at 29:08 with no violation
+found and no completion in sight (bound 2 exhausts it in 1.7M iterations;
+bound 3 is intractable for that one test), and the two remaining small tests
+were rerun separately at bound 3. Logs: `tmp/peer-constail/loom/bound-2.log`,
+`bound-3.log`, `bound-3-remainder.log`.
+
+| Test | Bound 2 | Bound 3 | Required witness |
+| --- | ---: | ---: | --- |
+| `owner_slices_never_overlap_the_all_stopped_epoch` | 1,735,625 | stopped 29:08, no violation | — |
+| `fenced_authority_scan_and_owner_admission_are_mutually_observable` | 51 | 77 | — |
+| `parked_owner_loses_no_request_wake` | 28 | 60 | — |
+| `poison_reaches_parked_owner_and_refuses_further_admissions` | 14 | 25 | — |
+| `catalog_transition_refuses_inflight_slice_and_excludes_new_ones` | 1 | 1 | — |
+| `negative_missing_owner_fence_reorders_admission_past_the_scan` | 1 | 1 | ADMISSION_OWNER_FENCE_REORDER_MISSES_LIVE_SLICE |
+| `negative_unfenced_authority_scan_misses_live_slice` | 1 | 1 | ADMISSION_UNFENCED_SCAN_MISSES_LIVE_SLICE |
+| `negative_skipped_authority_scan_misses_live_slice` | 1 | 1 | ADMISSION_SKIPPED_SCAN_MISSES_LIVE_SLICE |
+
+The witness predicate is value-based: the model phase word carries a
+transition counter (bits 16..) bumped by the closing publish of every
+transition window, and a fault is `missed && pre_transition_body` — the
+authority scan never observed the owner AND the owner's fenced load read the
+pre-transition initial word. This distinguishes a legal post-window admission
+from a genuinely missed slice, so the fenced Dekker pair positives stay clean
+while each fault still produces its exact witness.

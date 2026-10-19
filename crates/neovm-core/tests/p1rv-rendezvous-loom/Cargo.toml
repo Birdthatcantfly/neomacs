@@ -43,3 +43,7 @@ path = "tests/cons_catalog.rs"
 [[test]]
 name = "cons_tails"
 path = "tests/cons_tails.rs"
+
+[[test]]
+name = "admission"
+path = "tests/admission.rs"

@@ -16,6 +16,9 @@ paths, generated code or layouts.
 | `tests/readers.rs` | Reader admission, explicit finish, Closing publications, Busy retry, abandonment, identity/generation checks and retirement |
 | `tests/wait_graph.rs` | Declared keeper/owner/resource dependencies involving the Baton, control mutex and allocator |
 | `tests/poison.rs` | Event-driven poison, gate holder identity, Condvar owner transfer and exact lost-wake/self-lock controls |
+| `tests/cons_catalog.rs` | Keeper-side catalog detach/restore: transition exclusion of new run admissions and loan refusals around the cold window |
+| `tests/cons_tails.rs` | Owner-exclusive cons tails: lent-range charges, tail publication back to the catalog, and slice-close hand-in ordering |
+| `tests/admission.rs` | Lock-free slice admission: the Dekker store->load pair (owner admission word vs keeper phase word), no slice overlapping an AllStopped epoch, no lost request wake, poison reaching parked owners, and the catalog-transition fenced scan; exact witnesses for a missing owner fence, an unfenced authority scan and a skipped scan |
 | `tests/support/mod.rs` | Exploration receipts and exact expected-panic witnesses |
 
 The control model intentionally uses one mutex and a condvar. Its heap phases
@@ -34,6 +37,19 @@ tests abstract one heap slot and use fresh controls on generation renewal.
 The scalar trace oracle also updates counters under the gate; it does not model
 actual collector work or authorize carrying that gate across runtime GC,
 worker waits or callbacks.
+
+The admission model (`tests/admission.rs`) mirrors the production phase word
+(tag/blocked/epoch, plus a model-only transition counter in bits 16.. bumped by
+the closing publish of every transition window) and the owner admission word
+(OUT, IN_SLICE packing the observed epoch, EXITED). The transition counter is
+what makes the Dekker witnesses exact by value: an admissible counter-0 word
+is exactly the pre-transition initial word, so `missed && pre_transition_body`
+identifies a slice that ran against a window the authority truly failed to
+observe, without false-firing on a legal post-window admission. Stop-path
+invariants in the model are self-healing by construction (every owner actor
+ends in a gated settle/wait, mirroring the production driver's park between
+slice batches), so no stop-path negative can fire; the load-bearing scan is
+the catalog transition's, which the controls target directly.
 
 The checked invariants include:
 
