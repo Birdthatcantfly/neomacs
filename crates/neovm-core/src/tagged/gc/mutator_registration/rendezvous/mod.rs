@@ -273,6 +273,14 @@ pub(super) fn verify_stopped(
     if registry.park.poisoned.load(Ordering::Acquire) {
         return Err(RendezvousError::Poisoned);
     }
+    // Authority half of the admission Dekker pair. Publishing here (not only
+    // at the request's guard drop) keeps the pairing sound even when the
+    // request and this verification share one gate hold: no slice admitted
+    // against the Idle word can slip past the scan into the trace.
+    registry.phase.publish(gate);
+    if !admissions_quiescent(&gate.entries) {
+        return Err(RendezvousError::Busy);
+    }
     if !gate.rendezvous.debt.is_empty() {
         return Err(RendezvousError::Busy);
     }
@@ -282,7 +290,7 @@ pub(super) fn verify_stopped(
         if !matches!(e.rendezvous.mode, Mode::Stopped | Mode::NativeStopped) {
             return Err(RendezvousError::Busy);
         }
-        if e.run_loan || e.worker_loan || entry.live_run_loan.load(Ordering::Acquire) {
+        if e.run_loan || e.worker_loan || entry.admitted() {
             return Err(RendezvousError::Loan);
         }
         if e.image.is_none() {

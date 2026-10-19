@@ -14,6 +14,12 @@ fn current_thread() -> u64 {
 
 /// The owner tag describes only a held real mutex, never substitutes for it.
 /// Clearing precedes unlock; reacquisition restores it before inspecting state.
+///
+/// Every release path also publishes the phase word computed from the final
+/// gated state (`Release`, still under the mutex), so a mutation of the
+/// rendezvous phase or the catalog-transition flag can never become
+/// invisible to the lock-free admission polls: there is exactly one
+/// publication point per release, not one per mutation site.
 pub(super) struct RegistryGuard<'a> {
     registry: &'a Registry,
     guard: Option<MutexGuard<'a, RegistryState>>,
@@ -30,6 +36,9 @@ impl<'a> RegistryGuard<'a> {
         }
     }
     fn take_for_wait(mut self) -> MutexGuard<'a, RegistryState> {
+        if let Some(state) = self.guard.as_ref() {
+            self.registry.phase.publish(state);
+        }
         self.registry.gate.gate_owner.store(0, Ordering::Release);
         self.guard.take().expect("live registry guard")
     }
@@ -47,8 +56,10 @@ impl DerefMut for RegistryGuard<'_> {
 }
 impl Drop for RegistryGuard<'_> {
     fn drop(&mut self) {
-        if self.guard.is_some() {
+        if let Some(state) = self.guard.take() {
+            self.registry.phase.publish(&state);
             self.registry.gate.gate_owner.store(0, Ordering::Release);
+            drop(state);
         }
     }
 }

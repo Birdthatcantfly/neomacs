@@ -214,7 +214,7 @@ impl ConsRunState<'_> {
         if self.registry.park.poisoned.load(Ordering::Acquire) {
             return Err(RegistrationError::Poisoned);
         }
-        if !self.entry.live_run_loan.load(Ordering::Acquire) {
+        if !self.entry.admitted() {
             return Err(RegistrationError::OutstandingLoan);
         }
         self.registry.cons_catalog.check_live()

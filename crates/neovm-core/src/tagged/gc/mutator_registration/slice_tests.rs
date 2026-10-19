@@ -251,7 +251,7 @@ fn abandoned_slice_retains_committed_cursor(panic_body: bool) {
             assert_eq!(run.close_cons_region(), Err(RegistrationError::Poisoned));
             assert_eq!(era.cons_catalog_snapshot_for_test().unwrap(), before);
         }
-        assert!(owner.entry.live_run_loan.load(Ordering::Acquire));
+        assert!(owner.entry.admitted());
         assert_eq!(owner.enter_native(&[]), Err(RendezvousError::Poisoned));
         drop(owner);
         assert_eq!(

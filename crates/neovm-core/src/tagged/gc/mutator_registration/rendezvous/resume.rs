@@ -159,10 +159,7 @@ impl<'era> Mutator<'era> {
             if registry.completed_epoch.load(Ordering::Acquire) != gate.rendezvous.completed {
                 return Err(RendezvousError::Publication);
             }
-            if state.run_loan
-                || state.worker_loan
-                || self.entry.live_run_loan.load(Ordering::Acquire)
-            {
+            if state.run_loan || state.worker_loan || self.entry.admitted() {
                 return Err(RendezvousError::Loan);
             }
             if state.readers != 0 {
@@ -247,10 +244,7 @@ impl<'owner, 'era> ResumeGcImage<'owner, 'era> {
         if registry.completed_epoch.load(Ordering::Acquire) != gate.rendezvous.completed {
             return Err(RendezvousError::Publication);
         }
-        if state.run_loan
-            || state.worker_loan
-            || self.owner.entry.live_run_loan.load(Ordering::Acquire)
-        {
+        if state.run_loan || state.worker_loan || self.owner.entry.admitted() {
             return Err(RendezvousError::Loan);
         }
         if state.readers != 0 {

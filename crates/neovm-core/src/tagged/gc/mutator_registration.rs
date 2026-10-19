@@ -10,6 +10,7 @@
 //! a usable serial World after an abandoned owner.
 #![allow(dead_code)]
 
+mod admission;
 mod collection;
 mod cons_allocation;
 mod cons_catalog;
@@ -41,11 +42,12 @@ pub use token::{
     YoungWorkerLoan,
 };
 
+use admission::{AdmissionWord, PhaseLine, admissions_quiescent};
 use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::num::NonZeroU64;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::ThreadId;
 
@@ -154,14 +156,15 @@ struct EntryState {
 
 /// Stable Send + Sync metadata. It never contains a Context, heap reference,
 /// owner-state borrow, or owner-confined SATB buffer.
-/// Line-padded so adjacent entries' admission words (the loan flag and the
-/// entry mutex) never share a cacheline across owners.
+/// Line-padded so adjacent entries' admission words and the entry mutex
+/// never share a cacheline across owners.
 #[repr(align(64))]
 pub struct MutatorEntry {
     key: MutatorKey,
     young: YoungRegistrationId,
     cancelled_start: AtomicBool,
-    live_run_loan: AtomicBool,
+    /// Owner-written slice admission word (single writer: the owner thread).
+    admission: AtomicU64,
     state: Mutex<EntryState>,
 }
 
@@ -219,6 +222,10 @@ struct Registry {
     world: HeapIdentity,
     gate: GateLine,
     park: ParkLine,
+    /// Read-mostly phase word; the only shared line the per-slice fast
+    /// path loads. Kept off the gate and park lines so gate transfers and
+    /// park RMWs never invalidate an owner's poll.
+    phase: PhaseLine,
     request_epoch: AtomicU64,
     completed_epoch: AtomicU64,
     keeper_thread: ThreadId,
@@ -373,7 +380,7 @@ impl<'heap> ParallelHeapEra<'heap> {
             key,
             young,
             cancelled_start: AtomicBool::new(false),
-            live_run_loan: AtomicBool::new(false),
+            admission: AtomicU64::new(AdmissionWord::OUT),
             state: Mutex::new(EntryState {
                 phase: EntryPhase::Frozen,
                 owner_thread: Some(std::thread::current().id()),
@@ -414,6 +421,7 @@ impl<'heap> ParallelHeapEra<'heap> {
                     poisoned: AtomicBool::new(false),
                     wake: std::sync::Condvar::new(),
                 },
+                phase: PhaseLine::new(),
                 request_epoch: AtomicU64::new(0),
                 completed_epoch: AtomicU64::new(0),
                 keeper_thread: std::thread::current().id(),
@@ -480,7 +488,7 @@ impl<'heap> ParallelHeapEra<'heap> {
             key,
             young,
             cancelled_start: AtomicBool::new(false),
-            live_run_loan: AtomicBool::new(false),
+            admission: AtomicU64::new(AdmissionWord::OUT),
             state: Mutex::new(EntryState {
                 phase: EntryPhase::Starting,
                 owner_thread: None,
@@ -568,11 +576,7 @@ impl<'heap> ParallelHeapEra<'heap> {
             index: usize,
             current: &EntryState,
         ) -> Result<(), RegistrationError> {
-            if entry.live_run_loan.load(Ordering::Acquire)
-                || current.run_loan
-                || current.worker_loan
-                || current.readers != 0
-            {
+            if entry.admitted() || current.run_loan || current.worker_loan || current.readers != 0 {
                 return Err(RegistrationError::OutstandingLoan);
             }
             if entry.cancelled_start.load(Ordering::Acquire) {

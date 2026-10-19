@@ -686,7 +686,7 @@ fn forgotten_open_cons_run_refuses_publication_native_and_finish_without_waiting
         // Unlike the Drop regression, no destructor can publish poison or
         // return this grant. Only the canonical live-loan ledger remains.
         std::mem::forget(run);
-        assert!(owner.entry.live_run_loan.load(Ordering::Acquire));
+        assert!(owner.entry.admitted());
         assert!(!era.registry().park.poisoned.load(Ordering::Acquire));
         let before = era.cons_catalog_snapshot_for_test().unwrap();
         assert!(before.installed && before.metadata_coherent);

@@ -33,6 +33,10 @@ pub(crate) const OWNER_RUNNING: u8 = 9;
 pub(crate) const NATIVE_RETURNED: u8 = 10;
 /// The returning owner is `Running` again (permission granted).
 pub(crate) const NATIVE_PERMITTED: u8 = 11;
+/// A slice admission backed out: the phase word was not admissible, so the
+/// owner refused without running (cold backout branch only; the admitted
+/// fast path carries no probe).
+pub(crate) const ADMISSION_BACKOUT: u8 = 13;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ProbeEvent {

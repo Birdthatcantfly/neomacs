@@ -105,6 +105,8 @@ impl<'era> MutatorPermit<'era> {
                     thread,
                     published: None,
                     finished: false,
+                    run_admitted: false,
+                    young_loan: false,
                     protocol: super::rendezvous::OwnerLocal::default(),
                     _thread: PhantomData,
                 })
@@ -126,13 +128,23 @@ impl Drop for RunAccess<'_, '_> {
         {
             // No allocator work in Drop. Retain the run obligation and all
             // backing until terminal era cleanup; never ACK an open region.
+            // The admission word stays IN_SLICE: a forgotten open region
+            // keeps refusing exactly like the retained loan flag did.
             self.owner.registry.poison();
             return;
         }
+        self.owner.run_admitted = false;
         self.owner
             .entry
-            .live_run_loan
-            .store(false, Ordering::SeqCst);
+            .admission
+            .store(AdmissionWord::OUT, Ordering::Release);
+        // Exit half of the admission Dekker pair: an authority scan that
+        // read IN_SLICE is SC-before this store in the fence total order,
+        // so this load observes the published request and the owner reaches
+        // the gated slow path at its slice end, not merely at its next
+        // admission attempt. The load is Acquire (never removable).
+        fence(Ordering::SeqCst);
+        let _stop_observed = self.owner.registry.phase.load();
         if self.owner.registry.park.parked.load(Ordering::SeqCst) != 0 {
             // Loan predicates (entry admission/resume) are evaluated under the
             // gate, and the condvar wait releases exactly that gate, so
@@ -173,6 +185,16 @@ pub struct Mutator<'era> {
     pub(super) thread: ThreadId,
     published: Option<PublicationBinding>,
     pub(super) finished: bool,
+    /// Owner-local mirrors of the gated entry state, replacing the fast
+    /// path's gate reads. Sound because for a Running entry every mutation
+    /// site that moves `EntryPhase`/`Mode` off Running, or flips
+    /// `worker_loan`, is owner-thread code; the owner cannot be surprised
+    /// by its own entry between two of its own gated calls. A
+    /// `mem::forget`ted `RunAccess` leaves `run_admitted` set, so the next
+    /// admission refuses with `OutstandingLoan` — the fail-safe shape of
+    /// the old `swap(true)` returning true, without the RMW.
+    run_admitted: bool,
+    young_loan: bool,
     pub(super) protocol: super::rendezvous::OwnerLocal,
     _thread: PhantomData<Rc<()>>,
 }
@@ -238,28 +260,52 @@ impl<'era> Mutator<'era> {
         Arc::clone(&self.entry)
     }
 
+    /// Lock-free slice admission (the safepoint poll): zero RMWs on shared
+    /// lines — one plain store to the owner-private admission word, one
+    /// full fence, one plain load of the read-mostly phase word.
+    ///
+    /// The gated entry/rendezvous checks the old gate-held path performed
+    /// are carried by the owner-local mirrors (`finished`, `published`,
+    /// `run_admitted`, `young_loan`) plus the phase word. A refusal after
+    /// the fence backs out to the caller's gated slow path, which is the
+    /// same place the old `Busy` landed; `check_thread` on the retry then
+    /// distinguishes poison.
     pub fn run_access(&mut self) -> Result<RunAccess<'_, 'era>, RegistrationError> {
         self.check_thread()?;
-        let gate = self.registry.lock()?;
-        let entry = self.registry.validate_ref(&gate, self.entry.key)?;
-        let state = entry.state.try_lock().map_err(entry_lock_error)?;
-        if gate.catalog_transition
-            || state.phase != EntryPhase::Running
-            || state.rendezvous.mode != super::rendezvous::Mode::Running
-            || matches!(
-                gate.rendezvous.phase,
-                super::rendezvous::Phase::Stopping(_) | super::rendezvous::Phase::Tracing(_)
-            )
-        {
+        if self.finished || self.published.is_some() {
             return Err(RegistrationError::Busy);
         }
-        if state.worker_loan {
+        if self.run_admitted || self.young_loan {
             return Err(RegistrationError::OutstandingLoan);
         }
-        if self.entry.live_run_loan.swap(true, Ordering::AcqRel) {
-            return Err(RegistrationError::OutstandingLoan);
+        let snapshot = self.registry.phase.load();
+        if !PhaseLine::admissible(snapshot) {
+            return Err(self.admission_backout());
         }
+        self.entry.admission.store(
+            AdmissionWord::in_slice(PhaseLine::epoch(snapshot)),
+            Ordering::Release,
+        );
+        fence(Ordering::SeqCst);
+        let phase = self.registry.phase.load();
+        if !PhaseLine::admissible(phase) {
+            return Err(self.admission_backout());
+        }
+        self.run_admitted = true;
         Ok(RunAccess { owner: self })
+    }
+
+    /// Cold backout: clear the admission word and report the gated refusal.
+    /// Never inline — it must not inflate the admitted fast path.
+    #[cold]
+    #[inline(never)]
+    fn admission_backout(&self) -> RegistrationError {
+        #[cfg(test)]
+        a8_probes::mark(a8_probes::ADMISSION_BACKOUT, 0, self.entry.key.owner);
+        self.entry
+            .admission
+            .store(AdmissionWord::OUT, Ordering::Release);
+        RegistrationError::Busy
     }
 
     pub fn begin_publication(
@@ -284,7 +330,7 @@ impl<'era> Mutator<'era> {
         {
             return Err(RegistrationError::Busy);
         }
-        if self.entry.live_run_loan.load(Ordering::Acquire) {
+        if self.entry.admitted() {
             return Err(RegistrationError::OutstandingLoan);
         }
 
@@ -395,7 +441,7 @@ impl<'era> Mutator<'era> {
         if state.phase != EntryPhase::Running
             || state.worker_loan
             || state.run_loan
-            || self.entry.live_run_loan.load(Ordering::Acquire)
+            || self.entry.admitted()
         {
             return Err(RegistrationError::OutstandingLoan);
         }
@@ -415,6 +461,7 @@ impl<'era> Mutator<'era> {
             .young
             .take_owner_payload()?;
         state.worker_loan = true;
+        self.young_loan = true;
         Ok(YoungWorkerLoan {
             registry: self.registry,
             key: self.entry.key,
@@ -457,6 +504,7 @@ impl<'era> Mutator<'era> {
                 return Err(error.into());
             }
             state.worker_loan = false;
+            self.young_loan = false;
             Ok(())
         })();
         match result {

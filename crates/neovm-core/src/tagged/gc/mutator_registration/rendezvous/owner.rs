@@ -163,7 +163,7 @@ impl<'era> Mutator<'era> {
             {
                 return Err(RendezvousError::Busy);
             }
-            if e.run_loan || e.worker_loan || self.entry.live_run_loan.load(Ordering::Acquire) {
+            if e.run_loan || e.worker_loan || self.entry.admitted() {
                 return Err(RendezvousError::Loan);
             }
             let epoch = match gate.rendezvous.phase {
@@ -225,7 +225,7 @@ impl<'era> Mutator<'era> {
             if matches!(gate.rendezvous.phase, Phase::Tracing(_)) {
                 return Err(RendezvousError::Busy);
             }
-            if e.run_loan || e.worker_loan || self.entry.live_run_loan.load(Ordering::Acquire) {
+            if e.run_loan || e.worker_loan || self.entry.admitted() {
                 return Err(RendezvousError::Loan);
             }
             e.rendezvous.mode = Mode::Publishing;

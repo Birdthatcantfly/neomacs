@@ -389,7 +389,7 @@ fn forgotten_run_access_blocks_finish_and_ack_then_owner_drop_poisons() {
             owner.acknowledge(epoch, &roots[..1]),
             Err(RendezvousError::Loan)
         );
-        assert!(entry.live_run_loan.load(Ordering::Acquire));
+        assert!(entry.admitted());
         assert_eq!(entry.state.lock().unwrap().rendezvous.mode, Mode::Running);
         assert!(era.try_stop().unwrap().is_none());
         drop(owner);
