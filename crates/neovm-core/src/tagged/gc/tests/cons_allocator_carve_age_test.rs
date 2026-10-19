@@ -17,7 +17,7 @@ fn registered_block(allocator: &mut ConsAllocator, old: bool) -> ConsBlock {
         // Coherent stopped fixture: install one actual old cell and update the
         // canonical count through the same collector-owned count API.
         unsafe {
-            (*block.cells_ptr()).car = TaggedValue::T;
+            (*block.cells_ptr()).car.set_plain(TaggedValue::T);
             (*block.cells_ptr()).set_cdr(TaggedValue::NIL);
         }
         block.trailer().set_old(0);

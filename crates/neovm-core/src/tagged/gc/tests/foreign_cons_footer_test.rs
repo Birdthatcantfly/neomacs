@@ -20,17 +20,17 @@ struct ForeignFooterConses {
 
 impl ForeignFooterConses {
     fn new() -> Box<Self> {
-        let cell = ConsCell {
-            car: TaggedValue::NIL,
-            cdr_or_next: crate::tagged::header::ConsCdrOrNext {
-                cdr: TaggedValue::NIL,
-            },
+        // `ConsCell` words are interior-mutable, so the cell is not `Copy`;
+        // build one per fixture slot.
+        let cell = || ConsCell {
+            car: crate::tagged::header::ConsWord::new(TaggedValue::NIL),
+            cdr_or_next: crate::tagged::header::ConsCdrWord::new(TaggedValue::NIL),
         };
         Box::new(Self {
             prefix: [1; CONS_BLOCK_BYTES - 3 * size_of::<ConsCell>() - size_of::<u64>()],
-            eight_aligned: cell,
+            eight_aligned: cell(),
             spacer: 0,
-            aligned: cell,
+            aligned: cell(),
             tail: [1; size_of::<ConsCell>()],
         })
     }
