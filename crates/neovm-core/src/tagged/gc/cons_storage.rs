@@ -434,7 +434,8 @@ impl ConsCatalog {
     /// The caller owns this exact quiescent serial heap, has stopped every
     /// participant with all regions closed, excludes marker launches/reentry,
     /// and suspends the whole-heap loan before any owner runs. While installed
-    /// no other code may read/write the heap's inert cons placeholder fields.
+    /// no other code may read/write the heap's inert cons, boxed-list or
+    /// non-cons address-set placeholder fields.
     #[cold]
     #[inline(never)]
     pub(super) unsafe fn install(&self, heap: &mut TaggedHeap) -> Result<(), RegistrationError> {

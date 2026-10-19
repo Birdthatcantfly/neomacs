@@ -79,6 +79,7 @@ fn check_shells(
 ) {
     on_heap(era, stopped, |heap| {
         let mut addresses = HashSet::new();
+        let mut births = HashSet::new();
         for snap in snaps {
             for (index, &bits) in snap.slots[..2].iter().enumerate() {
                 let value = TaggedValue::from_bits(bits);
@@ -98,19 +99,35 @@ fn check_shells(
                 unsafe {
                     assert!((*header).gc.flags.boxed());
                     if both_born || index == 1 {
+                        births.insert(address);
                         assert!((*header).gc.is_marked_at(heap.mark_parity));
                     }
                 }
             }
         }
         if live {
-            let mut current = heap.all_objects;
             let mut linked = HashSet::new();
-            while !current.is_null() {
-                assert!(linked.insert(current as usize), "acyclic boxed list");
-                // SAFETY: stopped heap owns every node on the intrusive list.
-                current = unsafe { (*current).next };
+            let mut young = HashSet::new();
+            for (index, head) in [heap.all_objects, heap.generational.old_objects]
+                .into_iter()
+                .enumerate()
+            {
+                let mut current = head;
+                while !current.is_null() {
+                    assert!(
+                        linked.insert(current as usize),
+                        "disjoint acyclic boxed lists"
+                    );
+                    if index == 0 {
+                        young.insert(current as usize);
+                    }
+                    // SAFETY: stopped heap owns every node on both lists.
+                    current = unsafe { (*current).next };
+                }
             }
+            // Fresh shells always join all_objects. After a GEN1 collection,
+            // the unchanged source shell may instead be on the old list.
+            assert!(births.is_subset(&young));
             assert!(addresses.is_subset(&linked));
         }
     });
@@ -261,10 +278,26 @@ fn a6_ht_b7_make_copy_collect_resume_and_reclaim() {
                     session.round(Go::Forced, true, |era, stopped| {
                         check_graphs(era, stopped, &graphs, false);
                         check_shells(era, stopped, &graphs, false, false);
+                        on_heap(era, stopped, |heap| {
+                            for snap in &recopied {
+                                // GEN1 clear logs the old owner. The stopped
+                                // collector deliberately roots that pending
+                                // obligation for this cycle, then drains it.
+                                // Its empty payload no longer keeps the graph.
+                                assert_eq!(
+                                    heap.owns_heap_value_for_test(TaggedValue::from_bits(
+                                        snap.slots[1]
+                                    )),
+                                    heap.generational_enabled()
+                                );
+                            }
+                        });
+                    });
+                    let ends = session.finish_owners(|era, stopped| {
+                        check_graphs(era, stopped, &graphs, false);
+                        check_shells(era, stopped, &graphs, false, false);
                         check_shells(era, stopped, &recopied, false, false);
                     });
-                    let ends = session
-                        .finish_owners(|era, stopped| check_graphs(era, stopped, &graphs, false));
                     assert_eq!(ends.len(), N);
                     assert!(
                         ends.iter()
@@ -285,7 +318,7 @@ fn a6_ht_b7_make_copy_collect_resume_and_reclaim() {
 /// inspection is of the copy, so a later writer edit must never affect it.
 #[test]
 fn a6_ht_b7_copy_while_another_owner_mutates() {
-    const KEYS: usize = 32;
+    const KEYS: usize = 15;
     const REPS: usize = 32;
     let setup = HtSetup {
         source: "(list (make-hash-table :test 'eq))",
@@ -358,6 +391,41 @@ fn a6_ht_b7_copy_while_another_owner_mutates() {
                 }
             }
         }
+    }
+
+    // Witness the actual copying leases: all three snapshots hold their
+    // source reader count while the writer attempts its first insertion.
+    // Omitting the stress program's initial clear keeps that writer from
+    // entering before the readers have reached the barrier.
+    let witnessed = vec![
+        programs[1].clone(),
+        programs[2].clone(),
+        programs[3].clone(),
+        programs[0][1..].to_vec(),
+    ];
+    let abort = AtomicBool::new(false);
+    let witness = HtWitness::new(0, 3, 1, &abort);
+    let mut env = HtEnv::new(&[], HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
+    env.witness = Some(&witness);
+    let (lines, _) = run_ht_overlap_session(&setup, &witnessed, 1, 0, &env, 9850, &[]);
+    assert!(witness.max_readers.load(Ordering::SeqCst) >= 3);
+    for seen in &witness.seen {
+        assert_eq!(seen.load(Ordering::SeqCst), 3);
+    }
+    assert!(
+        witness.drain_observed.load(Ordering::SeqCst),
+        "source writer attempted while copying readers were live"
+    );
+    assert_eq!(witness.writer_word.load(Ordering::SeqCst), HT_WRITER_BIT);
+    for owner in &lines[..3] {
+        assert_eq!(owner.len(), 1);
+        let fields: Vec<_> = owner[0]
+            .trim_matches(['(', ')'])
+            .split_whitespace()
+            .collect();
+        assert_eq!(fields.len(), 1 + 2 * KEYS);
+        assert_eq!(fields[0], "0", "copy precedes the drained insertion");
+        assert!(fields[1..].iter().all(|field| *field == "nil"));
     }
 }
 

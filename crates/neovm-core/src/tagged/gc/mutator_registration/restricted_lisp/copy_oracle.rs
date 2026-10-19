@@ -101,45 +101,50 @@ fn a6_ht_make_copy_serial_twins_match_gnu_oracle() {
 // hash and compare callbacks copy a guarded source, mutate the copy and
 // observe that the original remains guarded. The copy preserves metadata
 // and the custom test callbacks; each later custom lookup exercises them.
-const CUSTOM_COPY_FORM: &str = r#"(let (answers)
-   (dolist (callback '(hash compare))
-     (let ((source nil) (armed nil) (fired nil) (copy nil) (observed nil))
-       (let ((action
-              (lambda ()
-                (when (and armed (not fired))
-                  (setq fired t copy (copy-hash-table source))
-                  (setq observed
-                        (list (eq (hash-table-test source) (hash-table-test copy))
-                              (= (hash-table-size source) (hash-table-size copy))
-                              (= (hash-table-rehash-size source)
-                                 (hash-table-rehash-size copy))
-                              (= (hash-table-rehash-threshold source)
-                                 (hash-table-rehash-threshold copy))
-                              (eq (hash-table-weakness source)
-                                  (hash-table-weakness copy))
-                              (puthash "copy-only" 2 copy)
-                              (condition-case err (puthash "source-only" 3 source)
-                                (error (list (car err) (cadr err)
-                                             (eq (nth 2 err) source))))))))))
-         (define-hash-table-test
-          'a6-b7-copy-test
-          (lambda (a b)
-            (when (eq callback 'compare) (funcall action))
-            (equal a b))
-          (lambda (_key)
-            (when (eq callback 'hash) (funcall action))
-            0))
-         (setq source (make-hash-table :test 'a6-b7-copy-test :size 32
-                                       :rehash-size 2.0 :rehash-threshold 0.8))
-         (puthash (copy-sequence "key") 1 source)
-         (setq armed t)
-         (let ((answer (gethash (copy-sequence "key") source)))
-           (setq armed nil)
-           (push (list callback answer observed
-                       (hash-table-count source) (hash-table-count copy)
-                       (gethash "key" copy) (gethash "copy-only" source 'absent))
-                 answers)))))
-   (nreverse answers))"#;
+const CUSTOM_COPY_FORM: &str = r#"(let ((answers nil) (callbacks '(compare hash)))
+  (while callbacks
+    (let ((callback (car callbacks))
+          (source nil) (armed nil) (fired nil) (copy nil) (observed nil))
+      (let ((action
+             (lambda ()
+               (if armed
+                   (if fired nil
+                     (progn
+                       (setq fired t copy (copy-hash-table source))
+                       (setq observed
+                             (list (eq (hash-table-test source) (hash-table-test copy))
+                                   (= (hash-table-size source) (hash-table-size copy))
+                                   (= (hash-table-rehash-size source)
+                                      (hash-table-rehash-size copy))
+                                   (= (hash-table-rehash-threshold source)
+                                      (hash-table-rehash-threshold copy))
+                                   (eq (hash-table-weakness source)
+                                       (hash-table-weakness copy))
+                                   (puthash "copy-only" 2 copy)
+                                   (condition-case err (puthash "source-only" 3 source)
+                                     (error (list (car err) (car (cdr err))
+                                                  (eq (nth 2 err) source))))))))))))
+        (define-hash-table-test
+         'a6-b7-copy-test
+         (lambda (a b)
+           (if (eq callback 'compare) (funcall action))
+           (equal a b))
+         (lambda (_key)
+           (if (eq callback 'hash) (funcall action))
+           0))
+        (setq source (make-hash-table :test 'a6-b7-copy-test :size 32
+                                      :rehash-size 2.0 :rehash-threshold 0.8))
+        (puthash (copy-sequence "key") 1 source)
+        (setq armed t)
+        (let ((answer (gethash (copy-sequence "key") source)))
+          (setq armed nil)
+          (setq answers
+                (cons (list callback answer observed
+                            (hash-table-count source) (hash-table-count copy)
+                            (gethash "key" copy) (gethash "copy-only" source 'absent))
+                      answers)))))
+    (setq callbacks (cdr callbacks)))
+  answers)"#;
 
 #[test]
 fn a6_ht_copy_metadata_and_custom_callbacks_match_gnu_oracle() {

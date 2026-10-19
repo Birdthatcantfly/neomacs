@@ -1,6 +1,6 @@
 //! Cold canonical registration, rooted rendezvous and scoped stopped collection.
-//! Running authority admits rooted cons allocation only. The serial inline
-//! iterator remains the Sim representation. The restricted overlap executor
+//! Running authority admits rooted cons and sealed hash-table allocation.
+//! The serial inline iterator remains the Sim representation. The overlap executor
 //! is the `restricted_lisp` test module and is absent from every
 //! `NEOVM_THREADS` mode. Production still has no public Lisp overlap entry.
 //!

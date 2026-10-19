@@ -1,7 +1,8 @@
 //! Test-only restricted Lisp overlap. Production has no call into this module,
 //! and `#[cfg(test)]` keeps it out of every `NEOVM_THREADS` mode.
 //!
-//! Owners allocate only through `RunSlice::cons_into` inside `with_slice`.
+//! Owners allocate conses through `RunSlice::cons_into` inside `with_slice`,
+//! and tables through the rooted `RunAccess` make/copy operations.
 //! Hot operands live in branded `SliceRoot` slots. `SharedRoot` is cold setup.
 //! A program that uses anything outside the closed subset is rejected before
 //! any owner is activated.
@@ -1859,6 +1860,39 @@ fn plain_rem(
     })
 }
 
+/// Observe the real reader lease used by count or copy while its count is live.
+fn observe_reader_witness(lease: &TableRef<'_>, w: &HtWitness<'_>, index: usize) {
+    let word = lease.authority_word().load(Ordering::Acquire);
+    w.max_readers
+        .fetch_max(word & HT_READER_MASK, Ordering::SeqCst);
+    // All `readers` owners are inside their reader lease at once:
+    // each holds one count, so the word observed after the barrier
+    // is exactly the overlap witness (design §6).
+    arrive(&w.flag, &w.seen[index], w.readers, w.abort);
+    let word = lease.authority_word().load(Ordering::Acquire);
+    w.max_readers
+        .fetch_max(word & HT_READER_MASK, Ordering::SeqCst);
+    if w.writers > 0 {
+        // The writer publishes its attempt only after every reader
+        // is inside, so this wait cannot miss it; the writer cannot
+        // take WRITER while our count is live, so the word observed
+        // here IS its drain wait: nonzero readers, no writer bit.
+        let deadline = Instant::now() + SPIN_WAIT;
+        while !w.writer_attempting.load(Ordering::SeqCst) {
+            if w.abort.load(Ordering::SeqCst) || Instant::now() >= deadline {
+                panic!("reader waited past the writer's attempt");
+            }
+            thread::yield_now();
+        }
+        let word = lease.authority_word().load(Ordering::Acquire);
+        assert!(
+            word & HT_READER_MASK > 0 && word & HT_WRITER_BIT == 0,
+            "a live reader count excludes the writer bit"
+        );
+        w.drain_observed.store(true, Ordering::SeqCst);
+    }
+}
+
 /// `hash-table-count` as one sealed read. With a B4 witness, the read is
 /// also the reader rendezvous: the lease holds across the barrier, and the
 /// authority word observed there is the overlap evidence.
@@ -1870,35 +1904,7 @@ fn plain_count(
     with_run(owner, |run| {
         let lease = TableRef::enter(run, table_tv)?;
         if let Some((w, index)) = witness {
-            let word = lease.authority_word().load(Ordering::Acquire);
-            w.max_readers
-                .fetch_max(word & HT_READER_MASK, Ordering::SeqCst);
-            // All `readers` owners are inside their reader lease at once:
-            // each holds one count, so the word observed after the barrier
-            // is exactly the overlap witness (design §6).
-            arrive(&w.flag, &w.seen[index], w.readers, w.abort);
-            let word = lease.authority_word().load(Ordering::Acquire);
-            w.max_readers
-                .fetch_max(word & HT_READER_MASK, Ordering::SeqCst);
-            if w.writers > 0 {
-                // The writer publishes its attempt only after every reader
-                // is inside, so this wait cannot miss it; the writer cannot
-                // take WRITER while our count is live, so the word observed
-                // here IS its drain wait: nonzero readers, no writer bit.
-                let deadline = Instant::now() + SPIN_WAIT;
-                while !w.writer_attempting.load(Ordering::SeqCst) {
-                    if w.abort.load(Ordering::SeqCst) || Instant::now() >= deadline {
-                        panic!("reader waited past the writer's attempt");
-                    }
-                    thread::yield_now();
-                }
-                let word = lease.authority_word().load(Ordering::Acquire);
-                assert!(
-                    word & HT_READER_MASK > 0 && word & HT_WRITER_BIT == 0,
-                    "a live reader count excludes the writer bit"
-                );
-                w.drain_observed.store(true, Ordering::SeqCst);
-            }
+            observe_reader_witness(&lease, w, index);
         }
         Ok(lease.read(|s| s.len()))
     })
@@ -2016,7 +2022,15 @@ fn ht_step<'era>(
             let source = home_index(table, slots.len())?;
             let dst = home_index(dst, slots.len())?;
             return with_run(owner, |run| {
-                run.copy_hash_table_into(&slots[source], &slots[dst])?;
+                if let Some(witness) =
+                    env.and_then(|env| env.witness.filter(|witness| witness.table_slot == table))
+                {
+                    run.copy_hash_table_into_observed(&slots[source], &slots[dst], |lease| {
+                        observe_reader_witness(lease, witness, index);
+                    })?;
+                } else {
+                    run.copy_hash_table_into(&slots[source], &slots[dst])?;
+                }
                 Ok(())
             });
         }

@@ -37,6 +37,26 @@ impl RunAccess<'_, '_> {
         source: &OwnerRootSlot<'_>,
         destination: &OwnerRootSlot<'_>,
     ) -> Result<(), RegistrationError> {
+        self.copy_hash_table_into_with(source, destination, |_| {})
+    }
+
+    /// Test-only observation of the actual copying lease, before its snapshot.
+    #[cfg(test)]
+    pub(super) fn copy_hash_table_into_observed(
+        &mut self,
+        source: &OwnerRootSlot<'_>,
+        destination: &OwnerRootSlot<'_>,
+        observe: impl FnOnce(&TableRef<'_>),
+    ) -> Result<(), RegistrationError> {
+        self.copy_hash_table_into_with(source, destination, observe)
+    }
+
+    fn copy_hash_table_into_with(
+        &mut self,
+        source: &OwnerRootSlot<'_>,
+        destination: &OwnerRootSlot<'_>,
+        observe: impl FnOnce(&TableRef<'_>),
+    ) -> Result<(), RegistrationError> {
         self.cons_state().check_boundary()?;
         source.check(self)?;
         destination.check(self)?;
@@ -49,6 +69,7 @@ impl RunAccess<'_, '_> {
             .value();
         let table = {
             let lease = TableRef::enter(self, value)?;
+            observe(&lease);
             lease.snapshot_for_copy()
         };
         // This run cannot ACK while the ordinary owned clone is temporarily
