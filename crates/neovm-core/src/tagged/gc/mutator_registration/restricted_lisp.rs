@@ -114,6 +114,17 @@ enum Op {
     HtClear {
         table: u16,
     },
+    /// B7 owner allocation; the initialized shell is rooted before return.
+    HtMake {
+        dst: u16,
+        test: HashTableTest,
+        size: usize,
+    },
+    /// Snapshot the source under a reader, then root an independent shell.
+    HtCopy {
+        table: u16,
+        dst: u16,
+    },
     HtCount {
         table: u16,
         dst: u16,
@@ -559,6 +570,18 @@ fn prevalidate_with(
                 table_must(slots.as_slice(), nslots, table)?;
                 pc += 1;
             }
+            Op::HtMake { dst, size, .. } => {
+                if size > STEP_CAP as usize {
+                    return Err(Reject::Unbounded);
+                }
+                slots[slot_index(dst, nslots)?] = Abs::Table;
+                pc += 1;
+            }
+            Op::HtCopy { table, dst } => {
+                table_must(slots.as_slice(), nslots, table)?;
+                slots[slot_index(dst, nslots)?] = Abs::Table;
+                pc += 1;
+            }
             Op::HtCount { table, dst } => {
                 table_must(slots.as_slice(), nslots, table)?;
                 slots[slot_index(dst, nslots)?] = Abs::Top;
@@ -844,7 +867,7 @@ fn oracle_lines() -> Vec<&'static str> {
     let lines: Vec<_> = include_str!("restricted_lisp_oracle.expected")
         .lines()
         .collect();
-    assert_eq!(lines.len(), 35, "GNU 31.1 oracle fixture");
+    assert_eq!(lines.len(), 39, "GNU 31.1 oracle fixture");
     lines
 }
 
@@ -1069,6 +1092,8 @@ fn exec<'brand>(
             | Op::HtPut { .. }
             | Op::HtRem { .. }
             | Op::HtClear { .. }
+            | Op::HtMake { .. }
+            | Op::HtCopy { .. }
             | Op::HtCount { .. } => {
                 // Leases mint from `&mut RunAccess`, and the open slice
                 // region is borrowing it: leave pc on the op and let the
@@ -1976,6 +2001,27 @@ fn ht_step<'era>(
     env: Option<&HtEnv<'_>>,
     index: usize,
 ) -> Result<(), ExecError> {
+    // Construction never needs an operand Value in the executor: the sealed
+    // allocation bridge validates both homes, links/account-charges the shell,
+    // and installs the result before this run can reach a poll point.
+    match op {
+        Op::HtMake { dst, test, size } => {
+            let dst = home_index(dst, slots.len())?;
+            return with_run(owner, |run| {
+                run.make_hash_table_into(test, size, &slots[dst])?;
+                Ok(())
+            });
+        }
+        Op::HtCopy { table, dst } => {
+            let source = home_index(table, slots.len())?;
+            let dst = home_index(dst, slots.len())?;
+            return with_run(owner, |run| {
+                run.copy_hash_table_into(&slots[source], &slots[dst])?;
+                Ok(())
+            });
+        }
+        _ => {}
+    }
     // The user-program dispatch table: a registered program for the table
     // slot selects the user path, and the harness invariant is that those
     // tables really are user-defined (and vice versa for the plain path).
@@ -6189,3 +6235,9 @@ fn a6_ht_growth_serial_twin_matches_gnu_oracle() {
 
 #[path = "restricted_lisp/gc_tables.rs"]
 mod gc_tables;
+
+#[path = "restricted_lisp/allocation_tables.rs"]
+mod allocation_tables;
+
+#[path = "restricted_lisp/copy_oracle.rs"]
+mod copy_oracle;

@@ -164,3 +164,70 @@
  (list (hash-table-count a6-tK)
        (gethash 129 a6-tK)
        (progn (remhash 5 a6-tK) (remhash 6 a6-tK) (hash-table-count a6-tK))))
+
+;; B7 twins: tables made and copied by an owner, shallow values and independent
+;; entry storage. The cons key is the SAME object for both table lookups.
+(dolist (test '(eq eql equal))
+  (let* ((source (make-hash-table :test test :size 4))
+         (key (cons 7 nil))
+         (value (cons 41 nil)))
+    (puthash key value source)
+    (let ((copy (copy-hash-table source)))
+      (puthash key 99 source)
+      (puthash 8 88 source)
+      (setcar value 77)
+      (let ((source-count (hash-table-count source))
+            (copy-count (hash-table-count copy))
+            (copy-value (gethash key copy 'a6-miss))
+            (source-value (gethash key source 'a6-miss)))
+        (clrhash source)
+        (neovm-a6-out
+         (list source-count copy-count
+               (not (eq copy-value 'a6-miss)) copy-value
+               (not (eq source-value 'a6-miss)) source-value
+               (hash-table-count source) (hash-table-count copy)
+               (not (eq (gethash key copy 'a6-miss) 'a6-miss))
+               (gethash key copy)))))))
+
+;; A copy made inside either kind of custom callback keeps all metadata and
+;; callbacks, permits mutation, and leaves the source's test guard intact.
+(neovm-a6-out
+ (let (answers)
+   (dolist (callback '(hash compare))
+     (let ((source nil) (armed nil) (fired nil) (copy nil) (observed nil))
+       (let ((action
+              (lambda ()
+                (when (and armed (not fired))
+                  (setq fired t copy (copy-hash-table source))
+                  (setq observed
+                        (list (eq (hash-table-test source) (hash-table-test copy))
+                              (= (hash-table-size source) (hash-table-size copy))
+                              (= (hash-table-rehash-size source)
+                                 (hash-table-rehash-size copy))
+                              (= (hash-table-rehash-threshold source)
+                                 (hash-table-rehash-threshold copy))
+                              (eq (hash-table-weakness source)
+                                  (hash-table-weakness copy))
+                              (puthash "copy-only" 2 copy)
+                              (condition-case err (puthash "source-only" 3 source)
+                                (error (list (car err) (cadr err)
+                                             (eq (nth 2 err) source))))))))))
+         (define-hash-table-test
+          'a6-b7-copy-test
+          (lambda (a b)
+            (when (eq callback 'compare) (funcall action))
+            (equal a b))
+          (lambda (_key)
+            (when (eq callback 'hash) (funcall action))
+            0))
+         (setq source (make-hash-table :test 'a6-b7-copy-test :size 32
+                                       :rehash-size 2.0 :rehash-threshold 0.8))
+         (puthash (copy-sequence "key") 1 source)
+         (setq armed t)
+         (let ((answer (gethash (copy-sequence "key") source)))
+           (setq armed nil)
+           (push (list callback answer observed
+                       (hash-table-count source) (hash-table-count copy)
+                       (gethash "key" copy) (gethash "copy-only" source 'absent))
+                 answers)))))
+   (nreverse answers)))

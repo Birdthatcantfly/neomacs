@@ -33,3 +33,7 @@ nil
 22
 12
 (130 387 128)
+(2 1 t (77) t 99 0 1 t (77))
+(2 1 t (77) t 99 0 1 t (77))
+(2 1 t (77) t 99 0 1 t (77))
+((hash 1 (t t t t t 2 (error "hash table test modifies table" t)) 1 2 1 absent) (compare 1 (t t t t t 2 (error "hash table test modifies table" t)) 1 2 1 absent))
