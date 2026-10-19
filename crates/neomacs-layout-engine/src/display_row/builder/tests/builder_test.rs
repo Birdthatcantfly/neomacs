@@ -534,6 +534,102 @@ fn append_measured_display_item_to_current_text_row_uses_glyph_measurer() {
 }
 
 #[test]
+fn display_row_progress_writer_reuses_admission_advance_for_proportional_and_wide_clipping() {
+    struct MeasurementBudget {
+        remaining: std::array::IntoIter<(char, u8, f32), 4>,
+    }
+
+    impl DisplayGlyphMeasurer for MeasurementBudget {
+        fn glyph_advance_px(
+            &mut self,
+            ch: char,
+            face_id: FaceId,
+            columns: u8,
+            _fallback_advance_px: f32,
+        ) -> Option<f32> {
+            let (expected_char, expected_columns, advance) = self
+                .remaining
+                .next()
+                .expect("one measurement budgeted per input character, including rejected text");
+            assert_eq!(ch, expected_char);
+            assert_eq!(columns, expected_columns);
+            assert_eq!(face_id, FaceId::new(2));
+            Some(advance)
+        }
+
+        fn glyph_vertical_metrics_px(
+            &mut self,
+            _ch: char,
+            _face_id: FaceId,
+        ) -> Option<DisplayRowVerticalMetrics> {
+            Some(DisplayRowVerticalMetrics::new(12.0, 9.0))
+        }
+    }
+
+    for (area, expected_end, expected_widths) in [
+        (
+            GlyphArea::Text,
+            DisplayRowPosition::new(35.0, 4),
+            &[12.0, 4.0, 19.0][..],
+        ),
+        (
+            GlyphArea::LeftMargin,
+            DisplayRowPosition::new(36.0, 5),
+            &[12.0, 4.0, 19.0, 1.0][..],
+        ),
+    ] {
+        let mut row = GlyphRow::new(GlyphRowRole::Text);
+        let row_layout = layout();
+        let mut measurer = MeasurementBudget {
+            remaining: [
+                ('m', 1, 12.0),
+                ('i', 1, 4.0),
+                ('中', 2, 19.0),
+                ('W', 1, 14.0),
+            ]
+            .into_iter(),
+        };
+        let mut writer = DisplayRowProgressWriter::with_glyph_measurer_for_area(
+            &row_layout,
+            &mut row,
+            &mut measurer,
+            DisplayRowPosition::new(0.0, 0),
+            36.0,
+            area,
+        );
+
+        let progress = writer.push_item(independent_text_item("mi中W"));
+
+        assert_eq!(progress.status(), DisplayRowAppendStatus::Clipped);
+        assert_eq!(progress.end(), expected_end);
+        assert_eq!(
+            progress
+                .slots()
+                .iter()
+                .map(|slot| slot.width_px())
+                .collect::<Vec<_>>(),
+            expected_widths,
+        );
+        let glyphs = &row.glyphs[area.index()];
+        assert_eq!(
+            glyphs
+                .iter()
+                .filter(|glyph| !glyph.padding)
+                .map(|glyph| glyph.pixel_width)
+                .collect::<Vec<_>>(),
+            expected_widths,
+        );
+        let wide = &glyphs[2];
+        assert_eq!(wide.glyph_type, GlyphType::Char { ch: '中' });
+        assert!(wide.wide);
+        assert_eq!(wide.pixel_height, 12.0);
+        assert_eq!(wide.pixel_ascent, 9.0);
+        assert!(glyphs[3].padding);
+        assert!(measurer.remaining.next().is_none());
+    }
+}
+
+#[test]
 fn measured_text_glyph_carries_the_selected_font_vertical_metrics() {
     struct FallbackFontMeasurer;
 

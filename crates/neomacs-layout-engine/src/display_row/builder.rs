@@ -242,6 +242,14 @@ struct DisplayRowTextCharAdvanceRequest<'a> {
     measurement: &'a DisplayTextRunMeasurement,
 }
 
+/// Stack-local admission result paired with its character request. It is
+/// consumed by the same writer, never retained across a source callback.
+#[derive(Debug)]
+struct DisplayRowResolvedTextCharAdvance<'a> {
+    request: DisplayRowTextCharAdvanceRequest<'a>,
+    natural_advance_px: f32,
+}
+
 impl<'a> DisplayRowTextCharAdvanceRequest<'a> {
     fn new(
         char_state: DisplayRowTextCharState,
@@ -310,6 +318,16 @@ impl<'a> DisplayRowTextCharAdvanceRequest<'a> {
         self.resolve_advance_px(&policy, |ch, face_id, columns| {
             writer.glyph_advance_px(ch, face_id, columns)
         })
+    }
+
+    fn resolve_for_admission(
+        self,
+        writer: &mut DisplayRowWriter<'_, '_, '_>,
+    ) -> DisplayRowResolvedTextCharAdvance<'a> {
+        DisplayRowResolvedTextCharAdvance {
+            request: self,
+            natural_advance_px: self.resolve_advance_px_with_writer(writer),
+        }
     }
 }
 
@@ -2128,10 +2146,13 @@ impl<'layout, 'row, 'measurer> DisplayRowProgressWriter<'layout, 'row, 'measurer
                 byte_offset,
                 &measurement,
             );
-            let natural_advance = advance_request.resolve_advance_px_with_writer(&mut self.writer);
-            let advance =
-                self.writer
-                    .item_horizontal_advance_px(ch, face_id, natural_advance, item_layout);
+            let resolved_advance = advance_request.resolve_for_admission(&mut self.writer);
+            let advance = self.writer.item_horizontal_advance_px(
+                ch,
+                face_id,
+                resolved_advance.natural_advance_px,
+                item_layout,
+            );
             let overflowing = !(self.buffer_tab_admission && ch == '\t')
                 && advance > 0.0
                 && self.position.x_px + advance > self.max_x_px;
@@ -2154,11 +2175,11 @@ impl<'layout, 'row, 'measurer> DisplayRowProgressWriter<'layout, 'row, 'measurer
             if resolved_source_mapping.is_none() {
                 resolved_source_mapping = Some(source_mapping.resolve(span, self.writer.row));
             }
-            self.writer.push_text_char_state_with_advance_request(
+            self.writer.push_text_char_state_with_resolved_advance(
                 resolved_source_mapping
                     .expect("text source mapping resolved before glyph emission")
                     .provenance(char_offset),
-                advance_request,
+                resolved_advance,
             );
             self.writer
                 .apply_item_layout_since(before_len, face_id, item_layout);
@@ -2627,6 +2648,31 @@ impl<'layout, 'row, 'measurer> DisplayRowWriter<'layout, 'row, 'measurer> {
         provenance: GlyphProvenance,
         advance_request: DisplayRowTextCharAdvanceRequest<'_>,
     ) {
+        self.push_text_char_state_with_advance_resolution(
+            provenance,
+            advance_request,
+            |writer, request| request.resolve_advance_px_with_writer(writer),
+        );
+    }
+
+    fn push_text_char_state_with_resolved_advance(
+        &mut self,
+        provenance: GlyphProvenance,
+        resolved: DisplayRowResolvedTextCharAdvance<'_>,
+    ) {
+        self.push_text_char_state_with_advance_resolution(
+            provenance,
+            resolved.request,
+            |_writer, _request| resolved.natural_advance_px,
+        );
+    }
+
+    fn push_text_char_state_with_advance_resolution<'request>(
+        &mut self,
+        provenance: GlyphProvenance,
+        advance_request: DisplayRowTextCharAdvanceRequest<'request>,
+        resolve_advance: impl FnOnce(&mut Self, DisplayRowTextCharAdvanceRequest<'request>) -> f32,
+    ) {
         let ch = advance_request.ch();
         let face_id = advance_request.face_id;
         let area_index = self.area_index();
@@ -2649,7 +2695,7 @@ impl<'layout, 'row, 'measurer> DisplayRowWriter<'layout, 'row, 'measurer> {
                 );
             }
             DisplayRowTextNaturalAdvanceKind::ComplexRunMember => {
-                let advance = advance_request.resolve_advance_px_with_writer(self);
+                let advance = resolve_advance(self, advance_request);
                 glyph_row_writer::push_run_member_to_area(
                     self.row,
                     area_index,
@@ -2660,7 +2706,7 @@ impl<'layout, 'row, 'measurer> DisplayRowWriter<'layout, 'row, 'measurer> {
                 );
             }
             DisplayRowTextNaturalAdvanceKind::FaceColumns { columns } if columns > 1 => {
-                let advance = advance_request.resolve_advance_px_with_writer(self);
+                let advance = resolve_advance(self, advance_request);
                 glyph_row_writer::push_wide_char_to_area(
                     self.row,
                     area_index,
@@ -2680,7 +2726,7 @@ impl<'layout, 'row, 'measurer> DisplayRowWriter<'layout, 'row, 'measurer> {
                 );
             }
             DisplayRowTextNaturalAdvanceKind::FaceColumns { .. } => {
-                let advance = advance_request.resolve_advance_px_with_writer(self);
+                let advance = resolve_advance(self, advance_request);
                 glyph_row_writer::push_char_to_area(
                     self.row,
                     area_index,
