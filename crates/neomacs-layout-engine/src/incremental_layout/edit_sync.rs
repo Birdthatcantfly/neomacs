@@ -36,7 +36,7 @@
 //! | --- | --- | --- | --- |
 //! | `NEOMACS_LAYOUT_EDIT_SYNC` | `sync` | `prove`; `sync`/`on`/`1`/`true`/`yes` | Synchronize the edit walk with unchanged rows below it. |
 //! | `NEOMACS_EDIT_SYNC_DENSE_INDEX` | `on` | `off`, `on` | Use proved consecutive row indexes for edit-plan membership and surviving-row remapping; every unproved case keeps the original hash path. |
-//! | `NEOMACS_EDIT_SYNC_FONTIFY_COVERAGE` | `on` | `off`; `on`/`1`/`true`/`yes` | Prove that an admitted edit-Sync attempt has no uncovered point query using current immutable row extrema; unknown or intersecting ranges retain the full iterator. |
+//! | `NEOMACS_EDIT_SYNC_FONTIFY_COVERAGE` | `on` | `off`; `on`/`1`/`true`/`yes` | Prove that an admitted edit-Sync attempt or a completed freshness-checked full/cursor/scroll walk has no uncovered point query using current immutable row extrema; unknown or intersecting ranges retain the full iterator. |
 //! | `NEOMACS_EDIT_SYNC_STILL` | `off` | `off`, `on` | Transfer synchronized geometry without remapping when its placement and visibility are unchanged. |
 //! | `NEOMACS_EDIT_SYNC_PROVE_FIRST` | `off` | `off`, `on` | Prefer a completely admitted bounded prove producer inside GNU sync; rejected proofs still use general sync. |
 //! | `NEOMACS_EDIT_SYNC_LAZY_PROOF` | `on` | `off`, `on` | Defer source proof until bounded fallback is possible in general Sync with ProveFirst off. |

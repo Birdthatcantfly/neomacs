@@ -79,6 +79,15 @@ pub(crate) enum VisibleFontificationCoverage {
     Requires(VisibleFontificationPlan),
 }
 
+/// Admission belongs only to this immutable inspection, never a retained owner
+/// or cross-mutator cache. Synthetic/eager callers keep the original iterator.
+#[derive(Clone, Copy, Debug)]
+enum InspectionAdmission {
+    Eager,
+    EditSyncAttempt,
+    CompletedWalk,
+}
+
 impl VisibleFontificationCoverage {
     /// Existing eager consumer: always follows the original inspector.
     #[inline]
@@ -87,7 +96,31 @@ impl VisibleFontificationCoverage {
         snapshot: &WindowDisplaySnapshot,
         contiguous_prepass_end: CharPos0,
     ) -> Self {
-        Self::inspect_for_edit_sync(buffer, snapshot, contiguous_prepass_end, false)
+        Self::inspect_with_admission(
+            buffer,
+            snapshot,
+            contiguous_prepass_end,
+            InspectionAdmission::Eager,
+        )
+    }
+
+    /// Inspect a completed full/cursor/scroll walk after the engine has checked
+    /// its buffer-body/chrome freshness and topology. The numeric exclusion is
+    /// independent of which producer completed; it proves only that the old
+    /// iterator would issue no property query. It does not certify a snapshot
+    /// for publication or authorize reuse of synthetic/unknown point storage.
+    #[inline]
+    pub(crate) fn inspect_completed<B: LayoutBufferView + ?Sized>(
+        buffer: &B,
+        snapshot: &WindowDisplaySnapshot,
+        contiguous_prepass_end: CharPos0,
+    ) -> Self {
+        Self::inspect_with_admission(
+            buffer,
+            snapshot,
+            contiguous_prepass_end,
+            InspectionAdmission::CompletedWalk,
+        )
     }
 
     /// One immutable admitted edit-Sync attempt. This flag is captured after
@@ -102,13 +135,32 @@ impl VisibleFontificationCoverage {
         contiguous_prepass_end: CharPos0,
         admitted_edit_sync_attempt: bool,
     ) -> Self {
+        Self::inspect_with_admission(
+            buffer,
+            snapshot,
+            contiguous_prepass_end,
+            if admitted_edit_sync_attempt {
+                InspectionAdmission::EditSyncAttempt
+            } else {
+                InspectionAdmission::Eager
+            },
+        )
+    }
+
+    #[inline]
+    fn inspect_with_admission<B: LayoutBufferView + ?Sized>(
+        buffer: &B,
+        snapshot: &WindowDisplaySnapshot,
+        contiguous_prepass_end: CharPos0,
+        admission: InspectionAdmission,
+    ) -> Self {
         let accessible_end = buffer.layout_point_max_char_pos();
         let fontified = Value::symbol("fontified");
         let mut plan = VisibleFontificationPlan { spans: Vec::new() };
 
         // Preserve the original prologue and its one captured accessible bound.
         // Refusal or OFF runs the complete original global point iterator below.
-        if admitted_edit_sync_attempt
+        if !matches!(admission, InspectionAdmission::Eager)
             && fontify_coverage::enabled()
             && fontify_coverage::excludes_every_query(
                 snapshot,
@@ -121,6 +173,8 @@ impl VisibleFontificationCoverage {
             return Self::Complete;
         }
 
+        #[cfg(test)]
+        let admitted_edit_sync_attempt = matches!(admission, InspectionAdmission::EditSyncAttempt);
         #[cfg(test)]
         crate::incremental_layout::edit_sync::fontify_coverage_test_support::note_iterator(
             admitted_edit_sync_attempt,

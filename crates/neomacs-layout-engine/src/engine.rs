@@ -5160,12 +5160,25 @@ impl LayoutEngine {
                 .map(WindowPresentationSnapshot::display_snapshot)
                 .find(|snapshot| snapshot.window_id == window_id)
                 .map(|snapshot| {
-                    VisibleFontificationCoverage::inspect_for_edit_sync(
-                        buffer,
-                        snapshot,
-                        neovm_core::buffer::CharPos0::new(fontify_end.max(0) as usize),
-                        admitted_edit_sync_fontify_attempt,
-                    )
+                    let prepass_end =
+                        neovm_core::buffer::CharPos0::new(fontify_end.max(0) as usize);
+                    if admitted_edit_sync_fontify_attempt {
+                        VisibleFontificationCoverage::inspect_for_edit_sync(
+                            buffer,
+                            snapshot,
+                            prepass_end,
+                            true,
+                        )
+                    } else {
+                        // Finished plus the body/chrome freshness and topology
+                        // checks above certify this attempt's actual rows.
+                        // Numeric refusal retains the exact global iterator.
+                        VisibleFontificationCoverage::inspect_completed(
+                            buffer,
+                            snapshot,
+                            prepass_end,
+                        )
+                    }
                 })
                 .unwrap_or(VisibleFontificationCoverage::Complete);
 

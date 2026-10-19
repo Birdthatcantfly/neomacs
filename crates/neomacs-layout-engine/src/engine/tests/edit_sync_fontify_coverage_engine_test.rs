@@ -394,9 +394,11 @@ fn coverage_keeps_seams_replacement_callbacks_and_source_horizon_retries() {
             assert_eq!(on.0.2[0].edit_windows, 0, "conditional Lisp refuses reuse");
             assert!(on.0.2[0].full_windows > 0);
             assert_eq!(on.3.completed_sync_installs, 0);
+            // Refusal still prevents Sync installation. Its completed full
+            // walk may now prove numeric coverage without omitting a query.
             assert_eq!(
-                on.3.shortcuts, 0,
-                "conditional refusal stays outside proof scope"
+                on.3.queries, off.3.queries,
+                "completed coverage preserves every actual query"
             );
         }
     }
@@ -467,3 +469,7 @@ fn coverage_numeric_scope_restores_unwind_and_independent_mutator_ownership() {
 #[cfg(test)]
 #[path = "edit_sync_fontify_coverage_default_startup_test.rs"]
 mod default_startup_tests;
+
+#[cfg(test)]
+#[path = "completed_fontify_coverage_engine_test.rs"]
+mod completed_walk_tests;

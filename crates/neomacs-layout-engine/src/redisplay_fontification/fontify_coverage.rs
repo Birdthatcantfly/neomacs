@@ -2,6 +2,10 @@
 //! OnceLock publishes immutable process policy. A proof borrows only current
 //! row descriptors and retains no source, Lisp owner, cache or shared mutable
 //! state; independent mutators may use different immutable snapshots at once.
+//!
+//! | Knob | Default | Values | Gate |
+//! | --- | --- | --- | --- |
+//! | `NEOMACS_EDIT_SYNC_FONTIFY_COVERAGE` | `on` | `off`, `on` | Numeric no-query proof for admitted edit-Sync attempts and completed freshness-checked full/cursor/scroll walks. |
 use neovm_core::buffer::CharPos0;
 use neovm_core::window::WindowDisplaySnapshot;
 use std::ffi::OsStr;
