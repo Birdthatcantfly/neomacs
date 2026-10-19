@@ -12,6 +12,7 @@
 
 use std::rc::Rc;
 
+use neovm_core::buffer::text_props::PropertyNamePresence;
 use neovm_core::buffer::{Buffer, BufferId, CharPos0, EmacsByteRange};
 use neovm_core::emacs_core::Context;
 use neovm_core::emacs_core::display_spec::{DisplayPropertySpecs, display_spec_when_parts};
@@ -217,6 +218,14 @@ fn collect_when_form_sites_at_end(
 
     for name in ["display", "line-prefix", "wrap-prefix"] {
         let name_value = Value::symbol(name);
+        // This proof covers only raw buffer properties. Overlays, prefix
+        // variables and properties inside strings are independent sources
+        // and must still be scanned below.
+        if buffer.text_props_property_name_presence(name_value)
+            == PropertyNamePresence::DefinitelyAbsent
+        {
+            continue;
+        }
         let mut pos = from;
         while pos < to {
             let bytepos = buffer.layout_char_pos_to_emacs_byte_pos(pos);

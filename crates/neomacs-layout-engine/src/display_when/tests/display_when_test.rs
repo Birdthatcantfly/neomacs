@@ -48,6 +48,113 @@ fn prefix_when_form(string: Value) -> Value {
 }
 
 #[test]
+fn absent_preflight_keys_become_visible_after_property_assignment() {
+    let mut eval = Context::new();
+    let buf_id = eval.buffers.current_buffer_id().expect("buffer");
+    {
+        let buffer = eval.buffers.get_mut(buf_id).unwrap();
+        buffer.insert("αβγδεζηθ\n");
+        for pos in 0..8 {
+            buffer.text_props_put_property_in_emacs_byte_range(
+                EmacsByteRange::new(
+                    buffer.char_pos_to_emacs_byte_pos_clamped(CharPos0::new(pos)),
+                    buffer.char_pos_to_emacs_byte_pos_clamped(CharPos0::new(pos + 1)),
+                ),
+                Value::symbol("face"),
+                Value::symbol(if pos % 2 == 0 { "bold" } else { "italic" }),
+            );
+        }
+    }
+    for name in ["display", "line-prefix", "wrap-prefix"] {
+        assert_eq!(
+            eval.buffers
+                .get(buf_id)
+                .unwrap()
+                .text_props_property_name_presence(Value::symbol(name)),
+            PropertyNamePresence::DefinitelyAbsent,
+        );
+    }
+    assert!(
+        collect_when_form_sites(
+            eval.buffers.get(buf_id).unwrap(),
+            None,
+            CharPos0::new(0),
+            CharPos0::new(9),
+            &[]
+        )
+        .is_empty()
+    );
+
+    let display = read(&mut eval, "(when (= 1 1) . \"D\")");
+    let prefix = eval
+        .eval_str("(propertize \"P\" 'display '(when (= 2 2) . \"Q\"))")
+        .expect("nested prefix display");
+    {
+        let buffer = eval.buffers.get_mut(buf_id).unwrap();
+        let range = EmacsByteRange::new(
+            buffer.char_pos_to_emacs_byte_pos_clamped(CharPos0::new(2)),
+            buffer.char_pos_to_emacs_byte_pos_clamped(CharPos0::new(4)),
+        );
+        for (name, value) in [
+            ("display", display),
+            ("line-prefix", prefix),
+            ("wrap-prefix", prefix),
+        ] {
+            buffer.text_props_put_property_in_emacs_byte_range(range, Value::symbol(name), value);
+            assert_eq!(
+                buffer.text_props_property_name_presence(Value::symbol(name)),
+                PropertyNamePresence::PossiblyPresent
+            );
+        }
+    }
+    let sites = collect_when_form_sites(
+        eval.buffers.get(buf_id).unwrap(),
+        None,
+        CharPos0::new(0),
+        CharPos0::new(9),
+        &[],
+    );
+    assert!(sites.iter().any(|site| site.property == display));
+    assert_eq!(sites.iter().filter(|site| site.object == prefix).count(), 2);
+}
+
+#[test]
+fn absent_buffer_keys_keep_overlay_default_and_local_prefix_string_forms() {
+    let mut eval = Context::new();
+    let buf_id = eval.buffers.current_buffer_id().expect("buffer");
+    eval.eval_str("(insert \"abcdefgh\\n\")").unwrap();
+    let prefix = eval
+        .eval_str("(propertize \"P\" 'display '(when (= 3 3) . \"Q\"))")
+        .unwrap();
+    eval.set_variable("ttykey-prefix", prefix);
+    let overlay_display = eval
+        .eval_str(
+            "(let ((o (make-overlay 2 6)))
+           (overlay-put o 'line-prefix ttykey-prefix)
+           (overlay-put o 'wrap-prefix ttykey-prefix)
+           (overlay-put o 'before-string ttykey-prefix)
+           (overlay-put o 'after-string ttykey-prefix)
+           (overlay-put o 'display '(when (= 4 4) . \"O\"))
+           (overlay-get o 'display))",
+        )
+        .unwrap();
+    eval.eval_str("(set (make-local-variable 'line-prefix) ttykey-prefix)")
+        .unwrap();
+    let buffer = eval.buffers.get(buf_id).unwrap();
+    for name in ["display", "line-prefix", "wrap-prefix"] {
+        assert_eq!(
+            buffer.text_props_property_name_presence(Value::symbol(name)),
+            PropertyNamePresence::DefinitelyAbsent
+        );
+    }
+    let sites =
+        collect_when_form_sites(buffer, None, CharPos0::new(0), CharPos0::new(9), &[prefix]);
+    assert!(sites.iter().any(|site| site.property == overlay_display));
+    // Two overlay prefixes, two overlay strings, a local prefix and a default.
+    assert_eq!(sites.iter().filter(|site| site.object == prefix).count(), 6);
+}
+
+#[test]
 fn window_span_forms_are_evaluated_from_text_props_overlays_and_prefix_vars() {
     let mut eval = Context::new();
     let buf_id = eval.buffers.current_buffer_id().expect("buffer");
