@@ -4928,7 +4928,8 @@ impl LayoutEngine {
         else {
             return LeafLayoutAttempt::LogicalInputsChanged;
         };
-        let _ = Self::ensure_fontified_rust(evaluator, buf_id, window_start, fontify_end);
+        let fontification_outcome =
+            Self::ensure_fontified_rust(evaluator, buf_id, window_start, fontify_end);
         // `(when FORM . SPEC)` display specs need Lisp, which the walk cannot
         // run while it holds the buffer: evaluate the forms of the span the
         // walk can reach (the same one fontification just covered) here, so
@@ -4974,12 +4975,17 @@ impl LayoutEngine {
         if evaluator.frame_manager().window_topology_generation() != topology_generation {
             return LeafLayoutAttempt::LogicalInputsChanged;
         }
-        let Some(freshness_after_fontification) =
-            evaluator.window_layout_attempt_freshness(frame_id, window_id, buf_id)
-        else {
+        let freshness_mode = crate::attempt_freshness::mode();
+        let freshness_after_fontification = crate::attempt_freshness::after_span(
+            evaluator,
+            &freshness_before_fontification,
+            crate::attempt_freshness::preparation_admission(fontification_outcome, &display_when),
+            freshness_mode,
+        );
+        let Some(freshness_after_fontification) = freshness_after_fontification else {
             return LeafLayoutAttempt::LogicalInputsChanged;
         };
-        if freshness_after_fontification != freshness_before_fontification {
+        if freshness_after_fontification.as_ref() != &freshness_before_fontification {
             return LeafLayoutAttempt::LogicalInputsChanged;
         }
 
@@ -5110,8 +5116,29 @@ impl LayoutEngine {
         // equals the one they were produced from. Reject before attaching the
         // post-callback token to those rows; otherwise stale geometry could be
         // certified as fresh.
-        let freshness_after_leaf =
-            evaluator.window_layout_attempt_freshness(frame_id, window_id, buf_id);
+        let freshness_after_leaf = match &render_outcome {
+            BufferSourceRenderAttemptOutcome::Finished {
+                freshness_before_chrome,
+                chrome_lisp_admission,
+                ..
+            } => crate::attempt_freshness::after_span(
+                evaluator,
+                freshness_before_chrome,
+                *chrome_lisp_admission,
+                freshness_mode,
+            ),
+            BufferSourceRenderAttemptOutcome::Skipped
+            | BufferSourceRenderAttemptOutcome::LogicalInputsChanged
+            | BufferSourceRenderAttemptOutcome::GnuMiniEobCursorUnavailable { .. }
+            | BufferSourceRenderAttemptOutcome::Retry { .. }
+            | BufferSourceRenderAttemptOutcome::ResolveViewport { .. }
+            | BufferSourceRenderAttemptOutcome::RetryPointIntoWindow { .. }
+            | BufferSourceRenderAttemptOutcome::ReplayMispredicted
+            | BufferSourceRenderAttemptOutcome::SyncSourceHorizonExhausted { .. }
+            | BufferSourceRenderAttemptOutcome::QuerySourceHorizonExhausted => evaluator
+                .window_layout_attempt_freshness(frame_id, window_id, buf_id)
+                .map(std::borrow::Cow::Owned),
+        };
         let lisp_boundaries_remain_valid = match (&render_outcome, &freshness_after_leaf) {
             (
                 BufferSourceRenderAttemptOutcome::Finished {
@@ -5129,7 +5156,7 @@ impl LayoutEngine {
                 )
             }
             (_, Some(freshness_after_leaf)) => {
-                freshness_after_leaf == &freshness_after_fontification
+                freshness_after_leaf.as_ref() == freshness_after_fontification.as_ref()
             }
             (_, None) => false,
         };
@@ -5189,7 +5216,8 @@ impl LayoutEngine {
                     let freshness_after_visible_fontification =
                         evaluator.window_layout_attempt_freshness(frame_id, window_id, buf_id);
                     if evaluator.frame_manager().window_topology_generation() != topology_generation
-                        || freshness_after_visible_fontification != freshness_after_leaf
+                        || freshness_after_visible_fontification.as_ref()
+                            != freshness_after_leaf.as_deref()
                         || outcome.requires_layout_retry()
                     {
                         if let Some(attempt) = window_end_attempt.take() {
@@ -5201,6 +5229,7 @@ impl LayoutEngine {
             }
         }
 
+        drop(freshness_after_leaf);
         let (redisplay_positions, effective_default_face, line_number_field) = match render_outcome
         {
             BufferSourceRenderAttemptOutcome::LogicalInputsChanged => {
@@ -5452,6 +5481,7 @@ impl LayoutEngine {
                 query_target_prefix_policy,
                 window_end_record,
                 freshness_before_chrome: _,
+                chrome_lisp_admission: _,
                 effective_default_face,
                 cursor_only,
                 reused_matrix_rows,
@@ -5559,7 +5589,7 @@ impl LayoutEngine {
             Ok(outcome) => outcome,
             Err(e) => {
                 tracing::debug!("ensure_fontified_rust: fontification error: {:?}", e);
-                neovm_core::emacs_core::xdisp::RedisplayFontificationOutcome::Unchanged
+                neovm_core::emacs_core::xdisp::RedisplayFontificationOutcome::CallbacksUnchanged
             }
         }
     }

@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "fontification_admission_test.rs"]
+mod fontification_admission_test;
+
 use super::*;
 use crate::buffer::buffer::BUFFER_SLOT_BUFFER_FILE_CODING_SYSTEM;
 use crate::buffer::{BufferTextBackendKind, CharPos0, LispCharPos1};

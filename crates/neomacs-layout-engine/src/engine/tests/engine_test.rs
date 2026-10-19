@@ -37305,3 +37305,7 @@ mod mini_scroll_sites;
 #[cfg(test)]
 #[path = "live_viewport_source_bound_engine_test.rs"]
 mod live_viewport_source_bound_tests;
+
+#[cfg(test)]
+#[path = "freshness_spans_engine_test.rs"]
+mod freshness_spans_engine_test;

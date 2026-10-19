@@ -7,6 +7,7 @@
 // FFI-heavy layout code; migrate to explicit `unsafe {}` blocks incrementally.
 #![allow(unsafe_op_in_unsafe_fn)]
 
+pub(crate) mod attempt_freshness;
 pub mod bidi;
 pub(crate) mod buffer_source;
 pub mod composition;

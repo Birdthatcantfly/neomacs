@@ -106,18 +106,32 @@ fn render_or_retain_window_chrome(
     request: WindowChromeRowsRenderRequest<'_, '_>,
     render_services: ChromeRowRenderServices<'_, '_>,
     source: WindowChromeRowSource<'_>,
-) -> Result<WindowChromeMetrics, LogicalInputsChanged> {
+) -> Result<
+    (
+        WindowChromeMetrics,
+        crate::attempt_freshness::LayoutLispAdmission,
+    ),
+    LogicalInputsChanged,
+> {
     let memo = match source {
         WindowChromeRowSource::Recompute => None,
         WindowChromeRowSource::RecomputeWithMemo(memo) => Some(memo),
         WindowChromeRowSource::Retained(chrome) => {
-            return Ok(crate::window_output::install_retained_window_chrome(
-                output,
-                output_emitter,
-                chrome,
+            return Ok((
+                crate::window_output::install_retained_window_chrome(
+                    output,
+                    output_emitter,
+                    chrome,
+                ),
+                crate::attempt_freshness::LayoutLispAdmission::NativeOnly,
             ));
         }
-        WindowChromeRowSource::PreserveReservedMetrics(metrics) => return Ok(metrics),
+        WindowChromeRowSource::PreserveReservedMetrics(metrics) => {
+            return Ok((
+                metrics,
+                crate::attempt_freshness::LayoutLispAdmission::NativeOnly,
+            ));
+        }
     };
     match render_window_chrome_rows(
         output,
@@ -127,7 +141,10 @@ fn render_or_retain_window_chrome(
         render_services,
         memo,
     ) {
-        WindowChromeRowsRenderOutcome::Rendered(metrics) => Ok(metrics),
+        WindowChromeRowsRenderOutcome::Rendered {
+            metrics,
+            lisp_admission,
+        } => Ok((metrics, lisp_admission)),
         WindowChromeRowsRenderOutcome::SourceInvalidated => Err(LogicalInputsChanged),
     }
 }
@@ -1007,17 +1024,21 @@ impl BufferSourceOutputSetup {
                     Ok(freshness) => freshness,
                     Err(changed) => return changed.into(),
                 };
-            let measured_chrome_heights = match render_or_retain_window_chrome(
-                output.reborrow(),
-                &mut output_emitter,
-                evaluator,
-                chrome_request,
-                render_services.reborrow(),
-                WindowChromeRowSource::for_replay(retained_chrome.as_ref(), chrome_memo.as_ref()),
-            ) {
-                Ok(metrics) => metrics,
-                Err(changed) => return changed.into(),
-            };
+            let (measured_chrome_heights, chrome_lisp_admission) =
+                match render_or_retain_window_chrome(
+                    output.reborrow(),
+                    &mut output_emitter,
+                    evaluator,
+                    chrome_request,
+                    render_services.reborrow(),
+                    WindowChromeRowSource::for_replay(
+                        retained_chrome.as_ref(),
+                        chrome_memo.as_ref(),
+                    ),
+                ) {
+                    Ok(metrics) => metrics,
+                    Err(changed) => return changed.into(),
+                };
             tail_context.finish_and_install(
                 TextWindowFinishState::new(output, output_emitter, evaluator),
                 measured_chrome_heights,
@@ -1033,6 +1054,7 @@ impl BufferSourceOutputSetup {
                     && !params.word_wrap,
                 window_end_record: publish_request.window_end_record(redisplay_positions),
                 freshness_before_chrome,
+                chrome_lisp_admission,
                 effective_default_face,
                 cursor_only: true,
                 reused_matrix_rows: None,
@@ -1465,17 +1487,21 @@ impl BufferSourceOutputSetup {
                     Ok(freshness) => freshness,
                     Err(changed) => return changed.into(),
                 };
-            let measured_chrome_heights = match render_or_retain_window_chrome(
-                output.reborrow(),
-                &mut output_emitter,
-                evaluator,
-                chrome_request,
-                render_services.reborrow(),
-                WindowChromeRowSource::for_replay(retained_chrome.as_ref(), chrome_memo.as_ref()),
-            ) {
-                Ok(metrics) => metrics,
-                Err(changed) => return changed.into(),
-            };
+            let (measured_chrome_heights, chrome_lisp_admission) =
+                match render_or_retain_window_chrome(
+                    output.reborrow(),
+                    &mut output_emitter,
+                    evaluator,
+                    chrome_request,
+                    render_services.reborrow(),
+                    WindowChromeRowSource::for_replay(
+                        retained_chrome.as_ref(),
+                        chrome_memo.as_ref(),
+                    ),
+                ) {
+                    Ok(metrics) => metrics,
+                    Err(changed) => return changed.into(),
+                };
 
             tail_context.finish_and_install(
                 TextWindowFinishState::new(output, output_emitter, evaluator),
@@ -1498,6 +1524,7 @@ impl BufferSourceOutputSetup {
                     && !params.word_wrap,
                 window_end_record: publish_request.window_end_record(redisplay_positions),
                 freshness_before_chrome,
+                chrome_lisp_admission,
                 effective_default_face,
                 cursor_only: false,
                 reused_matrix_rows: Some(reused_matrix_rows),
@@ -1715,7 +1742,7 @@ impl BufferSourceOutputSetup {
                 Ok(freshness) => freshness,
                 Err(changed) => return changed.into(),
             };
-        let measured_chrome_heights = match render_or_retain_window_chrome(
+        let (measured_chrome_heights, chrome_lisp_admission) = match render_or_retain_window_chrome(
             output.reborrow(),
             &mut output_emitter,
             evaluator,
@@ -1745,6 +1772,7 @@ impl BufferSourceOutputSetup {
                 && !params.word_wrap,
             window_end_record: publish_request.window_end_record(redisplay_positions),
             freshness_before_chrome,
+            chrome_lisp_admission,
             effective_default_face,
             cursor_only: false,
             reused_matrix_rows: None,

@@ -3071,6 +3071,21 @@ pub enum WindowLayoutLispBoundary {
     WindowChrome,
 }
 
+/// Actual callback admission at an attempt-local input boundary.
+///
+/// NativeOnly is restricted to audited layout preparation/publication that
+/// changes no logical input, restores temporary buffer/point selection, and
+/// evaluates no Lisp. Arbitrary native edits require MayHaveEntered too.
+/// A possible callback includes unsuccessful/unmarking
+/// callbacks and errors. The complete token is freshly captured in that case.
+/// This value belongs to one exclusively borrowed evaluator attempt; it is
+/// never retained or used as an invalidation key by another mutator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowLayoutLispAdmission {
+    NativeOnly,
+    MayHaveEntered,
+}
+
 impl WindowLayoutAttemptFreshness {
     /// Whether `after` may still publish rows produced from `self` across the
     /// given GNU redisplay boundary.

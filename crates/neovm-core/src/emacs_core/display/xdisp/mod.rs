@@ -8553,13 +8553,18 @@ fn call_fontification_functions_at(ctx: &mut super::eval::Context, hook_value: V
 /// into a fontified one.
 ///
 /// GNU's `handle_fontified_prop` recomputes iterator properties only for the
-/// second state.  Keeping that distinction typed lets the immutable layout
+/// successful transition. Keeping callback entry separate lets the immutable layout
 /// engine retry after a successful callback without looping forever when a
 /// fontification function declines to mark the requested position.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RedisplayFontificationOutcome {
+    /// No fontification callback was entered. Native property inspection alone
+    /// cannot invalidate the caller's owned layout inputs.
     #[default]
     Unchanged,
+    /// A callback may have run without marking the requested position. This
+    /// includes an unsuccessful callback: it still requires fresh validation.
+    CallbacksUnchanged,
     Fontified,
 }
 
@@ -8567,12 +8572,19 @@ impl RedisplayFontificationOutcome {
     pub const fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::Fontified, _) | (_, Self::Fontified) => Self::Fontified,
+            (Self::CallbacksUnchanged, _) | (_, Self::CallbacksUnchanged) => {
+                Self::CallbacksUnchanged
+            }
             (Self::Unchanged, Self::Unchanged) => Self::Unchanged,
         }
     }
 
     pub const fn requires_layout_retry(self) -> bool {
         matches!(self, Self::Fontified)
+    }
+
+    pub const fn entered_callbacks(self) -> bool {
+        !matches!(self, Self::Unchanged)
     }
 }
 
@@ -8643,6 +8655,9 @@ pub fn ensure_fontified_for_redisplay(
 
             let before = get_fontified_property(ctx, pos)?;
             if before.is_nil() {
+                // Mark before entering Lisp, including callbacks which fail,
+                // decline to fontify, or remove the current buffer.
+                outcome = outcome.merge(RedisplayFontificationOutcome::CallbacksUnchanged);
                 call_fontification_functions_at(ctx, hook_value, pos);
                 if ctx.buffers.current_buffer_id() != Some(buf_id) {
                     ctx.restore_current_buffer_if_live(buf_id);

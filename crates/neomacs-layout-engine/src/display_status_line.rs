@@ -869,7 +869,14 @@ impl<'face, 'params> WindowChromeRowsRenderRequest<'face, 'params> {
             }
         }
 
-        WindowChromeRowsRenderOutcome::Rendered(measured)
+        WindowChromeRowsRenderOutcome::Rendered {
+            metrics: measured,
+            lisp_admission: if final_row.is_none() {
+                crate::attempt_freshness::LayoutLispAdmission::NativeOnly
+            } else {
+                crate::attempt_freshness::LayoutLispAdmission::MayHaveEntered
+            },
+        }
     }
 }
 
@@ -890,7 +897,10 @@ impl WindowChromeSourceIdentity {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum WindowChromeRowsRenderOutcome {
-    Rendered(WindowChromeMetrics),
+    Rendered {
+        metrics: WindowChromeMetrics,
+        lisp_admission: crate::attempt_freshness::LayoutLispAdmission,
+    },
     /// A chrome `:eval` deleted the window, killed its buffer, or retargeted
     /// the window. The containing frame transaction must discard every row
     /// produced from the stale source projection and recollect live inputs.

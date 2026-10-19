@@ -568,6 +568,51 @@ impl crate::emacs_core::eval::Context {
         })
     }
 
+    /// Pass an owned token through native layout preparation/publication.
+    ///
+    /// Native admission is restricted to audited layout preparation/publication
+    /// that changes no logical input and restores temporary buffer/point
+    /// selection. Merely avoiding Lisp does not admit arbitrary native edits.
+    /// Possible Lisp always recaptures. This is an attempt-local borrow, not
+    /// retained state or a key-based cache. Each evaluator exclusively owns its
+    /// inputs; independently published fontsets/dispatch and lazy native
+    /// character-table initialization still require the checks below.
+    pub fn window_layout_attempt_freshness_after_span<'a>(
+        &self,
+        before: &'a crate::window::WindowLayoutAttemptFreshness,
+        admission: super::WindowLayoutLispAdmission,
+    ) -> Option<std::borrow::Cow<'a, crate::window::WindowLayoutAttemptFreshness>> {
+        use std::borrow::Cow;
+        // Enumerate the complete projection: adding an input requires auditing
+        // whether native preparation can change it without a Lisp boundary.
+        let crate::window::WindowLayoutAttemptFreshness {
+            fontset_generation,
+            context_instance_id,
+            window_topology_generation: _,
+            frame,
+            window,
+            live_buffer: _,
+            source_buffer,
+            source_layout_variables: _,
+            selection: _,
+            face_change_count: _,
+            media_generation: _,
+            body_redisplay: _,
+            function_epoch,
+        } = before;
+        if admission == super::WindowLayoutLispAdmission::NativeOnly
+            && *context_instance_id == self.context_instance_id()
+            && *fontset_generation == crate::emacs_core::fontset::fontset_generation()
+            && window.char_table_mutation_epoch == super::CharTableLayoutRevision::current()
+            && *function_epoch == self.obarray.function_epoch()
+        {
+            Some(Cow::Borrowed(before))
+        } else {
+            self.window_layout_attempt_freshness(frame.id, window.id, source_buffer.id)
+                .map(Cow::Owned)
+        }
+    }
+
     /// Install the frontend half of the synchronous layout-query boundary.
     pub fn install_window_layout_query<F>(&mut self, query: F)
     where

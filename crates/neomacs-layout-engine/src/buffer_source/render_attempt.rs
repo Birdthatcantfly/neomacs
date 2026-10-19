@@ -202,6 +202,9 @@ pub(crate) enum BufferSourceRenderAttemptOutcome {
         /// Exact canonical inputs after body production and immediately before
         /// GNU's late `display_mode_lines` phase enters Lisp.
         freshness_before_chrome: neovm_core::window::WindowLayoutAttemptFreshness,
+        /// Proven native chrome can pass the same complete token through the
+        /// subsequent snapshot publication. All live formatters remain fresh.
+        chrome_lisp_admission: crate::attempt_freshness::LayoutLispAdmission,
         /// The exact window-local default face used to produce this accepted
         /// body. Late TTY padding must consume this artifact rather than
         /// independently falling back to the frame default.

@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "attempt_freshness_span_test.rs"]
+mod attempt_freshness_span_test;
+
 use super::*;
 use crate::buffer::{CharLen, EmacsByteLen};
 use neomacs_display_protocol::TransitionDirection;
