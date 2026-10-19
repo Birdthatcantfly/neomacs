@@ -657,6 +657,11 @@ pub struct BufferLayoutInputState {
     pub(crate) accessible_bytes: EmacsByteRange,
     pub(crate) total_chars: CharLen,
     pub(crate) total_emacs_bytes: EmacsByteLen,
+    /// Effective callback identity, captured on this Context's mutator. The
+    /// numeric word owns no Lisp object and is never dereferenced from here.
+    /// This detects hook replacement; mutable contents and callback visitation
+    /// still require the unchanged conservative redisplay-generation boundary.
+    fontification_functions: Option<WindowLayoutValueIdentity>,
     pub(crate) prefixes: LayoutPrefixInputs,
     pub(crate) invisibility: LayoutInvisibilityInput,
     pub(crate) display_table: LayoutDisplayTableInput,

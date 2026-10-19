@@ -824,6 +824,14 @@ impl crate::emacs_core::eval::Context {
             accessible_bytes: buffer.accessible_emacs_byte_region().range(),
             total_chars: buffer.total_char_len(),
             total_emacs_bytes: buffer.total_emacs_byte_len(),
+            // Installing a hook can change the next canonical motion walk
+            // without changing text ticks or the generic redisplay generation.
+            fontification_functions: self
+                .variable_value_in_buffer_inline(
+                    Some(buffer),
+                    crate::emacs_core::intern::intern("fontification-functions"),
+                )
+                .map(super::WindowLayoutValueIdentity::of),
             prefixes: self.layout_prefix_inputs(buffer_id)?,
             invisibility: self.layout_invisibility_input(buffer_id)?,
             display_table: self.layout_display_table_input(buffer_id)?,

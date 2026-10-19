@@ -73,6 +73,9 @@ mod line_spacing;
 
 #[path = "../../tests/engine_display_motion_test.rs"]
 mod display_motion;
+#[cfg(test)]
+#[path = "../../tests/engine_fontification_motion_test.rs"]
+mod fontification_motion;
 
 #[path = "chrome_memo_engine_test.rs"]
 mod chrome_memo_engine_test;
