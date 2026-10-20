@@ -3705,7 +3705,15 @@ fn a6_ht_ops_match_gnu_oracle() {
     let env = HtEnv::new(&users, HT_CB_KEY, HT_CB_CAND, HT_CB_OUT);
     let dump_forms = [
         "(internal--hash-table-buckets a6-tA)",
-        "(internal--hash-table-histogram a6-tB)",
+        // EQ symbols hash by runtime identity, not their names. GNU's symbol
+        // addresses and our interner IDs need not give the same collisions.
+        // Compare the count and sorted contents instead of bucket geometry.
+        r#"(let ((entries nil))
+  (maphash (lambda (key value)
+             (setq entries (cons (cons (symbol-name key) value) entries))) a6-tB)
+  (list (hash-table-count a6-tB)
+        (sort entries (lambda (a b)
+                        (string-lessp (car a) (car b))))))"#,
         "(internal--hash-table-buckets a6-tD)",
         "(internal--hash-table-buckets a6-tE)",
         "(internal--hash-table-histogram a6-tG)",
@@ -3720,7 +3728,7 @@ fn a6_ht_ops_match_gnu_oracle() {
     assert_eq!(lines[0], oracle[13], "P1 eq fixnum");
     assert_eq!(dumps[0], oracle[14], "tA buckets");
     assert_eq!(lines[1], oracle[15], "P2 eq symbol");
-    assert_eq!(dumps[1], oracle[16], "tB histogram");
+    assert_eq!(dumps[1], oracle[16], "tB count and contents");
     assert_eq!(lines[2], oracle[17], "P3 eql");
     assert_eq!(lines[3], oracle[18], "P4 equal cons");
     assert_eq!(dumps[2], oracle[19], "tD buckets");

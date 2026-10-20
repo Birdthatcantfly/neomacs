@@ -63,12 +63,19 @@
 (neovm-a6-out (append (a6-gh 10 a6-tA) (a6-gh 30 a6-tA)
                       (list (hash-table-count a6-tA))))
 (neovm-a6-out (internal--hash-table-buckets a6-tA))
-;; P2: eq, bare symbols -> (t 1 nil nil 2); then tB histogram.
+;; P2: eq, bare symbols -> (t 1 nil nil 2); then tB count and sorted contents.
+;; Symbol EQ hashes use runtime identity, so bucket histograms are not portable.
 (puthash 'a6-symA 1 a6-tB)
 (puthash 'a6-symB 2 a6-tB)
 (neovm-a6-out (append (a6-gh 'a6-symA a6-tB) (a6-gh 99 a6-tB)
                       (list (hash-table-count a6-tB))))
-(neovm-a6-out (internal--hash-table-histogram a6-tB))
+(neovm-a6-out
+ (let ((entries nil))
+   (maphash (lambda (key value)
+              (setq entries (cons (cons (symbol-name key) value) entries))) a6-tB)
+   (list (hash-table-count a6-tB)
+         (sort entries (lambda (a b)
+                         (string-lessp (car a) (car b)))))))
 ;; P3: eql -> (t 1000 1).
 (puthash 10 1000 a6-tC)
 (neovm-a6-out (append (a6-gh 10 a6-tC) (list (hash-table-count a6-tC))))
