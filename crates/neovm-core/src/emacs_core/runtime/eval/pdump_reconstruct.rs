@@ -300,10 +300,10 @@ impl Context {
         // surface, so restore that surface immediately afterward.
         builtins::init_builtins(&mut ev);
         for (sym_id, symbol) in dumped_function_surface.iter_symbols() {
-            if !symbol.function.is_nil() {
+            if !symbol.function.get().is_nil() {
                 ev.obarray.set_symbol_function_id_for(
                     sym_id,
-                    symbol.function,
+                    symbol.function.get(),
                     crate::emacs_core::symbol::FunctionEpochBump::PdumpRestore,
                 );
             } else if dumped_function_surface.is_function_unbound_id(sym_id) {

@@ -18,6 +18,9 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
+mod atomic_value;
+pub use atomic_value::AtomicTaggedValue;
+
 // ---------------------------------------------------------------------------
 // ConsCell — no header, minimal size
 // ---------------------------------------------------------------------------

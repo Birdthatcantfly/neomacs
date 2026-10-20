@@ -1080,7 +1080,7 @@ pub(super) fn builtin_register_code_conversion_map(
         let plist = eval
             .obarray()
             .get_by_id(sym_id)
-            .map(|s| s.plist)
+            .map(|s| s.plist.get())
             .unwrap_or(Value::NIL);
         crate::emacs_core::plist::plist_check(plist)?;
     }

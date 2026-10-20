@@ -3438,8 +3438,8 @@ fn dump_symbol_data(
         interned: sd.flags().interned().into(),
         declared_special: sd.flags().declared_special(),
         val,
-        function: encoder.dump_value(&sd.function),
-        plist: encoder.dump_value(&sd.plist),
+        function: encoder.dump_value(&sd.function.get()),
+        plist: encoder.dump_value(&sd.plist.get()),
     }
 }
 

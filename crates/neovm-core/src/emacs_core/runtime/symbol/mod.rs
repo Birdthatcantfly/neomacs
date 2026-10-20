@@ -1738,8 +1738,8 @@ impl Obarray {
                 }
                 ValueCell::Alias(_) | ValueCell::Forwarded(_) | ValueCell::Localized(_) => {}
             }
-            push(load_value_atomic(&sym.function));
-            push(load_value_atomic(&sym.plist));
+            push(sym.function.load_atomic());
+            push(sym.plist.load_atomic());
         }
     }
 
@@ -3895,10 +3895,10 @@ impl Obarray {
         };
         if symbol.function_unbound {
             FunctionCellSnapshot::ExplicitlyUnbound
-        } else if symbol.function.is_nil() {
+        } else if symbol.function.get().is_nil() {
             FunctionCellSnapshot::Empty
         } else {
-            FunctionCellSnapshot::Bound(symbol.function)
+            FunctionCellSnapshot::Bound(symbol.function.get())
         }
     }
 
@@ -3921,11 +3921,11 @@ impl Obarray {
         self.mark_global_member(id);
         let sym = self.ensure_symbol_id(id);
         // See `set_symbol_function_id': the same value redefines nothing.
-        let unchanged = !sym.function_unbound && sym.function.bits() == function.bits();
-        let previous = sym.function;
+        let unchanged = !sym.function_unbound && sym.function.get().bits() == function.bits();
+        let previous = sym.function.get();
         // SATB: retain the function cell's pre-image during a concurrent mark.
-        crate::tagged::gc::note_root_overwrite(sym.function);
-        store_value_atomic(&mut sym.function, function);
+        crate::tagged::gc::note_root_overwrite(sym.function.get());
+        sym.function.store_atomic(function);
         sym.function_unbound = false;
         if !unchanged {
             self.note_function_redefined(id, FunctionEpochBump::InternalCellWrite, previous);
@@ -4049,11 +4049,11 @@ impl Obarray {
         // Storing the value the cell already holds changes no call's
         // behavior, so it redefines nothing: no epoch move, no JIT eviction
         // (a `defalias' re-run while a file reloads, an `fset' in a loop).
-        let unchanged = !sym.function_unbound && sym.function.bits() == function.bits();
-        let previous = sym.function;
+        let unchanged = !sym.function_unbound && sym.function.get().bits() == function.bits();
+        let previous = sym.function.get();
         // SATB: retain the function cell's pre-image during a concurrent mark.
-        crate::tagged::gc::note_root_overwrite(sym.function);
-        store_value_atomic(&mut sym.function, function);
+        crate::tagged::gc::note_root_overwrite(sym.function.get());
+        sym.function.store_atomic(function);
         sym.function_unbound = false;
         if !unchanged {
             self.note_function_redefined(id, why, previous);
@@ -4072,12 +4072,12 @@ impl Obarray {
         self.ensure_global_member_if_canonical(id);
         let sym = self.ensure_symbol_id(id);
         let was_unbound = sym.function_unbound;
-        let was_bound_function = !sym.function.is_nil();
-        let previous = sym.function;
+        let was_bound_function = !sym.function.get().is_nil();
+        let previous = sym.function.get();
         sym.function_unbound = true;
         // SATB: retain the function cell's pre-image during a concurrent mark.
-        crate::tagged::gc::note_root_overwrite(sym.function);
-        store_value_atomic(&mut sym.function, Value::NIL);
+        crate::tagged::gc::note_root_overwrite(sym.function.get());
+        sym.function.store_atomic(Value::NIL);
         if !was_unbound || was_bound_function {
             self.note_function_redefined(id, FunctionEpochBump::Fmakunbound, previous);
         }
@@ -4093,12 +4093,12 @@ impl Obarray {
     pub fn clear_function_silent_id(&mut self, id: SymId) {
         let mut redefined = None;
         if let Some(sym) = self.slot_mut(id)
-            && !sym.function.is_nil()
+            && !sym.function.get().is_nil()
         {
-            let previous = sym.function;
+            let previous = sym.function.get();
             // SATB: retain the function cell's pre-image during a concurrent mark.
-            crate::tagged::gc::note_root_overwrite(sym.function);
-            store_value_atomic(&mut sym.function, Value::NIL);
+            crate::tagged::gc::note_root_overwrite(sym.function.get());
+            sym.function.store_atomic(Value::NIL);
             redefined = Some(previous);
         }
         if let Some(previous) = redefined {
@@ -4296,7 +4296,7 @@ impl Obarray {
     /// Check if a symbol has a function cell by identity.
     pub fn fboundp_id(&self, id: SymId) -> bool {
         self.slot(id)
-            .is_some_and(|s| !s.function_unbound && !s.function.is_nil())
+            .is_some_and(|s| !s.function_unbound && !s.function.get().is_nil())
     }
 
     /// Get a property from the symbol's plist.
@@ -4323,13 +4323,13 @@ impl Obarray {
         self.mark_global_member(symbol);
         let sym = self.ensure_symbol_id(symbol);
         let (new_plist, _changed) = crate::emacs_core::plist::plist_put(
-            sym.plist,
+            sym.plist.get(),
             Value::from_sym_id(intern(prop)),
             value,
         )?;
         // SATB: retain the plist cell's pre-image during a concurrent mark.
-        crate::tagged::gc::note_root_overwrite(sym.plist);
-        store_value_atomic(&mut sym.plist, new_plist);
+        crate::tagged::gc::note_root_overwrite(sym.plist.get());
+        sym.plist.store_atomic(new_plist);
         SymbolPropertyRevision::changed(symbol);
         Ok(())
     }
@@ -4347,10 +4347,10 @@ impl Obarray {
         self.ensure_global_member_if_canonical(symbol);
         let sym = self.ensure_symbol_id(symbol);
         let (new_plist, _changed) =
-            crate::emacs_core::plist::plist_put(sym.plist, Value::from_sym_id(prop), value)?;
+            crate::emacs_core::plist::plist_put(sym.plist.get(), Value::from_sym_id(prop), value)?;
         // SATB: retain the plist cell's pre-image during a concurrent mark.
-        crate::tagged::gc::note_root_overwrite(sym.plist);
-        store_value_atomic(&mut sym.plist, new_plist);
+        crate::tagged::gc::note_root_overwrite(sym.plist.get());
+        sym.plist.store_atomic(new_plist);
         SymbolPropertyRevision::changed(symbol);
         Ok(())
     }
@@ -4373,8 +4373,8 @@ impl Obarray {
         };
         let sym = self.ensure_symbol_id(symbol);
         // SATB: retain the plist cell's pre-image during a concurrent mark.
-        crate::tagged::gc::note_root_overwrite(sym.plist);
-        store_value_atomic(&mut sym.plist, new_plist);
+        crate::tagged::gc::note_root_overwrite(sym.plist.get());
+        sym.plist.store_atomic(new_plist);
         SymbolPropertyRevision::changed(symbol);
     }
 
@@ -4385,8 +4385,8 @@ impl Obarray {
         self.ensure_global_member_if_canonical(symbol);
         let sym = self.ensure_symbol_id(symbol);
         // SATB: retain the plist cell's pre-image during a concurrent mark.
-        crate::tagged::gc::note_root_overwrite(sym.plist);
-        store_value_atomic(&mut sym.plist, plist);
+        crate::tagged::gc::note_root_overwrite(sym.plist.get());
+        sym.plist.store_atomic(plist);
         SymbolPropertyRevision::changed(symbol);
     }
 
@@ -4397,7 +4397,7 @@ impl Obarray {
 
     /// Get the symbol's full plist as a flat list by identity.
     pub fn symbol_plist_id(&self, id: SymId) -> Value {
-        self.slot(id).map(|s| s.plist).unwrap_or(Value::NIL)
+        self.slot(id).map(|s| s.plist.get()).unwrap_or(Value::NIL)
     }
 
     /// Snapshot the states relevant to property lookup in one symbol-slot read.
@@ -4406,7 +4406,7 @@ impl Obarray {
     /// means the same thing as nil to GNU's `plist_get`, even though
     /// [`Self::symbol_plist_id`] must continue returning it verbatim.
     pub(crate) fn symbol_plist_snapshot_id(&self, id: SymId) -> SymbolPlistSnapshot {
-        match self.slot(id).map(|symbol| symbol.plist) {
+        match self.slot(id).map(|symbol| symbol.plist.get()) {
             Some(plist) if plist.is_cons() => SymbolPlistSnapshot::Entries(plist),
             _ => SymbolPlistSnapshot::NoEntries,
         }
@@ -4796,10 +4796,10 @@ impl Obarray {
         let mut current_id = id;
         loop {
             let sym = self.slot(current_id)?;
-            if sym.function.is_nil() {
+            if sym.function.get().is_nil() {
                 return None;
             }
-            let func = sym.function;
+            let func = sym.function.get();
             match func.kind() {
                 ValueKind::Symbol(id) => {
                     current_id = id;
@@ -4846,9 +4846,9 @@ impl Obarray {
                 sym.is_present()
                     && sym.interned_global
                     && !sym.function_unbound
-                    && !sym.function.is_nil()
+                    && !sym.function.get().is_nil()
             })
-            .map(|sym| (sym.name(), sym.function))
+            .map(|sym| (sym.name(), sym.function.get()))
     }
 
     /// Remove a symbol from the obarray.  Returns `true` if it was present.
@@ -5076,8 +5076,8 @@ impl GcTrace for Obarray {
                 // Localized: BLV contents traced via self.blvs below.
                 ValueCell::Alias(_) | ValueCell::Forwarded(_) | ValueCell::Localized(_) => {}
             }
-            roots.push(load_value_atomic(&sym.function));
-            roots.push(load_value_atomic(&sym.plist));
+            roots.push(sym.function.load_atomic());
+            roots.push(sym.plist.load_atomic());
         }
         // BLV contents for LOCALIZED symbols. Unchanged.
         for &blv_ptr in &self.blvs {

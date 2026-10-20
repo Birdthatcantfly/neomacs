@@ -387,8 +387,8 @@ fn seqlock_symbol_read_never_tears_arm() {
     let mut sym = LispSymbol::new(intern("vm-seqlock-test-sym"));
     stage(&mut sym, SymbolRedirect::Plainval, heap_a());
     // Only the val arm may produce a child: function/plist are NIL (non-heap).
-    sym.function = Value::NIL;
-    sym.plist = Value::NIL;
+    sym.function.store_atomic(Value::NIL);
+    sym.plist.store_atomic(Value::NIL);
 
     let seq = AtomicU32::new(0); // even = stable
     let done = AtomicBool::new(false);
@@ -438,8 +438,8 @@ fn seqlock_negative_control_tears_without_protocol() {
     // samples the exact torn window that the seqlock protects.
     let mut sym = LispSymbol::new(intern("vm-seqlock-test-sym"));
     stage(&mut sym, SymbolRedirect::Varalias, heap_b());
-    sym.function = Value::NIL;
-    sym.plist = Value::NIL;
+    sym.function.store_atomic(Value::NIL);
+    sym.plist.store_atomic(Value::NIL);
 
     let seq = AtomicU32::new(0);
     let arm_published = Barrier::new(2);

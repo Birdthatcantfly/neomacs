@@ -38,7 +38,7 @@ use super::{
 use crate::emacs_core::forward::FwdRef;
 use crate::emacs_core::intern::{NameId, SymId, symbol_name_id};
 use crate::emacs_core::value::Value;
-use crate::tagged::header::load_value_atomic;
+use crate::tagged::header::AtomicTaggedValue;
 use std::cell::UnsafeCell;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
@@ -468,10 +468,10 @@ pub struct LispSymbol {
     val: CellWord,
     /// Function slot. `Value::NIL` is the unbound sentinel (GNU `Qnil` in
     /// `struct Lisp_Symbol::s.function`, `lisp.h:820`).
-    pub function: Value,
+    pub function: AtomicTaggedValue,
     /// Property list as a Lisp cons list (NIL = empty). Matches GNU
     /// `struct Lisp_Symbol::s.plist` (`lisp.h:820`).
-    pub plist: Value,
+    pub plist: AtomicTaggedValue,
     /// Whether this symbol is interned in the global obarray.
     pub(super) interned_global: bool,
     /// Whether `fmakunbound` explicitly masked the symbol's fallback function.
@@ -542,8 +542,8 @@ impl Clone for LispSymbol {
             name: AtomicU32::new(self.name.load(Ordering::Relaxed)),
             flags: self.flags.clone(),
             val: self.val.clone(),
-            function: self.function,
-            plist: self.plist,
+            function: self.function.clone(),
+            plist: self.plist.clone(),
             interned_global: self.interned_global,
             function_unbound: self.function_unbound,
         }
@@ -580,8 +580,8 @@ impl LispSymbol {
             name: AtomicU32::new(SYMBOL_NAME_SENTINEL.0),
             flags: SymbolFlags::default(),
             val: CellWord::plain(Value::UNBOUND),
-            function: Value::NIL,
-            plist: Value::NIL,
+            function: AtomicTaggedValue::new(Value::NIL),
+            plist: AtomicTaggedValue::new(Value::NIL),
             interned_global: false,
             function_unbound: false,
         }
@@ -634,8 +634,8 @@ impl LispSymbol {
         };
         sym.flags.set_redirect(redirect);
         sym.val = word;
-        sym.function = function;
-        sym.plist = plist;
+        sym.function = function.into();
+        sym.plist = plist.into();
         sym
     }
 
@@ -1302,8 +1302,8 @@ pub(super) fn read_symbol_children<const MAJOR: bool>(
         // Read the word regardless of arm; it is only INTERPRETED below when
         // the consistently-observed redirect is `Plainval`.
         let word = sym.load_word_acquire();
-        let function = load_value_atomic(&sym.function);
-        let plist = load_value_atomic(&sym.plist);
+        let function = sym.function.load_atomic();
+        let plist = sym.plist.load_atomic();
         // Boehm's reader half of `seqlock_enter`: a load above that saw a
         // store from a write window also sees, after this fence, the odd
         // count that opened it.
