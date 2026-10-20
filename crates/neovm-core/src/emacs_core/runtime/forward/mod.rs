@@ -302,14 +302,19 @@ impl FwdRef {
 
     /// Rebuild from a cell word. `address` must name a live descriptor
     /// header (the cell only stores addresses that came from [`Self::of`]).
+    ///
+    /// Infallible by the cell's invariant: `CellWord::forwarded` is the only
+    /// producer of a stored address, it stores `FwdRef::address` (a
+    /// `NonNull`), so the word is never zero. Keeping this conversion
+    /// infallible matters beyond tidiness: an `expect` here put a cold panic
+    /// edge in every value-cell decode, which changed inlining and cost real
+    /// instructions per builtin read (b135 sustained-editing regression).
     #[inline(always)]
     pub(crate) fn from_address(address: usize) -> Self {
-        // The cell stores only addresses that came from `of`; descriptor
-        // allocations are never at the null address.
-        Self(
-            std::ptr::NonNull::new(address as *mut LispFwd)
-                .expect("forwarded cell address is a live descriptor"),
-        )
+        // SAFETY: see the method contract; the address is a `NonNull` header
+        // address stored by `CellWord::forwarded`, or a live descriptor
+        // header from `of`.
+        Self(unsafe { std::ptr::NonNull::new_unchecked(address as *mut LispFwd) })
     }
 
     /// The raw header address, for identity comparisons.

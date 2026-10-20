@@ -138,10 +138,33 @@ impl SymbolFlags {
         unsafe { AtomicU8::from_ptr(self.0.get()).load(Ordering::Relaxed) }
     }
 
+    /// Decode the two-bit redirect field. The field is masked to two bits and
+    /// `SymbolRedirect` has exactly GNU's four codes in order, so this
+    /// mapping is total. Decoding must not go through a fallible conversion:
+    /// an `expect` on this path leaves a cold panic edge in every owner read
+    /// of the value cell, which changes inlining (measured by the b135
+    /// sustained-editing regression: the inliner stopped folding
+    /// `builtin_var_value`'s dispatch and added real call overhead per
+    /// builtin read).
+    #[inline(always)]
+    fn decode_redirect(bits: u8) -> SymbolRedirect {
+        const _: () = {
+            assert!(SymbolRedirect::Plainval as u8 == 0);
+            assert!(SymbolRedirect::Varalias as u8 == 1);
+            assert!(SymbolRedirect::Localized as u8 == 2);
+            assert!(SymbolRedirect::Forwarded as u8 == 3);
+        };
+        match bits & Self::REDIRECT_MASK {
+            0 => SymbolRedirect::Plainval,
+            1 => SymbolRedirect::Varalias,
+            2 => SymbolRedirect::Localized,
+            _ => SymbolRedirect::Forwarded,
+        }
+    }
+
     #[inline(always)]
     pub fn redirect(&self) -> SymbolRedirect {
-        SymbolRedirect::try_from(self.load() & Self::REDIRECT_MASK)
-            .expect("symbol redirect flag contains valid GNU symbol_redirect code")
+        Self::decode_redirect(self.load())
     }
 
     /// Private: the redirect moves only with its word ([`CellWrite`]).
@@ -250,8 +273,7 @@ impl SymbolFlags {
     /// torn flags byte while the mutator changes a redirect/flag bit.
     #[inline]
     fn load_redirect(&self) -> SymbolRedirect {
-        SymbolRedirect::try_from(self.load_atomic() & Self::REDIRECT_MASK)
-            .expect("symbol redirect flag contains valid GNU symbol_redirect code")
+        Self::decode_redirect(self.load_atomic())
     }
 }
 
