@@ -533,6 +533,22 @@ impl crate::emacs_core::eval::Context {
         window_id: WindowId,
         source_buffer_id: BufferId,
     ) -> Option<crate::window::WindowLayoutAttemptFreshness> {
+        self.window_layout_attempt_freshness_with_capture(
+            frame_id,
+            window_id,
+            source_buffer_id,
+            Self::buffer_layout_inputs,
+        )
+    }
+
+    #[inline]
+    fn window_layout_attempt_freshness_with_capture(
+        &self,
+        frame_id: FrameId,
+        window_id: WindowId,
+        source_buffer_id: BufferId,
+        mut capture: impl FnMut(&Self, BufferId) -> Option<BufferLayoutInputState>,
+    ) -> Option<crate::window::WindowLayoutAttemptFreshness> {
         use strum::VariantArray;
 
         let frame = self.frames.get(frame_id)?;
@@ -546,20 +562,38 @@ impl crate::emacs_core::eval::Context {
                 .variable_value_in_buffer(Some(source_buffer), variable.sym_id())
                 .map(crate::window::WindowLayoutValueIdentity::of);
         }
-        // Keep the original native-read order. These projections own only
-        // immutable native snapshots and invoke no Lisp callbacks. Equal live
-        // and semantic source identities therefore need one buffer read here;
-        // cloning shares immutable payloads, never mutable Lisp source data.
+        // Keep the original native-read order. The canonical projections own
+        // immutable snapshots and invoke no Lisp callbacks; cloning shares
+        // native payloads, never mutable Lisp source data.
         let fontset_generation = crate::emacs_core::fontset::fontset_generation();
         let context_instance_id = self.context_instance_id();
         let window_topology_generation = self.frames.window_topology_generation();
         let frame_inputs = frame.layout_inputs();
         let window_inputs = frame.window_layout_inputs(window_id)?;
-        let live_buffer = self.buffer_layout_inputs(live_buffer_id)?;
-        let source_buffer = if live_buffer_id == source_buffer_id {
-            live_buffer.clone()
+        let (live_buffer, source_buffer) = if live_buffer_id == source_buffer_id {
+            let namespace_before = crate::emacs_core::intern::symbol_registry_epoch_value();
+            let live_buffer = capture(self, live_buffer_id)?;
+            let owned_source = live_buffer.clone();
+            let namespace_after = crate::emacs_core::intern::symbol_registry_epoch_value();
+            // Another World may unintern the fontifier's process-global name
+            // without borrowing this Context. Reuse requires the same observed
+            // namespace epoch across the actual read and clone. This relies on
+            // native intern retaining its positive entry until an observed
+            // epoch change (no eviction): an unpublished removal under the
+            // registry write lock also leaves the old second lookup a cache
+            // hit. A miss waits for that writer and observes its publication.
+            // Owner/buffer reads remain private and noncalling in this scope.
+            let source_buffer = if namespace_before == namespace_after {
+                owned_source
+            } else {
+                capture(self, source_buffer_id)?
+            };
+            (live_buffer, source_buffer)
         } else {
-            self.buffer_layout_inputs(source_buffer_id)?
+            (
+                capture(self, live_buffer_id)?,
+                capture(self, source_buffer_id)?,
+            )
         };
         Some(crate::window::WindowLayoutAttemptFreshness {
             fontset_generation,

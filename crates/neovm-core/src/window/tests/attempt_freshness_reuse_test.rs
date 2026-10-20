@@ -21,17 +21,26 @@ fn same_buffer_attempt_captures_fontifier_identity_once() {
     eval.window_layout_attempt_freshness(frame, window, live)
         .unwrap();
     crate::emacs_core::intern::reset_intern_calls();
+    let namespace_before = crate::emacs_core::intern::symbol_registry_epoch_value();
     let captured = eval
         .window_layout_attempt_freshness(frame, window, live)
         .unwrap();
+    let namespace_after = crate::emacs_core::intern::symbol_registry_epoch_value();
     let names = crate::emacs_core::intern::intern_call_names();
-    assert_eq!(
-        names
-            .iter()
-            .filter(|name| name.as_str() == "fontification-functions")
-            .count(),
-        1
-    );
+    let reads = names
+        .iter()
+        .filter(|name| name.as_str() == "fontification-functions")
+        .count();
+    if namespace_before == namespace_after {
+        assert_eq!(reads, 1, "stable namespace must retain the one-read budget");
+    } else {
+        // Another test can legitimately unintern a process-global name. Its
+        // publication may be outside this request's guarded interval.
+        assert!(
+            (1..=2).contains(&reads),
+            "unexpected capture count: {reads}"
+        );
+    }
     assert_eq!(captured.live_buffer, captured.source_buffer);
     assert_eq!(
         captured.live_buffer,
@@ -156,5 +165,165 @@ fn distinct_buffer_attempt_keeps_two_independent_projections() {
     assert_eq!(
         captured.source_buffer,
         eval.buffer_layout_inputs(source).unwrap()
+    );
+}
+
+#[test]
+fn same_buffer_attempt_rechecks_after_fontifier_namespace_change() {
+    // Removing this real canonical name must not disturb another test's
+    // process-global registry. Follow the existing ignored-child pattern.
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "window::display::attempt_freshness_reuse_tests::same_buffer_namespace_change_child",
+            "--ignored",
+            "--test-threads",
+            "1",
+        ])
+        .env_remove("RUST_LOG")
+        .output()
+        .expect("run isolated namespace scenario");
+    assert!(
+        output.status.success(),
+        "namespace child failed: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+#[ignore = "real canonical-name removal runs only in the isolated parent test"]
+fn same_buffer_namespace_change_child() {
+    use crate::emacs_core::display_when::DisplayWhenSite;
+    use crate::emacs_core::intern::{intern, intern_call_names, reset_intern_calls};
+    use crate::emacs_core::xdisp::{RedisplayFontificationOutcome, ensure_fontified_for_redisplay};
+    use crate::window::WindowLayoutLispBoundary;
+
+    let (mut eval, live, frame, window) = setup();
+    // A second owner has only its own Lisp graph. It removes the shared name,
+    // not any A-owned hook/list/string, after the real first projection.
+    let mut other = Context::new();
+    eval.eval_str(
+        r#"(progn
+          (insert "abcd")
+          (setq ttykey-namespace-calls 0
+                ttykey-namespace-saved-hook
+                (list (lambda (start)
+                        (setq ttykey-namespace-calls (1+ ttykey-namespace-calls))
+                        (put-text-property start (point-max) 'display "X\nY")
+                        (put-text-property start (point-max) 'fontified t)))
+                fontification-functions ttykey-namespace-saved-hook
+                ttykey-namespace-when
+                '(when (progn
+                         (set (intern "fontification-functions")
+                              ttykey-namespace-saved-hook)
+                         nil) . "unused")))"#,
+    )
+    .expect("install prebuilt hook and dynamic-key WHEN");
+    let old_key = intern("fontification-functions");
+    assert!(other.obarray().is_global_member(old_key));
+    let property = eval.eval_str("ttykey-namespace-when").unwrap();
+    let sites = [DisplayWhenSite {
+        property,
+        object: Value::make_buffer(live),
+        position: 1,
+        buffer_position: 1,
+    }];
+    // Warm native metadata and normal WHEN bindings before the evidence
+    // interval, so the callback need not load or define a function later.
+    eval.evaluate_display_when_sites(live, None, &sites, |spec| spec.is_string())
+        .expect("warm WHEN machinery");
+    eval.window_layout_attempt_freshness(frame, window, live)
+        .unwrap();
+    let function_epoch = eval.obarray().function_epoch();
+    let original_inputs = eval.buffer_layout_inputs(live).unwrap();
+    assert!(original_inputs.fontification_functions.is_some());
+    reset_intern_calls();
+    let mut reads = 0;
+    let before = eval
+        .window_layout_attempt_freshness_with_capture(frame, window, live, |ctx, buffer| {
+            let captured = ctx.buffer_layout_inputs(buffer);
+            reads += 1;
+            if reads == 1 {
+                assert!(other.obarray_mut().unintern_id(old_key));
+            }
+            captured
+        })
+        .unwrap();
+    assert_eq!(
+        reads, 2,
+        "namespace change must restore the original second read"
+    );
+    assert_eq!(
+        intern_call_names()
+            .iter()
+            .filter(|name| name.as_str() == "fontification-functions")
+            .count(),
+        2
+    );
+    assert_eq!(before.live_buffer, original_inputs);
+    assert_eq!(before.source_buffer.fontification_functions, None);
+    let fresh_key = intern("fontification-functions");
+    assert_ne!(fresh_key, old_key);
+    assert_eq!(eval.obarray().function_epoch(), function_epoch);
+    assert_eq!(
+        ensure_fontified_for_redisplay(&mut eval, live, 0, 4).unwrap(),
+        RedisplayFontificationOutcome::Unchanged
+    );
+    assert_eq!(
+        eval.eval_str("ttykey-namespace-calls").unwrap(),
+        Value::fixnum(0),
+        "fresh canonical key initially has no hook"
+    );
+    assert!(
+        eval.eval_str("(get-text-property 1 'display)")
+            .unwrap()
+            .is_nil()
+    );
+    eval.evaluate_display_when_sites(live, None, &sites, |spec| spec.is_string())
+        .expect("install exactly the saved F under fresh T through normal WHEN");
+    assert!(
+        eval.eval_str(
+            "(eq (symbol-value (intern \"fontification-functions\")) ttykey-namespace-saved-hook)"
+        )
+        .unwrap()
+        .is_truthy()
+    );
+    let after = eval
+        .window_layout_attempt_freshness(frame, window, live)
+        .unwrap();
+    assert_eq!(after.live_buffer, original_inputs);
+    assert_eq!(after.source_buffer, original_inputs);
+    assert_eq!(after.function_epoch, function_epoch);
+    assert_eq!(before.body_redisplay, after.body_redisplay);
+    assert!(!before.remains_valid_across(&after, WindowLayoutLispBoundary::BufferBody));
+    // Counterfactual only: the real old clone token would have matched every
+    // field, so a generic revision change cannot explain the refusal above.
+    let mut old_cloned_token = before.clone();
+    old_cloned_token.source_buffer = old_cloned_token.live_buffer.clone();
+    assert_eq!(old_cloned_token, after);
+
+    assert_eq!(
+        ensure_fontified_for_redisplay(&mut eval, live, 0, 4).unwrap(),
+        RedisplayFontificationOutcome::Fontified,
+        "refused attempt must retry the formerly skipped real hook"
+    );
+    assert_eq!(
+        eval.eval_str("ttykey-namespace-calls").unwrap(),
+        Value::fixnum(1)
+    );
+    assert_eq!(
+        eval.eval_str("(get-text-property 1 'display)").unwrap(),
+        Value::string("X\nY")
+    );
+    assert!(
+        eval.eval_str("(get-text-property 1 'fontified)")
+            .unwrap()
+            .is_truthy()
+    );
+    assert!(
+        eval.buffer_layout_inputs(live).unwrap().props_modified_tick
+            > original_inputs.props_modified_tick
     );
 }
