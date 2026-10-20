@@ -8,7 +8,7 @@
 //! a still-unclaimed table. A finished reader never accesses its backing again.
 
 use super::mark_word::MarkWord;
-use super::{CollectionScope, HashTableObj, TaggedValue, VecLikeType, load_value_atomic};
+use super::{CollectionScope, HashTableObj, TaggedValue, VecLikeType};
 use crate::emacs_core::value::{HashTableEntry, HashTableStorage};
 use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -331,9 +331,11 @@ impl HashTableReadGuard<'_> {
         let slots = unsafe { std::slice::from_raw_parts(self.entry.slots, self.entry.slots_len) };
         for entry in slots.iter().flatten() {
             // No raw Option representation, None payload or padding is read.
-            // Both addresses come from the initialized typed Some variant.
-            push(load_value_atomic(&entry.key));
-            push(load_value_atomic(&entry.value));
+            // Both words belong to the initialized typed Some variant.
+            // The lease keeps this original allocation immutable, so these
+            // are plain reads, not atomic views of ordinary Value fields.
+            push(entry.key);
+            push(entry.value);
         }
         for callback in self.entry.callbacks.into_iter().flatten() {
             push(callback.value());

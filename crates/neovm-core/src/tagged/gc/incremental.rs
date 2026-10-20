@@ -979,14 +979,16 @@ impl TaggedHeap {
                                 }
                             }
                         } else {
-                            // Trace all values in the hash table
+                            // Owner-side tracing reads current entries while
+                            // Lisp writers are excluded. The worker separately
+                            // reads an immutable original under its hash lease.
                             for slot in ht.data.values() {
-                                let val = load_value_atomic(slot);
+                                let val = *slot;
                                 self.mark_or_push_child(val, "hash-table-value");
                             }
                             // Trace key snapshots (original key objects)
                             for slot in ht.key_snapshots() {
-                                let val = load_value_atomic(slot);
+                                let val = *slot;
                                 self.mark_or_push_child(val, "hash-table-key-snapshot");
                             }
                         }
