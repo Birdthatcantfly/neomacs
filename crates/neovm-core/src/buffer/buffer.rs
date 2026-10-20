@@ -3652,6 +3652,8 @@ impl Buffer {
         self.text.text_props_intervals_snapshot()
     }
 
+    /// Raw test fixture replacement: bypasses byte/property edit publication.
+    /// This is outside the motion source-authority revision contract.
     #[cfg(test)]
     pub(crate) fn replace_text_props_for_test(&mut self, props: TextPropertyTable) {
         self.text.text_props_replace(props);

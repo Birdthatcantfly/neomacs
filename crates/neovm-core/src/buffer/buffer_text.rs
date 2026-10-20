@@ -523,6 +523,9 @@ impl Clone for BufferTextStorage {
     }
 }
 
+mod source_authority;
+pub use source_authority::{BufferSourceAuthority, BufferSourceReadLease};
+
 pub struct BufferText {
     storage: Rc<RefCell<BufferTextStorage>>,
 }
@@ -1605,6 +1608,11 @@ impl BufferText {
         self.storage.borrow().text_props.as_ref().clone()
     }
 
+    /// Install a prepared table after a byte-content mutation, or while
+    /// constructing fresh unpublished text. This raw operation does not
+    /// publish a standalone live property edit: table-local mutation numbers
+    /// can collide. Live callers must pair it with the existing content epoch;
+    /// the test-only raw replacement helper intentionally bypasses that rule.
     pub fn text_props_replace(&self, table: TextPropertyTable) {
         let mut storage = self.storage.borrow_mut();
         storage.text_props = Rc::new(table);

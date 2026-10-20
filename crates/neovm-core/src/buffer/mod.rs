@@ -25,6 +25,7 @@ pub use buffer::{
     SavedRestrictionState,
 };
 pub(crate) use buffer_text::BufferText;
+pub use buffer_text::{BufferSourceAuthority, BufferSourceReadLease};
 pub use edit_transaction::TranspositionAnchorPolicy;
 pub(crate) use edit_transaction::{PreparedBufferEdit, TextMeasurement};
 pub use overlay::{Overlay, OverlayList};
