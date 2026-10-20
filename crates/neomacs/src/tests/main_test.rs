@@ -1733,6 +1733,7 @@ fn gui_startup() -> StartupOptions {
         no_site_lisp: true,
         no_loadup: false,
         no_build_details: false,
+        rows_query_admission: neomacs_layout_engine::RowsQueryAdmission::Off,
     }
 }
 
@@ -1810,6 +1811,7 @@ fn gui_startup_with_args(args: &[&str]) -> StartupOptions {
         no_site_lisp: false,
         no_loadup: false,
         no_build_details: false,
+        rows_query_admission: neomacs_layout_engine::RowsQueryAdmission::Off,
     }
 }
 
@@ -1828,6 +1830,7 @@ fn tty_batch_startup_with_args(args: &[&str]) -> StartupOptions {
         no_site_lisp: false,
         no_loadup: false,
         no_build_details: false,
+        rows_query_admission: neomacs_layout_engine::RowsQueryAdmission::Off,
     }
 }
 
@@ -4620,6 +4623,7 @@ fn configure_gnu_startup_state_clears_window_system_for_tty_boots() {
         no_site_lisp: false,
         no_loadup: false,
         no_build_details: false,
+        rows_query_admission: neomacs_layout_engine::RowsQueryAdmission::Off,
     };
     configure_gnu_startup_state(&mut eval, frame_id, &startup);
 
@@ -4724,6 +4728,7 @@ fn live_tty_defface_keeps_dark_color_parent_attributes_through_inverse_video() {
         no_site_lisp: true,
         no_loadup: false,
         no_build_details: false,
+        rows_query_admission: neomacs_layout_engine::RowsQueryAdmission::Off,
     };
     configure_gnu_startup_state(&mut eval, frame_id, &startup);
 
@@ -4807,6 +4812,7 @@ fn configure_gnu_startup_state_marks_batch_mode_noninteractive() {
         no_site_lisp: false,
         no_loadup: false,
         no_build_details: false,
+        rows_query_admission: neomacs_layout_engine::RowsQueryAdmission::Off,
     };
     configure_gnu_startup_state(&mut eval, FrameId(9), &startup);
 

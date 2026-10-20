@@ -257,10 +257,12 @@ impl<'source, 'surface, B: LayoutBufferView + ?Sized>
         request.prepared_append_at(position, measured_width_px, display_item)
     }
 
-    fn append_special_source_char_plan_to_text_row_and_emit(
+    fn append_special_source_char_plan_to_text_row_and_emit<
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &self,
         geometry: &DisplayRowGeometryState,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         plan: DisplaySourceSpecialCharAppendPlan,
     ) -> Option<DisplayRowAppendProgress> {
         let (display_item, position, fallback_kind) = plan.into_append_request();
@@ -373,11 +375,13 @@ impl<'source, 'surface, B: LayoutBufferView + ?Sized>
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn prepare_source_item_for_current_text_row(
+    pub(crate) fn prepare_source_item_for_current_text_row<
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &self,
         geometry: DisplayRowGeometryState,
         append_state: &mut DisplaySourceRowAppendState,
-        source_render: &mut TextRowSourceRenderState<'_>,
+        source_render: &mut TextRowSourceRenderState<'_, FS>,
         source_char: &DisplaySourceTextChar,
         text: &[u8],
         byte_idx: usize,
@@ -404,11 +408,13 @@ impl<'source, 'surface, B: LayoutBufferView + ?Sized>
     /// `DISP_CHAR_VECTOR` before its control/tab/nobreak branches and then
     /// classifies the vector's glyphs, not the replaced buffer character.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn prepare_display_vector_for_current_text_row(
+    pub(crate) fn prepare_display_vector_for_current_text_row<
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &self,
         geometry: DisplayRowGeometryState,
         append_state: &mut DisplaySourceRowAppendState,
-        source_render: &mut TextRowSourceRenderState<'_>,
+        source_render: &mut TextRowSourceRenderState<'_, FS>,
         source_char: &DisplaySourceTextChar,
         text: &[u8],
         byte_idx: usize,
@@ -431,10 +437,10 @@ impl<'source, 'surface, B: LayoutBufferView + ?Sized>
     }
 
     #[cfg(test)]
-    pub(crate) fn append_source_text_request_to_text_row(
+    pub(crate) fn append_source_text_request_to_text_row<FS: crate::neovm_bridge::FaceServices>(
         &self,
         geometry: &DisplayRowGeometryState,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         source_text: DisplaySourceTextRequest,
         position: DisplayRowPosition,
     ) -> Option<DisplayRowAppendProgress> {
@@ -460,10 +466,10 @@ impl<'source, 'surface, B: LayoutBufferView + ?Sized>
         )
     }
 
-    pub(crate) fn append_source_display_item_to_text_row(
+    pub(crate) fn append_source_display_item_to_text_row<FS: crate::neovm_bridge::FaceServices>(
         &self,
         geometry: &DisplayRowGeometryState,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         item: DisplayItem,
         position: DisplayRowPosition,
         fallback_kind: DisplayRowAppendKind,
@@ -500,10 +506,11 @@ impl<'source, 'surface, B: LayoutBufferView + ?Sized>
     pub(crate) fn render_display_item_source_to_text_row<
         S: crate::display_source::DisplayItemSource,
         P: crate::display_row::render_policy::DisplayRowRenderPolicy,
+        FS: crate::neovm_bridge::FaceServices,
     >(
         &self,
         geometry: &mut DisplayRowGeometryState,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         source: &mut S,
         source_state: &mut crate::display_row::source_state::DisplayRowSourceState,
         position: DisplayRowPosition,
@@ -536,10 +543,10 @@ impl<'source, 'surface, B: LayoutBufferView + ?Sized>
         Some(outcome.into_append_progress(position))
     }
 
-    fn append_source_char_plan_to_text_row(
+    fn append_source_char_plan_to_text_row<FS: crate::neovm_bridge::FaceServices>(
         &self,
         geometry: &DisplayRowGeometryState,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         plan: DisplaySourceTextCharAppendPlan,
     ) -> Option<DisplayRowAppendProgress> {
         let (source_item, position, fallback_kind, mut render_policy) = plan.into_render_request();
@@ -557,10 +564,10 @@ impl<'source, 'surface, B: LayoutBufferView + ?Sized>
 impl<'source, 'surface, B: LayoutBufferView + ?Sized> DisplaySourceCharAppendContext
     for BufferSourceRowAppendContext<'source, 'surface, B>
 {
-    fn append_source_char_plan_to_text_row(
+    fn append_source_char_plan_to_text_row<FS: crate::neovm_bridge::FaceServices>(
         &self,
         geometry: &DisplayRowGeometryState,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         plan: DisplaySourceTextCharAppendPlan,
     ) -> Option<DisplayRowAppendProgress> {
         BufferSourceRowAppendContext::append_source_char_plan_to_text_row(
@@ -568,10 +575,12 @@ impl<'source, 'surface, B: LayoutBufferView + ?Sized> DisplaySourceCharAppendCon
         )
     }
 
-    fn append_special_source_char_plan_to_text_row_and_emit(
+    fn append_special_source_char_plan_to_text_row_and_emit<
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &self,
         geometry: &DisplayRowGeometryState,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         plan: DisplaySourceSpecialCharAppendPlan,
     ) -> Option<DisplayRowAppendProgress> {
         BufferSourceRowAppendContext::append_special_source_char_plan_to_text_row_and_emit(

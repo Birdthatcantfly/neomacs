@@ -35,17 +35,17 @@ use crate::types::{LineWrapMode, WindowParams};
 use neomacs_display_protocol::types::FaceId;
 
 pub(crate) trait DisplaySourceCharAppendContext {
-    fn append_source_char_plan_to_text_row(
+    fn append_source_char_plan_to_text_row<FS: crate::neovm_bridge::FaceServices>(
         &self,
         geometry: &DisplayRowGeometryState,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         plan: DisplaySourceTextCharAppendPlan,
     ) -> Option<DisplayRowAppendProgress>;
 
-    fn append_special_source_char_plan_to_text_row_and_emit(
+    fn append_special_source_char_plan_to_text_row_and_emit<FS: crate::neovm_bridge::FaceServices>(
         &self,
         geometry: &DisplayRowGeometryState,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         plan: DisplaySourceSpecialCharAppendPlan,
     ) -> Option<DisplayRowAppendProgress>;
 }
@@ -293,23 +293,29 @@ impl DisplaySourceTextCharPreparedAppend {
         )
     }
 
-    pub(crate) fn append_to_text_row<C: DisplaySourceCharAppendContext + ?Sized>(
+    pub(crate) fn append_to_text_row<
+        C: DisplaySourceCharAppendContext + ?Sized,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         context: &C,
         geometry: &DisplayRowGeometryState,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
     ) -> Option<DisplaySourceTextCharAppendOutcome> {
         let progress = context.append_source_char_plan_to_text_row(geometry, state, self.plan)?;
         Some(DisplaySourceTextCharAppendOutcome { progress })
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn append_to_text_row_and_apply<C: DisplaySourceCharAppendContext + ?Sized>(
+    pub(crate) fn append_to_text_row_and_apply<
+        C: DisplaySourceCharAppendContext + ?Sized,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         context: &C,
         geometry: &DisplayRowGeometryState,
         ch: char,
-        source_render: &mut TextRowSourceRenderState<'_>,
+        source_render: &mut TextRowSourceRenderState<'_, FS>,
         trailing_whitespace: &mut TrailingWhitespaceRenderState,
         word_wrap: &mut WordWrapRenderState,
         progress: &mut DisplaySourceProgressState<'_>,
@@ -404,10 +410,10 @@ impl DisplaySourceAppendRenderPlanResolver {
 
 impl DisplaySourceStepChar {
     #[cfg(test)]
-    pub(crate) fn record_word_wrap_candidate(
+    pub(crate) fn record_word_wrap_candidate<FS: crate::neovm_bridge::FaceServices>(
         self,
         word_wrap: &mut WordWrapRenderState,
-        source_render: &TextRowSourceRenderState<'_>,
+        source_render: &TextRowSourceRenderState<'_, FS>,
     ) {
         self.record_word_wrap_candidate_at(
             word_wrap,
@@ -417,10 +423,10 @@ impl DisplaySourceStepChar {
         );
     }
 
-    pub(crate) fn record_word_wrap_candidate_at(
+    pub(crate) fn record_word_wrap_candidate_at<FS: crate::neovm_bridge::FaceServices>(
         self,
         word_wrap: &mut WordWrapRenderState,
-        source_render: &TextRowSourceRenderState<'_>,
+        source_render: &TextRowSourceRenderState<'_, FS>,
         row_position: DisplayRowPosition,
         row_extend: Option<DisplayRowExtendFace>,
     ) {
@@ -439,11 +445,11 @@ impl WordWrapRenderState {
     /// appended.  Glyph output, display-point metadata, and the authoritative
     /// buffer position are captured together so every source producer uses one
     /// atomic boundary.
-    pub(crate) fn record_source_candidate(
+    pub(crate) fn record_source_candidate<FS: crate::neovm_bridge::FaceServices>(
         &mut self,
         ch: char,
         position: DisplaySourceTextPosition,
-        source_render: &TextRowSourceRenderState<'_>,
+        source_render: &TextRowSourceRenderState<'_, FS>,
         row_position: DisplayRowPosition,
         row_extend: Option<DisplayRowExtendFace>,
     ) {
@@ -554,13 +560,16 @@ impl DisplaySourceSpecialCharPreparedAppend {
         ))
     }
 
-    pub(crate) fn append_to_text_row<C: DisplaySourceCharAppendContext + ?Sized>(
+    pub(crate) fn append_to_text_row<
+        C: DisplaySourceCharAppendContext + ?Sized,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         context: &C,
         geometry: &DisplayRowGeometryState,
         params: &WindowParams,
         face_ids: &mut FrameFaceAttempt,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
     ) -> Option<DisplaySourceSpecialCharAppendOutcome> {
         // The escape-glyph / nobreak face merge is realized earlier, in
         // `resolve_source_item_layout_for_active_face`, so the special-char
@@ -583,13 +592,16 @@ impl DisplaySourceSpecialCharPreparedAppend {
 
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn append_to_text_row_and_apply<C: DisplaySourceCharAppendContext + ?Sized>(
+    pub(crate) fn append_to_text_row_and_apply<
+        C: DisplaySourceCharAppendContext + ?Sized,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         context: &C,
         geometry: &DisplayRowGeometryState,
         params: &WindowParams,
         face_ids: &mut FrameFaceAttempt,
-        source_render: &mut TextRowSourceRenderState<'_>,
+        source_render: &mut TextRowSourceRenderState<'_, FS>,
         face_scan: &mut FaceScanCheckpoint,
         word_wrap: &mut WordWrapRenderState,
         progress: &mut DisplaySourceProgressState<'_>,
@@ -875,9 +887,11 @@ impl<'a> DisplaySourceItemAppendContext<'a> {
         self.single_item.frame()
     }
 
-    pub(crate) fn append_display_item_to_text_row_and_emit(
+    pub(crate) fn append_display_item_to_text_row_and_emit<
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         item: DisplayItem,
         position: DisplayRowPosition,
         fallback_kind: DisplayRowAppendKind,

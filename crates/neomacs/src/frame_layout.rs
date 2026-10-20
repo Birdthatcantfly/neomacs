@@ -202,12 +202,42 @@ pub fn install_font_shape_driver(evaluator: &mut Context) {
 }
 
 pub fn install_window_layout_query_fn(evaluator: &mut Context) {
+    install_window_layout_query_with_policy(
+        evaluator,
+        neomacs_layout_engine::RowsQueryPolicy::disabled(),
+    );
+}
+
+fn install_window_layout_query_with_policy(
+    evaluator: &mut Context,
+    policy: neomacs_layout_engine::RowsQueryPolicy,
+) {
     evaluator.display_idle_maintenance_fn = Some(Box::new(|eval| {
         REDISPLAY_RUNTIME.with(|runtime| runtime.maintain_scroll_coverage(eval))
     }));
-    evaluator.install_window_layout_query(|eval, frame_id, window_id, scope| {
-        REDISPLAY_RUNTIME.with(|runtime| runtime.query_window(eval, frame_id, window_id, scope))
+    // The immutable native policy lives in this existing heap allocation.
+    // Context, LayoutEngine and the runtime's TLS representation do not grow.
+    evaluator.install_window_layout_query(move |eval, frame_id, window_id, scope| {
+        REDISPLAY_RUNTIME.with(|runtime| {
+            runtime.query_window_with_policy(eval, frame_id, window_id, scope, &policy)
+        })
     });
+}
+
+pub(crate) fn tty_rows_host_authority()
+-> neovm_core::emacs_core::display_host::InertRowsHostAuthority {
+    // SAFETY: TtyPopupDisplayHost stores only the popup redraw AtomicBool.
+    // In every instance state its geometry/image/font services are inherited
+    // inert defaults: image catalogs are absent and no external font geometry
+    // is supplied. Popup/clipboard/terminal I/O methods are not part of the
+    // certified Rows producer. Any change to these services requires revisiting
+    // this all-instances contract. Core checks the actual host's Any TypeId,
+    // current face lifetime, installed owner and collector on every use.
+    unsafe {
+        neovm_core::emacs_core::display_host::InertRowsHostAuthority::for_type::<
+            super::tty_frontend::TtyPopupDisplayHost,
+        >()
+    }
 }
 
 // ── TTY layout tree and redisplay ─────────────────────────────────────────
@@ -458,7 +488,13 @@ pub fn install_tty_redisplay_callback_with_popup_redraw(
         }
     }));
     install_frame_snapshot_fn(evaluator);
-    install_window_layout_query_fn(evaluator);
+    install_window_layout_query_with_policy(
+        evaluator,
+        neomacs_layout_engine::RowsQueryPolicy::terminal(
+            startup.rows_query_admission,
+            tty_rows_host_authority(),
+        ),
+    );
     install_font_shape_driver(evaluator);
 }
 

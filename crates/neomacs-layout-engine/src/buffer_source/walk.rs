@@ -54,11 +54,14 @@ pub(crate) enum BufferSourceRewind {
 /// step. Publishing a missing item's source position precedes face/emission
 /// installation; dispatch receives the item only after those side effects.
 #[allow(clippy::too_many_arguments)]
-fn apply_produced_step_to_render_progress<B: LayoutBufferView>(
+fn apply_produced_step_to_render_progress<
+    B: LayoutBufferView,
+    FS: crate::neovm_bridge::FaceServices,
+>(
     step: &mut ProducedStep,
     progress: &mut DisplaySourceProgressState<'_>,
     face_resolution_context: BufferSourceFaceResolutionContext<'_, B>,
-    source_render: &mut TextRowSourceRenderState<'_>,
+    source_render: &mut TextRowSourceRenderState<'_, FS>,
     row_geometry: &mut DisplayRowGeometryState,
     append_surface: &DisplayRowAppendSurface,
     active_face_state: &DisplayRowActiveFaceState,
@@ -221,12 +224,12 @@ impl<'request, B: LayoutBufferView> BufferSourceWalk<'request, B> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn consume_source_item_for_render_into(
+    pub(crate) fn consume_source_item_for_render_into<FS: crate::neovm_bridge::FaceServices>(
         &mut self,
         progress: &mut DisplaySourceProgressState<'_>,
         face_resolution_context: BufferSourceFaceResolutionContext<'_, B>,
         face_ids: &mut FrameFaceAttempt,
-        source_render: &mut TextRowSourceRenderState<'_>,
+        source_render: &mut TextRowSourceRenderState<'_, FS>,
         row_geometry: &mut DisplayRowGeometryState,
         append_surface: &DisplayRowAppendSurface,
         active_face_state: &DisplayRowActiveFaceState,

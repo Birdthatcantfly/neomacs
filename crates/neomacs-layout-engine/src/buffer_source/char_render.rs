@@ -39,7 +39,10 @@ use crate::types::WindowParams;
 /// hand it on; `reborrow` already expresses that, so the field-by-field
 /// rebuilds are gone.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_source_char_and_apply<B: LayoutBufferView>(
+pub(crate) fn render_source_char_and_apply<
+    B: LayoutBufferView,
+    FS: crate::neovm_bridge::FaceServices,
+>(
     loop_context: BufferSourceLoopRequestContext,
     text: &[u8],
     params: &WindowParams,
@@ -50,7 +53,7 @@ pub(crate) fn render_source_char_and_apply<B: LayoutBufferView>(
     active_face_state: &DisplayRowActiveFaceState,
     append_context: &BufferSourceRowAppendContext<'_, '_, B>,
     predecessor_row_extend: Option<DisplayRowExtendFace>,
-    mut state: BufferSourceLoopMutableState<'_, '_, '_>,
+    mut state: BufferSourceLoopMutableState<'_, '_, '_, FS>,
 ) -> BufferSourceItemRenderOutcome {
     let text_start_byte = loop_context.text_start_byte();
 
@@ -349,7 +352,10 @@ pub(crate) fn render_source_char_and_apply<B: LayoutBufferView>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_display_table_vector_and_apply<B: LayoutBufferView>(
+fn render_display_table_vector_and_apply<
+    B: LayoutBufferView,
+    FS: crate::neovm_bridge::FaceServices,
+>(
     loop_context: BufferSourceLoopRequestContext,
     params: &WindowParams,
     source_step_char: crate::display_source::DisplaySourceStepChar,
@@ -363,7 +369,7 @@ fn render_display_table_vector_and_apply<B: LayoutBufferView>(
     active_face_state: &DisplayRowActiveFaceState,
     append_context: &BufferSourceRowAppendContext<'_, '_, B>,
     prepared_append: &DisplaySourceTextCharPreparedAppend,
-    mut state: BufferSourceLoopMutableState<'_, '_, '_>,
+    mut state: BufferSourceLoopMutableState<'_, '_, '_, FS>,
 ) -> BufferSourceItemRenderOutcome {
     let mut source = DisplayItemSegmentSource::new(source_item);
     let mut source_state = DisplayRowSourceState::frame_local();

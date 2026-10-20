@@ -3952,6 +3952,77 @@ enum FaceRealizationSource {
     Complete(std::sync::Arc<RootedFace>),
 }
 
+/// A render-local capability for pure resolution plus optional cold-entry
+/// observation. Ordinary rendering uses FaceResolver itself, so its existing
+/// one-pointer services borrow and empty observation specialize unchanged.
+pub(crate) trait FaceServices {
+    fn resolver(&self) -> &FaceResolver;
+    fn realize_for_display(&self, face: &mut ResolvedFace, evaluator: &mut Context);
+}
+
+trait ColdFaceEntryObserver {
+    fn before_entry(&self);
+}
+
+struct NoColdFaceEntryObserver;
+impl ColdFaceEntryObserver for NoColdFaceEntryObserver {
+    #[inline]
+    fn before_entry(&self) {}
+}
+
+impl ColdFaceEntryObserver for std::cell::Cell<bool> {
+    #[inline]
+    fn before_entry(&self) {
+        self.set(true);
+    }
+}
+
+/// This borrowed capability is created only for an actual synchronous Rows
+/// producer. The sticky Cell outlives every physical retry of that producer.
+pub(crate) struct ObservedFaceServices<'a> {
+    resolver: &'a FaceResolver,
+    cold_entry: &'a std::cell::Cell<bool>,
+}
+
+impl<'a> ObservedFaceServices<'a> {
+    pub(crate) fn new(resolver: &'a FaceResolver, cold_entry: &'a std::cell::Cell<bool>) -> Self {
+        Self {
+            resolver,
+            cold_entry,
+        }
+    }
+}
+
+impl FaceServices for ObservedFaceServices<'_> {
+    fn resolver(&self) -> &FaceResolver {
+        self.resolver
+    }
+
+    fn realize_for_display(&self, face: &mut ResolvedFace, evaluator: &mut Context) {
+        // Pending hook flow must keep the original placeholder behavior. In
+        // the quiescent case a native warm lookup cannot enter user Lisp.
+        if !evaluator.redisplay_hook_flow_pending()
+            && self.resolver.realize_cached_for_display(face, evaluator)
+        {
+            return;
+        }
+        self.resolver
+            .realize_with_cold_observer(face, evaluator, self.cold_entry);
+    }
+}
+
+impl FaceServices for FaceResolver {
+    #[inline]
+    fn resolver(&self) -> &FaceResolver {
+        self
+    }
+
+    #[inline]
+    fn realize_for_display(&self, face: &mut ResolvedFace, evaluator: &mut Context) {
+        FaceResolver::realize_for_display(self, face, evaluator);
+    }
+}
+
 /// Resolves face attributes at buffer positions using the neovm-core
 /// `FaceTable`, text properties, and overlays.
 ///
@@ -4615,6 +4686,16 @@ impl FaceResolver {
     }
 
     pub(crate) fn realize_for_display(&self, face: &mut ResolvedFace, evaluator: &mut Context) {
+        self.realize_with_cold_observer(face, evaluator, &NoColdFaceEntryObserver);
+    }
+
+    #[inline]
+    fn realize_with_cold_observer<O: ColdFaceEntryObserver>(
+        &self,
+        face: &mut ResolvedFace,
+        evaluator: &mut Context,
+        observer: &O,
+    ) {
         if let Some(source) = self.tty_face_source
             && source.is_current(evaluator, &self.face_table)
         {
@@ -4637,6 +4718,9 @@ impl FaceResolver {
                 paint.install(face);
                 return;
             }
+            // Observe the actual demand entry, including pending/error/no-
+            // insertion returns. Cache journals record only later successes.
+            observer.before_entry();
             let realized =
                 evaluator.realize_display_face_for_frame(source.frame_id, attributes.attributes());
             // See realize_cached_for_display: the memo key is the
@@ -6373,3 +6457,7 @@ mod composed_source_pin_test;
 #[cfg(test)]
 #[path = "neovm_bridge/tests/line_count_test.rs"]
 mod line_count_test;
+
+#[cfg(test)]
+#[path = "neovm_bridge/tests/rows_face_witness_test.rs"]
+mod rows_face_witness_test;

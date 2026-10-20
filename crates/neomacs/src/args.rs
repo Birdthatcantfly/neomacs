@@ -573,6 +573,13 @@ pub(crate) static STANDARD_ARGS: &[StandardArg] = &[
         priority: 1,
         nargs: 1,
     },
+    // Native-only typed layout admission; never forwarded to Lisp startup.
+    StandardArg {
+        name: "-rows-query-admission",
+        longname: Some("--rows-query-admission"),
+        priority: 1,
+        nargs: 1,
+    },
     // -seccomp omitted.
     // NS-only flags omitted.
     // These have the same priority as ordinary file name args, so they

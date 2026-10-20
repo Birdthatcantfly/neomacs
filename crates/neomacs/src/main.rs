@@ -303,6 +303,7 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StartupOptions {
     gui: startup_resources::GuiStartupOptions,
+    rows_query_admission: neomacs_layout_engine::RowsQueryAdmission,
     frontend: FrontendKind,
     forwarded_args: Vec<String>,
     terminal_device: Option<String>,
@@ -584,6 +585,7 @@ fn parse_startup_options(args: impl IntoIterator<Item = String>) -> Result<Start
     let mut no_site_lisp = false;
     let mut no_loadup = false;
     let mut no_build_details = false;
+    let mut rows_query_admission = neomacs_layout_engine::RowsQueryAdmission::Off;
     let mut gui = startup_resources::GuiStartupOptions::default();
     let mut idx = 0usize;
 
@@ -601,6 +603,29 @@ fn parse_startup_options(args: impl IntoIterator<Item = String>) -> Result<Start
         if next == "--" {
             forwarded_args.extend(parsed[idx + 1..].iter().cloned());
             break;
+        }
+
+        // Native engine policy, consumed before Lisp startup. The sorter keeps
+        // value-taking options and their operands together, including --eval.
+        match argmatch(
+            &parsed,
+            &mut idx,
+            "-rows-query-admission",
+            Some("--rows-query-admission"),
+            "--rows-query-admission".len(),
+            true,
+        ) {
+            ArgMatch::Value(value) => {
+                rows_query_admission = value.parse().map_err(|_| {
+                    format!("neomacs: invalid --rows-query-admission value `{value}`")
+                })?;
+                continue;
+            }
+            ArgMatch::MissingValue => {
+                return Err("neomacs: --rows-query-admission requires an argument".to_owned());
+            }
+            ArgMatch::NoMatch => {}
+            ArgMatch::Bare => unreachable!(),
         }
 
         if let Some(options) = daemon::parse_option(next) {
@@ -909,6 +934,7 @@ fn parse_startup_options(args: impl IntoIterator<Item = String>) -> Result<Start
 
     Ok(StartupOptions {
         gui,
+        rows_query_admission,
         frontend,
         forwarded_args,
         terminal_device,
@@ -5930,3 +5956,7 @@ fn initialize_system_locale() {}
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/rows_query_admission_test.rs"]
+mod rows_query_admission_test;

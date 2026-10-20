@@ -51,10 +51,10 @@ impl BufferLineNumberTextPrefixRenderRequest {
         }
     }
 
-    pub(crate) fn render_pending_with_source_state(
+    pub(crate) fn render_pending_with_source_state<FS: crate::neovm_bridge::FaceServices>(
         self,
         line_numbers: &mut LineNumberRenderState,
-        source_render: &mut TextRowSourceRenderState<'_>,
+        source_render: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         row_geometry: &mut DisplayRowGeometryState,
         face_scan: &mut FaceScanCheckpoint,

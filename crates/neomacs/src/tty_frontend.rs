@@ -17,6 +17,9 @@ pub struct TtyTerminalHost {
     pub cmd_tx: crossbeam_channel::Sender<RenderCommand>,
 }
 
+/// Popup I/O is separate from the inherited absent geometry/image/font
+/// services. `frame_layout::tty_rows_host_authority` audits those services for
+/// every instance state; adding a geometry service must revisit that contract.
 pub struct TtyPopupDisplayHost {
     force_full_redraw: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }

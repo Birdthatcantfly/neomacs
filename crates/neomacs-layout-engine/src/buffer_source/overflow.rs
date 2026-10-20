@@ -142,9 +142,9 @@ impl<'a> BufferSourceOverflowRenderRequest<'a> {
     /// Only when a column was RESERVED for the marker: without a reservation
     /// the last column holds a real glyph that already answers for itself, and
     /// a slot here would sit one column past the window.
-    fn publish_right_edge_marker_slot(
+    fn publish_right_edge_marker_slot<FS: crate::neovm_bridge::FaceServices>(
         &self,
-        source_render: &mut TextRowSourceRenderState<'_>,
+        source_render: &mut TextRowSourceRenderState<'_, FS>,
         row_geometry: &DisplayRowGeometryState,
         marker_position: DisplayRowPosition,
     ) {
@@ -180,12 +180,15 @@ impl<'a> BufferSourceOverflowRenderRequest<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render_if_needed_and_apply<B: LayoutBufferView>(
+    pub(crate) fn render_if_needed_and_apply<
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         append_context: &BufferSourceRowAppendContext<'_, '_, B>,
         source_walk: &mut BufferSourceWalk<'_, B>,
         text: &[u8],
-        state: BufferSourceLoopMutableState<'_, '_, '_>,
+        state: BufferSourceLoopMutableState<'_, '_, '_, FS>,
     ) -> BufferSourceOverflowRenderOutcome {
         let BufferSourceLoopMutableState {
             mut progress,
@@ -832,11 +835,14 @@ impl<'a> BufferSourceSpecialOverflowRenderRequest<'a> {
         }
     }
 
-    pub(crate) fn render_if_needed_and_apply<B: LayoutBufferView>(
+    pub(crate) fn render_if_needed_and_apply<
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         source_walk: &mut BufferSourceWalk<'_, B>,
         buffer: &B,
-        state: BufferSourceLoopMutableState<'_, '_, '_>,
+        state: BufferSourceLoopMutableState<'_, '_, '_, FS>,
     ) -> BufferSourceSpecialOverflowRenderOutcome {
         let BufferSourceLoopMutableState {
             mut progress,

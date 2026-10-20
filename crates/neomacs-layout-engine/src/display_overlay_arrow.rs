@@ -55,12 +55,12 @@ impl OverlayArrowStyle {
 /// Draw every applicable overlay arrow into this window's already-installed
 /// body rows. Call after the body walk has installed its rows (their
 /// `start_charpos`/`end_charpos` must be final) and before chrome.
-pub(crate) fn draw_overlay_arrows<B: LayoutBufferView>(
+pub(crate) fn draw_overlay_arrows<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
     mut output: TextWindowOutputTarget<'_>,
     evaluator: &Context,
     buffer: &B,
     buffer_id: BufferId,
-    faces: WindowFaces<'_>,
+    faces: WindowFaces<'_, FS>,
     face_ids: &mut FrameFaceAttempt,
     style: OverlayArrowStyle,
 ) {

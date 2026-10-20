@@ -1,11 +1,14 @@
 //! Partial physical-owner observations for the private numeric Rows producer.
 //! No public API here grants geometry, coverage or cached-query authority.
 use super::Context;
+use crate::emacs_core::display_host::InertRowsHostAuthority;
+use crate::face::{FaceTableIdentity, realization::RealizationEpoch};
 use crate::tagged::{
     collection_reads::CollectionReads,
     gc::{self, HeapIdentity, RowsOwnedDomain},
 };
 use crate::window::FrameId;
+use std::any::{Any, TypeId};
 use std::{marker::PhantomData, ops::Range};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -28,10 +31,35 @@ pub enum RowsObservationRefusal {
     TtyOrUnknownFrame,
     #[error("face normalization is not already warm")]
     ColdFaces,
+    #[error("the actual termcap face lifecycle is unavailable")]
+    TtyLifecycleUnavailable,
+    #[error("the live terminal identity or output class changed")]
+    TerminalChanged,
+    #[error("the existing face cache or source-table lifetime changed")]
+    FaceRealizationChanged,
+    #[error("the installed native host differs from its captured authority")]
+    HostTypeChanged,
     #[error("the existing chunk map is disabled")]
     ChunkMapDisabled,
     #[error("a dependency is foreign, new-domain, boxed or unsupported")]
     UnknownOwner,
+}
+
+#[derive(Debug)]
+enum RowsFrameAuthority {
+    Graphical,
+    Tty {
+        terminal: u64,
+        realization: RealizationEpoch,
+        table: FaceTableIdentity,
+        host: RowsHostIdentity,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowsHostIdentity {
+    Absent,
+    Inert(TypeId),
 }
 
 /// Inert pre-read owner-domain authority, never object/source references.
@@ -41,6 +69,7 @@ pub struct RowsObservationEpoch {
     collections: usize,
     context: u64,
     frame: FrameId,
+    frame_authority: RowsFrameAuthority,
     faces: u64,
     owned: RowsOwnedDomain,
     dump: Option<(usize, Range<usize>)>,
@@ -64,7 +93,7 @@ static_assertions::assert_not_impl_any!(RowsDependencyMetadata<'static>: Send, S
 
 impl Context {
     // Closed native checks: no normalization, tracing, service, Lisp or GC.
-    fn rows_environment_current(&self, frame: FrameId) -> Result<(), RowsObservationRefusal> {
+    fn rows_mutator_current(&self) -> Result<(), RowsObservationRefusal> {
         if !gc::tagged_heap_is_current(&self.tagged_heap) {
             return Err(RowsObservationRefusal::InactiveContext);
         }
@@ -77,6 +106,12 @@ impl Context {
         if !self.tagged_heap.rows_observation_idle() {
             return Err(RowsObservationRefusal::CollectorBusy);
         }
+        Ok(())
+    }
+
+    // The original graphical/default API keeps its exact host/TTY refusals.
+    fn rows_environment_current(&self, frame: FrameId) -> Result<(), RowsObservationRefusal> {
+        self.rows_mutator_current()?;
         if self.display_host.is_some() {
             return Err(RowsObservationRefusal::DisplayHostInstalled);
         }
@@ -111,6 +146,68 @@ impl Context {
         frame: FrameId,
     ) -> Result<RowsObservationEpoch, RowsObservationRefusal> {
         self.rows_environment_current(frame)?;
+        self.capture_rows_epoch(frame, RowsFrameAuthority::Graphical)
+    }
+
+    /// Explicit real-TTY metadata admission. This is not a no-callback seal:
+    /// Layout must separately witness the actual canonical warm face footprint.
+    /// The legacy graphical/default constructor does not call this method.
+    pub fn begin_tty_rows_observation(
+        &self,
+        frame: FrameId,
+        authority: Option<&InertRowsHostAuthority>,
+    ) -> Result<RowsObservationEpoch, RowsObservationRefusal> {
+        self.rows_mutator_current()?;
+        let host = match (self.display_host.as_deref(), authority) {
+            (None, Some(_) | None) => RowsHostIdentity::Absent,
+            (Some(host), Some(authority)) if authority.accepts(host) => {
+                RowsHostIdentity::Inert(authority.host_type())
+            }
+            (Some(_), Some(_) | None) => {
+                return Err(RowsObservationRefusal::DisplayHostInstalled);
+            }
+        };
+        if !crate::face::realization::enabled() {
+            return Err(RowsObservationRefusal::TtyLifecycleUnavailable);
+        }
+        let owner = self
+            .frames
+            .get(frame)
+            .ok_or(RowsObservationRefusal::TtyOrUnknownFrame)?;
+        if !crate::face::realization::frame_is_tty_target(owner) {
+            return Err(RowsObservationRefusal::TtyOrUnknownFrame);
+        }
+        let table = owner
+            .face_realization
+            .table(self.face_change_count)
+            .ok_or(RowsObservationRefusal::ColdFaces)?;
+        let realization = owner
+            .face_realization
+            .realization_epoch()
+            .ok_or(RowsObservationRefusal::ColdFaces)?;
+        if owner
+            .face_realization
+            .basic(crate::face::realization::BasicFace::Default)
+            .is_none()
+        {
+            return Err(RowsObservationRefusal::ColdFaces);
+        }
+        self.capture_rows_epoch(
+            frame,
+            RowsFrameAuthority::Tty {
+                terminal: owner.terminal_id,
+                realization,
+                table: table.rows_snapshot_identity(),
+                host,
+            },
+        )
+    }
+
+    fn capture_rows_epoch(
+        &self,
+        frame: FrameId,
+        frame_authority: RowsFrameAuthority,
+    ) -> Result<RowsObservationEpoch, RowsObservationRefusal> {
         let owned = self
             .tagged_heap
             .capture_rows_owned_domain()
@@ -126,6 +223,7 @@ impl Context {
             collections: self.tagged_heap.gc_collections(),
             context: self.context_instance_id,
             frame,
+            frame_authority,
             faces: self.face_change_count,
             owned,
             dump,
@@ -165,7 +263,49 @@ impl Context {
         {
             return Err(RowsObservationRefusal::RuntimeChanged);
         }
-        self.rows_environment_current(epoch.frame)
+        match &epoch.frame_authority {
+            RowsFrameAuthority::Graphical => self.rows_environment_current(epoch.frame),
+            RowsFrameAuthority::Tty {
+                terminal,
+                realization,
+                table,
+                host,
+            } => {
+                // Standard Any and native identities only; no host virtual
+                // service, face normalization, collection or saved-key read.
+                let current_host = self
+                    .display_host
+                    .as_deref()
+                    .map(|host| RowsHostIdentity::Inert(Any::type_id(host)))
+                    .unwrap_or(RowsHostIdentity::Absent);
+                if current_host != *host {
+                    return Err(RowsObservationRefusal::HostTypeChanged);
+                }
+                let owner = self
+                    .frames
+                    .get(epoch.frame)
+                    .ok_or(RowsObservationRefusal::TerminalChanged)?;
+                if owner.terminal_id != *terminal
+                    || !crate::face::realization::frame_is_tty_target(owner)
+                {
+                    return Err(RowsObservationRefusal::TerminalChanged);
+                }
+                let current_table = owner
+                    .face_realization
+                    .table(self.face_change_count)
+                    .ok_or(RowsObservationRefusal::ColdFaces)?;
+                if !owner.face_realization.retains_epoch(realization)
+                    || !table.matches(current_table)
+                    || owner
+                        .face_realization
+                        .basic(crate::face::realization::BasicFace::Default)
+                        .is_none()
+                {
+                    return Err(RowsObservationRefusal::FaceRealizationChanged);
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Safe numeric domain matching only, not lifetime or query admission.
@@ -220,3 +360,7 @@ impl RowsDependencyMetadata<'_> {
 #[cfg(test)]
 #[path = "tests/rows_observation_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/tty_rows_observation_test.rs"]
+mod tty_tests;

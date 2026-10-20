@@ -198,12 +198,12 @@ impl<'a> EndOfBufferRowsFillRequest<'a> {
     /// row (0-based within the text area) and `row_geometry.y()` its top.
     ///
     /// Returns the number of filler rows installed.
-    pub(crate) fn fill<B: LayoutBufferView>(
+    pub(crate) fn fill<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
         &self,
         buffer: &B,
         mut output: TextWindowOutputTarget<'_>,
         evaluator: &Context,
-        faces: WindowFaces<'_>,
+        faces: WindowFaces<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         row_geometry: &DisplayRowGeometryState,
     ) -> usize {

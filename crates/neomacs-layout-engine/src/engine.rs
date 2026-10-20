@@ -15,8 +15,12 @@ mod retained_face_gather;
 #[cfg(test)]
 #[path = "engine/tests/retained_face_gather_support.rs"]
 pub(crate) mod retained_face_gather_test_support;
+mod rows_face_services;
+use rows_face_services::{BoundFaceServices, FaceServiceFactory};
 mod rows_fontification;
 mod rows_lifetime;
+mod rows_query_policy;
+pub use rows_query_policy::{RowsQueryAdmission, RowsQueryPolicy};
 mod scroll_coverage;
 pub use scroll_coverage::ScrollCoverageProgress;
 mod scroll_preview;
@@ -1837,10 +1841,32 @@ impl LayoutEngine {
         evaluator: &mut neovm_core::emacs_core::Context,
         frame_id: neovm_core::window::FrameId,
         purpose: LayoutPurpose,
+        rows_lifetime: Option<&mut rows_lifetime::Producer>,
+        #[cfg(test)] rows_fontification_sink: Option<
+            &mut dyn FnMut(neovm_core::emacs_core::xdisp::RedisplayFontificationWitness),
+        >,
+    ) -> Option<neovm_core::window::WindowLayoutQuery> {
+        self.layout_frame_rust_with_face_services(
+            evaluator,
+            frame_id,
+            purpose,
+            rows_lifetime,
+            #[cfg(test)]
+            rows_fontification_sink,
+            &rows_face_services::NoopFaceServiceFactory,
+        )
+    }
+
+    fn layout_frame_rust_with_face_services<F: FaceServiceFactory>(
+        &mut self,
+        evaluator: &mut neovm_core::emacs_core::Context,
+        frame_id: neovm_core::window::FrameId,
+        purpose: LayoutPurpose,
         mut rows_lifetime: Option<&mut rows_lifetime::Producer>,
         #[cfg(test)] mut rows_fontification_sink: Option<
             &mut dyn FnMut(neovm_core::emacs_core::xdisp::RedisplayFontificationWitness),
         >,
+        face_services: &F,
     ) -> Option<neovm_core::window::WindowLayoutQuery> {
         // Anything recorded since the last pass that no pass has reported yet.
         // The drain below covers what this pass observes; this one covers
@@ -2800,13 +2826,14 @@ impl LayoutEngine {
                         }
                         continue 'frame_layout;
                     }
+                    let bound_faces = face_services.bind(&face_resolver);
                     match self.layout_window_rust(
                         evaluator,
                         frame_id,
                         &live_inputs.window,
                         &live_inputs.frame,
                         &layout_box,
-                        &face_resolver,
+                        bound_faces.services(),
                         window_geometry.reserve_terminal_right_border_col,
                         visibility_retry_budget,
                         viewport_retry_phase.clone(),
@@ -4202,6 +4229,28 @@ impl LayoutEngine {
         )
     }
 
+    /// Select native observation/admission for this engine-local query only.
+    /// The policy is configuration, never evidence that geometry is reusable.
+    pub fn query_window_layout_with_policy(
+        &mut self,
+        evaluator: &mut neovm_core::emacs_core::Context,
+        frame_id: neovm_core::window::FrameId,
+        window_id: neovm_core::window::WindowId,
+        scope: neovm_core::window::WindowLayoutQueryScope,
+        policy: &RowsQueryPolicy,
+    ) -> Result<neovm_core::window::WindowLayoutQuery, neovm_core::window::WindowLayoutQueryFailure>
+    {
+        self.query_window_layout_observed_with_policy(
+            evaluator,
+            frame_id,
+            window_id,
+            scope,
+            policy,
+            #[cfg(test)]
+            None,
+        )
+    }
+
     // No cache field/admission changes. The optional test sink runs only after
     // the private proof/source lease have been consumed and dropped.
     fn query_window_layout_observed(
@@ -4210,6 +4259,27 @@ impl LayoutEngine {
         frame_id: neovm_core::window::FrameId,
         window_id: neovm_core::window::WindowId,
         scope: neovm_core::window::WindowLayoutQueryScope,
+        #[cfg(test)] mut report_sink: Option<&mut dyn FnMut(rows_lifetime::Report)>,
+    ) -> Result<neovm_core::window::WindowLayoutQuery, neovm_core::window::WindowLayoutQueryFailure>
+    {
+        self.query_window_layout_observed_with_policy(
+            evaluator,
+            frame_id,
+            window_id,
+            scope,
+            &RowsQueryPolicy::disabled(),
+            #[cfg(test)]
+            report_sink.take(),
+        )
+    }
+
+    fn query_window_layout_observed_with_policy(
+        &mut self,
+        evaluator: &mut neovm_core::emacs_core::Context,
+        frame_id: neovm_core::window::FrameId,
+        window_id: neovm_core::window::WindowId,
+        scope: neovm_core::window::WindowLayoutQueryScope,
+        policy: &RowsQueryPolicy,
         #[cfg(test)] mut report_sink: Option<&mut dyn FnMut(rows_lifetime::Report)>,
     ) -> Result<neovm_core::window::WindowLayoutQuery, neovm_core::window::WindowLayoutQueryFailure>
     {
@@ -4239,23 +4309,65 @@ impl LayoutEngine {
             scope,
             neovm_core::window::WindowLayoutQueryScope::Rows { .. }
         )
-        .then(|| rows_lifetime::Producer::begin(self, evaluator, frame_id, window_id, scope));
-        let (query, collections) = neovm_core::tagged::collection_reads::capture_normalized(
-            evaluator,
-            |evaluator| {
-                evaluator.sync_runtime_faces_for_frame(frame_id);
-            },
-            |evaluator| {
-                self.layout_frame_rust_for_purpose_inner(
+        .then(|| match policy.environment() {
+            rows_query_policy::RowsQueryEnvironment::Graphical => {
+                rows_lifetime::Producer::begin(self, evaluator, frame_id, window_id, scope)
+            }
+            rows_query_policy::RowsQueryEnvironment::Terminal(ref host) => {
+                rows_lifetime::Producer::begin_tty(
+                    self,
                     evaluator,
                     frame_id,
-                    LayoutPurpose::SynchronousQuery { window_id, scope },
-                    lifetime.as_mut().and_then(|pending| pending.as_mut().ok()),
-                    #[cfg(test)]
-                    None,
+                    window_id,
+                    scope,
+                    Some(host),
                 )
-            },
-        );
+            }
+        });
+        let (query, collections) = if matches!(
+            scope,
+            neovm_core::window::WindowLayoutQueryScope::Rows { .. }
+        ) {
+            let face_services = rows_face_services::RowsFaceServiceFactory::new();
+            let captured = neovm_core::tagged::collection_reads::capture_normalized(
+                evaluator,
+                |evaluator| {
+                    evaluator.sync_runtime_faces_for_frame(frame_id);
+                },
+                |evaluator| {
+                    self.layout_frame_rust_with_face_services(
+                        evaluator,
+                        frame_id,
+                        LayoutPurpose::SynchronousQuery { window_id, scope },
+                        lifetime.as_mut().and_then(|pending| pending.as_mut().ok()),
+                        #[cfg(test)]
+                        None,
+                        &face_services,
+                    )
+                },
+            );
+            if let Some(producer) = lifetime.as_mut().and_then(|pending| pending.as_mut().ok()) {
+                producer.note_face_entry(Some(face_services.cold_entry()));
+            }
+            captured
+        } else {
+            neovm_core::tagged::collection_reads::capture_normalized(
+                evaluator,
+                |evaluator| {
+                    evaluator.sync_runtime_faces_for_frame(frame_id);
+                },
+                |evaluator| {
+                    self.layout_frame_rust_for_purpose_inner(
+                        evaluator,
+                        frame_id,
+                        LayoutPurpose::SynchronousQuery { window_id, scope },
+                        lifetime.as_mut().and_then(|pending| pending.as_mut().ok()),
+                        #[cfg(test)]
+                        None,
+                    )
+                },
+            )
+        };
         self.report_image_failures(evaluator);
         let query = query.ok_or(neovm_core::window::WindowLayoutQueryFailure::DidNotConverge)?;
         if let Some(pending) = lifetime {
@@ -4903,14 +5015,14 @@ impl LayoutEngine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn layout_window_rust(
+    fn layout_window_rust<FS: crate::neovm_bridge::FaceServices>(
         &mut self,
         evaluator: &mut neovm_core::emacs_core::Context,
         frame_id: neovm_core::window::FrameId,
         params: &WindowParams,
         frame_params: &FrameParams,
         layout_box: &WindowLayoutBox,
-        face_resolver: &super::neovm_bridge::FaceResolver,
+        face_services: &FS,
         reserve_right_border_col: bool,
         remaining_visibility_retries: usize,
         viewport_resolution: ViewportResolutionPhase,
@@ -4927,6 +5039,7 @@ impl LayoutEngine {
         topology_generation: u64,
         face_attempt: &FrameFaceAttempt,
     ) -> LeafLayoutAttempt {
+        let face_resolver = face_services.resolver();
         #[cfg(test)]
         let _viewport_retry_depth = viewport_retry_depth_probe::Guard::enter();
         tracing::debug!(
@@ -5164,7 +5277,7 @@ impl LayoutEngine {
             && scroll_replay
                 .as_ref()
                 .is_some_and(|replay| replay.edit && replay.sync.is_some());
-        let render_outcome = BufferWindowRenderRequest::new(
+        let render_request = BufferWindowRenderRequest::new(
             frame_id,
             window_id,
             params,
@@ -5180,13 +5293,13 @@ impl LayoutEngine {
         .with_forward_viewport_measurement(match &viewport_resolution {
             ViewportResolutionPhase::Measure(measurement) => Some(measurement.clone()),
             ViewportResolutionPhase::Resolve | ViewportResolutionPhase::Commit(_) => None,
-        })
-        .render_into(
+        });
+        let render_outcome = render_request.render_into(
             BufferSourceRenderAttemptContext::from_frame_output_owner(
                 &mut self.frame_output,
                 evaluator,
                 &mut self.font_metrics,
-                face_resolver,
+                face_services,
                 face_attempt.clone(),
                 &mut self.window_snapshots,
             ),

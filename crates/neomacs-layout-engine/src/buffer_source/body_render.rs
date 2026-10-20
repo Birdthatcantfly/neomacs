@@ -41,7 +41,9 @@ use crate::display_text_window_row_lifecycle::{
 };
 use crate::font::metrics::FontMetricsService;
 use crate::frame_face_arena::FrameFaceAttempt;
-use crate::neovm_bridge::{FaceResolver, LayoutBufferView, RustBufferAccess};
+#[cfg(test)]
+use crate::neovm_bridge::FaceResolver;
+use crate::neovm_bridge::{LayoutBufferView, RustBufferAccess};
 use crate::types::{LineWrapMode, WindowParams, WindowSourceExtent};
 use crate::window_output::{
     TextWindowOutputTarget, TextWindowRedisplayPositions, WindowOutputEmitter,
@@ -113,17 +115,20 @@ pub(crate) struct BufferSourceWalkSetup {
         Option<crate::buffer_source::end_of_buffer_rows::BeyondAccessibleEndLinePrefix>,
 }
 
-struct BufferSourceWalkRenderState<'emit> {
-    source_render: TextRowSourceRenderState<'emit>,
+struct BufferSourceWalkRenderState<
+    'emit,
+    FS: crate::neovm_bridge::FaceServices = crate::neovm_bridge::FaceResolver,
+> {
+    source_render: TextRowSourceRenderState<'emit, FS>,
     line_numbers: &'emit mut LineNumberRenderState,
     face_scan: &'emit mut FaceScanCheckpoint,
     active_face_state: &'emit mut DisplayRowActiveFaceState,
     face_ids: &'emit mut FrameFaceAttempt,
 }
 
-impl<'emit> BufferSourceWalkRenderState<'emit> {
+impl<'emit, FS: crate::neovm_bridge::FaceServices> BufferSourceWalkRenderState<'emit, FS> {
     fn new(
-        source_render: TextRowSourceRenderState<'emit>,
+        source_render: TextRowSourceRenderState<'emit, FS>,
         line_numbers: &'emit mut LineNumberRenderState,
         face_scan: &'emit mut FaceScanCheckpoint,
         active_face_state: &'emit mut DisplayRowActiveFaceState,
@@ -349,9 +354,13 @@ impl<'a> BufferSourceWalkSetupRequest<'a> {
 
 impl BufferSourceWalkSetup {
     #[allow(clippy::too_many_arguments)]
-    fn render_visible_steps<'request, B: LayoutBufferView>(
+    fn render_visible_steps<
+        'request,
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &mut self,
-        state: &mut BufferSourceWalkRenderState<'_>,
+        state: &mut BufferSourceWalkRenderState<'_, FS>,
         row_prelude_context: BufferSourceRowPreludeRequestContext,
         loop_context: BufferSourceLoopRequestContext,
         face_resolution_context: BufferSourceFaceResolutionContext<'request, B>,
@@ -433,9 +442,14 @@ impl BufferSourceWalkSetup {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_tail_and_decide_retry<'request, 'buf, B: LayoutBufferView>(
+    fn render_tail_and_decide_retry<
+        'request,
+        'buf,
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &mut self,
-        source_render: TextRowSourceRenderState<'_>,
+        source_render: TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         line_numbers: &mut LineNumberRenderState,
         face_scan: &mut FaceScanCheckpoint,
@@ -488,9 +502,14 @@ impl BufferSourceWalkSetup {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_body_and_tail<'request, 'buf, B: LayoutBufferView>(
+    fn render_body_and_tail<
+        'request,
+        'buf,
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &mut self,
-        state: &mut BufferSourceWalkRenderState<'_>,
+        state: &mut BufferSourceWalkRenderState<'_, FS>,
         row_prelude_context: BufferSourceRowPreludeRequestContext,
         loop_context: BufferSourceLoopRequestContext,
         face_resolution_context: BufferSourceFaceResolutionContext<'request, B>,
@@ -537,12 +556,17 @@ impl BufferSourceWalkSetup {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn begin_render_body_and_tail<'request, 'buf, B: LayoutBufferView>(
+    pub(crate) fn begin_render_body_and_tail<
+        'request,
+        'buf,
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &mut self,
         begin_request: TextWindowBeginRequest,
         output: &mut BufferSourceOutputState<'_>,
         font_metrics: &mut Option<FontMetricsService>,
-        face_resolver: &FaceResolver,
+        face_resolver: &FS,
         face_ids: &mut FrameFaceAttempt,
         line_numbers: &mut LineNumberRenderState,
         face_scan: &mut FaceScanCheckpoint,

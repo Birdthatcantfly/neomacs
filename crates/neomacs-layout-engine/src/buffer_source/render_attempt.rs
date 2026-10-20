@@ -17,7 +17,6 @@ use crate::font::metrics::FontMetricsService;
 use crate::frame_face_arena::FrameFaceAttempt;
 use crate::incremental_layout::ReusedMatrixRows;
 use crate::layout_effect::{LayoutEffect, WindowScrollEffect, WindowScrollHookSite};
-use crate::neovm_bridge::FaceResolver;
 use crate::types::WindowParams;
 use crate::viewport_resolution::ViewportDecision;
 use crate::window_output::{
@@ -34,10 +33,14 @@ pub(crate) struct BufferSourceOutputState<'emit> {
     evaluator: &'emit mut Context,
 }
 
-pub(crate) struct BufferSourceRenderAttemptContext<'a, 'face> {
+pub(crate) struct BufferSourceRenderAttemptContext<
+    'a,
+    'face,
+    FS: crate::neovm_bridge::FaceServices = crate::neovm_bridge::FaceResolver,
+> {
     output: BufferSourceOutputState<'a>,
     font_metrics: &'a mut Option<FontMetricsService>,
-    face_resolver: &'face FaceResolver,
+    face_resolver: &'face FS,
     face_attempt: FrameFaceAttempt,
     window_snapshots: &'a mut Vec<WindowPresentationSnapshot>,
 }
@@ -288,13 +291,13 @@ impl<'emit> BufferSourceOutputState<'emit> {
         begin_request.begin_and_apply(self.output.reborrow(), self.evaluator)
     }
 
-    pub(crate) fn source_render_state<'output>(
+    pub(crate) fn source_render_state<'output, FS: crate::neovm_bridge::FaceServices>(
         &'output mut self,
         output_emitter: &'output mut WindowOutputEmitter,
         font_metrics: &'output mut Option<FontMetricsService>,
         measurement_mode: DisplayRowMeasurementMode,
-        faces: WindowFaces<'output>,
-    ) -> TextRowSourceRenderState<'output> {
+        faces: WindowFaces<'output, FS>,
+    ) -> TextRowSourceRenderState<'output, FS> {
         TextRowSourceRenderState::from_output_render(
             TextRowOutputRenderState::from_parts(
                 self.output.reborrow(),
@@ -308,12 +311,14 @@ impl<'emit> BufferSourceOutputState<'emit> {
     }
 }
 
-impl<'a, 'face> BufferSourceRenderAttemptContext<'a, 'face> {
+impl<'a, 'face, FS: crate::neovm_bridge::FaceServices>
+    BufferSourceRenderAttemptContext<'a, 'face, FS>
+{
     pub(crate) fn new(
         output: TextWindowOutputTarget<'a>,
         evaluator: &'a mut Context,
         font_metrics: &'a mut Option<FontMetricsService>,
-        face_resolver: &'face FaceResolver,
+        face_resolver: &'face FS,
         face_attempt: FrameFaceAttempt,
         window_snapshots: &'a mut Vec<WindowPresentationSnapshot>,
     ) -> Self {
@@ -330,7 +335,7 @@ impl<'a, 'face> BufferSourceRenderAttemptContext<'a, 'face> {
         frame_output: &'a mut FrameOutputOwner,
         evaluator: &'a mut Context,
         font_metrics: &'a mut Option<FontMetricsService>,
-        face_resolver: &'face FaceResolver,
+        face_resolver: &'face FS,
         face_attempt: FrameFaceAttempt,
         window_snapshots: &'a mut Vec<WindowPresentationSnapshot>,
     ) -> Self {
@@ -347,7 +352,7 @@ impl<'a, 'face> BufferSourceRenderAttemptContext<'a, 'face> {
     /// Borrow the same prepared leaf for one unpublished physical retry. The
     /// face attempt is the existing attempt-owned lineage; no Lisp cache or
     /// cross-mutator state is created by this borrow.
-    pub(crate) fn reborrow(&mut self) -> BufferSourceRenderAttemptContext<'_, 'face> {
+    pub(crate) fn reborrow(&mut self) -> BufferSourceRenderAttemptContext<'_, 'face, FS> {
         BufferSourceRenderAttemptContext {
             output: self.output.reborrow(),
             font_metrics: self.font_metrics,
@@ -371,7 +376,7 @@ impl<'a, 'face> BufferSourceRenderAttemptContext<'a, 'face> {
 
     pub(crate) fn with_face_services<R>(
         &mut self,
-        f: impl FnOnce(&FaceResolver, &mut Option<FontMetricsService>) -> R,
+        f: impl FnOnce(&FS, &mut Option<FontMetricsService>) -> R,
     ) -> R {
         f(self.face_resolver, self.font_metrics)
     }
@@ -381,7 +386,7 @@ impl<'a, 'face> BufferSourceRenderAttemptContext<'a, 'face> {
     ) -> (
         BufferSourceOutputState<'a>,
         &'a mut Option<FontMetricsService>,
-        &'face FaceResolver,
+        &'face FS,
         FrameFaceAttempt,
         &'a mut Vec<WindowPresentationSnapshot>,
     ) {

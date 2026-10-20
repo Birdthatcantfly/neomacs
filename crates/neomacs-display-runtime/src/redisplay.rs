@@ -291,10 +291,31 @@ impl RedisplayRuntime {
         window_id: WindowId,
         scope: neovm_core::window::WindowLayoutQueryScope,
     ) -> WindowLayoutQueryOutcome {
+        self.query_window_with_policy(
+            evaluator,
+            frame_id,
+            window_id,
+            scope,
+            &neomacs_layout_engine::RowsQueryPolicy::disabled(),
+        )
+    }
+
+    /// Immutable admission selection belongs to this query's boxed adapter.
+    /// The disjoint reentrant engine retains its explicit disabled wrapper.
+    pub fn query_window_with_policy(
+        &self,
+        evaluator: &mut Context,
+        frame_id: FrameId,
+        window_id: WindowId,
+        scope: neovm_core::window::WindowLayoutQueryScope,
+        policy: &neomacs_layout_engine::RowsQueryPolicy,
+    ) -> WindowLayoutQueryOutcome {
         // The common path reuses the warm presentation engine while it is
         // idle. A nested callback takes the explicitly disjoint path below.
         if let Ok(mut engine) = self.engine.try_borrow_mut() {
-            return match engine.query_window_layout(evaluator, frame_id, window_id, scope) {
+            return match engine
+                .query_window_layout_with_policy(evaluator, frame_id, window_id, scope, policy)
+            {
                 Ok(query) => WindowLayoutQueryOutcome::Ready(query),
                 Err(failure) => WindowLayoutQueryOutcome::Failed(failure),
             };

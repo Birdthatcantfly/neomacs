@@ -28,7 +28,9 @@ pub(crate) enum BufferSourceVisibleLoopOutcome {
     QueryTargetReached,
 }
 
-impl<'rows, 'emit, 'surface> BufferSourceLoopMutableState<'rows, 'emit, 'surface> {
+impl<'rows, 'emit, 'surface, FS: crate::neovm_bridge::FaceServices>
+    BufferSourceLoopMutableState<'rows, 'emit, 'surface, FS>
+{
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_visible_steps<'request, B: LayoutBufferView>(
         &mut self,

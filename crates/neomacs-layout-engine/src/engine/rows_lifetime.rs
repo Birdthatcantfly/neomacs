@@ -27,6 +27,8 @@ pub(super) enum Refusal {
     Source,
     #[error("the canonical producer did not prove complete no-demand fontification")]
     Fontification,
+    #[error("the TTY producer entered cold face realization or lacks its actual witness")]
+    ColdFaceEntry,
     #[error("the producer evaluated a dynamic display form or retried")]
     DynamicOrRetry,
     #[error("the completed query lacks complete numeric geometry")]
@@ -43,6 +45,13 @@ pub(super) enum Refusal {
 pub(super) enum Report {
     Certified { rows: usize, points: usize },
     Refused(Refusal),
+}
+
+#[derive(Debug)]
+enum FaceEntrySeal {
+    Unseen,
+    WarmOnly,
+    Cold,
 }
 
 #[derive(Debug)]
@@ -64,6 +73,8 @@ pub(super) struct Producer {
     source_authority: BufferSourceAuthority,
     epoch: RowsObservationEpoch,
     fontification: FontificationSeal,
+    face_entry: FaceEntrySeal,
+    tty: bool,
     _local: PhantomData<*const ()>,
 }
 
@@ -104,6 +115,36 @@ impl Producer {
             return Err(Refusal::FontServices);
         }
         let epoch = context.begin_static_rows_observation(frame)?;
+        Self::begin_with_epoch(context, frame, window, scope, epoch)
+    }
+
+    /// Explicit TTY metadata policy; the actual render must still supply its
+    /// independent warm-only face-entry seal before completion.
+    pub(super) fn begin_tty(
+        engine: &LayoutEngine,
+        context: &Context,
+        frame: FrameId,
+        window: WindowId,
+        scope: WindowLayoutQueryScope,
+        host: Option<&neovm_core::emacs_core::display_host::InertRowsHostAuthority>,
+    ) -> Result<Self, Refusal> {
+        if !matches!(scope, WindowLayoutQueryScope::Rows { .. }) {
+            return Err(Refusal::Scope);
+        }
+        if engine.font_metrics.is_some() {
+            return Err(Refusal::FontServices);
+        }
+        let epoch = context.begin_tty_rows_observation(frame, host)?;
+        Self::begin_with_epoch(context, frame, window, scope, epoch)
+    }
+
+    fn begin_with_epoch(
+        context: &Context,
+        frame: FrameId,
+        window: WindowId,
+        scope: WindowLayoutQueryScope,
+        epoch: RowsObservationEpoch,
+    ) -> Result<Self, Refusal> {
         let frame_owner = context.frame_manager().get(frame).ok_or(Refusal::Window)?;
         if frame_owner.minibuffer_window == Some(window) {
             return Err(Refusal::Window);
@@ -127,8 +168,22 @@ impl Producer {
             source_authority,
             epoch,
             fontification: FontificationSeal::Unseen,
+            face_entry: FaceEntrySeal::Unseen,
+            tty: frame_owner.effective_window_system().is_none(),
             _local: PhantomData,
         })
+    }
+
+    /// Supplied only by the actual canonical Rows render's sticky witness.
+    /// Repeated notes cannot turn an incomplete or cold observation warm.
+    pub(super) fn note_face_entry(&mut self, entry: Option<&std::cell::Cell<bool>>) {
+        self.face_entry = match (&self.face_entry, entry) {
+            (FaceEntrySeal::Unseen, Some(entry)) if !entry.get() => FaceEntrySeal::WarmOnly,
+            (FaceEntrySeal::Unseen, Some(_))
+            | (FaceEntrySeal::Unseen, None)
+            | (FaceEntrySeal::WarmOnly, _)
+            | (FaceEntrySeal::Cold, _) => FaceEntrySeal::Cold,
+        };
     }
 
     /// Called only at the real canonical Rows return, using stage1's actual
@@ -157,6 +212,9 @@ impl Producer {
     ) -> Result<Completed<'a>, Refusal> {
         if !matches!(self.fontification, FontificationSeal::NoDemand) {
             return Err(Refusal::Fontification);
+        }
+        if self.tty && !matches!(self.face_entry, FaceEntrySeal::WarmOnly) {
+            return Err(Refusal::ColdFaceEntry);
         }
         // These retain the deliberately narrow producer scope. Lifetime no
         // longer depends on inferring that native callbacks did not execute.
@@ -259,3 +317,7 @@ pub(super) fn finish_and_drop(
 #[cfg(test)]
 #[path = "rows_lifetime_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tty_rows_lifetime_test.rs"]
+mod tty_tests;

@@ -698,10 +698,16 @@ impl BufferSourceOutputSetup {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render_body_attempt<'a, 'surface, 'buf, B>(
+    pub(crate) fn render_body_attempt<
+        'a,
+        'surface,
+        'buf,
+        B,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         walk_setup: &mut BufferSourceWalkSetup,
-        state: BufferSourceRenderAttemptContext<'_, '_>,
+        state: BufferSourceRenderAttemptContext<'_, '_, FS>,
         chrome_request: WindowChromeRowsRenderRequest<'_, '_>,
         remaining_visibility_retries: usize,
         forward_viewport_measurement: Option<ForwardViewportMeasurement>,
@@ -731,7 +737,7 @@ impl BufferSourceOutputSetup {
             state.into_parts();
         let retry_checkpoint = output.capture_retry_checkpoint();
         let effective_default_face =
-            default_face.reserve_effective_face(face_resolver, &mut face_ids);
+            default_face.reserve_effective_face(face_resolver.resolver(), &mut face_ids);
         let default_face_id = effective_default_face.face_id();
         BufferWindowBackground::from_default_face(&effective_default_face).publish(
             &mut output.output_target(),
@@ -742,7 +748,7 @@ impl BufferSourceOutputSetup {
         let has_overlays = !buffer.layout_overlays().is_empty();
         let face_resolution = BufferSourceFaceResolutionContext::new(
             buffer,
-            face_resolver,
+            face_resolver.resolver(),
             default_face.measurement_policy(),
             default_face.face(),
             default_face_id,
@@ -899,7 +905,7 @@ impl BufferSourceOutputSetup {
             // allocation. This window can now install rows without mutating the
             // namespace behind glyphs emitted by an earlier sibling.
             let mut render_services =
-                ChromeRowRenderServices::new(font_metrics, face_resolver, &mut face_ids);
+                ChromeRowRenderServices::new(font_metrics, face_resolver.resolver(), &mut face_ids);
 
             // Install retained body rows verbatim (already bidi-finalized), with
             // the prior cursor decoration stripped — the new cursor is set below.
@@ -1225,7 +1231,7 @@ impl BufferSourceOutputSetup {
             }
 
             let mut render_services =
-                ChromeRowRenderServices::new(font_metrics, face_resolver, &mut face_ids);
+                ChromeRowRenderServices::new(font_metrics, face_resolver.resolver(), &mut face_ids);
 
             // Redisplay positions: window_end is the LAST visible row.
             //  - SCROLL: reused rows sit ABOVE the exposed (bottom) rows, so the
@@ -1632,7 +1638,7 @@ impl BufferSourceOutputSetup {
         let (mut output, evaluator) = output.into_parts();
         let window_faces = FrameFaces::new(face_resolver).for_window(buffer);
         let mut render_services =
-            ChromeRowRenderServices::new(font_metrics, face_resolver, &mut face_ids);
+            ChromeRowRenderServices::new(font_metrics, face_resolver.resolver(), &mut face_ids);
         let mut output_emitter = output_emitter;
         let redisplay_positions = walk_setup.install_body(
             output.reborrow(),

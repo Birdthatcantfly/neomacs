@@ -193,9 +193,9 @@ where
     /// A bounded viewport read that runs out of source re-acquires here the
     /// same way, with its geometry allowance grown; the discarded attempt's
     /// unpublished window grid is dropped before the retaken body replaces it.
-    pub(crate) fn render_into(
+    pub(crate) fn render_into<FS: crate::neovm_bridge::FaceServices>(
         self,
-        mut context: BufferSourceRenderAttemptContext<'_, '_>,
+        mut context: BufferSourceRenderAttemptContext<'_, '_, FS>,
         text_buf: &mut Vec<u8>,
         remaining_visibility_retries: usize,
         mut cursor_only: Option<crate::incremental_layout::CursorOnlyReplay>,
@@ -390,9 +390,9 @@ where
         }
     }
 
-    fn render_once(
+    fn render_once<FS: crate::neovm_bridge::FaceServices>(
         self,
-        context: BufferSourceRenderAttemptContext<'_, '_>,
+        context: BufferSourceRenderAttemptContext<'_, '_, FS>,
         text_buf: &mut Vec<u8>,
         remaining_visibility_retries: usize,
         cursor_only: Option<crate::incremental_layout::CursorOnlyReplay>,
@@ -425,7 +425,7 @@ where
 
         let mut default_face = state.with_face_services(|face_resolver, font_metrics| {
             BufferSourceDefaultFacePlan::new(
-                face_resolver,
+                face_resolver.resolver(),
                 buffer,
                 font_metrics,
                 DisplayRowMeasurementMode::from_frame_window_system(frame_params.window_system),
@@ -477,7 +477,7 @@ where
         );
 
         let chrome_plan = state.with_face_services(|face_resolver, _font_metrics| {
-            WindowChromeRowsPlan::new(params, buffer, face_resolver)
+            WindowChromeRowsPlan::new(params, buffer, face_resolver.resolver())
         });
         let max_mini_window_rows = {
             let frame_rows = frame_params.height / char_h.max(1.0);

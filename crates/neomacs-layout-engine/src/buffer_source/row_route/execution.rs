@@ -117,8 +117,8 @@ impl RoutedRowCheckpoint {
     /// buffer pipeline owns the row. `face_cache_mark` is the speculation
     /// window the caller armed before its first face probe; ownership moves
     /// here so the checkpoint is the single rewind authority for the attempt.
-    fn capture(
-        state: &mut crate::buffer_source::loop_state::BufferSourceLoopMutableState<'_, '_, '_>,
+    fn capture<FS: crate::neovm_bridge::FaceServices>(
+        state: &mut crate::buffer_source::loop_state::BufferSourceLoopMutableState<'_, '_, '_, FS>,
         active_face: &DisplayRowActiveFaceState,
         face_cache_mark: crate::neovm_bridge::FaceCacheSpeculationMark,
     ) -> Option<Self> {
@@ -147,9 +147,9 @@ impl RoutedRowCheckpoint {
 
     /// Rewind every mutation the attempt made. Consuming the checkpoint
     /// keeps the rewind single-shot: the next attempt captures a fresh one.
-    fn restore(
+    fn restore<FS: crate::neovm_bridge::FaceServices>(
         self,
-        state: &mut crate::buffer_source::loop_state::BufferSourceLoopMutableState<'_, '_, '_>,
+        state: &mut crate::buffer_source::loop_state::BufferSourceLoopMutableState<'_, '_, '_, FS>,
         active_face: &mut DisplayRowActiveFaceState,
     ) {
         assert!(
@@ -188,9 +188,9 @@ impl RoutedRowCheckpoint {
 
     /// Close the attempt's face-cache speculation window for a row that
     /// routed: its cache entries were earned and stay.
-    fn accept(
+    fn accept<FS: crate::neovm_bridge::FaceServices>(
         self,
-        state: &mut crate::buffer_source::loop_state::BufferSourceLoopMutableState<'_, '_, '_>,
+        state: &mut crate::buffer_source::loop_state::BufferSourceLoopMutableState<'_, '_, '_, FS>,
     ) {
         state
             .source_render
@@ -198,8 +198,8 @@ impl RoutedRowCheckpoint {
     }
 }
 
-impl<'rows, 'emit, 'surface>
-    crate::buffer_source::loop_state::BufferSourceLoopMutableState<'rows, 'emit, 'surface>
+impl<'rows, 'emit, 'surface, FS: crate::neovm_bridge::FaceServices>
+    crate::buffer_source::loop_state::BufferSourceLoopMutableState<'rows, 'emit, 'surface, FS>
 {
     /// Attempt to acquire and render the row starting at the current walk
     /// position through the whole-row fast path. Only rows

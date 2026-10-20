@@ -6,6 +6,9 @@
 use std::fmt::{Display, Formatter};
 use std::num::{NonZeroU16, NonZeroU32};
 
+mod rows_authority;
+pub use rows_authority::InertRowsHostAuthority;
+
 mod system_fonts;
 pub use system_fonts::{SystemFontName, SystemFontRole, SystemFonts};
 
@@ -335,7 +338,7 @@ impl GuiResourceQuery {
     }
 }
 
-pub trait DisplayHost {
+pub trait DisplayHost: std::any::Any {
     #[cfg(target_os = "macos")]
     fn ns_resource(&self, _name: &str) -> Option<String> {
         None

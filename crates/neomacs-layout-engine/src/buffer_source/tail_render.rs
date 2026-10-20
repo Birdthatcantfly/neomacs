@@ -320,9 +320,10 @@ pub(crate) fn render_buffer_source_tail_and_decide_retry<
     'surface,
     'buf,
     B: LayoutBufferView,
+    FS: crate::neovm_bridge::FaceServices,
 >(
     loop_context: BufferSourceLoopRequestContext,
-    mut source_render: TextRowSourceRenderState<'emit>,
+    mut source_render: TextRowSourceRenderState<'emit, FS>,
     mut row_progress: DisplaySourceRowProgressState<'emit>,
     row_geometry: &'emit mut DisplayRowGeometryState,
     cursor_info: &'emit mut CursorCaptureState,

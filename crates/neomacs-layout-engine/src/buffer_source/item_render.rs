@@ -93,13 +93,13 @@ impl<'a> BufferSourceItemRenderRequest<'a> {
         }
     }
 
-    pub(crate) fn render_and_apply<B: LayoutBufferView>(
+    pub(crate) fn render_and_apply<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
         mut self,
         source_item: DisplaySourceStepItem,
         source_walk: &mut BufferSourceWalk<'_, B>,
         buffer: &B,
         row_prelude_context: Option<BufferSourceRowPreludeRequestContext>,
-        state: BufferSourceLoopMutableState<'_, '_, '_>,
+        state: BufferSourceLoopMutableState<'_, '_, '_, FS>,
     ) -> bool {
         let source_step_char = source_item.source_step_char();
         let box_vertical_edges = source_item.item().box_vertical_edges;
@@ -158,13 +158,13 @@ impl<'a> BufferSourceItemRenderRequest<'a> {
         !outcome.should_break()
     }
 
-    fn render_text_item_and_apply<B: LayoutBufferView>(
+    fn render_text_item_and_apply<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
         self,
         source_item: DisplaySourceStepItem,
         source_walk: &mut BufferSourceWalk<'_, B>,
         buffer: &B,
         row_prelude_context: Option<BufferSourceRowPreludeRequestContext>,
-        state: BufferSourceLoopMutableState<'_, '_, '_>,
+        state: BufferSourceLoopMutableState<'_, '_, '_, FS>,
     ) -> BufferSourceItemRenderOutcome {
         self.render_prepared_source_item_and_apply(
             source_item,
@@ -175,9 +175,12 @@ impl<'a> BufferSourceItemRenderRequest<'a> {
         )
     }
 
-    fn render_selective_display_tail_for_context<B: LayoutBufferView>(
+    fn render_selective_display_tail_for_context<
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &mut self,
-        state: &mut BufferSourceLoopMutableState<'_, '_, '_>,
+        state: &mut BufferSourceLoopMutableState<'_, '_, '_, FS>,
         source_walk: &mut BufferSourceWalk<'_, B>,
         source_step_char: DisplaySourceStepChar,
         buffer: &B,
@@ -192,9 +195,9 @@ impl<'a> BufferSourceItemRenderRequest<'a> {
         self.render_selective_display_tail(state, source_walk, request, buffer)
     }
 
-    fn render_selective_display_tail<B: LayoutBufferView>(
+    fn render_selective_display_tail<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
         &mut self,
-        state: &mut BufferSourceLoopMutableState<'_, '_, '_>,
+        state: &mut BufferSourceLoopMutableState<'_, '_, '_, FS>,
         source_walk: &mut BufferSourceWalk<'_, B>,
         request: BufferSourceSelectiveDisplayTailRenderRequest<'_>,
         buffer: &B,
@@ -202,9 +205,9 @@ impl<'a> BufferSourceItemRenderRequest<'a> {
         request.render_if_needed_and_apply(source_walk, buffer, state.reborrow())
     }
 
-    fn render_line_break_for_context<B: LayoutBufferView>(
+    fn render_line_break_for_context<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
         &mut self,
-        state: &mut BufferSourceLoopMutableState<'_, '_, '_>,
+        state: &mut BufferSourceLoopMutableState<'_, '_, '_, FS>,
         source_walk: &mut BufferSourceWalk<'_, B>,
         source_char: DisplaySourceStepChar,
         box_vertical_edges: neomacs_display_protocol::face::BoxVerticalEdges,
@@ -226,9 +229,9 @@ impl<'a> BufferSourceItemRenderRequest<'a> {
         self.render_line_break(state, source_walk, request, buffer)
     }
 
-    fn render_line_break<B: LayoutBufferView>(
+    fn render_line_break<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
         &mut self,
-        state: &mut BufferSourceLoopMutableState<'_, '_, '_>,
+        state: &mut BufferSourceLoopMutableState<'_, '_, '_, FS>,
         source_walk: &mut BufferSourceWalk<'_, B>,
         request: BufferSourceLineBreakRenderRequest<'_>,
         buffer: &B,
@@ -236,13 +239,16 @@ impl<'a> BufferSourceItemRenderRequest<'a> {
         request.render_and_apply(source_walk, buffer, state.reborrow())
     }
 
-    fn render_prepared_source_item_and_apply<B: LayoutBufferView>(
+    fn render_prepared_source_item_and_apply<
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         mut source_item: DisplaySourceStepItem,
         source_walk: &mut BufferSourceWalk<'_, B>,
         buffer: &B,
         row_prelude_context: Option<BufferSourceRowPreludeRequestContext>,
-        state: BufferSourceLoopMutableState<'_, '_, '_>,
+        state: BufferSourceLoopMutableState<'_, '_, '_, FS>,
     ) -> BufferSourceItemRenderOutcome {
         let BufferSourceLoopMutableState {
             invisible_text_checkpoint,

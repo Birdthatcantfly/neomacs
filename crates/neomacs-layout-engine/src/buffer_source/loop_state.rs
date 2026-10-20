@@ -167,10 +167,15 @@ impl<'surface> BufferSourceSurfaceContext<'surface> {
     }
 }
 
-pub(crate) struct BufferSourceLoopMutableState<'rows, 'emit, 'surface> {
+pub(crate) struct BufferSourceLoopMutableState<
+    'rows,
+    'emit,
+    'surface,
+    FS: crate::neovm_bridge::FaceServices = crate::neovm_bridge::FaceResolver,
+> {
     pub(crate) invisible_text_checkpoint: &'emit mut InvisibleTextScanCheckpoint,
     pub(crate) progress: DisplaySourceProgressState<'emit>,
-    pub(crate) source_render: TextRowSourceRenderState<'emit>,
+    pub(crate) source_render: TextRowSourceRenderState<'emit, FS>,
     pub(crate) row_build: BufferSourceRowBuildState<'emit>,
     pub(crate) row_source_start: &'emit mut DisplayRowSourceStart,
     pub(crate) row_carryover: BufferSourceRowCarryoverState<'emit>,
@@ -182,12 +187,14 @@ pub(crate) struct BufferSourceLoopMutableState<'rows, 'emit, 'surface> {
     pub(crate) surface: BufferSourceSurfaceContext<'surface>,
 }
 
-impl<'rows, 'emit, 'surface> BufferSourceLoopMutableState<'rows, 'emit, 'surface> {
+impl<'rows, 'emit, 'surface, FS: crate::neovm_bridge::FaceServices>
+    BufferSourceLoopMutableState<'rows, 'emit, 'surface, FS>
+{
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         invisible_text_checkpoint: &'emit mut InvisibleTextScanCheckpoint,
         progress: DisplaySourceProgressState<'emit>,
-        source_render: TextRowSourceRenderState<'emit>,
+        source_render: TextRowSourceRenderState<'emit, FS>,
         row_build: BufferSourceRowBuildState<'emit>,
         row_source_start: &'emit mut DisplayRowSourceStart,
         row_carryover: BufferSourceRowCarryoverState<'emit>,
@@ -230,7 +237,7 @@ impl<'rows, 'emit, 'surface> BufferSourceLoopMutableState<'rows, 'emit, 'surface
         self
     }
 
-    pub(crate) fn reborrow(&mut self) -> BufferSourceLoopMutableState<'_, '_, 'surface> {
+    pub(crate) fn reborrow(&mut self) -> BufferSourceLoopMutableState<'_, '_, 'surface, FS> {
         BufferSourceLoopMutableState {
             invisible_text_checkpoint: self.invisible_text_checkpoint,
             progress: self.progress.reborrow(),

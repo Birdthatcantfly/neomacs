@@ -168,11 +168,11 @@ impl<'a> OverlayStringRenderRequest<'a> {
         }
     }
 
-    pub(crate) fn render<B: LayoutBufferView>(
+    pub(crate) fn render<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
         self,
         buffer: &B,
         point: CharPos0,
-        state: &mut OverlayStringRenderState<'_>,
+        state: &mut OverlayStringRenderState<'_, FS>,
     ) -> DisplayRowTransitionContinuation {
         render_overlay_string(buffer, self.source, point, self.row_context, state)
     }
@@ -251,8 +251,11 @@ impl<'a> OverlayStringRenderRowContext<'a> {
     }
 }
 
-pub(crate) struct OverlayStringRenderState<'a> {
-    pub(crate) source_render: TextRowSourceRenderState<'a>,
+pub(crate) struct OverlayStringRenderState<
+    'a,
+    FS: crate::neovm_bridge::FaceServices = crate::neovm_bridge::FaceResolver,
+> {
+    pub(crate) source_render: TextRowSourceRenderState<'a, FS>,
     pub(crate) x: &'a mut f32,
     pub(crate) col: &'a mut usize,
     pub(crate) geometry: &'a mut DisplayRowGeometryState,
@@ -268,10 +271,10 @@ struct BufferSourceContinuationRowPreludeState<'a> {
     face_scan: &'a mut FaceScanCheckpoint,
 }
 
-impl<'a> OverlayStringRenderState<'a> {
+impl<'a, FS: crate::neovm_bridge::FaceServices> OverlayStringRenderState<'a, FS> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_source_render(
-        source_render: TextRowSourceRenderState<'a>,
+        source_render: TextRowSourceRenderState<'a, FS>,
         x: &'a mut f32,
         col: &'a mut usize,
         geometry: &'a mut DisplayRowGeometryState,
@@ -394,13 +397,16 @@ impl<'a> BufferOverlayStringTextRowRenderContext<'a> {
     /// them as a typed element with insertion semantics); this side owns only
     /// the append, which is a session per string because a string can break
     /// rows, clip, and carry its own `cursor` property.
-    pub(crate) fn render_produced_strings<B: LayoutBufferView>(
+    pub(crate) fn render_produced_strings<
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         buffer: &B,
         positions: OverlayStringRenderPositions,
         strings: &[OverlayDisplayString],
         box_boundaries: DisplayStringBoxBoundaries,
-        state: &mut OverlayStringRenderState<'_>,
+        state: &mut OverlayStringRenderState<'_, FS>,
     ) -> DisplayRowTransitionContinuation {
         if !self.enabled {
             return DisplayRowTransitionContinuation::Continue;
@@ -432,12 +438,15 @@ impl<'a> BufferOverlayStringTextRowRenderContext<'a> {
     /// The end-of-buffer anchor path: collect and render here, because the
     /// producer stops at point-max and cannot surface an element for it.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render_eob_anchor_strings_at_text_row<B: LayoutBufferView>(
+    pub(crate) fn render_eob_anchor_strings_at_text_row<
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         buffer: &B,
         positions: OverlayStringRenderPositions,
         anchor_face_boxed: bool,
-        source_render: TextRowSourceRenderState<'_>,
+        source_render: TextRowSourceRenderState<'_, FS>,
         x: &mut f32,
         col: &mut usize,
         geometry: &mut DisplayRowGeometryState,
@@ -475,13 +484,16 @@ impl<'a> BufferOverlayStringTextRowRenderContext<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render_produced_strings_at_text_row<B: LayoutBufferView>(
+    pub(crate) fn render_produced_strings_at_text_row<
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         buffer: &B,
         positions: OverlayStringRenderPositions,
         strings: &[OverlayDisplayString],
         box_boundaries: DisplayStringBoxBoundaries,
-        source_render: TextRowSourceRenderState<'_>,
+        source_render: TextRowSourceRenderState<'_, FS>,
         x: &mut f32,
         col: &mut usize,
         geometry: &mut DisplayRowGeometryState,
@@ -542,9 +554,9 @@ impl<'a> OverlayStringRowBreakRenderContext<'a> {
         }
     }
 
-    pub(crate) fn finish_row(
+    pub(crate) fn finish_row<FS: crate::neovm_bridge::FaceServices>(
         self,
-        state: &mut OverlayStringRenderState<'_>,
+        state: &mut OverlayStringRenderState<'_, FS>,
     ) -> DisplayRowTransitionContinuation {
         let content_x = self.row_context.content_x();
         let geometry_transition = DisplayRowLineBreakTransitionRequest::new(
@@ -580,12 +592,12 @@ impl<'a> OverlayStringRowBreakRenderContext<'a> {
     }
 }
 
-fn render_overlay_string<B: LayoutBufferView>(
+fn render_overlay_string<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
     buffer: &B,
     source_request: OverlayStringRenderSource,
     point: CharPos0,
     row_context: OverlayStringRenderRowContext<'_>,
-    state: &mut OverlayStringRenderState<'_>,
+    state: &mut OverlayStringRenderState<'_, FS>,
 ) -> DisplayRowTransitionContinuation {
     let anchor_charpos = source_request.anchor_i64();
     let text_value = source_request.value();

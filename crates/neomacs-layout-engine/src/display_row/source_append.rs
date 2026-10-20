@@ -242,9 +242,9 @@ impl SyntheticTextAppendContext {
         }
     }
 
-    fn append_to_text_row_and_emit(
+    fn append_to_text_row_and_emit<FS: crate::neovm_bridge::FaceServices>(
         &self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         position: DisplayRowPosition,
         source: SyntheticTextSource,
     ) -> Option<DisplayRowAppendProgress> {
@@ -324,9 +324,9 @@ impl<'a> SyntheticTextRowAppendContext<'a> {
         )
     }
 
-    pub(crate) fn append_request_to_text_row_and_emit(
+    pub(crate) fn append_request_to_text_row_and_emit<FS: crate::neovm_bridge::FaceServices>(
         self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         request: SyntheticTextAppendRequest,
     ) -> Option<DisplayRowAppendProgress> {
         let (position, source, face) = request.into_parts();
@@ -391,9 +391,9 @@ impl<'a> BufferSyntheticTextRenderContext<'a> {
         )
     }
 
-    pub(crate) fn render_request_to_text_row(
+    pub(crate) fn render_request_to_text_row<FS: crate::neovm_bridge::FaceServices>(
         self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         geometry: &'a DisplayRowGeometryState,
         request: SyntheticTextAppendRequest,
     ) -> Option<DisplayRowAppendProgress> {
@@ -402,9 +402,9 @@ impl<'a> BufferSyntheticTextRenderContext<'a> {
     }
 
     #[cfg(test)]
-    pub(crate) fn render_active_marker_to_text_row(
+    pub(crate) fn render_active_marker_to_text_row<FS: crate::neovm_bridge::FaceServices>(
         self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         geometry: &'a DisplayRowGeometryState,
         position: DisplayRowPosition,
         marker: SyntheticTextMarker,
@@ -417,9 +417,9 @@ impl<'a> BufferSyntheticTextRenderContext<'a> {
         .map(|progress| progress.end())
     }
 
-    pub(crate) fn hscroll_truncation_request(
+    pub(crate) fn hscroll_truncation_request<FS: crate::neovm_bridge::FaceServices>(
         &self,
-        source: &TextRowSourceRenderState<'_>,
+        source: &TextRowSourceRenderState<'_, FS>,
         content_x: f32,
     ) -> SyntheticTextAppendRequest {
         // GNU produce_special_glyphs resolves the buffer-remapped default,
@@ -438,9 +438,11 @@ impl<'a> BufferSyntheticTextRenderContext<'a> {
     }
 
     #[cfg(test)]
-    pub(crate) fn render_hscroll_truncation_marker_to_text_row(
+    pub(crate) fn render_hscroll_truncation_marker_to_text_row<
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         geometry: &'a DisplayRowGeometryState,
         content_x: f32,
     ) -> Option<DisplayRowPosition> {
@@ -490,9 +492,9 @@ impl<'face> SingleDisplayItemAppendContext<'face> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render_source_with_policy<S, P>(
+    pub(crate) fn render_source_with_policy<S, P, FS: crate::neovm_bridge::FaceServices>(
         &self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         source: &mut S,
         source_state: &mut DisplayRowSourceState,
@@ -577,9 +579,12 @@ impl<'face> SingleDisplayItemAppendContext<'face> {
         prepare_single_display_item_source_append(item, self.face_id, position, kind)
     }
 
-    pub(crate) fn render_with_policy<P: DisplayRowRenderPolicy>(
+    pub(crate) fn render_with_policy<
+        P: DisplayRowRenderPolicy,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         item: DisplayItem,
         position: DisplayRowPosition,
@@ -604,9 +609,9 @@ impl<'face> SingleDisplayItemAppendContext<'face> {
         Some(outcome.into_append_progress(position))
     }
 
-    pub(crate) fn render_naturally(
+    pub(crate) fn render_naturally<FS: crate::neovm_bridge::FaceServices>(
         &self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         item: DisplayItem,
         position: DisplayRowPosition,
@@ -720,8 +725,8 @@ impl<'face> SingleDisplayItemAppendContext<'face> {
     }
 }
 
-fn append_synthetic_text_to_display_row(
-    state: &mut TextRowSourceRenderState<'_>,
+fn append_synthetic_text_to_display_row<FS: crate::neovm_bridge::FaceServices>(
+    state: &mut TextRowSourceRenderState<'_, FS>,
     face_ids: &mut FrameFaceAttempt,
     face: &ResolvedFrameFace,
     frame: DisplayRowAppendFrame,

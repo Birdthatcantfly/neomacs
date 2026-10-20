@@ -205,7 +205,7 @@ impl<'a, 'emit> DisplayRowTextWindowEmitContext<'a, 'emit> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn from_source_render(
+    pub(crate) fn from_source_render<FS: crate::neovm_bridge::FaceServices>(
         defaults: DisplayRowGeometryDefaults,
         row_base: usize,
         row_y_positions: &'a mut DisplayRowYPositions,
@@ -213,7 +213,7 @@ impl<'a, 'emit> DisplayRowTextWindowEmitContext<'a, 'emit> {
         row_geometry: &'emit mut DisplayRowGeometryState,
         row_flags: &'emit mut DisplayRowFlags,
         row_limit: DisplayRowLimit,
-        source_render: &'emit mut TextRowSourceRenderState<'_>,
+        source_render: &'emit mut TextRowSourceRenderState<'_, FS>,
     ) -> Self {
         Self::new(
             defaults,

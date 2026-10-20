@@ -34,9 +34,9 @@ use crate::display_source::DisplaySourceStepItem;
 use crate::neovm_bridge::LayoutBufferView;
 use crate::types::{LayoutCharPos0, WindowParams};
 
-pub(crate) fn emit_nested_source_visual_wrap(
+pub(crate) fn emit_nested_source_visual_wrap<FS: crate::neovm_bridge::FaceServices>(
     loop_context: BufferSourceLoopRequestContext,
-    state: BufferSourceLoopMutableState<'_, '_, '_>,
+    state: BufferSourceLoopMutableState<'_, '_, '_, FS>,
 ) -> DisplayRowTransitionContinuation {
     let BufferSourceLoopMutableState {
         mut progress,
@@ -144,9 +144,9 @@ pub(crate) fn emit_nested_source_visual_wrap(
 /// 720 -- and with `word-wrap` t it is [1..42), ending BEFORE the word, with
 /// [42..47) -- "zzz" and the whole 400 px image -- on the next line
 /// (`tmp/midrow-image/case-3.txt`, `case-1.txt`).
-fn emit_word_wrap_rewind<B: LayoutBufferView>(
+fn emit_word_wrap_rewind<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
     loop_context: BufferSourceLoopRequestContext,
-    state: BufferSourceLoopMutableState<'_, '_, '_>,
+    state: BufferSourceLoopMutableState<'_, '_, '_, FS>,
     source_walk: &mut BufferSourceWalk<'_, B>,
     break_candidate: WordWrapBreakCandidate,
 ) -> DisplayRowTransitionContinuation {
@@ -236,24 +236,31 @@ fn emit_word_wrap_rewind<B: LayoutBufferView>(
     continuation
 }
 
-pub(crate) struct BufferSourceRenderRequest<'rows, 'request, 'emit, 'surface, 'face> {
+pub(crate) struct BufferSourceRenderRequest<
+    'rows,
+    'request,
+    'emit,
+    'surface,
+    'face,
+    FS: crate::neovm_bridge::FaceServices = crate::neovm_bridge::FaceResolver,
+> {
     loop_context: BufferSourceLoopRequestContext,
     text: &'request [u8],
     params: &'request WindowParams,
     active_face_state: &'face DisplayRowActiveFaceState,
-    state: BufferSourceLoopMutableState<'rows, 'emit, 'surface>,
+    state: BufferSourceLoopMutableState<'rows, 'emit, 'surface, FS>,
     row_prelude_context: Option<BufferSourceRowPreludeRequestContext>,
 }
 
-impl<'rows, 'request, 'emit, 'surface, 'face>
-    BufferSourceRenderRequest<'rows, 'request, 'emit, 'surface, 'face>
+impl<'rows, 'request, 'emit, 'surface, 'face, FS: crate::neovm_bridge::FaceServices>
+    BufferSourceRenderRequest<'rows, 'request, 'emit, 'surface, 'face, FS>
 {
     pub(crate) fn new(
         loop_context: BufferSourceLoopRequestContext,
         text: &'request [u8],
         params: &'request WindowParams,
         active_face_state: &'face DisplayRowActiveFaceState,
-        state: BufferSourceLoopMutableState<'rows, 'emit, 'surface>,
+        state: BufferSourceLoopMutableState<'rows, 'emit, 'surface, FS>,
     ) -> Self {
         Self {
             loop_context,

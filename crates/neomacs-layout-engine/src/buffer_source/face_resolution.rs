@@ -173,9 +173,9 @@ impl<'a, B: LayoutBufferView> BufferSourceFaceResolutionContext<'a, B> {
     /// state `resolve_at_checkpoint` would install for `face_id`/`resolved`,
     /// WITHOUT installing it or touching row geometry — the route decision
     /// must measure candidate segments before mutating any loop state.
-    pub(crate) fn probe_measured_active_face(
+    pub(crate) fn probe_measured_active_face<FS: crate::neovm_bridge::FaceServices>(
         &self,
-        source_render: &mut TextRowSourceRenderState<'_>,
+        source_render: &mut TextRowSourceRenderState<'_, FS>,
         face_id: FaceId,
         resolved: ResolvedFace,
     ) -> DisplayRowActiveFaceState {
@@ -190,9 +190,9 @@ impl<'a, B: LayoutBufferView> BufferSourceFaceResolutionContext<'a, B> {
         }
     }
 
-    pub(crate) fn resolve_at_checkpoint(
+    pub(crate) fn resolve_at_checkpoint<FS: crate::neovm_bridge::FaceServices>(
         &self,
-        state: &mut BufferSourceFaceResolutionState<'_, '_>,
+        state: &mut BufferSourceFaceResolutionState<'_, '_, FS>,
         charpos: i64,
     ) -> bool {
         if !state.face_scan.should_resolve_at(charpos as usize) {
@@ -300,9 +300,9 @@ impl<'a, B: LayoutBufferView> BufferSourceFaceResolutionContext<'a, B> {
         .with_automatic_composition(self.buffer().layout_string_composition_rules())
     }
 
-    pub(crate) fn install_pending_source_faces(
+    pub(crate) fn install_pending_source_faces<FS: crate::neovm_bridge::FaceServices>(
         self,
-        source_render: &mut TextRowSourceRenderState<'_>,
+        source_render: &mut TextRowSourceRenderState<'_, FS>,
         pending_faces: Vec<PendingDisplaySourceFace>,
     ) {
         // Pending faces include neighbours inspected for box-run boundaries.
@@ -321,9 +321,9 @@ impl<'a, B: LayoutBufferView> BufferSourceFaceResolutionContext<'a, B> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn resolve_at_checkpoint_with_source_state(
+    pub(crate) fn resolve_at_checkpoint_with_source_state<FS: crate::neovm_bridge::FaceServices>(
         &self,
-        source_render: &mut TextRowSourceRenderState<'_>,
+        source_render: &mut TextRowSourceRenderState<'_, FS>,
         face_scan: &mut FaceScanCheckpoint,
         face_ids: &mut FrameFaceAttempt,
         active_face_state: &mut DisplayRowActiveFaceState,
@@ -416,9 +416,12 @@ impl std::ops::Deref for ItemActiveFace<'_> {
 }
 
 impl BufferSourceItemLayoutResolutionContext<'_> {
-    pub(crate) fn resolve_source_item_layout_for_active_face<'face>(
+    pub(crate) fn resolve_source_item_layout_for_active_face<
+        'face,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &self,
-        source_render: &mut TextRowSourceRenderState<'_>,
+        source_render: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         row_geometry: &mut DisplayRowGeometryState,
         active_face_state: &'face DisplayRowActiveFaceState,
@@ -515,9 +518,9 @@ impl BufferSourceItemLayoutResolutionContext<'_> {
     /// (`load_face_colors`, src/xfaces.c:1389-1400), and `nobreak-space` can
     /// set `:background` outright (its `min-colors 8` branch), so a
     /// foreground-only comparison would discard a real colour change.
-    fn merge_named_active_face(
+    fn merge_named_active_face<FS: crate::neovm_bridge::FaceServices>(
         &self,
-        source_render: &mut TextRowSourceRenderState<'_>,
+        source_render: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         row_geometry: &mut DisplayRowGeometryState,
         active_face_state: &DisplayRowActiveFaceState,
@@ -536,9 +539,9 @@ impl BufferSourceItemLayoutResolutionContext<'_> {
         Some(self.install_merged_active_face(source_render, face_ids, row_geometry, item, merged))
     }
 
-    fn install_merged_active_face(
+    fn install_merged_active_face<FS: crate::neovm_bridge::FaceServices>(
         &self,
-        source_render: &mut TextRowSourceRenderState<'_>,
+        source_render: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         row_geometry: &mut DisplayRowGeometryState,
         item: &mut DisplayItem,
@@ -561,8 +564,12 @@ impl BufferSourceItemLayoutResolutionContext<'_> {
     }
 }
 
-pub(crate) struct BufferSourceFaceResolutionState<'a, 'source> {
-    source_render: &'a mut TextRowSourceRenderState<'source>,
+pub(crate) struct BufferSourceFaceResolutionState<
+    'a,
+    'source,
+    FS: crate::neovm_bridge::FaceServices = crate::neovm_bridge::FaceResolver,
+> {
+    source_render: &'a mut TextRowSourceRenderState<'source, FS>,
     face_scan: &'a mut FaceScanCheckpoint,
     face_ids: &'a mut FrameFaceAttempt,
     active_face_state: &'a mut DisplayRowActiveFaceState,
@@ -572,10 +579,12 @@ pub(crate) struct BufferSourceFaceResolutionState<'a, 'source> {
     x: f32,
 }
 
-impl<'a, 'source> BufferSourceFaceResolutionState<'a, 'source> {
+impl<'a, 'source, FS: crate::neovm_bridge::FaceServices>
+    BufferSourceFaceResolutionState<'a, 'source, FS>
+{
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        source_render: &'a mut TextRowSourceRenderState<'source>,
+        source_render: &'a mut TextRowSourceRenderState<'source, FS>,
         face_scan: &'a mut FaceScanCheckpoint,
         face_ids: &'a mut FrameFaceAttempt,
         active_face_state: &'a mut DisplayRowActiveFaceState,

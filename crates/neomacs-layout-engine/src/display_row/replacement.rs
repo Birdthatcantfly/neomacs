@@ -281,10 +281,10 @@ impl DisplayReplacementStringRowSession {
         })
     }
 
-    pub(crate) fn render_to_text_row_and_emit(
+    pub(crate) fn render_to_text_row_and_emit<FS: crate::neovm_bridge::FaceServices>(
         &mut self,
         replacement_append_context: DisplayReplacementRowAppendContext<'_>,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         row_geometry: &mut DisplayRowGeometryState,
         position: DisplayRowPosition,
@@ -688,11 +688,11 @@ impl DisplayReplacementItemAppendTemplate {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn append_to_text_row(
+    fn append_to_text_row<FS: crate::neovm_bridge::FaceServices>(
         self,
         replacement_append_context: DisplayReplacementRowAppendContext<'_>,
         row_geometry: &mut DisplayRowGeometryState,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         position: DisplayRowPosition,
         pointer_appearance: Option<DisplayPointerAppearance>,
@@ -813,10 +813,10 @@ impl DisplayPropertyReplacementAppendRequest {
         ))
     }
 
-    fn into_plan<B: LayoutBufferView>(
+    fn into_plan<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
         self,
         buffer: &B,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         active_face_state: &DisplayRowActiveFaceState,
         face_ids: &mut FrameFaceAttempt,
     ) -> DisplayPropertyReplacementAppendPlan {
@@ -924,10 +924,13 @@ impl DisplayPropertyReplacementRowRenderRequest {
     }
 
     #[cfg(test)]
-    pub(crate) fn string_plan_snapshot<B: LayoutBufferView>(
+    pub(crate) fn string_plan_snapshot<
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         buffer: &B,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         active_face_state: &DisplayRowActiveFaceState,
         face_ids: &mut FrameFaceAttempt,
     ) -> Option<DisplayPropertyReplacementStringPlanSnapshot> {
@@ -936,10 +939,13 @@ impl DisplayPropertyReplacementRowRenderRequest {
             .string_plan_snapshot()
     }
 
-    pub(crate) fn begin_render_to_text_rows<B: LayoutBufferView>(
+    pub(crate) fn begin_render_to_text_rows<
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         buffer: &B,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         append_surface: &DisplayRowAppendSurface,
         row_geometry: &mut DisplayRowGeometryState,
@@ -1071,9 +1077,9 @@ impl DisplayPropertyReplacementStringRender {
         )
     }
 
-    pub(crate) fn render_next_row(
+    pub(crate) fn render_next_row<FS: crate::neovm_bridge::FaceServices>(
         &mut self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         append_surface: &DisplayRowAppendSurface,
         row_geometry: &mut DisplayRowGeometryState,
@@ -1131,9 +1137,9 @@ impl DisplayPropertyReplacementAppendPlan {
         }
     }
 
-    fn begin_render_to_text_rows(
+    fn begin_render_to_text_rows<FS: crate::neovm_bridge::FaceServices>(
         self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         append_surface: &DisplayRowAppendSurface,
         row_geometry: &mut DisplayRowGeometryState,
@@ -1235,10 +1241,10 @@ impl DisplayPropertyReplacementAppendPlanItemRequest {
         Self { item }
     }
 
-    fn resolve<B: LayoutBufferView>(
+    fn resolve<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
         self,
         buffer: &B,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         active_face_state: &DisplayRowActiveFaceState,
         face_ids: &mut FrameFaceAttempt,
     ) -> DisplayPropertyReplacementAppendPlanItem {
@@ -1296,11 +1302,11 @@ impl DisplayPropertyReplacementAppendPlanItemRequest {
 
 impl DisplayPropertyReplacementAtomicAppendPlanItem {
     #[allow(clippy::too_many_arguments)]
-    fn append_to_text_row(
+    fn append_to_text_row<FS: crate::neovm_bridge::FaceServices>(
         self,
         replacement_append_context: DisplayReplacementRowAppendContext<'_>,
         row_geometry: &mut DisplayRowGeometryState,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         position: DisplayRowPosition,
         pointer_appearance: Option<DisplayPointerAppearance>,
@@ -1452,9 +1458,9 @@ impl<'a> DisplayReplacementRowAppendContext<'a> {
         )
     }
 
-    fn append_item_request_to_text_row_and_emit(
+    fn append_item_request_to_text_row_and_emit<FS: crate::neovm_bridge::FaceServices>(
         self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         request: DisplayReplacementItemAppendRequest,
     ) -> Option<DisplayRowAppendProgress> {
@@ -1477,9 +1483,11 @@ impl<'a> DisplayReplacementRowAppendContext<'a> {
     }
 
     #[cfg(test)]
-    pub(crate) fn append_stretch_source_item_to_text_row_and_emit(
+    pub(crate) fn append_stretch_source_item_to_text_row_and_emit<
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         item: DisplayReplacementStretchSourceItem,
         position: DisplayRowPosition,
@@ -1493,9 +1501,11 @@ impl<'a> DisplayReplacementRowAppendContext<'a> {
     }
 
     #[cfg(test)]
-    pub(crate) fn append_media_source_item_to_text_row_and_emit(
+    pub(crate) fn append_media_source_item_to_text_row_and_emit<
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         item: DisplayReplacementMediaSourceItem,
         position: DisplayRowPosition,
@@ -1508,9 +1518,11 @@ impl<'a> DisplayReplacementRowAppendContext<'a> {
     }
 
     #[cfg(test)]
-    pub(crate) fn append_source_mapped_text_item_to_text_row_and_emit(
+    pub(crate) fn append_source_mapped_text_item_to_text_row_and_emit<
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         item: DisplayReplacementSourceMappedTextItem,
         position: DisplayRowPosition,
@@ -1539,9 +1551,9 @@ impl<'a> DisplayReplacementAppendContext<'a> {
         }
     }
 
-    fn append_replacement_item_plan_to_text_row_and_emit(
+    fn append_replacement_item_plan_to_text_row_and_emit<FS: crate::neovm_bridge::FaceServices>(
         &self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         plan: DisplayReplacementItemAppendPlan,
     ) -> Option<DisplayRowAppendProgress> {
@@ -1563,9 +1575,11 @@ impl<'a> DisplayReplacementAppendContext<'a> {
     }
 
     #[cfg(test)]
-    pub(crate) fn append_replacement_item_kind_to_text_row_and_emit(
+    pub(crate) fn append_replacement_item_kind_to_text_row_and_emit<
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         replacement_source: BufferDisplayReplacementSource,
         kind: DisplayItemKind,
@@ -1578,9 +1592,11 @@ impl<'a> DisplayReplacementAppendContext<'a> {
 
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn append_replacement_string_source_to_text_row_and_emit(
+    pub(crate) fn append_replacement_string_source_to_text_row_and_emit<
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         replacement_source: BufferDisplayReplacementSource,
         source_id: LispStringSourceId,

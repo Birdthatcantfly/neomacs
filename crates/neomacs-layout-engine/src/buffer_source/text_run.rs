@@ -97,7 +97,10 @@ impl BufferSourceTextRunRenderRequest {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render_and_apply<B: LayoutBufferView + ?Sized>(
+    pub(crate) fn render_and_apply<
+        B: LayoutBufferView + ?Sized,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         source_item: DisplaySourceStepItem,
         active_face_state: &DisplayRowActiveFaceState,
@@ -106,7 +109,7 @@ impl BufferSourceTextRunRenderRequest {
         trailing_whitespace: &mut TrailingWhitespaceRenderState,
         word_wrap: &mut WordWrapRenderState,
         predecessor_row_extend: Option<DisplayRowExtendFace>,
-        source_render: &mut TextRowSourceRenderState<'_>,
+        source_render: &mut TextRowSourceRenderState<'_, FS>,
         progress: &mut DisplaySourceProgressState<'_>,
     ) -> BufferSourceItemRenderOutcome {
         let output_display_point_start = source_render.output_emitter().display_point_len();

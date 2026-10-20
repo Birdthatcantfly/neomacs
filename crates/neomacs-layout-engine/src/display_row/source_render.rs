@@ -395,22 +395,30 @@ pub(crate) struct TextRowOutputRenderState<'a> {
     evaluator: &'a mut Context,
 }
 
-struct DisplayRowCurrentTextSourceState<'face, 'emit> {
+struct DisplayRowCurrentTextSourceState<
+    'face,
+    'emit,
+    FS: crate::neovm_bridge::FaceServices = crate::neovm_bridge::FaceResolver,
+> {
     automatic_composition: Option<neovm_core::emacs_core::composite::AutomaticCompositionRules>,
     row_output: DisplayRowCurrentRowOutput<'emit>,
     evaluator: &'emit mut Context,
     font_metrics: &'emit mut Option<FontMetricsService>,
     measurement_mode: DisplayRowMeasurementMode,
-    face_resolver: &'face FaceResolver,
+    face_resolver: &'face FS,
     face_ids: &'emit mut FrameFaceAttempt,
 }
 
-struct DisplayRowCurrentSourceFragmentRenderState<'face, 'emit> {
+struct DisplayRowCurrentSourceFragmentRenderState<
+    'face,
+    'emit,
+    FS: crate::neovm_bridge::FaceServices = crate::neovm_bridge::FaceResolver,
+> {
     automatic_composition: Option<neovm_core::emacs_core::composite::AutomaticCompositionRules>,
     row_output: DisplayRowCurrentRowOutput<'emit>,
     font_metrics: &'emit mut Option<FontMetricsService>,
     measurement_mode: DisplayRowMeasurementMode,
-    face_resolver: &'face FaceResolver,
+    face_resolver: &'face FS,
     evaluator: &'emit mut Context,
     face_ids: &'emit mut FrameFaceAttempt,
 }
@@ -519,13 +527,15 @@ where
     }
 }
 
-impl<'face, 'emit> DisplayRowCurrentTextSourceState<'face, 'emit> {
+impl<'face, 'emit, FS: crate::neovm_bridge::FaceServices>
+    DisplayRowCurrentTextSourceState<'face, 'emit, FS>
+{
     fn new(
         row_output: DisplayRowCurrentRowOutput<'emit>,
         evaluator: &'emit mut Context,
         font_metrics: &'emit mut Option<FontMetricsService>,
         measurement_mode: DisplayRowMeasurementMode,
-        face_resolver: &'face FaceResolver,
+        face_resolver: &'face FS,
         face_ids: &'emit mut FrameFaceAttempt,
         automatic_composition: Option<neovm_core::emacs_core::composite::AutomaticCompositionRules>,
     ) -> Self {
@@ -555,7 +565,7 @@ impl<'face, 'emit> DisplayRowCurrentTextSourceState<'face, 'emit> {
         // DisplayHost supplies graphic image/font services to this renderer;
         // terminal images are replacement text, so no host borrow is needed.
         // Keep the host on Context itself: advised Lisp callbacks still see it.
-        let (display_host, evaluator) = if self.face_resolver.has_tty_realization() {
+        let (display_host, evaluator) = if self.face_resolver.resolver().has_tty_realization() {
             (None, Some(&mut *self.evaluator))
         } else {
             (self.evaluator.display_host.as_deref(), None)
@@ -568,6 +578,7 @@ impl<'face, 'emit> DisplayRowCurrentTextSourceState<'face, 'emit> {
         };
         let realizer = self
             .face_resolver
+            .resolver()
             .has_tty_realization()
             .then_some(&realize as &dyn Fn(&mut ResolvedFace));
         let mutation = DisplayRowCurrentSourceStepMutation {
@@ -575,9 +586,13 @@ impl<'face, 'emit> DisplayRowCurrentTextSourceState<'face, 'emit> {
             renderer: DisplayRowRenderer::new(self.font_metrics, self.measurement_mode),
             source,
             source_state,
-            context: DisplayRowRenderContext::new(self.face_resolver, display_host, self.face_ids)
-                .with_face_realizer(realizer)
-                .with_automatic_composition(self.automatic_composition),
+            context: DisplayRowRenderContext::new(
+                self.face_resolver.resolver(),
+                display_host,
+                self.face_ids,
+            )
+            .with_face_realizer(realizer)
+            .with_automatic_composition(self.automatic_composition),
             render_policy,
         };
         let (result, row_height_px, row_ascent_px) =
@@ -603,7 +618,7 @@ impl<'face, 'emit> DisplayRowCurrentTextSourceState<'face, 'emit> {
         // DisplayHost supplies graphic image/font services to this renderer;
         // terminal images are replacement text, so no host borrow is needed.
         // Keep the host on Context itself: advised Lisp callbacks still see it.
-        let (display_host, evaluator) = if self.face_resolver.has_tty_realization() {
+        let (display_host, evaluator) = if self.face_resolver.resolver().has_tty_realization() {
             (None, Some(&mut *self.evaluator))
         } else {
             (self.evaluator.display_host.as_deref(), None)
@@ -613,11 +628,13 @@ impl<'face, 'emit> DisplayRowCurrentTextSourceState<'face, 'emit> {
             if let Some(evaluator) = evaluator.borrow_mut().as_deref_mut() {
                 let _ = self
                     .face_resolver
+                    .resolver()
                     .realize_cached_for_display(face, evaluator);
             }
         };
         let realizer = self
             .face_resolver
+            .resolver()
             .has_tty_realization()
             .then_some(&realize as &dyn Fn(&mut ResolvedFace));
         let mutation = DisplayRowCurrentSourceStepMutation {
@@ -625,9 +642,13 @@ impl<'face, 'emit> DisplayRowCurrentTextSourceState<'face, 'emit> {
             renderer: DisplayRowRenderer::new(self.font_metrics, self.measurement_mode),
             source,
             source_state,
-            context: DisplayRowRenderContext::new(self.face_resolver, display_host, self.face_ids)
-                .with_face_realizer(realizer)
-                .with_automatic_composition(self.automatic_composition),
+            context: DisplayRowRenderContext::new(
+                self.face_resolver.resolver(),
+                display_host,
+                self.face_ids,
+            )
+            .with_face_realizer(realizer)
+            .with_automatic_composition(self.automatic_composition),
             render_policy,
         };
         let (result, row_height_px, row_ascent_px) = self
@@ -641,12 +662,14 @@ impl<'face, 'emit> DisplayRowCurrentTextSourceState<'face, 'emit> {
     }
 }
 
-impl<'face, 'emit> DisplayRowCurrentSourceFragmentRenderState<'face, 'emit> {
+impl<'face, 'emit, FS: crate::neovm_bridge::FaceServices>
+    DisplayRowCurrentSourceFragmentRenderState<'face, 'emit, FS>
+{
     fn new(
         row_output: DisplayRowCurrentRowOutput<'emit>,
         font_metrics: &'emit mut Option<FontMetricsService>,
         measurement_mode: DisplayRowMeasurementMode,
-        face_resolver: &'face FaceResolver,
+        face_resolver: &'face FS,
         evaluator: &'emit mut Context,
         face_ids: &'emit mut FrameFaceAttempt,
         automatic_composition: Option<neovm_core::emacs_core::composite::AutomaticCompositionRules>,
@@ -668,7 +691,7 @@ impl<'face, 'emit> DisplayRowCurrentSourceFragmentRenderState<'face, 'emit> {
         source: &mut S,
         source_state: &mut DisplayRowSourceState,
     ) -> Option<DisplayRowRenderIntoRowResult> {
-        let (display_host, evaluator) = if self.face_resolver.has_tty_realization() {
+        let (display_host, evaluator) = if self.face_resolver.resolver().has_tty_realization() {
             (None, Some(&mut *self.evaluator))
         } else {
             (self.evaluator.display_host.as_deref(), None)
@@ -681,12 +704,13 @@ impl<'face, 'emit> DisplayRowCurrentSourceFragmentRenderState<'face, 'emit> {
         };
         let realizer = self
             .face_resolver
+            .resolver()
             .has_tty_realization()
             .then_some(&realize as &dyn Fn(&mut ResolvedFace));
         let mut render_executor = DisplayRowRenderExecutor::new(
             self.font_metrics,
             self.measurement_mode,
-            self.face_resolver,
+            self.face_resolver.resolver(),
             display_host,
             self.face_ids,
         )
@@ -718,8 +742,8 @@ impl DisplayRowCurrentTextSourceStepResult {
     }
 }
 
-fn render_display_item_source_into_current_text_row<S, P>(
-    state: &mut DisplayRowCurrentTextSourceState<'_, '_>,
+fn render_display_item_source_into_current_text_row<S, P, FS: crate::neovm_bridge::FaceServices>(
+    state: &mut DisplayRowCurrentTextSourceState<'_, '_, FS>,
     source: &mut S,
     source_state: &mut DisplayRowSourceState,
     request: DisplayRowSourceRenderRequest<'_>,
@@ -732,8 +756,12 @@ where
     state.render_source_with_policy(request, source, source_state, render_policy)
 }
 
-fn measure_display_item_source_against_current_text_row<S, P>(
-    state: &mut DisplayRowCurrentTextSourceState<'_, '_>,
+fn measure_display_item_source_against_current_text_row<
+    S,
+    P,
+    FS: crate::neovm_bridge::FaceServices,
+>(
+    state: &mut DisplayRowCurrentTextSourceState<'_, '_, FS>,
     source: &mut S,
     source_state: &mut DisplayRowSourceState,
     request: DisplayRowSourceRenderRequest<'_>,
@@ -870,13 +898,13 @@ impl<'a> TextRowOutputRenderState<'a> {
         }
     }
 
-    fn current_text_render_state<'emit>(
+    fn current_text_render_state<'emit, FS: crate::neovm_bridge::FaceServices>(
         &'emit mut self,
         font_metrics: &'emit mut Option<FontMetricsService>,
         measurement_mode: DisplayRowMeasurementMode,
-        face_resolver: &'emit FaceResolver,
+        face_resolver: &'emit FS,
         face_ids: &'emit mut FrameFaceAttempt,
-    ) -> DisplayRowCurrentTextSourceState<'emit, 'emit> {
+    ) -> DisplayRowCurrentTextSourceState<'emit, 'emit, FS> {
         DisplayRowCurrentTextSourceState::new(
             self.output.current_row_output(),
             self.evaluator,
@@ -888,13 +916,13 @@ impl<'a> TextRowOutputRenderState<'a> {
         )
     }
 
-    fn current_source_fragment_render_state<'emit>(
+    fn current_source_fragment_render_state<'emit, FS: crate::neovm_bridge::FaceServices>(
         &'emit mut self,
         font_metrics: &'emit mut Option<FontMetricsService>,
         measurement_mode: DisplayRowMeasurementMode,
-        face_resolver: &'emit FaceResolver,
+        face_resolver: &'emit FS,
         face_ids: &'emit mut FrameFaceAttempt,
-    ) -> DisplayRowCurrentSourceFragmentRenderState<'emit, 'emit> {
+    ) -> DisplayRowCurrentSourceFragmentRenderState<'emit, 'emit, FS> {
         DisplayRowCurrentSourceFragmentRenderState::new(
             self.output.current_row_output(),
             font_metrics,
@@ -956,18 +984,25 @@ impl<'a> TextRowOutputRenderState<'a> {
 /// `trailing-whitespace` / `fill-column-indicator` faces against the frame
 /// face resolver, interns a stable face id, and installs the resolved face on
 /// the output, exactly as the pre-seam inline sequence did.
-struct TextRowLineEndFaceResolver<'render, 'a, 'ids> {
-    render: &'render mut TextRowSourceRenderState<'a>,
+struct TextRowLineEndFaceResolver<
+    'render,
+    'a,
+    'ids,
+    FS: crate::neovm_bridge::FaceServices = crate::neovm_bridge::FaceResolver,
+> {
+    render: &'render mut TextRowSourceRenderState<'a, FS>,
     face_ids: &'ids mut FrameFaceAttempt,
 }
 
-impl TextRowLineEndFaceResolver<'_, '_, '_> {
+impl<FS: crate::neovm_bridge::FaceServices> TextRowLineEndFaceResolver<'_, '_, '_, FS> {
     fn install_named_face(&mut self, face: &ResolvedFace) -> FaceId {
         self.render.intern_and_install_face(self.face_ids, face)
     }
 }
 
-impl LineEndFaceResolver for TextRowLineEndFaceResolver<'_, '_, '_> {
+impl<FS: crate::neovm_bridge::FaceServices> LineEndFaceResolver
+    for TextRowLineEndFaceResolver<'_, '_, '_, FS>
+{
     fn trailing_whitespace_face_id(&mut self) -> FaceId {
         let face = self.render.resolve_named_face("trailing-whitespace");
         self.install_named_face(&face)
@@ -986,19 +1021,22 @@ impl LineEndFaceResolver for TextRowLineEndFaceResolver<'_, '_, '_> {
     }
 }
 
-pub(crate) struct TextRowSourceRenderState<'a> {
+pub(crate) struct TextRowSourceRenderState<
+    'a,
+    FS: crate::neovm_bridge::FaceServices = crate::neovm_bridge::FaceResolver,
+> {
     output_render: TextRowOutputRenderState<'a>,
     font_metrics: &'a mut Option<FontMetricsService>,
     measurement_mode: DisplayRowMeasurementMode,
-    faces: WindowFaces<'a>,
+    faces: WindowFaces<'a, FS>,
 }
 
-impl<'a> TextRowSourceRenderState<'a> {
+impl<'a, FS: crate::neovm_bridge::FaceServices> TextRowSourceRenderState<'a, FS> {
     pub(crate) fn from_output_render(
         output_render: TextRowOutputRenderState<'a>,
         font_metrics: &'a mut Option<FontMetricsService>,
         measurement_mode: DisplayRowMeasurementMode,
-        faces: WindowFaces<'a>,
+        faces: WindowFaces<'a, FS>,
     ) -> Self {
         Self {
             output_render,
@@ -1008,7 +1046,7 @@ impl<'a> TextRowSourceRenderState<'a> {
         }
     }
 
-    pub(crate) fn reborrow(&mut self) -> TextRowSourceRenderState<'_> {
+    pub(crate) fn reborrow(&mut self) -> TextRowSourceRenderState<'_, FS> {
         TextRowSourceRenderState {
             output_render: self.output_render.reborrow(),
             font_metrics: self.font_metrics,
@@ -1274,7 +1312,7 @@ impl<'a> TextRowSourceRenderState<'a> {
         &mut self,
         f: impl FnOnce(&dyn Fn(&mut ResolvedFace)) -> R,
     ) -> R {
-        let resolver = self.faces.pipeline_resolver();
+        let resolver = self.faces.pipeline_services();
         let evaluator = std::cell::RefCell::new(&mut *self.output_render.evaluator);
         let realize = |face: &mut ResolvedFace| {
             resolver.realize_for_display(face, &mut evaluator.borrow_mut());
@@ -1323,7 +1361,7 @@ impl<'a> TextRowSourceRenderState<'a> {
 
     pub(crate) fn realize_face_for_display(&mut self, face: &mut ResolvedFace) {
         self.faces
-            .pipeline_resolver()
+            .pipeline_services()
             .realize_for_display(face, self.output_render.evaluator);
     }
 
@@ -1448,7 +1486,7 @@ impl<'a> TextRowSourceRenderState<'a> {
             .current_source_fragment_render_state(
                 self.font_metrics,
                 self.measurement_mode,
-                self.faces.pipeline_resolver(),
+                self.faces.pipeline_services(),
                 face_ids,
             )
             .render_natural_fragment_into_current_row(request, source, source_state);
@@ -1962,14 +2000,14 @@ impl<'a> TextRowSourceRenderState<'a> {
     }
 }
 
-fn current_text_render_state<'emit>(
-    state: &'emit mut TextRowSourceRenderState<'_>,
+fn current_text_render_state<'emit, FS: crate::neovm_bridge::FaceServices>(
+    state: &'emit mut TextRowSourceRenderState<'_, FS>,
     face_ids: &'emit mut FrameFaceAttempt,
-) -> DisplayRowCurrentTextSourceState<'emit, 'emit> {
+) -> DisplayRowCurrentTextSourceState<'emit, 'emit, FS> {
     state.output_render.current_text_render_state(
         state.font_metrics,
         state.measurement_mode,
-        state.faces.pipeline_resolver(),
+        state.faces.pipeline_services(),
         face_ids,
     )
 }

@@ -77,9 +77,11 @@ impl<'row> LispStringRowAppendContext<'row> {
         }
     }
 
-    pub(crate) fn render_active_face_source_request_to_text_row_and_emit(
+    pub(crate) fn render_active_face_source_request_to_text_row_and_emit<
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         request: LispStringSourceAppendSessionRequest<'row>,
     ) -> DisplayRowPosition {
@@ -122,9 +124,12 @@ impl<'row> DisplayRowPrefixAppendContext<'row> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn render_source_to_text_row_and_emit<B: LayoutBufferView>(
+    fn render_source_to_text_row_and_emit<
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         buffer: &B,
         base_face: &DisplayStringBaseFace,
@@ -183,8 +188,8 @@ impl<'row> DisplayRowPrefixAppendContext<'row> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_lisp_string_source_append_to_text_row_and_emit(
-    state: &mut TextRowSourceRenderState<'_>,
+fn render_lisp_string_source_append_to_text_row_and_emit<FS: crate::neovm_bridge::FaceServices>(
+    state: &mut TextRowSourceRenderState<'_, FS>,
     source: &mut LispStringSourceCursor,
     source_state: &mut DisplayRowSourceState,
     base_face: &ResolvedFace,
@@ -207,8 +212,10 @@ fn render_lisp_string_source_append_to_text_row_and_emit(
     )
 }
 
-fn render_single_display_item_source_append_to_text_row_and_emit(
-    state: &mut TextRowSourceRenderState<'_>,
+fn render_single_display_item_source_append_to_text_row_and_emit<
+    FS: crate::neovm_bridge::FaceServices,
+>(
+    state: &mut TextRowSourceRenderState<'_, FS>,
     item: DisplayItem,
     base_face: &ResolvedFace,
     base_face_id: FaceId,
@@ -358,9 +365,9 @@ impl<'a> LispStringSourceAppendSession<'a> {
         })
     }
 
-    fn render_to_text_row_and_emit(
+    fn render_to_text_row_and_emit<FS: crate::neovm_bridge::FaceServices>(
         &mut self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         frame: DisplayRowAppendFrame,
         position: DisplayRowPosition,
@@ -643,10 +650,13 @@ impl<'a> BufferLinePrefixRenderRequest<'a> {
         }
     }
 
-    pub(crate) fn render_requested_to_text_row_and_emit<B: LayoutBufferView>(
+    pub(crate) fn render_requested_to_text_row_and_emit<
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         request: &mut DisplayRowPrefixRequest,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         buffer: &B,
         anchor_charpos: i64,
         face_ids: &mut FrameFaceAttempt,
@@ -690,10 +700,13 @@ impl<'a> BufferLinePrefixRenderRequest<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn render_requested_with_source_state_and_apply<B: LayoutBufferView>(
+    pub(crate) fn render_requested_with_source_state_and_apply<
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         self,
         request: &mut DisplayRowPrefixRequest,
-        source_render: &mut TextRowSourceRenderState<'_>,
+        source_render: &mut TextRowSourceRenderState<'_, FS>,
         buffer: &B,
         anchor_charpos: i64,
         face_ids: &mut FrameFaceAttempt,
@@ -761,9 +774,9 @@ impl<'a> LispStringSourceRowAppendSession<'a> {
         })
     }
 
-    pub(crate) fn render_to_text_row_and_emit(
+    pub(crate) fn render_to_text_row_and_emit<FS: crate::neovm_bridge::FaceServices>(
         &mut self,
-        state: &mut TextRowSourceRenderState<'_>,
+        state: &mut TextRowSourceRenderState<'_, FS>,
         face_ids: &mut FrameFaceAttempt,
         geometry: &DisplayRowGeometryState,
         position: DisplayRowPosition,
@@ -799,8 +812,8 @@ pub(crate) fn apply_pending_display_source_faces(
 
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn append_lisp_string_to_text_row(
-    state: &mut TextRowSourceRenderState<'_>,
+pub(crate) fn append_lisp_string_to_text_row<FS: crate::neovm_bridge::FaceServices>(
+    state: &mut TextRowSourceRenderState<'_, FS>,
     text_value: Value,
     source_id: u64,
     base_face: &ResolvedFace,

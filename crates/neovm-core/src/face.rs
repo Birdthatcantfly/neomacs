@@ -1785,6 +1785,32 @@ pub struct FaceTable {
     tty_palette: std::rc::Rc<neomacs_display_protocol::TtyPalette>,
 }
 
+/// Rows-local identity of the existing native table allocations.
+/// Weak control blocks prevent address ABA without retaining any Lisp-valued
+/// table payload. Construction/validation performs no collection projection.
+#[derive(Debug)]
+pub(crate) struct FaceTableIdentity {
+    faces: std::rc::Weak<FaceStorage>,
+    lisp_face_refs: std::rc::Weak<HashMap<LispFaceId, Value>>,
+    tty_palette: std::rc::Weak<neomacs_display_protocol::TtyPalette>,
+}
+
+static_assertions::assert_not_impl_any!(FaceTableIdentity: Send, Sync);
+
+impl FaceTableIdentity {
+    pub(crate) fn matches(&self, table: &FaceTable) -> bool {
+        std::ptr::eq(self.faces.as_ptr(), std::rc::Rc::as_ptr(&table.faces))
+            && std::ptr::eq(
+                self.lisp_face_refs.as_ptr(),
+                std::rc::Rc::as_ptr(&table.lisp_face_refs),
+            )
+            && std::ptr::eq(
+                self.tty_palette.as_ptr(),
+                std::rc::Rc::as_ptr(&table.tty_palette),
+            )
+    }
+}
+
 /// Copy-on-write definition storage: the map plus the traced-root memo for
 /// exactly this snapshot. `update_faces` mutates through `Rc::make_mut`:
 /// in place while unshared, one reallocation when a resolver still pins the
@@ -1812,6 +1838,16 @@ impl FaceTable {
         };
         table.register_standard_faces();
         table
+    }
+
+    /// Capture only existing allocation identity for an eligible Rows attempt.
+    /// No source-table contents, roots or mutable generation are copied.
+    pub(crate) fn rows_snapshot_identity(&self) -> FaceTableIdentity {
+        FaceTableIdentity {
+            faces: std::rc::Rc::downgrade(&self.faces),
+            lisp_face_refs: std::rc::Rc::downgrade(&self.lisp_face_refs),
+            tty_palette: std::rc::Rc::downgrade(&self.tty_palette),
+        }
     }
 
     /// Whether both immutable snapshots still refer to the same definitions.

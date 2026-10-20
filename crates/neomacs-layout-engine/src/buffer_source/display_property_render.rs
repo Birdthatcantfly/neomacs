@@ -90,8 +90,11 @@ pub(crate) struct BufferDisplayPropertyTextReplacementRenderRequest<'a, 'face> {
     active_face_state: &'face DisplayRowActiveFaceState,
 }
 
-pub(crate) struct BufferDisplayPropertyTextReplacementRenderState<'emit> {
-    source_render: TextRowSourceRenderState<'emit>,
+pub(crate) struct BufferDisplayPropertyTextReplacementRenderState<
+    'emit,
+    FS: crate::neovm_bridge::FaceServices = crate::neovm_bridge::FaceResolver,
+> {
+    source_render: TextRowSourceRenderState<'emit, FS>,
     face_ids: &'emit mut FrameFaceAttempt,
     append_surface: &'emit DisplayRowAppendSurface,
     row_geometry: &'emit mut DisplayRowGeometryState,
@@ -99,9 +102,11 @@ pub(crate) struct BufferDisplayPropertyTextReplacementRenderState<'emit> {
     line_numbers: &'emit mut LineNumberRenderState,
 }
 
-impl<'emit> BufferDisplayPropertyTextReplacementRenderState<'emit> {
+impl<'emit, FS: crate::neovm_bridge::FaceServices>
+    BufferDisplayPropertyTextReplacementRenderState<'emit, FS>
+{
     pub(crate) fn new(
-        source_render: TextRowSourceRenderState<'emit>,
+        source_render: TextRowSourceRenderState<'emit, FS>,
         face_ids: &'emit mut FrameFaceAttempt,
         append_surface: &'emit DisplayRowAppendSurface,
         row_geometry: &'emit mut DisplayRowGeometryState,
@@ -156,10 +161,10 @@ impl<'a, 'face> BufferDisplayPropertyTextReplacementRenderContext<'a, 'face> {
         }
     }
 
-    pub(crate) fn render_and_apply<B: LayoutBufferView>(
+    pub(crate) fn render_and_apply<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
         &self,
         buffer: &B,
-        state: BufferDisplayPropertyTextReplacementRenderState<'_>,
+        state: BufferDisplayPropertyTextReplacementRenderState<'_, FS>,
         progress: &mut DisplaySourceProgressState<'_>,
         cursor_info: &mut CursorCaptureState,
         point_charpos: i64,
@@ -179,10 +184,13 @@ impl<'a, 'face> BufferDisplayPropertyTextReplacementRenderContext<'a, 'face> {
     /// the row and produce it again at the start of the next one (GNU
     /// `display_line`, src/xdisp.c:26448-26475).  The covered buffer text stays
     /// unrendered: it belongs to the row that will show the replacement.
-    pub(crate) fn render_and_report_refusal<B: LayoutBufferView>(
+    pub(crate) fn render_and_report_refusal<
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &self,
         buffer: &B,
-        state: BufferDisplayPropertyTextReplacementRenderState<'_>,
+        state: BufferDisplayPropertyTextReplacementRenderState<'_, FS>,
         progress: &mut DisplaySourceProgressState<'_>,
         cursor_info: &mut CursorCaptureState,
         point_charpos: i64,
@@ -197,10 +205,13 @@ impl<'a, 'face> BufferDisplayPropertyTextReplacementRenderContext<'a, 'face> {
         )
     }
 
-    fn render_and_apply_with_disposition<B: LayoutBufferView>(
+    fn render_and_apply_with_disposition<
+        B: LayoutBufferView,
+        FS: crate::neovm_bridge::FaceServices,
+    >(
         &self,
         buffer: &B,
-        mut state: BufferDisplayPropertyTextReplacementRenderState<'_>,
+        mut state: BufferDisplayPropertyTextReplacementRenderState<'_, FS>,
         progress: &mut DisplaySourceProgressState<'_>,
         cursor_info: &mut CursorCaptureState,
         point_charpos: i64,
@@ -324,11 +335,11 @@ impl<'a, 'face> BufferDisplayPropertyTextReplacementRenderRequest<'a, 'face> {
         DisplaySourceStepItem::new(source_item, self.text_start_byte)
     }
 
-    fn render_append_request<B: LayoutBufferView>(
+    fn render_append_request<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
         &self,
         append_request: DisplayPropertyReplacementRowRenderRequest,
         buffer: &B,
-        state: &mut BufferDisplayPropertyTextReplacementRenderState<'_>,
+        state: &mut BufferDisplayPropertyTextReplacementRenderState<'_, FS>,
     ) -> BufferDisplayPropertyTextReplacementRenderOutcome {
         match append_request.begin_render_to_text_rows(
             buffer,
@@ -353,20 +364,20 @@ impl<'a, 'face> BufferDisplayPropertyTextReplacementRenderRequest<'a, 'face> {
     }
 
     #[cfg(test)]
-    pub(crate) fn render<B: LayoutBufferView>(
+    pub(crate) fn render<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
         &self,
         buffer: &B,
-        mut state: BufferDisplayPropertyTextReplacementRenderState<'_>,
+        mut state: BufferDisplayPropertyTextReplacementRenderState<'_, FS>,
         current_x: f32,
         start_position: DisplayRowPosition,
     ) -> BufferDisplayPropertyTextReplacementRenderOutcome {
         self.render_with_state(buffer, &mut state, current_x, start_position)
     }
 
-    fn render_with_state<B: LayoutBufferView>(
+    fn render_with_state<B: LayoutBufferView, FS: crate::neovm_bridge::FaceServices>(
         &self,
         buffer: &B,
-        state: &mut BufferDisplayPropertyTextReplacementRenderState<'_>,
+        state: &mut BufferDisplayPropertyTextReplacementRenderState<'_, FS>,
         current_x: f32,
         start_position: DisplayRowPosition,
     ) -> BufferDisplayPropertyTextReplacementRenderOutcome {
