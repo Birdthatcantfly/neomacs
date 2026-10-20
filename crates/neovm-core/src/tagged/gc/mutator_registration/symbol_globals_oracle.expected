@@ -1,0 +1,16 @@
+73
+97
+t
+t
+(nil void-variable)
+(nil t nil)
+(101 101 t nil)
+(11 22 22)
+(11 22 11)
+(11 22)
+(1 1 1)
+(1 2 2)
+((41 42) nil)
+(99 (7 18 7) 99)
+7
+((setting-constant nil) (setting-constant t) (setting-constant :p3sym-c3-constant))

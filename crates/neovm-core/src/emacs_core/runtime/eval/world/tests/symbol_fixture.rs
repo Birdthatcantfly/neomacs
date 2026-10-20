@@ -6,6 +6,15 @@ impl Context {
     pub(crate) fn with_test_symbol_era<R>(
         body: impl for<'heap> FnOnce(crate::tagged::gc::ParallelHeapEra<'heap>, SymId) -> R,
     ) -> R {
+        Self::with_test_symbol_backing_era(crate::tagged::gc::PlainSymbolBacking::Unprojected, body)
+    }
+
+    /// C3 setup only: the same small World, optionally projected before the
+    /// era exists. No production cell accessor changes and no setup collection.
+    pub(crate) fn with_test_symbol_backing_era<R>(
+        kind: crate::tagged::gc::PlainSymbolBacking,
+        body: impl for<'heap> FnOnce(crate::tagged::gc::ParallelHeapEra<'heap>, SymId) -> R,
+    ) -> R {
         use crate::tagged::gc::{AliasableBox, ParallelHeapEra, TaggedHeap};
 
         let heap = AliasableBox::new(TaggedHeap::new());
@@ -14,7 +23,7 @@ impl Context {
         let mut obarray = Obarray::new();
         let id = crate::emacs_core::intern::intern("p3sym-c2-global");
         obarray.seed_value_id(id, TaggedValue::fixnum(73));
-        let ready = WorldStorageBuilder {
+        let mut ready = WorldStorageBuilder {
             owned_roots: Default::default(),
             tagged_heap: heap,
             obarray,
@@ -33,6 +42,17 @@ impl Context {
         }
         .build();
         let world = Arc::clone(&ready.obarray.lease.0);
+        if kind != crate::tagged::gc::PlainSymbolBacking::Unprojected {
+            let mut table = world.thread_projections.borrow_mut();
+            ready.obarray.with_dispatch_write(|obarray| {
+                if kind == crate::tagged::gc::PlainSymbolBacking::VoidProjection {
+                    obarray.seed_value_id(id, TaggedValue::UNBOUND);
+                }
+                obarray
+                    .project_thread_variable_for_test(id, &mut table)
+                    .unwrap();
+            });
+        }
         let heap = world.tagged_heap.root().as_ptr();
         // SAFETY: freshly constructed, sole serial owner, no marker or GC was
         // started; no Lisp/Context root source exists and no collection runs.

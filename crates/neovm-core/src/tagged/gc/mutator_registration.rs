@@ -30,6 +30,8 @@ pub use run_slice::{RunSlice, SliceRoot};
 mod rendezvous;
 mod summaries;
 mod symbol_authority;
+#[cfg(test)]
+mod symbol_globals;
 pub use symbol_authority::{KeeperSymbols, PlainSymbolBacking, SymbolHandle, SymbolMut, SymbolRef};
 mod token;
 // The extent API ships ahead of its first production call site (the Green
