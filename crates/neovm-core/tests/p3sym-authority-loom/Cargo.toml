@@ -1,0 +1,33 @@
+[package]
+name = "p3sym-authority-loom"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+autotests = false
+
+# C1 only: isolated models, no production dependency, feature or layout change.
+[workspace]
+
+[dev-dependencies]
+loom = "=0.7.2"
+static_assertions = "=1.1.0"
+
+[profile.test]
+opt-level = 1
+
+[[test]]
+name = "authority"
+path = "tests/authority.rs"
+
+[[test]]
+name = "publication"
+path = "tests/publication.rs"
+
+[[test]]
+name = "epoch"
+path = "tests/epoch.rs"
+
+[[test]]
+name = "keeper"
+path = "tests/keeper.rs"
