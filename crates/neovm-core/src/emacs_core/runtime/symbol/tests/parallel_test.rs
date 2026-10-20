@@ -79,7 +79,7 @@ fn p3sym_original_allocation_root_survives_thread_handoff() {
                 let backing = backing.lock().unwrap();
                 assert_eq!(
                     unsafe { backing.classify(id) },
-                    Some(PlainSymbolBacking::Cell)
+                    Some(PlainSymbolBacking::Unprojected)
                 );
                 assert_eq!(unsafe { backing.probe(id) }, Value::fixnum(29).bits());
             })
@@ -89,7 +89,7 @@ fn p3sym_original_allocation_root_survives_thread_handoff() {
     let backing = backing.lock().unwrap();
     assert_eq!(
         unsafe { backing.classify(id) },
-        Some(PlainSymbolBacking::Cell)
+        Some(PlainSymbolBacking::Unprojected)
     );
     assert_eq!(unsafe { backing.probe(id) }, Value::fixnum(29).bits());
 }

@@ -10,7 +10,7 @@ use std::ptr::NonNull;
 /// Metadata only: no Value, cell address or descriptor escapes admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlainSymbolBacking {
-    Cell,
+    Unprojected,
     Projected,
     VoidProjection,
 }
@@ -67,7 +67,7 @@ impl SymbolBacking {
         }
         match symbol.value_cell() {
             ValueCell::Plain(_) if !symbol.flags().runtime_projected() => {
-                Some(PlainSymbolBacking::Cell)
+                Some(PlainSymbolBacking::Unprojected)
             }
             ValueCell::Forwarded(fwd) => {
                 // SAFETY: same retained World, exclusive admission/keeper.

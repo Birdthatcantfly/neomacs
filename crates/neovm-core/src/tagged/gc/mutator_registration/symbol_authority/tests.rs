@@ -29,7 +29,7 @@ fn p3sym_real_backing_handoff_and_keeper_mint() {
         {
             let mut access = owner.run_access().unwrap();
             let reader = access.symbol_ref(&handle).unwrap();
-            assert_eq!(reader.backing(), PlainSymbolBacking::Cell);
+            assert_eq!(reader.backing(), PlainSymbolBacking::Unprojected);
             // SAFETY: actual retained World and counted read lease, no raw
             // bits escape to the executor; this is assertion-only test code.
             assert_eq!(
@@ -40,13 +40,13 @@ fn p3sym_real_backing_handoff_and_keeper_mint() {
         {
             let mut access = owner.run_access().unwrap();
             let writer = access.symbol_mut(&handle).unwrap();
-            assert_eq!(writer.backing(), PlainSymbolBacking::Cell);
+            assert_eq!(writer.backing(), PlainSymbolBacking::Unprojected);
         }
         owner.retire_rooted(&[]).unwrap();
         let mut stopped = era.stop().unwrap();
         {
             let keeper = stopped.symbols().unwrap();
-            assert_eq!(keeper.backing(&handle), Ok(PlainSymbolBacking::Cell));
+            assert_eq!(keeper.backing(&handle), Ok(PlainSymbolBacking::Unprojected));
             assert_eq!(
                 unsafe { keeper.registry.symbols.backing.probe(id) },
                 Value::fixnum(73).bits()
