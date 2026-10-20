@@ -570,9 +570,10 @@ impl crate::emacs_core::eval::Context {
         let window_topology_generation = self.frames.window_topology_generation();
         let frame_inputs = frame.layout_inputs();
         let window_inputs = frame.window_layout_inputs(window_id)?;
-        let (live_buffer, source_buffer) = if live_buffer_id == source_buffer_id {
-            let namespace_before = crate::emacs_core::intern::symbol_registry_epoch_value();
-            let live_buffer = capture(self, live_buffer_id)?;
+        let namespace_before = (live_buffer_id == source_buffer_id)
+            .then(crate::emacs_core::intern::symbol_registry_epoch_value);
+        let live_buffer = capture(self, live_buffer_id)?;
+        let source_buffer = if let Some(namespace_before) = namespace_before {
             let owned_source = live_buffer.clone();
             let namespace_after = crate::emacs_core::intern::symbol_registry_epoch_value();
             // Another World may unintern the fontifier's process-global name
@@ -583,17 +584,13 @@ impl crate::emacs_core::eval::Context {
             // registry write lock also leaves the old second lookup a cache
             // hit. A miss waits for that writer and observes its publication.
             // Owner/buffer reads remain private and noncalling in this scope.
-            let source_buffer = if namespace_before == namespace_after {
+            if namespace_before == namespace_after {
                 owned_source
             } else {
                 capture(self, source_buffer_id)?
-            };
-            (live_buffer, source_buffer)
+            }
         } else {
-            (
-                capture(self, live_buffer_id)?,
-                capture(self, source_buffer_id)?,
-            )
+            capture(self, source_buffer_id)?
         };
         Some(crate::window::WindowLayoutAttemptFreshness {
             fontset_generation,
