@@ -18,7 +18,7 @@ fn setup(context: &mut Context) -> SymId {
 
 #[test]
 fn p3sym_real_backing_handoff_and_keeper_mint() {
-    Context::with_test_collection_era(setup, |era, id| {
+    Context::with_test_symbol_era(|era, id| {
         let handle = era.admit_plain_symbol(id).unwrap();
         let heap = era.heap_identity();
         let mut owner = era.register(1, 8).unwrap().activate(heap, 1).unwrap();
@@ -60,7 +60,7 @@ fn p3sym_real_backing_handoff_and_keeper_mint() {
 
 #[test]
 fn p3sym_two_readers_overlap_and_writer_refuses() {
-    Context::with_test_collection_era(setup, |era, id| {
+    Context::with_test_symbol_era(|era, id| {
         let handle = era.admit_plain_symbol(id).unwrap();
         let heap = era.heap_identity();
         let permits = [era.register(1, 8).unwrap(), era.register(2, 8).unwrap()];

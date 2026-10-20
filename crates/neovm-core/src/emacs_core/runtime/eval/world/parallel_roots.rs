@@ -287,3 +287,7 @@ impl Context {
 #[cfg(test)]
 #[path = "tests/parallel_roots_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/symbol_fixture.rs"]
+mod symbol_fixture;
