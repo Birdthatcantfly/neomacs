@@ -54,7 +54,7 @@ fn query(
     scope: WindowLayoutQueryScope,
 ) -> (WindowLayoutQuery, Vec<Report>) {
     let mut reports = Vec::new();
-    let mut sink = |report| reports.push(report);
+    let mut sink = |_: &mut Context, report| reports.push(report);
     let query = engine
         .query_window_layout_observed(context, frame, window, scope, Some(&mut sink))
         .expect("the actual canonical numeric query converges");

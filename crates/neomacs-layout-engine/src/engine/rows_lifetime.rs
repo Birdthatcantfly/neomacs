@@ -1,5 +1,4 @@
-//! Private stage-3 closure for a GEN1, service-free numeric Rows producer.
-//! No cached query consumes this proof. Every completed proof is dropped.
+//! Actual GEN1 numeric Rows producer and private original-capture admission.
 use super::{LayoutEngine, QueryRowCoverage, rows_face_services::DiagnosticEffects};
 use neovm_core::{
     buffer::{BufferId, BufferSourceAuthority, BufferSourceReadLease, LispCharPos1},
@@ -10,10 +9,16 @@ use neovm_core::{
     },
     tagged::collection_reads::CollectionReads,
     window::{
-        FrameId, Window, WindowDisplaySnapshot, WindowId, WindowLayoutQuery, WindowLayoutQueryScope,
+        FrameId, Window, WindowDisplaySnapshot, WindowId, WindowLayoutAttemptFreshness,
+        WindowLayoutQuery, WindowLayoutQueryScope,
     },
 };
 use std::marker::PhantomData;
+
+#[path = "rows_lifetime/owned.rs"]
+mod owned;
+use owned::OriginalRowsFacts;
+pub(super) use owned::{CertifiedRowsHit, PublicationCandidate, StoredRows};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(super) enum Refusal {
@@ -37,6 +42,8 @@ pub(super) enum Refusal {
     Geometry,
     #[error("the source or window point changed")]
     Point,
+    #[error("the original complete attempt inputs or current buffer changed")]
+    Inputs,
     #[error("collection capture overflowed or was incoherent")]
     Collections,
     #[error(transparent)]
@@ -63,6 +70,12 @@ enum FontificationSeal {
     Refused,
 }
 
+#[derive(Debug)]
+struct AdmissionInputs {
+    current_buffer: Option<BufferId>,
+    attempt: WindowLayoutAttemptFreshness,
+}
+
 /// Pending clock/source facts, never a lifetime proof on their own.
 #[derive(Debug)]
 pub(super) struct Producer {
@@ -78,6 +91,7 @@ pub(super) struct Producer {
     face_entry: FaceEntrySeal,
     diagnostic_effects: DiagnosticEffects,
     tty: bool,
+    admission: Option<AdmissionInputs>,
     _local: PhantomData<*const ()>,
 }
 
@@ -91,7 +105,25 @@ struct Completed<'a> {
     dependencies: RowsDependencyMetadata<'a>,
     geometry: &'a WindowDisplaySnapshot,
     _source: BufferSourceReadLease<'a>,
+    origin: CompletedOrigin,
     _local: PhantomData<*const ()>,
+}
+
+struct CompletedOrigin {
+    frame: FrameId,
+    window: WindowId,
+    source: BufferId,
+    scope: WindowLayoutQueryScope,
+    source_point: LispCharPos1,
+    window_point: LispCharPos1,
+    source_authority: BufferSourceAuthority,
+    admission: Option<AdmissionInputs>,
+}
+
+pub(super) struct AdmissionCompletion {
+    pub(super) canonical_query: WindowLayoutQuery,
+    pub(super) report: Report,
+    pub(super) candidate: Option<PublicationCandidate>,
 }
 static_assertions::assert_not_impl_any!(Producer: Send, Sync);
 static_assertions::assert_not_impl_any!(Completed<'static>: Send, Sync);
@@ -174,8 +206,24 @@ impl Producer {
             face_entry: FaceEntrySeal::Unseen,
             diagnostic_effects: DiagnosticEffects::Unseen,
             tty: frame_owner.effective_window_system().is_none(),
+            admission: None,
             _local: PhantomData,
         })
+    }
+
+    /// Select only the real TTY admission route before the WHOLE canonical
+    /// capture. OFF observation never captures this additional complete token.
+    pub(super) fn for_admission(mut self, context: &Context) -> Result<Self, Refusal> {
+        if !self.tty {
+            return Err(Refusal::Scope);
+        }
+        self.admission = Some(AdmissionInputs {
+            current_buffer: context.buffer_manager().current_buffer_id(),
+            attempt: context
+                .window_layout_attempt_freshness(self.frame, self.window, self.source)
+                .ok_or(Refusal::Inputs)?,
+        });
+        Ok(self)
     }
 
     /// Supplied only by the actual canonical Rows render's sticky witness.
@@ -273,6 +321,15 @@ impl Producer {
         if source.point_lisp_char_pos() != self.source_point {
             return Err(Refusal::Point);
         }
+        if let Some(admission) = &self.admission
+            && (context.buffer_manager().current_buffer_id() != admission.current_buffer
+                || context
+                    .window_layout_attempt_freshness(self.frame, self.window, self.source)
+                    .as_ref()
+                    != Some(&admission.attempt))
+        {
+            return Err(Refusal::Inputs);
+        }
         // SAFETY: this sole production consumer is inside the closed native
         // completion phase. The actual Producer snapshot preceded the entire
         // canonical capture_normalized, and this completion rechecked installed
@@ -292,6 +349,9 @@ impl Producer {
         {
             return Err(Refusal::Geometry);
         }
+        if self.admission.is_some() && !super::query_cache::geometry_fits(query) {
+            return Err(Refusal::Geometry);
+        }
         if !matches!(self.scope, WindowLayoutQueryScope::Rows { .. }) {
             return Err(Refusal::Scope);
         }
@@ -305,9 +365,101 @@ impl Producer {
             dependencies,
             geometry,
             _source: source_read,
+            origin: CompletedOrigin {
+                frame: self.frame,
+                window: self.window,
+                source: self.source,
+                scope: self.scope,
+                source_point: self.source_point,
+                window_point: self.window_point,
+                source_authority: self.source_authority,
+                admission: self.admission,
+            },
             _local: PhantomData,
         })
     }
+}
+
+/// Sole production call site supplies the owned query/read set from the same
+/// lexical capture that began after Producer. No public metadata can bind an
+/// arbitrary geometry/read pair to this interval. All fields of the retained
+/// bundle remain private after this consuming transition.
+pub(super) fn finish_for_admission(
+    pending: Result<Producer, Refusal>,
+    engine: &LayoutEngine,
+    context: &Context,
+    query: WindowLayoutQuery,
+    reads: Option<CollectionReads>,
+) -> AdmissionCompletion {
+    let (report, facts) = {
+        let result =
+            pending.and_then(|producer| producer.finish(engine, context, &query, reads.as_ref()));
+        match result {
+            Ok(proof) => {
+                let report = Report::Certified {
+                    rows: proof.geometry.rows.len(),
+                    points: proof.geometry.point_count(),
+                };
+                let Completed {
+                    dependencies,
+                    geometry: _,
+                    _source: source_lease,
+                    origin,
+                    _local: _,
+                } = proof;
+                let epoch = dependencies.into_original_epoch();
+                drop(source_lease);
+                // The lease and every borrow of query/reads end before any trace,
+                // sink or owned publication candidate can escape this function.
+                match origin.admission {
+                    Some(admission) => (
+                        report,
+                        Some(OriginalRowsFacts {
+                            epoch,
+                            source_authority: origin.source_authority,
+                            frame: origin.frame,
+                            window: origin.window,
+                            source: origin.source,
+                            current_buffer: admission.current_buffer,
+                            scope: origin.scope,
+                            source_point: origin.source_point,
+                            window_point: origin.window_point,
+                            attempt: admission.attempt,
+                        }),
+                    ),
+                    None => (Report::Refused(Refusal::Scope), None),
+                }
+            }
+            Err(refusal) => (Report::Refused(refusal), None),
+        }
+    };
+    match (facts, reads) {
+        (Some(facts), Some(reads)) => {
+            // finish checked the unchanged existing cache budget before this
+            // sole numeric clone, replacing the previous remember-time clone.
+            let canonical_query = query.clone();
+            AdmissionCompletion {
+                canonical_query,
+                report,
+                candidate: Some(PublicationCandidate::from_finished(facts, query, reads)),
+            }
+        }
+        (Some(_), None) => AdmissionCompletion {
+            canonical_query: query,
+            report: Report::Refused(Refusal::Collections),
+            candidate: None,
+        },
+        (None, Some(_) | None) => AdmissionCompletion {
+            canonical_query: query,
+            report,
+            candidate: None,
+        },
+    }
+}
+
+pub(super) fn trace_report(report: Report) {
+    tracing::trace!(target: "neomacs_layout_engine::query_cache", ?report,
+        "GEN1 pre-read Rows owner-domain observation; no hit admission");
 }
 
 pub(super) fn finish_and_drop(
@@ -332,8 +484,7 @@ pub(super) fn finish_and_drop(
         }
         Err(refusal) => Report::Refused(refusal),
     };
-    tracing::trace!(target: "neomacs_layout_engine::query_cache", ?report,
-        "GEN1 pre-read Rows owner-domain observation; no hit admission");
+    trace_report(report);
     report
 }
 

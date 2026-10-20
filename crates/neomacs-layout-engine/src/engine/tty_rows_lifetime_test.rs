@@ -103,7 +103,7 @@ fn query(
     policy: &RowsQueryPolicy,
 ) -> (WindowLayoutQuery, Vec<Report>) {
     let mut reports = Vec::new();
-    let mut sink = |report| reports.push(report);
+    let mut sink = |_: &mut Context, report| reports.push(report);
     let query = engine
         .query_window_layout_observed_with_policy(
             context,
@@ -314,3 +314,6 @@ fn tty_rows_lifetime_actual_invalid_inserted_face_preserves_logs_and_refuses() {
         Refusal::Fontification,
     );
 }
+
+#[path = "tty_rows_hits_test.rs"]
+mod hits;

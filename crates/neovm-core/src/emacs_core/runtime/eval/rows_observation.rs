@@ -347,6 +347,14 @@ impl Context {
 }
 
 impl RowsDependencyMetadata<'_> {
+    /// Recover this receipt's SAME original pre-read epoch by consuming it.
+    /// No capture, renewal, owner/root or geometry authority is created. The
+    /// caller must still establish the original capture interval and pairing;
+    /// public conditional numeric metadata alone cannot certify saved rows.
+    pub fn into_original_epoch(self) -> RowsObservationEpoch {
+        self.epoch
+    }
+
     /// Recheck existing native owners/collector and numeric mutation metadata.
     /// This performs no saved-key header dereference and grants no pointer
     /// permission after return. It cannot establish the read-set interval or

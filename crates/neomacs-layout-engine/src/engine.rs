@@ -4253,15 +4253,17 @@ impl LayoutEngine {
         )
     }
 
-    // No cache field/admission changes. The optional test sink runs only after
-    // the private proof/source lease have been consumed and dropped.
+    // The test sink runs after the proof/source lease have been consumed and
+    // dropped, before the original publication candidate is revalidated.
     fn query_window_layout_observed(
         &mut self,
         evaluator: &mut neovm_core::emacs_core::Context,
         frame_id: neovm_core::window::FrameId,
         window_id: neovm_core::window::WindowId,
         scope: neovm_core::window::WindowLayoutQueryScope,
-        #[cfg(test)] mut report_sink: Option<&mut dyn FnMut(rows_lifetime::Report)>,
+        #[cfg(test)] mut report_sink: Option<
+            &mut dyn FnMut(&mut neovm_core::emacs_core::Context, rows_lifetime::Report),
+        >,
     ) -> Result<neovm_core::window::WindowLayoutQuery, neovm_core::window::WindowLayoutQueryFailure>
     {
         self.query_window_layout_observed_with_policy(
@@ -4282,23 +4284,47 @@ impl LayoutEngine {
         window_id: neovm_core::window::WindowId,
         scope: neovm_core::window::WindowLayoutQueryScope,
         policy: &RowsQueryPolicy,
-        #[cfg(test)] mut report_sink: Option<&mut dyn FnMut(rows_lifetime::Report)>,
+        #[cfg(test)] mut report_sink: Option<
+            &mut dyn FnMut(&mut neovm_core::emacs_core::Context, rows_lifetime::Report),
+        >,
     ) -> Result<neovm_core::window::WindowLayoutQuery, neovm_core::window::WindowLayoutQueryFailure>
     {
         let text_extent = matches!(
             scope,
             neovm_core::window::WindowLayoutQueryScope::TextExtent { .. }
         );
-        if !text_extent
-            && let Some(query) = self.query_cache.get(evaluator, frame_id, window_id, scope)
-        {
-            return Ok(query);
-        }
-        if let Some(query) = self
-            .prepared_viewports
-            .measure_rows(evaluator, frame_id, window_id, scope)
-        {
-            return Ok(query);
+        let certified_rows = matches!(
+            (policy.environment(), policy.admission(), scope),
+            (
+                rows_query_policy::RowsQueryEnvironment::Terminal(_),
+                RowsQueryAdmission::ExactProven,
+                neovm_core::window::WindowLayoutQueryScope::Rows { .. }
+            )
+        );
+        if certified_rows {
+            if self.font_metrics.is_none()
+                && let Some(hit) = self
+                    .query_cache
+                    .get_certified(evaluator, frame_id, window_id, scope)
+            {
+                // This success-only native move is the sole certified return.
+                // No trace, sink or callback follows its final validation.
+                return Ok(hit.into_query());
+            }
+            // An unproved selected Rows request must run the canonical walk;
+            // neither a legacy observation nor a prepared viewport can answer.
+        } else {
+            if !text_extent
+                && let Some(query) = self.query_cache.get(evaluator, frame_id, window_id, scope)
+            {
+                return Ok(query);
+            }
+            if let Some(query) = self
+                .prepared_viewports
+                .measure_rows(evaluator, frame_id, window_id, scope)
+            {
+                return Ok(query);
+            }
         }
         self.query_body_reuse_allowed = true;
         self.query_restart_rows.clear();
@@ -4311,22 +4337,31 @@ impl LayoutEngine {
             scope,
             neovm_core::window::WindowLayoutQueryScope::Rows { .. }
         )
-        .then(|| match policy.environment() {
-            rows_query_policy::RowsQueryEnvironment::Graphical => {
-                rows_lifetime::Producer::begin(self, evaluator, frame_id, window_id, scope)
-            }
-            rows_query_policy::RowsQueryEnvironment::Terminal(ref host) => {
-                rows_lifetime::Producer::begin_tty(
-                    self,
-                    evaluator,
-                    frame_id,
-                    window_id,
-                    scope,
-                    Some(host),
-                )
-            }
+        .then(|| {
+            (match policy.environment() {
+                rows_query_policy::RowsQueryEnvironment::Graphical => {
+                    rows_lifetime::Producer::begin(self, evaluator, frame_id, window_id, scope)
+                }
+                rows_query_policy::RowsQueryEnvironment::Terminal(ref host) => {
+                    rows_lifetime::Producer::begin_tty(
+                        self,
+                        evaluator,
+                        frame_id,
+                        window_id,
+                        scope,
+                        Some(host),
+                    )
+                }
+            })
+            .and_then(|producer| {
+                if certified_rows {
+                    producer.for_admission(evaluator)
+                } else {
+                    Ok(producer)
+                }
+            })
         });
-        let (query, collections) = if matches!(
+        let (query, mut collections) = if matches!(
             scope,
             neovm_core::window::WindowLayoutQueryScope::Rows { .. }
         ) {
@@ -4372,18 +4407,35 @@ impl LayoutEngine {
             )
         };
         self.report_image_failures(evaluator);
-        let query = query.ok_or(neovm_core::window::WindowLayoutQueryFailure::DidNotConverge)?;
+        let mut query =
+            query.ok_or(neovm_core::window::WindowLayoutQueryFailure::DidNotConverge)?;
+        let collections_captured = collections.is_some();
+        let mut candidate = None;
         if let Some(pending) = lifetime {
-            let report = rows_lifetime::finish_and_drop(
-                pending,
-                self,
-                evaluator,
-                &query,
-                collections.as_ref(),
-            );
+            let report = if certified_rows {
+                let completed = rows_lifetime::finish_for_admission(
+                    pending,
+                    self,
+                    evaluator,
+                    query,
+                    collections.take(),
+                );
+                query = completed.canonical_query;
+                candidate = completed.candidate;
+                rows_lifetime::trace_report(completed.report);
+                completed.report
+            } else {
+                rows_lifetime::finish_and_drop(
+                    pending,
+                    self,
+                    evaluator,
+                    &query,
+                    collections.as_ref(),
+                )
+            };
             #[cfg(test)]
             if let Some(sink) = report_sink.as_deref_mut() {
-                sink(report);
+                sink(evaluator, report);
             }
             #[cfg(not(test))]
             let _ = report;
@@ -4391,8 +4443,14 @@ impl LayoutEngine {
         let query_restart_rows = std::mem::take(&mut self.query_restart_rows);
         tracing::trace!(target: "neomacs_layout_engine::query_cache",
             body_reuse_allowed = self.query_body_reuse_allowed,
-            collections_captured = collections.is_some(), "query completed");
-        if !text_extent
+            collections_captured, "query completed");
+        if certified_rows {
+            if let Some(candidate) = candidate {
+                // All arbitrary trace/sink boundaries precede this original
+                // epoch/source/read-set revalidation and native insertion.
+                self.query_cache.remember_certified(evaluator, candidate);
+            }
+        } else if !text_extent
             && self.query_body_reuse_allowed
             && let Some(collections) = collections
         {

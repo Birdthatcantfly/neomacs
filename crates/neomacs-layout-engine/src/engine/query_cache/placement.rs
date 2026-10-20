@@ -132,7 +132,7 @@ fn reposition_complete_rows(
 /// An explicit row/pixel query already chooses its own start and zero vscroll.
 /// Moving the live viewport cannot move these pixels; point and every source
 /// dependency still have to match. The owner rejects fontification callbacks.
-pub(super) fn absolute_rows(
+pub(in crate::engine) fn absolute_rows(
     query: &WindowLayoutQuery,
     current: &WindowDisplaySnapshotFreshness,
 ) -> Option<WindowLayoutQuery> {
