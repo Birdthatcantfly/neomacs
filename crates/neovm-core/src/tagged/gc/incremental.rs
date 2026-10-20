@@ -1072,8 +1072,9 @@ impl TaggedHeap {
             VecLikeType::Overlay => {
                 let obj = ptr as *const OverlayObj;
                 let data = unsafe { &(*obj).data };
-                // Trace the property list
-                let plist = load_value_atomic(&data.plist);
+                // Overlay payloads are deferred by the worker and traced
+                // here with Lisp writers excluded.
+                let plist = data.plist;
                 self.mark_or_push_child(plist, "overlay-plist");
             }
             VecLikeType::SymbolWithPos => {
