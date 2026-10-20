@@ -36,7 +36,7 @@ impl TestTerminal {
         let mut master = -1;
         let mut slave = -1;
         let mut name = [0 as libc::c_char; 1024];
-        let size = libc::winsize {
+        let mut size = libc::winsize {
             ws_row: 25,
             ws_col: 80,
             ws_xpixel: 0,
@@ -44,14 +44,16 @@ impl TestTerminal {
         };
         // SAFETY: all output pointers refer to writable initialized storage;
         // the name buffer exceeds the platform's terminal-name limit, and the
-        // optional termios pointer is null as permitted by openpty.
+        // optional termios pointer is null as permitted by openpty. Darwin
+        // declares the termios and winsize parameters as `*mut` while Linux
+        // declares them `*const`; mutable pointers coerce to both.
         let result = unsafe {
             libc::openpty(
                 &mut master,
                 &mut slave,
                 name.as_mut_ptr(),
-                std::ptr::null(),
-                &size,
+                std::ptr::null_mut(),
+                &mut size,
             )
         };
         assert_eq!(
