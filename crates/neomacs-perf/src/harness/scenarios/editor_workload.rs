@@ -119,6 +119,7 @@ pub(crate) fn prepare(
         source_fixture_sha256: sha256_file(&source)?,
         package: package_provenance,
         environment_policy: "closed-v1",
+        editor_arguments: request.editor_arguments(),
         passthrough_environment: request
             .benchmark_environment()
             .into_iter()
@@ -547,6 +548,7 @@ struct EditorWorkloadInputProvenanceManifest<'a> {
     source_fixture_sha256: String,
     package: Option<PackageProvenance<'a>>,
     environment_policy: &'a str,
+    editor_arguments: &'a [String],
     passthrough_environment: BTreeMap<String, String>,
 }
 
@@ -878,4 +880,49 @@ pub(crate) fn valid_editor_workload_measurements(
         });
     }
     measurements
+}
+
+#[cfg(test)]
+mod editor_arguments_tests {
+    use super::*;
+    use crate::harness::editor_arguments_tests::{test_editor, test_host};
+
+    #[test]
+    fn editor_arguments_provenance_preserves_literal_array_and_editor_identity() {
+        for arguments in [
+            Vec::new(),
+            vec![
+                "--rows-query-admission=exact-proven".to_owned(),
+                "space = unicode λ; $(literal)".to_owned(),
+            ],
+        ] {
+            let request = RunRequest::new(
+                ScenarioId::SustainedEditing,
+                "/explicit artifact/neomacs",
+                std::num::NonZeroU32::new(1).unwrap(),
+            )
+            .with_editor_arguments(arguments.clone());
+            let manifest = EditorWorkloadInputProvenanceManifest {
+                editor: test_editor(),
+                host: test_host(),
+                scenario: request.scenario(),
+                workload_fixture_sha256: "fixture-sha".to_owned(),
+                source_fixture_sha256: "source-sha".to_owned(),
+                package: None,
+                environment_policy: "closed-v1",
+                editor_arguments: request.editor_arguments(),
+                passthrough_environment: BTreeMap::new(),
+            };
+            let encoded = serde_json::to_value(manifest).expect("serialize actual input manifest");
+            assert_eq!(encoded["editor_arguments"], serde_json::json!(arguments));
+            assert_eq!(encoded["editor"]["path"], "/explicit artifact/neomacs");
+            assert_eq!(encoded["editor"]["executable_sha256"], "test-editor-sha256");
+            assert_eq!(
+                encoded["editor"]["portable_dump"]["path"],
+                "/explicit artifact/neomacs.pdump"
+            );
+            assert_eq!(encoded["environment_policy"], "closed-v1");
+            assert_eq!(encoded["passthrough_environment"], serde_json::json!({}));
+        }
+    }
 }

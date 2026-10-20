@@ -39,6 +39,7 @@ fn run_command_parses_into_a_typed_workload_request() {
         PerfCommand::Run {
             scenario: ScenarioId::RustLspTyping,
             editor: Some(PathBuf::from("target/profiling/neomacs")),
+            editor_arguments: Vec::new(),
             iterations: NonZeroU32::new(25).expect("non-zero literal"),
             frontend: Some(Frontend::Gui {
                 width: 1200,
@@ -490,4 +491,74 @@ fn profile_command_rejects_zero_and_conflicting_sample_rates() {
     ] {
         assert!(parse(&arguments).is_err(), "{arguments:?}");
     }
+}
+
+#[test]
+fn editor_arguments_are_repeatable_verbatim_and_separate_from_driver_options() {
+    let PerfCommand::Run {
+        editor_arguments,
+        execution_overrides,
+        editor,
+        iterations,
+        machine,
+        ..
+    } = parse(&[
+        "run",
+        "sustained-editing",
+        "--iterations",
+        "17",
+        "--editor-arg=--rows-query-admission=exact-proven",
+        "--editor-arg=--eval",
+        "--editor-arg=space = unicode λ; $(literal)",
+        "--editor-arg=--iterations=999",
+        "--editor-arg=--editor=/literal/path with spaces",
+    ])
+    .expect("parse explicit literal editor argv")
+    else {
+        panic!("run command must remain typed");
+    };
+    assert_eq!(
+        editor_arguments,
+        vec![
+            "--rows-query-admission=exact-proven",
+            "--eval",
+            "space = unicode λ; $(literal)",
+            "--iterations=999",
+            "--editor=/literal/path with spaces",
+        ]
+    );
+    assert_eq!(iterations, NonZeroU32::new(17).unwrap());
+    assert_eq!(editor, None);
+    assert_eq!(machine, MachinePolicy::default());
+    assert_eq!(execution_overrides, crate::ExecutionOverrides::default());
+}
+
+#[test]
+fn editor_arguments_require_equals_to_avoid_consuming_driver_arguments() {
+    for arguments in [
+        vec!["run", "sustained-editing", "--editor-arg"],
+        vec![
+            "run",
+            "sustained-editing",
+            "--editor-arg",
+            "--iterations=17",
+        ],
+    ] {
+        assert!(parse(&arguments).is_err(), "{arguments:?}");
+    }
+}
+
+#[test]
+fn editor_arguments_are_run_only_until_comparison_transport_is_explicit() {
+    let mut arguments = vec![
+        "compare",
+        "sustained-editing",
+        "--baseline-editor",
+        "baseline",
+        "--candidate-editor",
+        "candidate",
+    ];
+    assert!(parse(&arguments).is_ok());
+    arguments.push("--editor-arg=--rows-query-admission=exact-proven");
+    assert!(parse(&arguments).is_err());
 }

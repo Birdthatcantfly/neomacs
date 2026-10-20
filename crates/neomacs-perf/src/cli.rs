@@ -27,6 +27,7 @@ pub enum PerfCommand {
     Run {
         scenario: ScenarioId,
         editor: Option<PathBuf>,
+        editor_arguments: Vec<String>,
         iterations: NonZeroU32,
         frontend: Option<Frontend>,
         timeout: Duration,
@@ -118,6 +119,15 @@ struct RunArgs {
     /// Runtime setting: NAME=VALUE sets; NAME alone removes an inherited setting. Repeatable.
     #[arg(long = "env", value_name = "NAME[=VALUE]")]
     execution_overrides: Vec<crate::ExecutionOverride>,
+    /// Extra editor argv, preserved verbatim and recorded; repeat as --editor-arg=ARG.
+    #[arg(
+        long = "editor-arg",
+        value_name = "ARG",
+        action = clap::ArgAction::Append,
+        allow_hyphen_values = true,
+        require_equals = true
+    )]
+    editor_arguments: Vec<String>,
     /// Registered scenario to execute.
     scenario: ScenarioId,
     /// Editor executable (defaults to target/release/neomacs).
@@ -474,6 +484,7 @@ impl TryFrom<PerfSubcommand> for PerfCommand {
                 Self::Run {
                     scenario: arguments.scenario,
                     editor: arguments.editor,
+                    editor_arguments: arguments.editor_arguments,
                     iterations,
                     frontend,
                     timeout,
@@ -584,6 +595,7 @@ pub fn run_cli(
         PerfCommand::Run {
             scenario,
             editor,
+            editor_arguments,
             iterations,
             frontend,
             timeout,
@@ -595,6 +607,7 @@ pub fn run_cli(
         } => {
             let editor = editor.unwrap_or_else(|| workspace_root.join("target/release/neomacs"));
             let mut request = RunRequest::new(scenario, editor, iterations)
+                .with_editor_arguments(editor_arguments)
                 .with_timeout(timeout)
                 .with_machine_policy(machine)
                 .with_counters(counters)

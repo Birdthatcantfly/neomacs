@@ -45,6 +45,7 @@ static RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub struct RunRequest {
     scenario: ScenarioId,
     editor: PathBuf,
+    editor_arguments: Vec<String>,
     iterations: NonZeroU32,
     frontend: Option<Frontend>,
     timeout: Duration,
@@ -61,6 +62,7 @@ impl RunRequest {
         Self {
             scenario,
             editor: editor.into(),
+            editor_arguments: Vec::new(),
             iterations,
             frontend: None,
             timeout: Duration::from_secs(300),
@@ -71,6 +73,16 @@ impl RunRequest {
             execution_overrides: crate::ExecutionOverrides::default(),
             inherited_environment: benchmark_passthrough_environment().into_iter().collect(),
         }
+    }
+
+    /// Explicit argv is separate from the closed environment and never shell parsed.
+    pub fn with_editor_arguments(mut self, arguments: Vec<String>) -> Self {
+        self.editor_arguments = arguments;
+        self
+    }
+
+    pub fn editor_arguments(&self) -> &[String] {
+        &self.editor_arguments
     }
 
     pub fn with_frontend(mut self, frontend: Frontend) -> Self {
@@ -1430,6 +1442,9 @@ fn frontend_command(
             command
         }
     };
+    // Appended after editor/default frontend flags, before workload --load below.
+    // TUI forwards these same tokens through pty-run.py to the real editor.
+    command.args(request.editor_arguments());
     configure_benchmark_environment_from(
         &mut command,
         &prepared.sandbox,
@@ -2193,3 +2208,7 @@ fn next_run_id(scenario: ScenarioId, unix_ms: u128) -> String {
 #[cfg(test)]
 #[path = "harness/tests/harness_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "harness/tests/editor_arguments_test.rs"]
+mod editor_arguments_tests;
