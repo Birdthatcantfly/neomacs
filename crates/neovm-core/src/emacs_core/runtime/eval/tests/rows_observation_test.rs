@@ -227,11 +227,11 @@ fn rows_observation_any_display_host_refuses_without_host_entry() {
     context.display_host = Some(Box::new(RefusingHost));
     assert!(matches!(
         context.begin_static_rows_observation(frame),
-        Err(RowsObservationRefusal::DisplayHost)
+        Err(RowsObservationRefusal::DisplayHostInstalled)
     ));
     assert_eq!(
         context.static_rows_observation_current(&epoch),
-        Err(RowsObservationRefusal::DisplayHost)
+        Err(RowsObservationRefusal::DisplayHostInstalled)
     );
 }
 

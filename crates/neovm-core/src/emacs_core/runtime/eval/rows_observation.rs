@@ -23,7 +23,7 @@ pub enum RowsObservationRefusal {
     #[error("a collection completed after observation began")]
     CollectionChanged,
     #[error("a native display host can enter external code")]
-    DisplayHost,
+    DisplayHostInstalled,
     #[error("only an explicit graphical window-system frame is supported")]
     TtyOrUnknownFrame,
     #[error("face normalization is not already warm")]
@@ -78,7 +78,7 @@ impl Context {
             return Err(RowsObservationRefusal::CollectorBusy);
         }
         if self.display_host.is_some() {
-            return Err(RowsObservationRefusal::DisplayHost);
+            return Err(RowsObservationRefusal::DisplayHostInstalled);
         }
         let owner = self
             .frames
