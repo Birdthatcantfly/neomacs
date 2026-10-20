@@ -201,9 +201,13 @@ error[E0599]: the associated function or constant `share` exists for struct `Thr
            which is required by `BufferManager: Sync`
            `(dyn std::any::Any + 'static): Send`
            which is required by `BufferManager: Sync`
+           `*const AtomicTaggedValue: Sync`
+           which is required by `BufferManager: Sync`
            `*const TaggedValue: Sync`
            which is required by `BufferManager: Sync`
            `*const CharTableObj: Sync`
+           which is required by `BufferManager: Sync`
+           `UnsafeCell<TaggedValue>: Sync`
            which is required by `BufferManager: Sync`
            `Rc<OverlayList>: Send`
            which is required by `BufferManager: Sync`

@@ -362,9 +362,13 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
            which is required by `neovm_core::Context: Sync`
            `(dyn std::io::Read + Send + 'static): Sync`
            which is required by `neovm_core::Context: Sync`
+           `*const AtomicTaggedValue: Sync`
+           which is required by `neovm_core::Context: Sync`
            `*const TaggedValue: Sync`
            which is required by `neovm_core::Context: Sync`
            `*const CharTableObj: Sync`
+           which is required by `neovm_core::Context: Sync`
+           `UnsafeCell<TaggedValue>: Sync`
            which is required by `neovm_core::Context: Sync`
            `Rc<OverlayList>: Send`
            which is required by `neovm_core::Context: Sync`

@@ -203,9 +203,13 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
            which is required by `BufferManager: Send`
            `(dyn std::any::Any + 'static): Send`
            which is required by `BufferManager: Send`
+           `*const AtomicTaggedValue: Sync`
+           which is required by `BufferManager: Send`
            `*const TaggedValue: Sync`
            which is required by `BufferManager: Send`
            `*const CharTableObj: Sync`
+           which is required by `BufferManager: Send`
+           `UnsafeCell<TaggedValue>: Sync`
            which is required by `BufferManager: Send`
            `(dyn for<'a> Fn(&'a LispString) -> Vec<LispString> + 'static): Send`
            which is required by `BufferManager: Send`
