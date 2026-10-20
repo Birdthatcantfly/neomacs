@@ -396,7 +396,7 @@ impl Drop for RestoreCleanup {
 
 /// Serialize the evaluator state to a pdump file.
 pub fn dump_to_file(eval: &Context, path: &Path) -> Result<(), DumpError> {
-    let mut state = dump_evaluator(eval);
+    let mut state = dump_evaluator_for_restart(eval);
     let symbol_table_payload = symbol_table_image::symbol_table_section_bytes(&state.symbol_table)?;
     let heap_payload = mapped_heap::extract_mapped_heap_payloads(&mut state);
     let object_starts_payload = object_starts::build_object_starts(&state.tagged_heap)?;
@@ -867,3 +867,7 @@ pub(crate) fn take_after_pdump_load_hook_pending(eval: &mut Context) -> bool {
 #[cfg(test)]
 #[path = "tests/pdump_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/deterministic_order_test.rs"]
+mod deterministic_order_tests;

@@ -3318,6 +3318,71 @@ pub(crate) fn dump_symbol_table() -> DumpSymbolTable {
 
 // --- Symbol / Obarray ---
 
+/// A live clone retains process history; a restart image starts GC statistics
+/// afresh, as GNU `init_alloc` does after loading a dump (src/alloc.c).
+#[derive(Clone, Copy, Debug)]
+enum DumpSession {
+    LiveSnapshot,
+    RestartImage {
+        elapsed: Option<SymId>,
+        collections: Option<SymId>,
+    },
+}
+
+impl DumpSession {
+    fn restart_image() -> Self {
+        // Look up existing canonical identities; do not intern during a walk.
+        Self::RestartImage {
+            elapsed: intern::lookup_interned("gc-elapsed"),
+            collections: intern::lookup_interned("gcs-done"),
+        }
+    }
+
+    fn source_for_symbol(self, id: SymId) -> SymbolDumpValue {
+        match self {
+            Self::LiveSnapshot => SymbolDumpValue::Stored,
+            Self::RestartImage {
+                elapsed,
+                collections,
+            } => {
+                if elapsed == Some(id) {
+                    SymbolDumpValue::FreshGcElapsed
+                } else if collections == Some(id) {
+                    SymbolDumpValue::FreshGcCount
+                } else {
+                    SymbolDumpValue::Stored
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SymbolDumpValue {
+    Stored,
+    FreshGcElapsed,
+    FreshGcCount,
+}
+
+impl SymbolDumpValue {
+    fn encode(self, encoder: &mut DumpEncoder, stored: &Value) -> DumpValue {
+        match self {
+            Self::Stored => encoder.dump_value(stored),
+            Self::FreshGcCount => DumpValue::Int(0),
+            Self::FreshGcElapsed => {
+                // A new restart-owned zero float, not the producer's old
+                // elapsed object: aliases to that object retain their values.
+                // No live heap mutation/allocation or restore guard is needed.
+                let id = TaggedHeapRef {
+                    index: encoder.state.objects.len() as u32,
+                };
+                encoder.state.objects.push(Some(DumpHeapObject::Float(0.0)));
+                DumpValue::Float(dump_heap_ref(id))
+            }
+        }
+    }
+}
+
 /// Which of a BLV's possible forwarders the image has to rebuild.
 ///
 /// `None` for the forward types whose storage is not the descriptor
@@ -3340,24 +3405,28 @@ fn dump_localized_forwarder(
     }
 }
 
-pub(crate) fn dump_symbol_data(
+fn dump_symbol_data(
     encoder: &mut DumpEncoder,
     sd: &LispSymbol,
     dynamic_default: Option<Option<Value>>,
+    value_source: SymbolDumpValue,
 ) -> DumpSymbolData {
     // Phase I (pdump v21): encode redirect + flags directly.
     use crate::emacs_core::symbol::ValueCell;
     let mut redirect = sd.redirect();
     let val = match sd.value_cell() {
-        ValueCell::Plain(plain) => dump_plain_val(encoder, plain, dynamic_default),
+        ValueCell::Plain(plain) => dump_plain_val(encoder, plain, dynamic_default, value_source),
         ValueCell::Alias(target) => DumpSymbolVal::Alias(dump_sym_id(target)),
-        ValueCell::Localized(blv) => dump_localized_val(encoder, blv, dynamic_default),
+        ValueCell::Localized(blv) => {
+            dump_localized_val(encoder, blv, dynamic_default, value_source)
+        }
         ValueCell::Forwarded(fwd) => match fwd.thread_projection() {
-            None => dump_forwarded_val(encoder, fwd),
+            None => dump_forwarded_val(encoder, fwd, value_source),
             // An image holds no owners: a thread projection is dumped as the
             // variable it projects, and loads unprojected.
             Some(projection) => {
-                let (logical, val) = dump_projected_val(encoder, projection, dynamic_default);
+                let (logical, val) =
+                    dump_projected_val(encoder, projection, dynamic_default, value_source);
                 redirect = logical;
                 val
             }
@@ -3377,7 +3446,7 @@ pub(crate) fn dump_symbol_data(
 /// SD's dumped redirect and value, printed, from a fresh encoder.
 #[cfg(test)]
 pub(crate) fn dumped_symbol_value_for_test(sd: &LispSymbol) -> String {
-    let data = dump_symbol_data(&mut DumpEncoder::new(), sd, None);
+    let data = dump_symbol_data(&mut DumpEncoder::new(), sd, None, SymbolDumpValue::Stored);
     format!("{:?} {:?}", data.redirect, data.val)
 }
 
@@ -3385,6 +3454,7 @@ fn dump_plain_val(
     encoder: &mut DumpEncoder,
     plain: Value,
     dynamic_default: Option<Option<Value>>,
+    value_source: SymbolDumpValue,
 ) -> DumpSymbolVal {
     let v = match dynamic_default {
         Some(Some(value)) => value,
@@ -3393,13 +3463,14 @@ fn dump_plain_val(
     };
     // Preserve the UNBOUND sentinel — DumpValue::Unbound maps back to
     // Value::UNBOUND on load, which is the correct "unbound" state.
-    DumpSymbolVal::Plain(encoder.dump_value(&v))
+    DumpSymbolVal::Plain(value_source.encode(encoder, &v))
 }
 
 fn dump_localized_val(
     encoder: &mut DumpEncoder,
     blv: crate::emacs_core::symbol::BlvPtr,
     dynamic_default: Option<Option<Value>>,
+    value_source: SymbolDumpValue,
 ) -> DumpSymbolVal {
     // Read the BLV to get the global default, the local_if_set flag and
     // the forwarder `make_blv` copied across (`src/data.c:2112-2140`).
@@ -3416,7 +3487,7 @@ fn dump_localized_val(
         None => default_val,
     };
     DumpSymbolVal::Localized {
-        default: encoder.dump_value(&default_val),
+        default: value_source.encode(encoder, &default_val),
         local_if_set,
         forwarder: forwarder.and_then(dump_localized_forwarder),
     }
@@ -3425,18 +3496,19 @@ fn dump_localized_val(
 fn dump_forwarded_val(
     encoder: &mut DumpEncoder,
     fwd: crate::emacs_core::forward::FwdRef,
+    value_source: SymbolDumpValue,
 ) -> DumpSymbolVal {
     use crate::emacs_core::forward::ForwardSlot;
     match fwd.slot() {
         ForwardSlot::Bool(bool_fwd) => DumpSymbolVal::BoolForwarded(bool_fwd.get()),
         ForwardSlot::Int(int_fwd) => {
-            DumpSymbolVal::IntForwarded(encoder.dump_value(&int_fwd.get()))
+            DumpSymbolVal::IntForwarded(value_source.encode(encoder, &int_fwd.get()))
         }
         ForwardSlot::Obj(obj_fwd) => {
-            DumpSymbolVal::ObjForwarded(encoder.dump_value(&obj_fwd.get()))
+            DumpSymbolVal::ObjForwarded(value_source.encode(encoder, &obj_fwd.get()))
         }
         ForwardSlot::KboardObj(kbd_fwd) => {
-            DumpSymbolVal::KboardForwarded(encoder.dump_value(&kbd_fwd.get()))
+            DumpSymbolVal::KboardForwarded(value_source.encode(encoder, &kbd_fwd.get()))
         }
         // BUFFER_OBJFWD forwarders are re-installed from
         // BUFFER_SLOT_INFO in reconstruct_evaluator.
@@ -3451,21 +3523,27 @@ fn dump_projected_val(
     encoder: &mut DumpEncoder,
     projection: &crate::emacs_core::forward::ThreadProjectionDescriptor,
     dynamic_default: Option<Option<Value>>,
+    value_source: SymbolDumpValue,
 ) -> (crate::emacs_core::symbol::SymbolRedirect, DumpSymbolVal) {
     use crate::emacs_core::forward::CanonicalArm;
     use crate::emacs_core::symbol::SymbolRedirect;
     match projection.arm() {
         CanonicalArm::Plain => (
             SymbolRedirect::Plainval,
-            dump_plain_val(encoder, projection.plain_value(), dynamic_default),
+            dump_plain_val(
+                encoder,
+                projection.plain_value(),
+                dynamic_default,
+                value_source,
+            ),
         ),
         CanonicalArm::Localized(blv) => (
             SymbolRedirect::Localized,
-            dump_localized_val(encoder, blv.blv(), dynamic_default),
+            dump_localized_val(encoder, blv.blv(), dynamic_default, value_source),
         ),
         CanonicalArm::Forwarded(builtin) => (
             SymbolRedirect::Forwarded,
-            dump_forwarded_val(encoder, builtin.descriptor()),
+            dump_forwarded_val(encoder, builtin.descriptor(), value_source),
         ),
     }
 }
@@ -3485,7 +3563,7 @@ fn dynamic_default_for_dump(eval: &Context, sym_id: SymId) -> Option<Option<Valu
     })
 }
 
-pub(crate) fn dump_obarray(encoder: &mut DumpEncoder, eval: &Context) -> DumpObarray {
+fn dump_obarray(encoder: &mut DumpEncoder, eval: &Context, session: DumpSession) -> DumpObarray {
     DumpObarray {
         symbols: eval
             .obarray
@@ -3493,7 +3571,12 @@ pub(crate) fn dump_obarray(encoder: &mut DumpEncoder, eval: &Context) -> DumpOba
             .map(|(id, sd)| {
                 (
                     dump_sym_id(id),
-                    dump_symbol_data(encoder, sd, dynamic_default_for_dump(eval, id)),
+                    dump_symbol_data(
+                        encoder,
+                        sd,
+                        dynamic_default_for_dump(eval, id),
+                        session.source_for_symbol(id),
+                    ),
                 )
             })
             .collect(),
@@ -3780,14 +3863,60 @@ pub(crate) fn dump_buffer_manager(
 
 // --- Sub-managers ---
 
+/// A cold dump snapshot ordered before any value is passed to the encoder.
+///
+/// Object IDs are assigned on first visit. Sorting already encoded rows would
+/// stabilize row order while leaving the heap layout dependent on map buckets.
+/// This invocation-owned view never changes a live map or an ordered Lisp list.
+/// The owning mutator holds immutable manager borrows throughout the walk;
+/// no concurrent Lisp mutation is admitted by the dump caller.
+#[derive(Debug)]
+#[must_use]
+struct OrderedDumpEntries<T> {
+    entries: Vec<T>,
+}
+
+impl<T> OrderedDumpEntries<T> {
+    fn by_key<K: Ord>(entries: impl IntoIterator<Item = T>, key: impl FnMut(&T) -> K) -> Self {
+        let mut entries: Vec<_> = entries.into_iter().collect();
+        entries.sort_unstable_by_key(key);
+        Self { entries }
+    }
+
+    fn by(
+        entries: impl IntoIterator<Item = T>,
+        compare: impl FnMut(&T, &T) -> std::cmp::Ordering,
+    ) -> Self {
+        let mut entries: Vec<_> = entries.into_iter().collect();
+        entries.sort_unstable_by(compare);
+        Self { entries }
+    }
+}
+
+impl<T> IntoIterator for OrderedDumpEntries<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
+/// Lossless key order, consistent with LispString equality. Raw byte payloads
+/// and the unibyte/multibyte distinction must not pass through UTF-8 display.
+fn dump_string_key_cmp(left: &LispString, right: &LispString) -> std::cmp::Ordering {
+    left.as_bytes()
+        .cmp(right.as_bytes())
+        .then_with(|| left.is_multibyte().cmp(&right.is_multibyte()))
+}
+
 pub(crate) fn dump_autoload_manager(
     encoder: &mut DumpEncoder,
     am: &AutoloadManager,
 ) -> DumpAutoloadManager {
     DumpAutoloadManager {
-        entries_syms: am
-            .dump_entries()
-            .iter()
+        entries_syms: OrderedDumpEntries::by_key(am.dump_entries(), |entry| entry.0.0)
+            .into_iter()
             .map(|(k, v)| {
                 (
                     dump_sym_id(*k),
@@ -3805,43 +3934,48 @@ pub(crate) fn dump_autoload_manager(
             })
             .collect(),
         entries: Vec::new(),
-        after_load_lisp: am
-            .dump_after_load()
-            .iter()
-            .map(|(k, v)| {
-                (
-                    dump_lisp_string(k.as_lisp_string()),
-                    v.iter().map(|value| encoder.dump_value(value)).collect(),
-                )
-            })
-            .collect(),
+        after_load_lisp: OrderedDumpEntries::by(am.dump_after_load(), |left, right| {
+            dump_string_key_cmp(left.0.as_lisp_string(), right.0.as_lisp_string())
+        })
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                dump_lisp_string(k.as_lisp_string()),
+                v.iter().map(|value| encoder.dump_value(value)).collect(),
+            )
+        })
+        .collect(),
         after_load: Vec::new(),
         loaded_files: am
             .dump_loaded_files()
             .iter()
             .map(dump_lisp_string)
             .collect(),
-        obsolete_functions_syms: am
-            .dump_obsolete_functions()
-            .iter()
-            .map(|(name, (new_name, when))| {
-                (
-                    dump_sym_id(*name),
-                    (dump_lisp_string(new_name), dump_lisp_string(when)),
-                )
-            })
-            .collect(),
+        obsolete_functions_syms: OrderedDumpEntries::by_key(
+            am.dump_obsolete_functions(),
+            |entry| entry.0.0,
+        )
+        .into_iter()
+        .map(|(name, (new_name, when))| {
+            (
+                dump_sym_id(*name),
+                (dump_lisp_string(new_name), dump_lisp_string(when)),
+            )
+        })
+        .collect(),
         obsolete_functions: Vec::new(),
-        obsolete_variables_syms: am
-            .dump_obsolete_variables()
-            .iter()
-            .map(|(name, (new_name, when))| {
-                (
-                    dump_sym_id(*name),
-                    (dump_lisp_string(new_name), dump_lisp_string(when)),
-                )
-            })
-            .collect(),
+        obsolete_variables_syms: OrderedDumpEntries::by_key(
+            am.dump_obsolete_variables(),
+            |entry| entry.0.0,
+        )
+        .into_iter()
+        .map(|(name, (new_name, when))| {
+            (
+                dump_sym_id(*name),
+                (dump_lisp_string(new_name), dump_lisp_string(when)),
+            )
+        })
+        .collect(),
         obsolete_variables: Vec::new(),
     }
 }
@@ -3915,9 +4049,8 @@ fn dump_mode_custom_type(encoder: &mut DumpEncoder, ct: &ModeCustomType) -> Dump
 
 pub(crate) fn dump_mode_registry(encoder: &mut DumpEncoder, mr: &ModeRegistry) -> DumpModeRegistry {
     DumpModeRegistry {
-        major_modes: mr
-            .dump_major_modes()
-            .iter()
+        major_modes: OrderedDumpEntries::by_key(mr.dump_major_modes(), |entry| entry.0.0)
+            .into_iter()
             .map(|(k, m)| {
                 (
                     dump_sym_id(*k),
@@ -3934,9 +4067,8 @@ pub(crate) fn dump_mode_registry(encoder: &mut DumpEncoder, mr: &ModeRegistry) -
                 )
             })
             .collect(),
-        minor_modes: mr
-            .dump_minor_modes()
-            .iter()
+        minor_modes: OrderedDumpEntries::by_key(mr.dump_minor_modes(), |entry| entry.0.0)
+            .into_iter()
             .map(|(k, m)| {
                 (
                     dump_sym_id(*k),
@@ -3949,21 +4081,23 @@ pub(crate) fn dump_mode_registry(encoder: &mut DumpEncoder, mr: &ModeRegistry) -
                 )
             })
             .collect(),
-        buffer_major_modes: mr
-            .dump_buffer_major_modes()
-            .iter()
-            .map(|(k, v)| (*k, encoder.dump_value(v)))
-            .collect(),
-        buffer_minor_modes: mr
-            .dump_buffer_minor_modes()
-            .iter()
-            .map(|(k, v)| {
-                (
-                    *k,
-                    v.iter().map(|value| encoder.dump_value(value)).collect(),
-                )
-            })
-            .collect(),
+        buffer_major_modes: OrderedDumpEntries::by_key(mr.dump_buffer_major_modes(), |entry| {
+            *entry.0
+        })
+        .into_iter()
+        .map(|(k, v)| (*k, encoder.dump_value(v)))
+        .collect(),
+        buffer_minor_modes: OrderedDumpEntries::by_key(mr.dump_buffer_minor_modes(), |entry| {
+            *entry.0
+        })
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                *k,
+                v.iter().map(|value| encoder.dump_value(value)).collect(),
+            )
+        })
+        .collect(),
         global_minor_modes: mr
             .dump_global_minor_modes()
             .iter()
@@ -3975,9 +4109,8 @@ pub(crate) fn dump_mode_registry(encoder: &mut DumpEncoder, mr: &ModeRegistry) -
             .iter()
             .map(|(pattern, value)| (dump_lisp_string(pattern), encoder.dump_value(value)))
             .collect(),
-        custom_variables: mr
-            .dump_custom_variables()
-            .iter()
+        custom_variables: OrderedDumpEntries::by_key(mr.dump_custom_variables(), |entry| entry.0.0)
+            .into_iter()
             .map(|(k, cv)| {
                 (
                     dump_sym_id(*k),
@@ -3993,9 +4126,8 @@ pub(crate) fn dump_mode_registry(encoder: &mut DumpEncoder, mr: &ModeRegistry) -
                 )
             })
             .collect(),
-        custom_groups: mr
-            .dump_custom_groups()
-            .iter()
+        custom_groups: OrderedDumpEntries::by_key(mr.dump_custom_groups(), |entry| entry.0.0)
+            .into_iter()
             .map(|(k, g)| {
                 (
                     dump_sym_id(*k),
@@ -4029,9 +4161,8 @@ pub(crate) fn dump_coding_system_manager(
     csm: &CodingSystemManager,
 ) -> DumpCodingSystemManager {
     DumpCodingSystemManager {
-        systems_syms: csm
-            .systems
-            .iter()
+        systems_syms: OrderedDumpEntries::by_key(&csm.systems, |entry| entry.0.0)
+            .into_iter()
             .map(|(k, v)| {
                 (
                     dump_sym_id(*k),
@@ -4055,31 +4186,31 @@ pub(crate) fn dump_coding_system_manager(
                         pre_write_conversion: None,
                         default_char: v.default_char,
                         for_unibyte: v.for_unibyte,
-                        properties_syms: v
-                            .properties
-                            .iter()
-                            .map(|(k, v)| (dump_sym_id(*k), encoder.dump_value(v)))
-                            .collect(),
+                        properties_syms: OrderedDumpEntries::by_key(&v.properties, |entry| {
+                            entry.0.0
+                        })
+                        .into_iter()
+                        .map(|(k, v)| (dump_sym_id(*k), encoder.dump_value(v)))
+                        .collect(),
                         properties: Vec::new(),
-                        int_properties: v
-                            .int_properties
-                            .iter()
-                            .map(|(k, v)| (*k, encoder.dump_value(v)))
-                            .collect(),
+                        int_properties: OrderedDumpEntries::by_key(&v.int_properties, |entry| {
+                            *entry.0
+                        })
+                        .into_iter()
+                        .map(|(k, v)| (*k, encoder.dump_value(v)))
+                        .collect(),
                     },
                 )
             })
             .collect(),
         systems: Vec::new(),
-        aliases_syms: csm
-            .aliases
-            .iter()
+        aliases_syms: OrderedDumpEntries::by_key(&csm.aliases, |entry| entry.0.0)
+            .into_iter()
             .map(|(k, v)| (dump_sym_id(*k), dump_sym_id(*v)))
             .collect(),
         aliases: Vec::new(),
-        alias_order_syms: csm
-            .alias_order
-            .iter()
+        alias_order_syms: OrderedDumpEntries::by_key(&csm.alias_order, |entry| entry.0.0)
+            .into_iter()
             .map(|(k, v)| {
                 (
                     dump_sym_id(*k),
@@ -4372,8 +4503,7 @@ fn dump_face(encoder: &mut DumpEncoder, f: &Face) -> DumpFace {
 
 pub(crate) fn dump_face_table(encoder: &mut DumpEncoder, ft: &FaceTable) -> DumpFaceTable {
     DumpFaceTable {
-        face_ids: ft
-            .dump_faces_by_sym_id()
+        face_ids: OrderedDumpEntries::by_key(ft.dump_faces_by_sym_id(), |entry| entry.0.0)
             .into_iter()
             .map(|(id, f)| (dump_sym_id(id), dump_face(encoder, &f)))
             .collect(),
@@ -4410,9 +4540,8 @@ pub(crate) fn dump_register_manager(
     rm: &RegisterManager,
 ) -> DumpRegisterManager {
     DumpRegisterManager {
-        registers: rm
-            .dump_registers()
-            .iter()
+        registers: OrderedDumpEntries::by_key(rm.dump_registers(), |entry| *entry.0)
+            .into_iter()
             .map(|(c, r)| {
                 (
                     *c,
@@ -4445,24 +4574,25 @@ pub(crate) fn dump_register_manager(
 
 pub(crate) fn dump_bookmark_manager(bm: &BookmarkManager) -> DumpBookmarkManager {
     DumpBookmarkManager {
-        bookmarks_lisp: bm
-            .dump_bookmarks()
-            .iter()
-            .map(|(k, b)| {
-                (
-                    dump_lisp_string(k.as_lisp_string()),
-                    DumpBookmark {
-                        name: dump_lisp_string(&b.name),
-                        filename: b.filename.as_ref().map(dump_lisp_string),
-                        position: b.position.as_i64().max(1) as usize,
-                        front_context: b.front_context.as_ref().map(dump_lisp_string),
-                        rear_context: b.rear_context.as_ref().map(dump_lisp_string),
-                        annotation: b.annotation.as_ref().map(dump_lisp_string),
-                        handler: b.handler.as_ref().map(dump_lisp_string),
-                    },
-                )
-            })
-            .collect(),
+        bookmarks_lisp: OrderedDumpEntries::by(bm.dump_bookmarks(), |left, right| {
+            dump_string_key_cmp(left.0.as_lisp_string(), right.0.as_lisp_string())
+        })
+        .into_iter()
+        .map(|(k, b)| {
+            (
+                dump_lisp_string(k.as_lisp_string()),
+                DumpBookmark {
+                    name: dump_lisp_string(&b.name),
+                    filename: b.filename.as_ref().map(dump_lisp_string),
+                    position: b.position.as_i64().max(1) as usize,
+                    front_context: b.front_context.as_ref().map(dump_lisp_string),
+                    rear_context: b.rear_context.as_ref().map(dump_lisp_string),
+                    annotation: b.annotation.as_ref().map(dump_lisp_string),
+                    handler: b.handler.as_ref().map(dump_lisp_string),
+                },
+            )
+        })
+        .collect(),
         bookmarks: Vec::new(),
         recent: bm.dump_recent().iter().map(dump_lisp_string).collect(),
     }
@@ -4470,29 +4600,29 @@ pub(crate) fn dump_bookmark_manager(bm: &BookmarkManager) -> DumpBookmarkManager
 
 pub(crate) fn dump_abbrev_manager(am: &AbbrevManager) -> DumpAbbrevManager {
     DumpAbbrevManager {
-        tables_syms: am
-            .dump_tables()
-            .iter()
+        tables_syms: OrderedDumpEntries::by_key(am.dump_tables(), |entry| entry.0.0)
+            .into_iter()
             .map(|(sym, t)| {
                 (
                     dump_sym_id(*sym),
                     DumpAbbrevTable {
                         name: dump_lisp_string(&t.name),
-                        abbrevs: t
-                            .abbrevs
-                            .iter()
-                            .map(|(k, a)| {
-                                (
-                                    dump_lisp_string(k),
-                                    DumpAbbrev {
-                                        expansion: dump_lisp_string(&a.expansion),
-                                        hook: a.hook.as_ref().map(dump_lisp_string),
-                                        count: a.count,
-                                        system: a.system,
-                                    },
-                                )
-                            })
-                            .collect(),
+                        abbrevs: OrderedDumpEntries::by(&t.abbrevs, |left, right| {
+                            dump_string_key_cmp(left.0, right.0)
+                        })
+                        .into_iter()
+                        .map(|(k, a)| {
+                            (
+                                dump_lisp_string(k),
+                                DumpAbbrev {
+                                    expansion: dump_lisp_string(&a.expansion),
+                                    hook: a.hook.as_ref().map(dump_lisp_string),
+                                    count: a.count,
+                                    system: a.system,
+                                },
+                            )
+                        })
+                        .collect(),
                         parent: t.parent.as_ref().map(dump_lisp_string),
                         case_fixed: t.case_fixed,
                         enable_quoting: t.enable_quoting,
@@ -4512,9 +4642,8 @@ pub(crate) fn dump_interactive_registry(
     ir: &InteractiveRegistry,
 ) -> DumpInteractiveRegistry {
     DumpInteractiveRegistry {
-        specs: ir
-            .dump_specs()
-            .iter()
+        specs: OrderedDumpEntries::by_key(ir.dump_specs(), |entry| entry.0.0)
+            .into_iter()
             .map(|(k, s)| {
                 (
                     dump_sym_id(*k),
@@ -4532,9 +4661,8 @@ pub(crate) fn dump_watcher_list(
     wl: &VariableWatcherList,
 ) -> DumpVariableWatcherList {
     DumpVariableWatcherList {
-        watchers: wl
-            .dump_watchers()
-            .iter()
+        watchers: OrderedDumpEntries::by_key(wl.dump_watchers(), |entry| entry.0.0)
+            .into_iter()
             .map(|(k, watchers)| {
                 (
                     dump_sym_id(*k),
@@ -4550,7 +4678,17 @@ pub(crate) fn dump_watcher_list(
 
 // --- Top-level dump ---
 
+/// Snapshot a live evaluator without resetting its process-local history.
 pub(crate) fn dump_evaluator(eval: &Context) -> DumpContextState {
+    dump_evaluator_for_session(eval, DumpSession::LiveSnapshot)
+}
+
+/// Build a restart image with fresh GC statistics, preserving the live source.
+pub(crate) fn dump_evaluator_for_restart(eval: &Context) -> DumpContextState {
+    dump_evaluator_for_session(eval, DumpSession::restart_image())
+}
+
+fn dump_evaluator_for_session(eval: &Context, session: DumpSession) -> DumpContextState {
     let mut encoder = DumpEncoder::new();
 
     let dump = DumpContextState {
@@ -4563,7 +4701,7 @@ pub(crate) fn dump_evaluator(eval: &Context) -> DumpContextState {
             mapped_veclikes: Vec::new(),
             mapped_slots: Vec::new(),
         },
-        obarray: dump_obarray(&mut encoder, eval),
+        obarray: dump_obarray(&mut encoder, eval, session),
         dynamic: Vec::new(),
         lexenv: encoder.dump_value(&eval.lexenv),
         features: eval.features.iter().copied().map(dump_sym_id).collect(),
