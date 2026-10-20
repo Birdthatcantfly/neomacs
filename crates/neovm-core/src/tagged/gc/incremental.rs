@@ -1102,16 +1102,15 @@ impl TaggedHeap {
             }
             VecLikeType::Xwidget => {
                 let obj = ptr as *const XwidgetObj;
+                // The worker defers xwidget payloads; this owner-side
+                // drain reads them with Lisp writers excluded.
                 let fields = unsafe {
                     [
-                        (load_value_atomic(&(*obj).plist), "xwidget-plist"),
-                        (load_value_atomic(&(*obj).type_), "xwidget-type"),
-                        (load_value_atomic(&(*obj).buffer), "xwidget-buffer"),
-                        (load_value_atomic(&(*obj).title), "xwidget-title"),
-                        (
-                            load_value_atomic(&(*obj).script_callbacks),
-                            "xwidget-script-callbacks",
-                        ),
+                        ((*obj).plist, "xwidget-plist"),
+                        ((*obj).type_, "xwidget-type"),
+                        ((*obj).buffer, "xwidget-buffer"),
+                        ((*obj).title, "xwidget-title"),
+                        ((*obj).script_callbacks, "xwidget-script-callbacks"),
                     ]
                 };
                 for (value, label) in fields {
