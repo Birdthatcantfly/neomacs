@@ -1293,7 +1293,9 @@ impl LispValueVec {
             LispValueVecStorage::Owned(ref items) => {
                 // SAFETY: cells have the same word layout. This owner-only
                 // read view never supplies the concurrent marker's provenance.
-                unsafe { std::slice::from_raw_parts(items.as_ptr().cast(), items.len()) }
+                unsafe {
+                    &*(items.as_slice() as *const [AtomicTaggedValue] as *const [TaggedValue])
+                }
             }
             LispValueVecStorage::Mapped { ptr, len } => {
                 if len == 0 {
