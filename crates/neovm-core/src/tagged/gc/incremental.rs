@@ -1631,6 +1631,11 @@ impl TaggedHeap {
             }
         }
 
+        // Sweeping must not append young allocations while its list is detached.
+        debug_assert!(
+            self.all_objects.is_null(),
+            "the eager sweep must not allocate into the young list"
+        );
         self.all_objects = head;
         live_bytes
     }
