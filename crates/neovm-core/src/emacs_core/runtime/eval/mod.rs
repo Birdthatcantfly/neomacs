@@ -5966,9 +5966,10 @@ impl Context {
         sym_id: SymId,
         sym: &crate::emacs_core::symbol::LispSymbol,
     ) -> Option<SymbolValueLookup> {
-        let buf_fwd = sym.forwarded_descriptor()?.as_buffer_obj_fwd()?;
+        let fwd = sym.forwarded_descriptor()?;
+        let buf_fwd = fwd.as_buffer_obj_fwd()?;
         let Some(slot) = buf_fwd.buffer_slot() else {
-            return buf_fwd
+            return fwd
                 .thread_projection()
                 .map(|projection| self.projected_value(sym_id, projection));
         };

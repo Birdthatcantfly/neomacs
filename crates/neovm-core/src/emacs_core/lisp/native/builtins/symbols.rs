@@ -4793,10 +4793,9 @@ pub(crate) fn builtin_local_variable_if_set_p(
             // symbols because setting them auto-localizes the per-buffer slot
             // (`data.c:2458-2460`). Other forwarder kinds are not
             // buffer-local variables.
-            let buf_fwd = sym
-                .forwarded_descriptor()
-                .and_then(|fwd| fwd.as_buffer_obj_fwd());
-            if buf_fwd.is_some_and(|buf_fwd| buf_fwd.thread_projection().is_some()) {
+            let fwd = sym.forwarded_descriptor();
+            let buf_fwd = fwd.and_then(|fwd| fwd.as_buffer_obj_fwd());
+            if fwd.is_some_and(|fwd| fwd.thread_projection().is_some()) {
                 return projected_local_variable_if_set_p(ctx, resolved_id, args);
             }
             Ok(Value::bool_val(buf_fwd.is_some()))

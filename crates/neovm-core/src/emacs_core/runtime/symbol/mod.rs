@@ -4788,7 +4788,7 @@ impl Obarray {
                 ValueCell::Forwarded(fwd) => {
                     return fwd.load().or_else(|| {
                         let buf_fwd = fwd.as_buffer_obj_fwd()?;
-                        match buf_fwd.thread_projection() {
+                        match fwd.thread_projection() {
                             None => Some(buf_fwd.default),
                             Some(projection) => projected(projection),
                         }

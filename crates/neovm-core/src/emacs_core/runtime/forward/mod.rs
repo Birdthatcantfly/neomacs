@@ -150,8 +150,8 @@ const _: () = {
 
 /// A descriptor body that begins with a [`LispFwd`] header (GNU's `struct
 /// Lisp_Intfwd`, `Lisp_Boolfwd`, ...): the safe upcast every installer uses
-/// instead of a pointer cast. Sealed: only this module's five bodies are
-/// descriptors.
+/// instead of a pointer cast. Sealed: only this module's concrete forwarder
+/// bodies and internal thread-projection body are descriptors.
 pub trait FwdDescriptor: sealed::Sealed {
     /// The family every value of this body carries in its header.
     const TYPE: LispFwdType;
@@ -871,7 +871,7 @@ pub struct LispBufferObjFwd {
 static_assertions::assert_impl_all!(LispBufferObjFwd: std::fmt::Debug);
 // Neither `Copy` nor `Clone`: a header is never lifted out of the body it
 // heads, so a thread projection's marker offset only ever sits at the start
-// of a `ThreadProjectionDescriptor` ([`LispBufferObjFwd::thread_projection`]).
+// of a `ThreadProjectionDescriptor` ([`FwdRef::thread_projection`]).
 static_assertions::assert_not_impl_any!(LispBufferObjFwd: Copy, Clone, Send, Sync);
 
 /// A per-buffer forwarder's slot index, read but not yet checked: the only
