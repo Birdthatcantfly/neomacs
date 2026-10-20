@@ -368,7 +368,11 @@ fn blv(context: &Context) -> *mut LispBufferLocalValue {
 fn blv_cell(context: &Context, local: bool) -> Value {
     // SAFETY: blv checked the record's live localized owner.
     let blv = unsafe { &*blv(context) };
-    if local { blv.valcell } else { blv.defcell }
+    if local {
+        blv.valcell.get()
+    } else {
+        blv.defcell.get()
+    }
 }
 
 fn compile_blv(context: &Context, ops: &[Op], constants: &[Value], arity: usize) -> CompiledLeaf {
@@ -487,8 +491,8 @@ fn mapped_blv_default_never_uses_the_owned_cons_trailer_or_a_baked_remembered_fa
     let owner = unsafe {
         context.tagged_heap.register_mapped_cons_range(mapped, 1);
         let owner = Value::from_cons_ptr(mapped);
-        (*record).defcell = owner;
-        (*record).valcell = owner;
+        (*record).defcell.store_atomic(owner);
+        (*record).valcell.store_atomic(owner);
         owner
     };
     context.gc_collect_exact();

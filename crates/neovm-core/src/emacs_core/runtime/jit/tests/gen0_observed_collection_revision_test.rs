@@ -248,10 +248,10 @@ fn check_mapped_blv_binding() {
     // SAFETY: this exclusive Context owns the checked BLV record; both cells
     // are live and have identical symbol/default contents.
     let blv = unsafe { &mut *symbol.localized_blv().expect("localized").as_ptr() };
-    if blv.valcell == blv.defcell {
-        blv.valcell = owner;
+    if blv.valcell.get() == blv.defcell.get() {
+        blv.valcell.store_atomic(owner);
     }
-    blv.defcell = owner;
+    blv.defcell.store_atomic(owner);
     assert!(
         context
             .tagged_heap

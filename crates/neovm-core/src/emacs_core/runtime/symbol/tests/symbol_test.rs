@@ -611,10 +611,10 @@ fn make_symbol_localized_allocates_blv() {
     assert_eq!(sym.redirect(), SymbolRedirect::Localized);
     let blv = ob.blv(id).expect("BLV pointer");
     // defcell == valcell initially.
-    assert_eq!(blv.defcell, blv.valcell);
+    assert_eq!(blv.defcell.get(), blv.valcell.get());
     // (sym . default)
-    assert_eq!(blv.defcell.cons_cdr(), Value::fixnum(42));
-    assert!(blv.where_buf.is_nil());
+    assert_eq!(blv.defcell.get().cons_cdr(), Value::fixnum(42));
+    assert!(blv.where_buf.get().is_nil());
     assert!(!blv.found);
     assert!(!blv.local_if_set);
 }
@@ -641,11 +641,11 @@ fn trace_roots_walks_blv_pool() {
     // equal to defcell. Both must be present in the root set.
     let blv = ob.blv(id).expect("BLV");
     assert!(
-        roots.iter().any(|r| r.bits() == blv.defcell.bits()),
+        roots.iter().any(|r| r.bits() == blv.defcell.get().bits()),
         "BLV defcell should be traced as a root"
     );
     assert!(
-        roots.iter().any(|r| r.bits() == blv.valcell.bits()),
+        roots.iter().any(|r| r.bits() == blv.valcell.get().bits()),
         "BLV valcell should be traced as a root"
     );
 }
@@ -684,7 +684,7 @@ fn localized_swap_in_reads_buffer_local_value() {
     assert_eq!(v, Some(Value::fixnum(99)));
     // The cache now records `where_buf == buf_a` and `found == true`.
     let blv = ob.blv(id).expect("BLV");
-    assert_eq!(blv.where_buf, buf_a);
+    assert_eq!(blv.where_buf.get(), buf_a);
     assert!(blv.found);
 }
 
@@ -713,7 +713,7 @@ fn localized_blv_cache_invalidated_on_buffer_switch() {
     let v_b = ob.find_symbol_value_in_buffer(id, None, buf_b, alist_b, None, 0, None);
     assert_eq!(v_b, Some(Value::fixnum(0)));
     let blv = ob.blv(id).expect("BLV");
-    assert_eq!(blv.where_buf, buf_b);
+    assert_eq!(blv.where_buf.get(), buf_b);
     assert!(!blv.found);
 }
 
@@ -740,7 +740,7 @@ fn indexed_localized_reads_preserve_shared_cells_defaults_and_void_values() {
         ob.read_localized_in_buffer(id, buffers.get(a).unwrap()),
         Some(Value::fixnum(42))
     );
-    assert_eq!(ob.blv(id).unwrap().valcell, a_cell);
+    assert_eq!(ob.blv(id).unwrap().valcell.get(), a_cell);
 
     a_cell.set_cdr(Value::UNBOUND);
     assert_eq!(
@@ -766,7 +766,7 @@ fn indexed_localized_reads_preserve_shared_cells_defaults_and_void_values() {
         ob.read_localized_in_buffer(id, buffers.get(a).unwrap()),
         Some(Value::T)
     );
-    assert_eq!(ob.blv(id).unwrap().valcell, a_cell);
+    assert_eq!(ob.blv(id).unwrap().valcell.get(), a_cell);
     buffers
         .get_mut(a)
         .unwrap()
@@ -836,7 +836,7 @@ fn set_localized_writes_default_when_no_local_if_set() {
     assert_eq!(new_alist.into_value(), Value::NIL);
     // The default value was updated to 99.
     let blv = ob.blv(id).expect("BLV");
-    assert_eq!(blv.defcell.cons_cdr(), Value::fixnum(99));
+    assert_eq!(blv.defcell.get().cons_cdr(), Value::fixnum(99));
 }
 
 /// When `let_shadows == true`, the auto-create branch is suppressed.
@@ -862,7 +862,7 @@ fn set_localized_does_not_create_when_let_shadows() {
     // No per-buffer binding created; defcell got the write.
     assert_eq!(new_alist.into_value(), Value::NIL);
     let blv = ob.blv(id).expect("BLV");
-    assert_eq!(blv.defcell.cons_cdr(), Value::fixnum(13));
+    assert_eq!(blv.defcell.get().cons_cdr(), Value::fixnum(13));
 }
 
 /// `set_internal_localized` with `bindflag = Bind` (let-binding's
@@ -889,7 +889,7 @@ fn set_localized_bind_never_auto_creates() {
     );
     assert_eq!(new_alist.into_value(), Value::NIL);
     let blv = ob.blv(id).expect("BLV");
-    assert_eq!(blv.defcell.cons_cdr(), Value::fixnum(7));
+    assert_eq!(blv.defcell.get().cons_cdr(), Value::fixnum(7));
 }
 
 /// If the target buffer's `local_var_alist` entry was replaced after the BLV

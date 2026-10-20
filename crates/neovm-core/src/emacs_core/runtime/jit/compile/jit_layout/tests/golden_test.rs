@@ -517,8 +517,8 @@ fn variable_words_are_where_compiled_code_reads_them() {
     let base = std::ptr::from_ref(blv).cast::<u8>();
     let buffer = ev.buffers.current_buffer_id().expect("a current buffer");
     assert_eq!(words_at(base, BLV_WHERE_BUF_ID_OFFSET), buffer.0 as usize);
-    assert_eq!(words_at(base, BLV_VALCELL_OFFSET), blv.valcell.bits());
-    assert_eq!(words_at(base, BLV_DEFCELL_OFFSET), blv.defcell.bits());
+    assert_eq!(words_at(base, BLV_VALCELL_OFFSET), blv.valcell.get().bits());
+    assert_eq!(words_at(base, BLV_DEFCELL_OFFSET), blv.defcell.get().bits());
     assert_eq!(
         words_at(base, BLV_ALIST_EPOCH_OFFSET) as u64,
         blv.alist_epoch
@@ -537,7 +537,7 @@ fn variable_words_are_where_compiled_code_reads_them() {
     assert_eq!(epoch, blv.alist_epoch, "the cache is current");
     // The valcell's cdr, from the tagged cons word.
     let cdr = words_at(
-        blv.valcell.bits() as *const u8,
+        blv.valcell.get().bits() as *const u8,
         CONS_CDR_OFFSET - crate::tagged::value::TAG_CONS,
     );
     assert_eq!(cdr, Value::fixnum(2).bits());

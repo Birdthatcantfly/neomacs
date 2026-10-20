@@ -30,9 +30,9 @@ fn cached_cell(context: &Context, name: &str, local: bool) -> Value {
     let blv = unsafe { &*symbol.localized_blv().expect("localized").as_ptr() };
     assert_eq!(blv.found, local);
     if !local {
-        assert_eq!(blv.valcell, blv.defcell);
+        assert_eq!(blv.valcell.get(), blv.defcell.get());
     }
-    blv.valcell
+    blv.valcell.get()
 }
 
 fn raw_cdr(owner: Value) -> Value {

@@ -28,7 +28,7 @@ fn loaded_local(context: &Context, name: &str) -> Value {
     // buffer's actual local pair, without replacing any production fields.
     let blv = unsafe { &*symbol.localized_blv().expect("localized").as_ptr() };
     assert!(blv.found);
-    blv.valcell
+    blv.valcell.get()
 }
 
 fn observe_bound_cells(context: &mut Context) -> EvalResult {

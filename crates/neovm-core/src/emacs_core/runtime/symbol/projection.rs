@@ -210,9 +210,9 @@ pub(super) fn store_projected_canonical(
         // unprojected `Localized` arm writes it.
         CanonicalArm::Localized(blv) => unsafe {
             let blv = &mut *blv.blv().as_ptr();
-            blv.defcell.set_cdr(value);
-            if super::super::value::eq_value(&blv.valcell, &blv.defcell) {
-                blv.valcell.set_cdr(value);
+            blv.defcell.get().set_cdr(value);
+            if super::super::value::eq_value(&blv.valcell.get(), &blv.defcell.get()) {
+                blv.valcell.get().set_cdr(value);
             }
         },
         CanonicalArm::Forwarded(builtin) => {
@@ -552,12 +552,9 @@ impl Obarray {
                             let valcell = if found {
                                 found_cell
                             } else {
-                                (*blv_ptr).defcell
+                                (*blv_ptr).defcell.get()
                             };
-                            crate::tagged::header::store_value_atomic(
-                                &mut (*blv_ptr).valcell,
-                                valcell,
-                            );
+                            (*blv_ptr).valcell.store_atomic(valcell);
                             (*blv_ptr).alist_epoch = super::blv_alist_epoch();
                             valcell.cons_cdr()
                         }
@@ -565,7 +562,7 @@ impl Obarray {
                 }
             }
             // SAFETY: as above; the default cell is read without a write.
-            None => unsafe { (*blv_ptr).defcell.cons_cdr() },
+            None => unsafe { (*blv_ptr).defcell.get().cons_cdr() },
         }
     }
 }
@@ -601,7 +598,9 @@ impl Obarray {
             CanonicalArm::Plain => projection.plain_value(),
             // SAFETY: a projection's localized arm names a record this
             // obarray's BLV pool owns; the default cell is only read.
-            CanonicalArm::Localized(blv) => unsafe { (*blv.blv().as_ptr()).defcell.cons_cdr() },
+            CanonicalArm::Localized(blv) => unsafe {
+                (*blv.blv().as_ptr()).defcell.get().cons_cdr()
+            },
             CanonicalArm::Forwarded(builtin) => {
                 let fwd = builtin.descriptor();
                 return fwd

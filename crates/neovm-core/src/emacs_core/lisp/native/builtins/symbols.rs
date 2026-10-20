@@ -4284,9 +4284,9 @@ pub(crate) fn builtin_variable_binding_locus(
                 }
                 if let Some(blv) = ctx.obarray.blv(resolved)
                     && blv.found
-                    && !blv.where_buf.is_nil()
+                    && !blv.where_buf.get().is_nil()
                 {
-                    return Ok(blv.where_buf);
+                    return Ok(blv.where_buf.get());
                 }
             }
             ValueCell::Forwarded(fwd) => {

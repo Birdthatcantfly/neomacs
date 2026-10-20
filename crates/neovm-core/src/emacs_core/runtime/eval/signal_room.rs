@@ -83,14 +83,16 @@ impl Context {
                 self.obarray
                     .blv(id)
                     .expect("localized depth variable")
-                    .valcell,
+                    .valcell
+                    .get(),
             )
         } else {
             Some(
                 self.obarray
                     .blv(id)
                     .expect("localized depth variable")
-                    .defcell,
+                    .defcell
+                    .get(),
             )
         }
     }
