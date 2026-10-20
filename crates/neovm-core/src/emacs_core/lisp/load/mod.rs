@@ -3165,9 +3165,41 @@ pub enum LoadupInvocation {
     Dump(LoadupDumpInvocation),
 }
 
+/// GNU's explicit choice to retain or omit build host/time details.
+///
+/// `version.el` obtains the build host with `(system-name)` and only records
+/// `current-time` when that host is non-nil. Keep the default inclusive; the
+/// command-line opt-out must reach the evaluator before version.el is loaded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildDetails {
+    Include,
+    Omit,
+}
+
+impl BuildDetails {
+    pub const fn from_omit_flag(omit: bool) -> Self {
+        if omit { Self::Omit } else { Self::Include }
+    }
+
+    /// Apply startup policy without changing the runtime-owned hostname cache.
+    #[cold]
+    pub fn apply(self, eval: &mut super::eval::Context) {
+        match self {
+            Self::Include => eval.set_variable("build-details", Value::T),
+            Self::Omit => {
+                eval.set_variable("build-details", Value::NIL);
+                // Context already owns a cached host string. Nil is therefore
+                // an explicit override, preserved by `(system-name)` refresh.
+                eval.set_variable("system-name", Value::NIL);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoadupDumpInvocation {
     mode: LoadupDumpMode,
+    build_details: BuildDetails,
     command_line_args: Vec<String>,
 }
 
@@ -3175,8 +3207,18 @@ impl LoadupDumpInvocation {
     pub fn new(mode: LoadupDumpMode, command_line_args: Vec<String>) -> Self {
         Self {
             mode,
+            build_details: BuildDetails::Include,
             command_line_args,
         }
+    }
+
+    pub fn with_build_details(mut self, build_details: BuildDetails) -> Self {
+        self.build_details = build_details;
+        self
+    }
+
+    pub const fn build_details(&self) -> BuildDetails {
+        self.build_details
     }
 
     pub const fn mode(&self) -> LoadupDumpMode {
@@ -6149,6 +6191,8 @@ fn apply_loadup_invocation(eval: &mut super::eval::Context, invocation: &LoadupI
         eval.set_variable("dump-mode", Value::NIL);
         return;
     };
+
+    dump.build_details().apply(eval);
 
     let argv = dump
         .command_line_args()

@@ -207,7 +207,7 @@ use neovm_core::emacs_core::image_catalog::{
 };
 use neovm_core::emacs_core::intern::intern;
 use neovm_core::emacs_core::load::{
-    LoadupDumpInvocation, LoadupDumpMode, LoadupInvocation, RuntimeImageRole,
+    BuildDetails, LoadupDumpInvocation, LoadupDumpMode, LoadupInvocation, RuntimeImageRole,
     TEMACS_ROLE_BINARY_NAME, find_file_in_load_path, get_load_path, load_file,
 };
 #[cfg(test)]
@@ -3469,10 +3469,10 @@ fn raw_dump_loadup_invocation(
     startup: &StartupOptions,
     dump_mode: LoadupDumpMode,
 ) -> LoadupInvocation {
-    LoadupInvocation::Dump(LoadupDumpInvocation::new(
-        dump_mode,
-        raw_loadup_command_line(startup, dump_mode),
-    ))
+    LoadupInvocation::Dump(
+        LoadupDumpInvocation::new(dump_mode, raw_loadup_command_line(startup, dump_mode))
+            .with_build_details(BuildDetails::from_omit_flag(startup.no_build_details)),
+    )
 }
 
 fn load_neomacs_gui_term_layer(evaluator: &mut Context) {
@@ -5458,14 +5458,7 @@ fn configure_gnu_startup_state(eval: &mut Context, frame_id: FrameId, startup: &
             Value::NIL
         },
     );
-    eval.set_variable(
-        "build-details",
-        if startup.no_build_details {
-            Value::NIL
-        } else {
-            Value::T
-        },
-    );
+    BuildDetails::from_omit_flag(startup.no_build_details).apply(eval);
     let (terminal_frame, frame_initial_frame, default_minibuffer_frame) = match startup.frontend {
         FrontendKind::Gui => {
             let terminal_frame_id = ensure_gnu_startup_terminal_frame(eval, frame_id);

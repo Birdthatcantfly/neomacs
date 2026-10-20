@@ -15958,3 +15958,72 @@ fn test_bootstrap_cache_paths_are_keyed_by_the_lisp_source_fingerprint() {
         "distinct cached images must not collide on one path"
     );
 }
+
+#[test]
+fn dump_loadup_build_details_default_preserves_owned_hostname() {
+    let mut eval = Context::new();
+    let host = eval.eval_str("(system-name)").expect("owned system name");
+    assert!(host.is_string());
+    let invocation = LoadupDumpInvocation::new(LoadupDumpMode::Pdump, vec![]);
+    assert_eq!(invocation.build_details(), BuildDetails::Include);
+    apply_loadup_invocation(&mut eval, &LoadupInvocation::Dump(invocation));
+    assert_eq!(
+        eval.obarray().symbol_value_copied("build-details"),
+        Some(Value::T)
+    );
+    assert_eq!(eval.eval_str("(system-name)").unwrap().bits(), host.bits());
+}
+
+#[test]
+fn dump_loadup_build_details_omit_survives_hostname_refresh() {
+    let mut eval = Context::new();
+    let host = eval.eval_str("(system-name)").expect("owned system name");
+    assert!(host.is_string());
+    // Ordinary user data is not a target of the startup policy.
+    eval.set_variable("test-user-build-time", Value::fixnum(7123));
+    let invocation = LoadupDumpInvocation::new(LoadupDumpMode::Pdump, vec![])
+        .with_build_details(BuildDetails::Omit);
+    assert_eq!(invocation.build_details(), BuildDetails::Omit);
+    apply_loadup_invocation(&mut eval, &LoadupInvocation::Dump(invocation));
+    assert_eq!(
+        eval.obarray().symbol_value_copied("build-details"),
+        Some(Value::NIL)
+    );
+    assert_eq!(
+        eval.obarray().symbol_value_copied("system-name"),
+        Some(Value::NIL)
+    );
+    assert_eq!(
+        eval.cached_system_name.bits(),
+        host.bits(),
+        "the owned hostname cache must not become nil"
+    );
+    assert!(
+        eval.eval_str("(system-name)").unwrap().is_nil(),
+        "version.el must observe the explicit nil override"
+    );
+    crate::emacs_core::runtime_identity::refresh_system_name(&mut eval);
+    assert!(
+        eval.eval_str("(system-name)").unwrap().is_nil(),
+        "later refresh must retain the override"
+    );
+    assert_eq!(
+        eval.obarray().symbol_value_copied("test-user-build-time"),
+        Some(Value::fixnum(7123))
+    );
+}
+
+#[test]
+fn build_details_include_preserves_explicit_hostname_override() {
+    let mut eval = Context::new();
+    eval.set_variable("system-name", Value::NIL);
+    BuildDetails::Include.apply(&mut eval);
+    assert!(
+        eval.eval_str("(system-name)").unwrap().is_nil(),
+        "Include must not undo a user hostname override"
+    );
+    assert_eq!(
+        eval.obarray().symbol_value_copied("build-details"),
+        Some(Value::T)
+    );
+}

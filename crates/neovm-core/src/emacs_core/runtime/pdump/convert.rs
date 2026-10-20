@@ -3657,7 +3657,10 @@ fn dump_text_property_table(
 fn dump_overlay(encoder: &mut DumpEncoder, o: &Overlay) -> DumpOverlay {
     let (start, end) = o.current_range();
     DumpOverlay {
-        serial: o.serial,
+        // Both restore paths derive a fresh precedence key from the relocated
+        // object. The producer's tagged address is dead image metadata; live
+        // overlays and immutable observer copies retain their original keys.
+        serial: 0,
         plist: encoder.dump_value(&o.plist),
         buffer: o.buffer.map(|id| DumpBufferId(id.0)),
         start,

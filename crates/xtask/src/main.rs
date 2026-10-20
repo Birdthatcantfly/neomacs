@@ -921,6 +921,31 @@ fn run_fresh_build(options: &FreshBuildOptions) -> Result<()> {
     run_fresh_build_inner(options, &[])
 }
 
+/// Normal build-owned image producers omit volatile build metadata.
+///
+/// This process-local recipe holds no evaluator state and is shared by printed
+/// plans and executed commands. Ordinary editor CLI invocations retain their
+/// existing include-build-details default.
+#[derive(Clone, Copy, Debug)]
+enum DumpProducerStage {
+    Bootstrap,
+    Final,
+}
+
+fn dump_producer_args(stage: DumpProducerStage) -> [OsString; 5] {
+    let mode = match stage {
+        DumpProducerStage::Bootstrap => "--temacs=pbootstrap",
+        DumpProducerStage::Final => "--temacs=pdump",
+    };
+    [
+        OsString::from("--batch"),
+        OsString::from("--no-build-details"),
+        OsString::from("-l"),
+        OsString::from("loadup"),
+        OsString::from(mode),
+    ]
+}
+
 fn run_fresh_build_inner(
     options: &FreshBuildOptions,
     build_envs: &[(OsString, OsString)],
@@ -1033,12 +1058,7 @@ fn run_fresh_build_inner(
         options,
         &options.repo_root,
         &paths.temacs,
-        &[
-            OsString::from("--batch"),
-            OsString::from("-l"),
-            OsString::from("loadup"),
-            OsString::from("--temacs=pbootstrap"),
-        ],
+        &dump_producer_args(DumpProducerStage::Bootstrap),
         &envs,
     )?;
 
@@ -1238,12 +1258,7 @@ fn run_fresh_build_inner(
         options,
         &options.repo_root,
         &paths.temacs,
-        &[
-            OsString::from("--batch"),
-            OsString::from("-l"),
-            OsString::from("loadup"),
-            OsString::from("--temacs=pdump"),
-        ],
+        &dump_producer_args(DumpProducerStage::Final),
         &pdump_envs,
     )?;
 
@@ -1336,15 +1351,8 @@ fn run_aot_preload_dry_run_gate(
     envs.push((OsString::from(AOT_PRELOAD_ENV), OsString::from("1")));
     envs.push((OsString::from(AOT_PRELOAD_DRY_RUN_ENV), OsString::from("1")));
     // Run directly (NOT through run_command, which would skip under --dry-run).
-    print_command(
-        paths.temacs.as_os_str(),
-        &[
-            OsString::from("--batch"),
-            OsString::from("-l"),
-            OsString::from("loadup"),
-            OsString::from("--temacs=pdump"),
-        ],
-    );
+    let args = dump_producer_args(DumpProducerStage::Final);
+    print_command(paths.temacs.as_os_str(), &args);
     if !paths.temacs.exists() {
         return Err(format!(
             "aot-preload dry-run: missing {} (run a full build first, or drop --skip-build)",
@@ -1353,12 +1361,7 @@ fn run_aot_preload_dry_run_gate(
         .into());
     }
     let mut command = Command::new(&paths.temacs);
-    command.current_dir(&options.repo_root).args([
-        OsStr::new("--batch"),
-        OsStr::new("-l"),
-        OsStr::new("loadup"),
-        OsStr::new("--temacs=pdump"),
-    ]);
+    command.current_dir(&options.repo_root).args(&args);
     configure_fresh_build_environment(&mut command, &envs);
     let status = command.status()?;
     if !status.success() {
