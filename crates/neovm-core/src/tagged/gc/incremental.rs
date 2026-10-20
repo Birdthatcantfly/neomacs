@@ -1593,8 +1593,12 @@ impl TaggedHeap {
         // cycle that just marked them (this eager sweep runs inside the same
         // collection, before any next flip).
         let parity = self.mark_parity;
-        let mut prev: *mut *mut GcHeader = &mut self.all_objects;
-        let mut current = self.all_objects;
+        // The unlink cursor must not borrow a field of `self`: promotion and
+        // reclamation below reborrow the whole heap. Keep the head local until
+        // those calls finish, just as the incremental sweep detaches its list.
+        let mut head = std::mem::replace(&mut self.all_objects, std::ptr::null_mut());
+        let mut prev = std::ptr::addr_of_mut!(head);
+        let mut current = head;
         let mut live_bytes = 0usize;
         while !current.is_null() {
             // SAFETY: sweeping is exclusive with every marker and mutator;
@@ -1612,7 +1616,7 @@ impl TaggedHeap {
                 if (*current).is_marked_at(parity) {
                     // Keep it — advance prev
                     live_bytes = live_bytes.saturating_add(self.collector_object_bytes(current));
-                    prev = &mut (*current).next;
+                    prev = std::ptr::addr_of_mut!((*current).next);
                     current = next;
                 } else {
                     // Free it — unlink from list
@@ -1627,6 +1631,7 @@ impl TaggedHeap {
             }
         }
 
+        self.all_objects = head;
         live_bytes
     }
 

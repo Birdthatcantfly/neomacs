@@ -1,5 +1,51 @@
 use super::*;
 
+/// Promotion and reclamation may reborrow the heap between consecutive
+/// unlinks, including while the cursor still points at the list head.
+#[test]
+fn miriub3_eager_sweep_preserves_young_and_old_survivors() {
+    let mut heap = TaggedHeap::new();
+    set_tagged_heap(&mut heap);
+    let values: Vec<_> = (0..5)
+        .map(|_| heap.alloc_char_table(TaggedValue::NIL, TaggedValue::NIL, 0))
+        .collect();
+    let mut headers: Vec<_> = values
+        .iter()
+        .map(|value| {
+            value
+                .as_veclike_ptr()
+                .unwrap()
+                .cast_mut()
+                .cast::<GcHeader>()
+        })
+        .collect();
+    // Allocation prepends: dead -> old -> dead -> young -> old. These are
+    // real residual Box objects, so the normal reclamation path runs too.
+    unsafe {
+        (*headers[0]).tenured = true;
+        (*headers[3]).tenured = true;
+        (*headers[2])
+            .marked
+            .store(UNMARKED_AT_REST, Ordering::Relaxed);
+        (*headers[4])
+            .marked
+            .store(UNMARKED_AT_REST, Ordering::Relaxed);
+    }
+    let young_bytes = heap.collector_object_bytes(headers[1]);
+    assert_eq!(heap.sweep_objects(), young_bytes);
+    assert_eq!(heap.non_cons_object_addrs.len(), 3);
+    assert_eq!(heap.all_objects, headers[1]);
+    assert_eq!(heap.generational.old_objects, headers[0]);
+    unsafe {
+        assert!((*headers[1]).next.is_null());
+        assert_eq!((*headers[0]).next, headers[3]);
+        assert!((*headers[3]).next.is_null());
+    }
+    assert_eq!(heap.sweep_objects(), young_bytes);
+    assert_eq!(heap.all_objects, headers[1]);
+    assert_eq!(heap.non_cons_object_addrs.len(), 3);
+}
+
 /// TASK 10 — the `dirty_owners` ABA regression.
 ///
 /// The owner-tracking side tables (`dirty_owners` / `dirty_owner_bits` /
