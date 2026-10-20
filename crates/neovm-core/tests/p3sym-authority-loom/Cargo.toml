@@ -31,3 +31,7 @@ path = "tests/epoch.rs"
 [[test]]
 name = "keeper"
 path = "tests/keeper.rs"
+
+[[test]]
+name = "globals"
+path = "tests/globals.rs"

@@ -1,5 +1,33 @@
 # Proof 3 symbol authority models — C1
 
+## C3 preparation extension
+
+`tests/globals.rs` adds ten cases on b142 (`fd1bd8edbb`), while production
+storage implementation waits for b143. Run it with the same pinned toolchain,
+target, bounds and receipt rules below. The full crate now has 37 cases and
+ten required negative witnesses; historical C1 receipts remain unchanged.
+
+The new ordinary checked payload and writer-only history ledger model nil
+versus void, two writer orders, a reader plus two writers (three owners),
+two readers plus two writers (four owners), set versus makunbound, independent
+set answers, rooted read answers across overwrite/stop, and a legal lost
+increment. An acquisition refusal is retried only after joins, as an explicit
+serial suffix. No fairness assumption or extra payload mutex is introduced.
+Readers copy under the counted-reader lease; every observed value/version
+pair must belong to the committed writer history. Existing C1 tests provide
+the explicit overlapping-reader count==2 and writer-drain witnesses.
+
+Two new controls require these exact headings:
+
+* `set returned another owner's value`
+* `symbol answer escaped before rooting`
+
+The root control is a finite root ledger, not real GC. GNU twins, actual
+Plain/projected-Plain engine operations, real stopped collection, Miri, TSan,
+reader scaling/drain latency, census and board are separate C3 obligations.
+
+## Historical C1 qualification
+
 Standalone, test-only workspace on `fa5aa55e2b`. Loom is pinned to **0.7.2**,
 static_assertions to **1.1.0**, with the dependency lock copied from proof 2's
 reviewed model workspace (only the root package name changes). There is no
