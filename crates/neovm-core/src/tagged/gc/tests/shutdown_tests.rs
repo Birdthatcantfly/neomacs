@@ -236,7 +236,7 @@ fn abandoned_marker_retains_retired_vector_original() {
     // SAFETY: this test exclusively owns the initialized vector in heap.
     let object = unsafe { &mut *(vector.as_veclike_ptr().unwrap() as *mut VectorObj) };
     let before = object.data.as_slice().as_ptr();
-    let retired = object.data.clone_owned_backing();
+    let retired = object.data.clone_owned_backing().expect("owned fixture");
     object.data.store_atomic(0, TaggedValue::fixnum(23));
     heap.retired_vector_buffers.push(retired);
     drop(heap);

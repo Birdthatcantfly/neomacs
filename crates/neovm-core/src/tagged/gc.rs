@@ -786,7 +786,7 @@ pub struct TaggedHeap {
     /// points at these immutable buffers, so they must stay alive until the GC thread
     /// joins. Drained + dropped in `join_concurrent_mark` (the GC thread has provably
     /// exited — the only safe free point). Empty unless a clone-on-write fired.
-    retired_vector_buffers: Vec<Vec<TaggedValue>>,
+    retired_vector_buffers: Vec<Vec<super::header::AtomicTaggedValue>>,
     /// Stage 2 Tier B CONCURRENT VECTOR SCAN: per-cycle clone-on-write dedup set,
     /// keyed on each vector owner's `TaggedValue` bits. On an owner's FIRST bulk
     /// mutation this cycle we clone+retire its OWNED backing once; later mutations of

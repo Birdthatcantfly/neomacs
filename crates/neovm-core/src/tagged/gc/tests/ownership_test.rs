@@ -1365,7 +1365,8 @@ fn concurrent_vector_slot_insertion_of_inflight_value_survives() {
         (*(v.as_veclike_ptr().unwrap() as *const VectorObj))
             .data
             .load_atomic(0)
-    };
+    }
+    .expect("vector slot");
     assert_eq!(slot0.0, x.0);
 }
 
@@ -2043,7 +2044,7 @@ fn parity_allocate_black_object_survives_two_cycles() {
     run_concurrent_cycle(&mut heap, &[spine, v, s]);
     assert!(heap.owns_non_cons_object(v_ptr));
     assert!(heap.owns_non_cons_object(s_ptr));
-    let slot = unsafe { (*(v_ptr as *const VectorObj)).data.load_atomic(0) };
+    let slot = unsafe { (*(v_ptr as *const VectorObj)).data.load_atomic(0) }.expect("vector slot");
     assert_eq!(slot.0, TaggedValue::fixnum(77).0, "vector payload intact");
     assert_eq!(
         unsafe { (*(s_ptr as *const StringObj)).data.as_bytes() },

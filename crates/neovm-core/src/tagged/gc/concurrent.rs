@@ -1050,8 +1050,9 @@ impl TaggedHeap {
         }
         // Replace the backing with a clone; retire the original so the GC's snapshot
         // pointer keeps addressing it (immutable + alive) until the join free point.
-        let original = obj.data.clone_owned_backing();
-        self.retired_vector_buffers.push(original);
+        if let Some(original) = obj.data.clone_owned_backing() {
+            self.retired_vector_buffers.push(original);
+        }
     }
 
     /// Called only after reader join, at the end of termination or teardown.

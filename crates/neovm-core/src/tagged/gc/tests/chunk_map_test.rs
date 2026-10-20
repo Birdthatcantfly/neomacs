@@ -559,7 +559,7 @@ fn chunk_map_concurrent_cycles_keep_the_live_set_while_pages_grow() {
     while cell.is_cons() {
         let v = unsafe { (*cell.xcons_ptr()).load_car() };
         let obj = unsafe { &*(v.as_veclike_ptr().unwrap() as *const VectorObj) };
-        let s = obj.data.load_atomic(0);
+        let s = obj.data.load_atomic(0).expect("vector slot");
         assert!(heap.owns_string_object(s.as_string_ptr().unwrap() as *const u8));
         n += 1;
         cell = unsafe { (*cell.xcons_ptr()).load_cdr() };

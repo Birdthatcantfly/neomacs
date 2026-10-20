@@ -38,14 +38,10 @@ impl SlotWrite {
 
     #[inline(always)]
     fn backing_slot(&self, backing: &mut LispValueVec, index: usize, value: TaggedValue) {
-        // Table shapes never grow after construction. On a mapped backing,
-        // ensure_owned copies the immutable image; the marker keeps its
-        // start-captured span and never rereads this storage enum.
-        let data = backing.ensure_owned();
-        if index < data.len() {
-            // SAFETY: the bounds check proves an initialized aligned slot.
-            // This capability cannot resize or retire an owned table backing.
-            unsafe { self.publish(data.as_mut_ptr().add(index), value) };
+        // Fixed-shape writes retain captured owned cells; only immutable
+        // mapped storage is copied. Never create an exclusive bulk view here.
+        if index < backing.len() {
+            backing.store_atomic(index, value);
         }
     }
 }

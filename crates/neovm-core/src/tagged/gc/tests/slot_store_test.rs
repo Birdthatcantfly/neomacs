@@ -5,10 +5,10 @@
 //! stores keep their semantics and their barrier through a concurrent mark.
 
 use super::*;
-use crate::tagged::header::{LambdaObj, MacroObj, RecordObj, load_value_atomic};
+use crate::tagged::header::{AtomicTaggedValue, LambdaObj, MacroObj, RecordObj, VectorScanEntry};
 use crate::tagged::mutate::{set_closure_slot, set_record_slot};
 
-fn slot_base(value: TaggedValue) -> (*const TaggedValue, usize) {
+fn slot_base(value: TaggedValue) -> (*const AtomicTaggedValue, usize) {
     let ptr = value.as_veclike_ptr().expect("a veclike");
     // SAFETY: a live record, lambda or macro; all three keep their slots in
     // a `LispValueVec` named `data`.
@@ -16,15 +16,24 @@ fn slot_base(value: TaggedValue) -> (*const TaggedValue, usize) {
         match value.veclike_type() {
             Some(VecLikeType::Record) => {
                 let data = &(*(ptr as *const RecordObj)).data;
-                (data.as_slice().as_ptr(), data.len())
+                match data.scan_entry() {
+                    VectorScanEntry::Owned { base, len } => (base, len),
+                    VectorScanEntry::Mapped { .. } => panic!("expected owned fixture"),
+                }
             }
             Some(VecLikeType::Lambda) => {
                 let data = &(*(ptr as *const LambdaObj)).data;
-                (data.as_slice().as_ptr(), data.len())
+                match data.scan_entry() {
+                    VectorScanEntry::Owned { base, len } => (base, len),
+                    VectorScanEntry::Mapped { .. } => panic!("expected owned fixture"),
+                }
             }
             Some(VecLikeType::Macro) => {
                 let data = &(*(ptr as *const MacroObj)).data;
-                (data.as_slice().as_ptr(), data.len())
+                match data.scan_entry() {
+                    VectorScanEntry::Owned { base, len } => (base, len),
+                    VectorScanEntry::Mapped { .. } => panic!("expected owned fixture"),
+                }
             }
             other => panic!("not a slot object: {other:?}"),
         }
@@ -35,7 +44,7 @@ fn slot(value: TaggedValue, index: usize) -> TaggedValue {
     let (base, len) = slot_base(value);
     assert!(index < len);
     // SAFETY: in bounds of a live object's owned slots.
-    load_value_atomic(unsafe { &*base.add(index) })
+    unsafe { &*base.add(index) }.load_atomic()
 }
 
 #[test]
@@ -96,7 +105,8 @@ fn slot_stores_race_free_against_an_atomic_reader() {
                         // SAFETY: the owners outlive the thread (joined
                         // below) and their owned slots never reallocate:
                         // single-slot stores do not grow them.
-                        let v = load_value_atomic(unsafe { &*(base as *const TaggedValue).add(i) });
+                        let v =
+                            unsafe { &*(base as *const AtomicTaggedValue).add(i) }.load_atomic();
                         let n = v.as_fixnum().expect("a whole fixnum");
                         assert!(n >= 0);
                     }

@@ -555,7 +555,7 @@ impl ByteCodeFunction {
         if eager_gnu_bytecode() {
             let (ops, byte_offset_map) = super::decode::decode_gnu_bytecode_with_offset_map(
                 raw_bytes,
-                self.constants.ensure_owned(),
+                &mut self.constants.ensure_owned(),
             )?;
             self.ops = ops;
             self.ops_sealed = true;
