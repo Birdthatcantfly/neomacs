@@ -15,6 +15,7 @@ mod retained_face_gather;
 #[cfg(test)]
 #[path = "engine/tests/retained_face_gather_support.rs"]
 pub(crate) mod retained_face_gather_test_support;
+mod rows_fontification;
 mod scroll_coverage;
 pub use scroll_coverage::ScrollCoverageProgress;
 mod scroll_preview;
@@ -1195,6 +1196,7 @@ impl FrameWindowEndAttempts {
 /// retries must not replay Lisp that the logical redisplay already ran.
 #[derive(Default)]
 struct RedisplayLispLedger {
+    rows_fontification: rows_fontification::RowsFontificationDemand,
     acknowledged_scroll_hooks: rustc_hash::FxHashSet<WindowScrollHookSite>,
     exact_hook_resumes: rustc_hash::FxHashMap<neovm_core::window::WindowId, ResolvedWindowStart>,
     mini_eob_scroll: mini_eob_scroll::MiniEobScrollLedger,
@@ -1800,7 +1802,13 @@ impl LayoutEngine {
         if evaluator.redisplay_hook_flow_pending() {
             return FrameLayoutAttempt::Aborted;
         }
-        self.layout_frame_rust_for_purpose_inner(evaluator, frame_id, purpose);
+        self.layout_frame_rust_for_purpose_inner(
+            evaluator,
+            frame_id,
+            purpose,
+            #[cfg(test)]
+            None,
+        );
         if evaluator.has_mode_line_display_flow() || evaluator.redisplay_hook_flow_pending() {
             self.last_frame_display_state = None;
             return FrameLayoutAttempt::Aborted;
@@ -1827,6 +1835,9 @@ impl LayoutEngine {
         evaluator: &mut neovm_core::emacs_core::Context,
         frame_id: neovm_core::window::FrameId,
         purpose: LayoutPurpose,
+        #[cfg(test)] mut rows_fontification_sink: Option<
+            &mut dyn FnMut(neovm_core::emacs_core::xdisp::RedisplayFontificationWitness),
+        >,
     ) -> Option<neovm_core::window::WindowLayoutQuery> {
         // Anything recorded since the last pass that no pass has reported yet.
         // The drain below covers what this pass observes; this one covers
@@ -2024,7 +2035,12 @@ impl LayoutEngine {
         // speculative output; only an iteration that requests no relayout can
         // reach presentation sealing below.
         let mut layout_coordinator = FrameLayoutCoordinator::new(MAX_FRAME_LAYOUT_RETRIES);
-        let mut lisp_ledger = RedisplayLispLedger::default();
+        let mut lisp_ledger = RedisplayLispLedger {
+            rows_fontification: rows_fontification::RowsFontificationDemand::for_purpose(
+                evaluator, frame_id, purpose,
+            ),
+            ..RedisplayLispLedger::default()
+        };
         let mut window_chrome_metrics = self.retained_window_chrome_metrics.clone();
         let committed_face_arena = self
             .frame_face_arenas
@@ -3125,6 +3141,17 @@ impl LayoutEngine {
                 // The completed query owns these small certificates until
                 // `query_window_layout` transfers them into its cache entry.
                 self.query_restart_rows = query_restart_rows;
+                let witness = lisp_ledger
+                    .rows_fontification
+                    .finish(evaluator, geometry.as_ref());
+                #[cfg(test)]
+                if let (Some(witness), Some(sink)) =
+                    (witness, rows_fontification_sink.as_deref_mut())
+                {
+                    sink(witness);
+                }
+                #[cfg(not(test))]
+                let _ = witness;
                 return Some(neovm_core::window::WindowLayoutQuery::new(end, geometry));
             }
 
@@ -4040,6 +4067,8 @@ impl LayoutEngine {
             LayoutPurpose::MiniPreparation {
                 window_id: request.window,
             },
+            #[cfg(test)]
+            None,
         );
         self.report_image_failures(evaluator);
         let query = query.ok_or_else(|| {
@@ -4186,6 +4215,8 @@ impl LayoutEngine {
                     evaluator,
                     frame_id,
                     LayoutPurpose::SynchronousQuery { window_id, scope },
+                    #[cfg(test)]
+                    None,
                 )
             },
         );
@@ -4928,8 +4959,11 @@ impl LayoutEngine {
         else {
             return LeafLayoutAttempt::LogicalInputsChanged;
         };
+        lisp_ledger.rows_fontification.begin_leaf(window_id, buf_id);
         let fontification_outcome =
-            Self::ensure_fontified_rust(evaluator, buf_id, window_start, fontify_end);
+            lisp_ledger
+                .rows_fontification
+                .ensure(evaluator, buf_id, window_start, fontify_end);
         // `(when FORM . SPEC)` display specs need Lisp, which the walk cannot
         // run while it holds the buffer: evaluate the forms of the span the
         // walk can reach (the same one fontification just covered) here, so
@@ -5211,8 +5245,12 @@ impl LayoutEngine {
 
             if let VisibleFontificationCoverage::Requires(plan) = coverage {
                 for span in plan.spans() {
-                    let outcome =
-                        Self::ensure_fontified_rust(evaluator, buf_id, span.start(), span.end());
+                    let outcome = lisp_ledger.rows_fontification.ensure(
+                        evaluator,
+                        buf_id,
+                        span.start(),
+                        span.end(),
+                    );
                     let freshness_after_visible_fontification =
                         evaluator.window_layout_attempt_freshness(frame_id, window_id, buf_id);
                     if evaluator.frame_manager().window_topology_generation() != topology_generation

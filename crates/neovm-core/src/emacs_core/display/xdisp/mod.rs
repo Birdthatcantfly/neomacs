@@ -8462,6 +8462,12 @@ fn validate_posn_pixel_coordinate(value: Value) -> Result<i64, Flow> {
 // Redisplay fontification
 // ---------------------------------------------------------------------------
 
+mod fontification_demand;
+use fontification_demand::{FontificationDemandObserver, NoFontificationDemand};
+pub use fontification_demand::{
+    RedisplayFontificationCoverage, RedisplayFontificationDemand, RedisplayFontificationWitness,
+};
+
 fn get_fontified_property(ctx: &mut super::eval::Context, pos: i64) -> EvalResult {
     super::textprop::builtin_get_char_property(
         ctx,
@@ -8493,7 +8499,12 @@ fn next_fontified_property_change(
     )
 }
 
-fn call_fontification_functions_at(ctx: &mut super::eval::Context, hook_value: Value, pos: i64) {
+fn call_fontification_functions_at<O: FontificationDemandObserver>(
+    ctx: &mut super::eval::Context,
+    hook_value: Value,
+    pos: i64,
+    observer: &mut O,
+) {
     let hook_sym = intern("fontification-functions");
     let functions = hook_runtime::collect_hook_functions_in_state(ctx, hook_sym, hook_value, true);
     if functions.is_empty() {
@@ -8537,6 +8548,7 @@ fn call_fontification_functions_at(ctx: &mut super::eval::Context, hook_value: V
             );
             continue;
         }
+        observer.callback();
         let result = ctx.apply(function, vec![arg]);
         let result = ctx.unbind_to_with_result(call_count, result);
         if let Err(flow) = result {
@@ -8629,18 +8641,71 @@ fn ensure_fontified_for_redisplay_with_mode(
     to_char: i64,
     mode: FontificationBoundaryMode,
 ) -> Result<RedisplayFontificationOutcome, Flow> {
+    ensure_fontified_for_redisplay_inner(
+        ctx,
+        buf_id,
+        from_char,
+        to_char,
+        mode,
+        &mut NoFontificationDemand,
+    )
+}
+
+/// Observe the canonical request without changing boundary mode, callbacks or scans.
+/// Producer evidence grants no reuse or source-lifetime authority.
+pub fn ensure_fontified_for_redisplay_with_demand(
+    ctx: &mut super::eval::Context,
+    buf_id: BufferId,
+    from_char: i64,
+    to_char: i64,
+    demand: &mut RedisplayFontificationDemand,
+) -> Result<RedisplayFontificationOutcome, Flow> {
+    let result = ensure_fontified_for_redisplay_inner(
+        ctx,
+        buf_id,
+        from_char,
+        to_char,
+        fontification_boundary::mode(),
+        demand,
+    );
+    if result.is_err() {
+        demand.abort();
+    }
+    result
+}
+
+fn ensure_fontified_for_redisplay_inner<O: FontificationDemandObserver>(
+    ctx: &mut super::eval::Context,
+    buf_id: BufferId,
+    from_char: i64,
+    to_char: i64,
+    mode: FontificationBoundaryMode,
+    observer: &mut O,
+) -> Result<RedisplayFontificationOutcome, Flow> {
     let Some((point_min, point_max)) = ctx.buffers.get(buf_id).map(|buffer| {
         (
             buffer.point_min_lisp_char_pos().as_i64(),
             buffer.point_max_lisp_char_pos().as_i64(),
         )
     }) else {
+        observer.unknown();
         return Ok(RedisplayFontificationOutcome::Unchanged);
     };
 
     let start = from_char.saturating_add(1).clamp(point_min, point_max);
     let end = to_char.saturating_add(1).clamp(start, point_max);
+    observer.begin(buf_id, LispCharPos1::new(start), LispCharPos1::new(end));
+    // The buffer interval proof does not certify effective overlay precedence.
+    if O::ENABLED
+        && ctx
+            .buffers
+            .get(buf_id)
+            .is_some_and(|buffer| !buffer.overlays().is_empty())
+    {
+        observer.unknown();
+    }
     if start >= end {
+        observer.complete();
         return Ok(RedisplayFontificationOutcome::Unchanged);
     }
 
@@ -8655,12 +8720,14 @@ fn ensure_fontified_for_redisplay_with_mode(
             .unwrap_or(Value::NIL)
             .is_truthy()
         {
+            observer.unknown();
             return Ok(RedisplayFontificationOutcome::Unchanged);
         }
 
         let hook_sym = intern("fontification-functions");
         let hook_value = hook_runtime::hook_value_by_id(ctx, hook_sym).unwrap_or(Value::NIL);
         if hook_value.is_nil() {
+            observer.unknown();
             return Ok(RedisplayFontificationOutcome::Unchanged);
         }
 
@@ -8683,10 +8750,11 @@ fn ensure_fontified_for_redisplay_with_mode(
 
             let before = get_fontified_property(ctx, pos)?;
             if before.is_nil() {
+                observer.unknown();
                 // Mark before entering Lisp, including callbacks which fail,
                 // decline to fontify, or remove the current buffer.
                 outcome = outcome.merge(RedisplayFontificationOutcome::CallbacksUnchanged);
-                call_fontification_functions_at(ctx, hook_value, pos);
+                call_fontification_functions_at(ctx, hook_value, pos, observer);
                 if ctx.buffers.current_buffer_id() != Some(buf_id) {
                     ctx.restore_current_buffer_if_live(buf_id);
                 }
@@ -8700,6 +8768,7 @@ fn ensure_fontified_for_redisplay_with_mode(
                 // same unfontified position.
                 let after = get_fontified_property(ctx, pos)?;
                 if after.is_nil() {
+                    observer.advance(LispCharPos1::new(pos), LispCharPos1::new(pos + 1), false);
                     pos += 1;
                     continue;
                 }
@@ -8711,8 +8780,18 @@ fn ensure_fontified_for_redisplay_with_mode(
                 break;
             };
             if next_pos <= pos {
+                observer.advance(
+                    LispCharPos1::new(pos),
+                    LispCharPos1::new(pos + 1),
+                    !before.is_nil(),
+                );
                 pos += 1;
             } else {
+                observer.advance(
+                    LispCharPos1::new(pos),
+                    LispCharPos1::new(next_pos.min(end)),
+                    !before.is_nil(),
+                );
                 pos = next_pos.min(end);
             }
         }
@@ -8720,6 +8799,7 @@ fn ensure_fontified_for_redisplay_with_mode(
         Ok(outcome)
     })();
 
+    observer.complete();
     if let Some(saved) = saved_current {
         ctx.restore_current_buffer_if_live(saved);
     }
@@ -10132,3 +10212,7 @@ mod mode_line_outer_flow;
 #[cfg(test)]
 #[path = "tests/mode_line_outer_handlers_test.rs"]
 mod mode_line_outer_handlers;
+
+#[cfg(test)]
+#[path = "tests/fontification_demand_test.rs"]
+mod fontification_demand_tests;

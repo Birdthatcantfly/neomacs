@@ -74,6 +74,7 @@ fn canonical_rows(content: &str, presentation: bool) -> (WindowDisplaySnapshot, 
             } else {
                 LayoutPurpose::MiniPreparation { window_id: window }
             },
+            None,
         )
         .expect("canonical ToEnd mini producer");
     let snapshot = query
