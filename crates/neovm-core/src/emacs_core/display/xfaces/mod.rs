@@ -364,7 +364,6 @@ use crate::emacs_core::SymId;
 use crate::face::{
     BoxStyle, Face as RuntimeFace, FontSlant, FontWeight, FontWidth, LFACE_ATTRS, UnderlineStyle,
 };
-use crate::tagged::header::store_value_atomic;
 use crate::window::{FrameId, FrameManager, FrameParam};
 use neomacs_display_protocol::TerminalColor;
 
@@ -1575,9 +1574,11 @@ fn reset_lisp_face_vector(vector: Value) {
         if slots.len() != LISP_FACE_VECTOR_LEN {
             *slots = vec![unspecified; LISP_FACE_VECTOR_LEN];
         }
-        store_value_atomic(&mut slots[0], face_tag_symbol());
+        // The bulk seam retired any captured backing before this exclusive
+        // view; no marker can read these plain temporary owner words.
+        slots[0] = face_tag_symbol();
         for slot in slots.iter_mut().take(LISP_FACE_VECTOR_LEN).skip(1) {
-            store_value_atomic(slot, unspecified);
+            *slot = unspecified;
         }
     });
 }
