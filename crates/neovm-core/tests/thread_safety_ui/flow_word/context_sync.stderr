@@ -270,6 +270,8 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
            which is required by `neovm_core::Context: Sync`
            `(dyn FnMut() -> Result<(), std::string::String> + Send + 'static): Sync`
            which is required by `neovm_core::Context: Sync`
+           `Rc<Cell<*const ()>>: Send`
+           which is required by `neovm_core::Context: Sync`
            `*mut HashTableObj: Sync`
            which is required by `neovm_core::Context: Sync`
            `*mut FinalizerObj: Sync`
@@ -313,6 +315,8 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
            `*const c_void: Send`
            which is required by `neovm_core::Context: Sync`
            `*const tree_sitter::ffi::TSTree: Send`
+           which is required by `neovm_core::Context: Sync`
+           `Rc<Cell<*const ()>>: Sync`
            which is required by `neovm_core::Context: Sync`
            `Rc<RefCell<neovm_core::buffer::buffer_text::BufferTextStorage>>: Send`
            which is required by `neovm_core::Context: Sync`
