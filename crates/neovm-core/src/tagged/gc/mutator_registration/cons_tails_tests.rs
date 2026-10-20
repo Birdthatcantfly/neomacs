@@ -238,9 +238,11 @@ fn two_owners_carve_disjoint_exclusive_tails() {
             era.register(1815, 8).unwrap(),
         ];
         let (tx, rx) = mpsc::channel();
-        let (go, go_rx) = mpsc::channel();
-        let go_rx = std::sync::Arc::new(std::sync::Mutex::new(go_rx));
         thread::scope(|scope| {
+            // Drop the keeper's wake sender before scope joins on unwind, so
+            // an assertion or owner failure cannot strand a peer in recv().
+            let (go, go_rx) = mpsc::channel();
+            let go_rx = std::sync::Arc::new(std::sync::Mutex::new(go_rx));
             for (index, permit) in permits.into_iter().enumerate() {
                 let tx = tx.clone();
                 let go_rx = std::sync::Arc::clone(&go_rx);
@@ -256,8 +258,13 @@ fn two_owners_carve_disjoint_exclusive_tails() {
                         }
                         words
                     });
-                    owner.enter_native(&[]).unwrap();
+                    // The peer can hold the registry gate while activating or
+                    // publishing. Busy is a retryable refusal, not an ACK.
+                    retry(|| owner.enter_native(&[]));
                     tx.send(words).unwrap();
+                    // This owner owes no more results. Retaining its sender
+                    // across the keeper wait would hide a failed peer from rx.
+                    drop(tx);
                     go_rx
                         .lock()
                         .expect("go channel lock")
@@ -290,7 +297,6 @@ fn two_owners_carve_disjoint_exclusive_tails() {
             for _ in 0..2 {
                 go.send(()).unwrap();
             }
-            // (go_rx's Arc clones died with the threads; drop the original.)
         });
         let (collector, keeper) = era.finish().unwrap();
         drop(collector);
