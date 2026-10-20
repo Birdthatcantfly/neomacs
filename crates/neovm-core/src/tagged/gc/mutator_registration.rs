@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 mod admission;
+mod authority_word;
 mod collection;
 mod cons_allocation;
 mod cons_catalog;
