@@ -940,7 +940,9 @@ impl TaggedHeap {
                 for val in font.fields.iter_atomic() {
                     self.mark_or_push_child(val, "font-property");
                 }
-                self.mark_or_push_child(load_value_atomic(&font.capability), "font-capability");
+                // Unsupported worker kinds defer their mutable payloads;
+                // this owner-side drain excludes Lisp writers.
+                self.mark_or_push_child(font.capability, "font-capability");
             }
             VecLikeType::HashTable => {
                 let obj = ptr as *const HashTableObj;
