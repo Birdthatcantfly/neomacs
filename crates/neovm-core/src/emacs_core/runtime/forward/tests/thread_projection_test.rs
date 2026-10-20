@@ -194,3 +194,21 @@ fn headers_resolve_to_their_projection() {
         assert!(header.thread_projection().is_none(), "{:?}", header.ty());
     }
 }
+
+/// Exercise the stored cell handle and table resolver without a Context or
+/// bootstrap obarray. The handle must retain the whole descriptor's extent.
+#[test]
+fn miriub3_fwdref_resolves_whole_thread_projection() {
+    let mut table = ThreadProjectionTable::default();
+    let projection = plain_projection(&mut table, Value::fixnum(97));
+    let handle = projection.header();
+    assert!(std::ptr::eq(
+        handle.thread_projection().unwrap(),
+        projection
+    ));
+    let stored = FwdRef::from_address(handle.address());
+    let resolved = stored.thread_projection().unwrap();
+    assert!(std::ptr::eq(resolved, projection));
+    assert_eq!(resolved.plain_value(), Value::fixnum(97));
+    assert!(std::ptr::eq(table.projection(stored).unwrap(), projection));
+}

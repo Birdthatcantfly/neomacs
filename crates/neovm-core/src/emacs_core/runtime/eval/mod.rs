@@ -7822,6 +7822,10 @@ mod gc_forced_first_cycle_tests;
 mod gc_root_ownership_tests;
 
 #[cfg(test)]
+#[path = "tests/gc_atomic_slot_test.rs"]
+mod gc_atomic_slot_tests;
+
+#[cfg(test)]
 #[path = "tests/gc_tls_ownership_test.rs"]
 mod gc_tls_ownership_tests;
 
