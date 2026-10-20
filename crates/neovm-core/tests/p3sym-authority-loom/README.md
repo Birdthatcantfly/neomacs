@@ -10,8 +10,8 @@ ten required negative witnesses; historical C1 receipts remain unchanged.
 The new ordinary checked payload and writer-only history ledger model nil
 versus void, two writer orders, a reader plus two writers (three owners),
 two readers plus two writers (four owners), set versus makunbound, independent
-set answers, rooted read answers across overwrite/stop, and a legal lost
-increment. An acquisition refusal is retried only after joins, as an explicit
+set answers, rooted read answers across overwrite/stop, and exact accounting
+for completed writer commits across bounded Busy retries. An acquisition refusal is retried only after joins, as an explicit
 serial suffix. No fairness assumption or extra payload mutex is introduced.
 Readers copy under the counted-reader lease; every observed value/version
 pair must belong to the committed writer history. Existing C1 tests provide
@@ -148,3 +148,16 @@ reader indicators, sharded authority, or per-symbol authority plus the common
 catalog/epoch domain. No promise of reader scaling follows from mutual
 exclusion alone. Sim must still have zero dormant hot diffs and the board
 must remain within ±1%.
+
+## C3 scaffold correction
+
+The initial lost-increment script incorrectly unwrapped a single reader CAS
+attempt: two readers can contend and one can refuse. Its replacement,
+`completed_writer_history_never_loses_a_commit`, uses at most three writer
+attempts with `loom::thread::yield_now()` after each Busy refusal. Exhausted
+attempts are legal no-write outcomes. Every successful writer must appear
+exactly once in the ledger and increment the committed version exactly once;
+failures print the complete bounded history and refusal counts. A protocol
+lost increment fails qualification immediately. This adds no atomic Lisp
+read/compute/set opcode; GNU's separate lost-update oracle remains unchanged.
+The crate still has 37 cases and ten required negative witnesses.

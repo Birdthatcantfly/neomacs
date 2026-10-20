@@ -5,7 +5,7 @@ mod support;
 
 use loom::sync::Arc;
 use loom::thread;
-use model::{Authority, Checked, Latch};
+use model::{Authority, Checked};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Snapshot {
@@ -188,30 +188,60 @@ fn read_answer_root_survives_overwrite_and_stop() {
     });
 }
 
+/// Finite retries preserve Busy as a legal outcome. No try-acquisition is
+/// unwrapped, and no successful commit may disappear from the history count.
+fn bounded_write(global: &Global, value: usize) -> (bool, usize) {
+    let mut refused = 0;
+    for _ in 0..3 {
+        if let Some(answer) = global.write(Some(value)) {
+            assert_eq!(answer, Some(value));
+            return (true, refused);
+        }
+        refused += 1;
+        thread::yield_now();
+    }
+    (false, refused)
+}
+
 #[test]
-fn separated_read_and_set_permits_a_lost_increment() {
+fn completed_writer_history_never_loses_a_commit() {
     support::check(2, || {
         let global = Arc::new(Global::new());
-        let both_read = Arc::new(Latch::default());
-        let first_stored = Arc::new(Latch::default());
-        let (g, read, stored) = (
-            Arc::clone(&global),
-            Arc::clone(&both_read),
-            Arc::clone(&first_stored),
+        let g = Arc::clone(&global);
+        let other = thread::spawn(move || bounded_write(&g, 11));
+        let (first_done, first_refused) = bounded_write(&global, 22);
+        let (other_done, other_refused) = other.join().unwrap();
+        let completed = usize::from(first_done) + usize::from(other_done);
+        let history = global.history.get();
+        let current = global.cell.get();
+        global.authority.assert_quiescent();
+        let state = format!(
+            "completed={completed} refused={first_refused}/{other_refused} \
+             states={:?} current={current:?}",
+            &history.states[..history.length]
         );
-        let other = thread::spawn(move || {
-            let old = g.read().unwrap().value.unwrap();
-            read.set();
-            stored.wait();
-            assert_eq!(g.write(Some(old + 1)), Some(Some(1)));
-        });
-        let old = global.read().unwrap().value.unwrap();
-        both_read.wait();
-        assert_eq!(global.write(Some(old + 1)), Some(Some(1)));
-        first_stored.set();
-        other.join().unwrap();
-        assert_eq!(global.read().unwrap().value, Some(1));
-        global.audit(&[global.read()]);
+        // The writer's version increment and cell publication are one guarded
+        // primitive. A lost increment HERE is a protocol error, regardless of
+        // the legal Busy branches. This is not a Lisp read/compute/set compound.
+        assert_eq!(history.length, completed + 1, "lost writer commit: {state}");
+        assert_eq!(
+            current.version, completed,
+            "lost version increment: {state}"
+        );
+        assert_eq!(
+            current, history.states[completed],
+            "lost final write: {state}"
+        );
+        for (done, value) in [(first_done, 22), (other_done, 11)] {
+            assert_eq!(
+                history.states[1..history.length]
+                    .iter()
+                    .filter(|entry| entry.value == Some(value))
+                    .count(),
+                usize::from(done),
+                "writer history disagrees with completion: {state}"
+            );
+        }
     });
 }
 
