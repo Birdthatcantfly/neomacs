@@ -2732,6 +2732,9 @@ mod shutdown_tests;
 pub(crate) use concurrent::{concurrent_hash_snapshot, prepare_concurrent_hash_write};
 pub(crate) mod concurrent_hash;
 
+mod rows_observation;
+pub(crate) use rows_observation::RowsOwnedDomain;
+
 mod incremental;
 mod reclamation;
 use reclamation::ReclamationMode;

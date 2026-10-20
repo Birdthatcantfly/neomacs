@@ -7920,3 +7920,6 @@ mod positioned_control_tests;
 #[cfg(test)]
 #[path = "tests/issue554_function_policy.rs"]
 mod issue554_function_policy;
+
+mod rows_observation;
+pub use rows_observation::{RowsDependencyMetadata, RowsObservationEpoch, RowsObservationRefusal};

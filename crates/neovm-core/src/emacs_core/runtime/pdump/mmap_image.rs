@@ -365,6 +365,12 @@ impl LoadedMmapImage {
     }
 
     #[allow(dead_code)] // grandfathered when dead_code lint was enabled; delete or wire up
+    // Bounds alone grant no lifetime: Rows captures these only from Context's
+    // actual process-retained &'static image. Temporary image bounds refuse.
+    pub(crate) fn rows_mapping_address_range(&self) -> std::ops::Range<usize> {
+        self.mapped_range()
+    }
+
     fn mapped_range(&self) -> std::ops::Range<usize> {
         let start = self.mmap.as_ptr() as usize;
         start..start + self.mmap.len()

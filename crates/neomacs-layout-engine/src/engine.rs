@@ -16,6 +16,7 @@ mod retained_face_gather;
 #[path = "engine/tests/retained_face_gather_support.rs"]
 pub(crate) mod retained_face_gather_test_support;
 mod rows_fontification;
+mod rows_lifetime;
 mod scroll_coverage;
 pub use scroll_coverage::ScrollCoverageProgress;
 mod scroll_preview;
@@ -1806,6 +1807,7 @@ impl LayoutEngine {
             evaluator,
             frame_id,
             purpose,
+            None,
             #[cfg(test)]
             None,
         );
@@ -1835,6 +1837,7 @@ impl LayoutEngine {
         evaluator: &mut neovm_core::emacs_core::Context,
         frame_id: neovm_core::window::FrameId,
         purpose: LayoutPurpose,
+        mut rows_lifetime: Option<&mut rows_lifetime::Producer>,
         #[cfg(test)] mut rows_fontification_sink: Option<
             &mut dyn FnMut(neovm_core::emacs_core::xdisp::RedisplayFontificationWitness),
         >,
@@ -3144,6 +3147,9 @@ impl LayoutEngine {
                 let witness = lisp_ledger
                     .rows_fontification
                     .finish(evaluator, geometry.as_ref());
+                if let Some(producer) = rows_lifetime.as_deref_mut() {
+                    producer.note_fontification(witness.as_ref());
+                }
                 #[cfg(test)]
                 if let (Some(witness), Some(sink)) =
                     (witness, rows_fontification_sink.as_deref_mut())
@@ -4067,6 +4073,7 @@ impl LayoutEngine {
             LayoutPurpose::MiniPreparation {
                 window_id: request.window,
             },
+            None,
             #[cfg(test)]
             None,
         );
@@ -4185,6 +4192,27 @@ impl LayoutEngine {
         scope: neovm_core::window::WindowLayoutQueryScope,
     ) -> Result<neovm_core::window::WindowLayoutQuery, neovm_core::window::WindowLayoutQueryFailure>
     {
+        self.query_window_layout_observed(
+            evaluator,
+            frame_id,
+            window_id,
+            scope,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    // No cache field/admission changes. The optional test sink runs only after
+    // the private proof/source lease have been consumed and dropped.
+    fn query_window_layout_observed(
+        &mut self,
+        evaluator: &mut neovm_core::emacs_core::Context,
+        frame_id: neovm_core::window::FrameId,
+        window_id: neovm_core::window::WindowId,
+        scope: neovm_core::window::WindowLayoutQueryScope,
+        #[cfg(test)] mut report_sink: Option<&mut dyn FnMut(rows_lifetime::Report)>,
+    ) -> Result<neovm_core::window::WindowLayoutQuery, neovm_core::window::WindowLayoutQueryFailure>
+    {
         let text_extent = matches!(
             scope,
             neovm_core::window::WindowLayoutQueryScope::TextExtent { .. }
@@ -4205,6 +4233,13 @@ impl LayoutEngine {
         self.query_row_coverage = QueryRowCoverage::Complete;
         self.query_target_prefix_policy = false;
         self.mini_preparation_height = None;
+        // Snapshot only actual canonical Rows misses; no ordinary frame,
+        // prepared-viewport or existing cache-hit maintenance is added.
+        let mut lifetime = matches!(
+            scope,
+            neovm_core::window::WindowLayoutQueryScope::Rows { .. }
+        )
+        .then(|| rows_lifetime::Producer::begin(self, evaluator, frame_id, window_id, scope));
         let (query, collections) = neovm_core::tagged::collection_reads::capture_normalized(
             evaluator,
             |evaluator| {
@@ -4215,6 +4250,7 @@ impl LayoutEngine {
                     evaluator,
                     frame_id,
                     LayoutPurpose::SynchronousQuery { window_id, scope },
+                    lifetime.as_mut().and_then(|pending| pending.as_mut().ok()),
                     #[cfg(test)]
                     None,
                 )
@@ -4222,6 +4258,21 @@ impl LayoutEngine {
         );
         self.report_image_failures(evaluator);
         let query = query.ok_or(neovm_core::window::WindowLayoutQueryFailure::DidNotConverge)?;
+        if let Some(pending) = lifetime {
+            let report = rows_lifetime::finish_and_drop(
+                pending,
+                self,
+                evaluator,
+                &query,
+                collections.as_ref(),
+            );
+            #[cfg(test)]
+            if let Some(sink) = report_sink.as_deref_mut() {
+                sink(report);
+            }
+            #[cfg(not(test))]
+            let _ = report;
+        }
         let query_restart_rows = std::mem::take(&mut self.query_restart_rows);
         tracing::trace!(target: "neomacs_layout_engine::query_cache",
             body_reuse_allowed = self.query_body_reuse_allowed,

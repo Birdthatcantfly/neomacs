@@ -4050,6 +4050,7 @@ dependencies = [
  "static_assertions",
  "strum",
  "sys-locale",
+ "thiserror 2.0.20",
  "tracing",
  "tracing-test",
  "ttf-parser",
