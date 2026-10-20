@@ -646,8 +646,12 @@ pub struct WindowLayoutInputState {
 }
 
 /// Buffer inputs that can change display-row positions or geometry.
+///
+/// The shared projection is used by redisplay skipping. Retained rows and
+/// speculative attempts require the additional typed fontification identity.
+/// All other fields are captured by one monomorphized collector.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BufferLayoutInputState {
+pub struct BufferLayoutInputState<Fontification = ()> {
     pub(crate) id: BufferId,
     pub(crate) modified_tick: i64,
     pub(crate) chars_modified_tick: i64,
@@ -657,15 +661,22 @@ pub struct BufferLayoutInputState {
     pub(crate) accessible_bytes: EmacsByteRange,
     pub(crate) total_chars: CharLen,
     pub(crate) total_emacs_bytes: EmacsByteLen,
-    /// Effective callback identity, captured on this Context's mutator. The
-    /// numeric word owns no Lisp object and is never dereferenced from here.
-    /// This detects hook replacement; mutable contents and callback visitation
-    /// still require the unchanged conservative redisplay-generation boundary.
-    fontification_functions: Option<WindowLayoutValueIdentity>,
+    fontification_functions: Fontification,
     pub(crate) prefixes: LayoutPrefixInputs,
     pub(crate) invisibility: LayoutInvisibilityInput,
     pub(crate) display_table: LayoutDisplayTableInput,
 }
+
+/// Effective callback identity, captured on this Context's mutator. The
+/// numeric word owns no Lisp object and is never dereferenced from here.
+/// Hook replacement must invalidate retained rows and speculative attempts;
+/// mutable contents and callback visitation retain their existing conservative
+/// redisplay-generation boundary. A unit-valued redisplay projection cannot be
+/// substituted for this typed identity at either freshness boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FontificationHookIdentity(Option<WindowLayoutValueIdentity>);
+
+pub(crate) type WindowBufferLayoutInputState = BufferLayoutInputState<FontificationHookIdentity>;
 
 /// Owned prefix inputs shared by redisplay skipping, geometry freshness and
 /// row reuse. String contents can change without a buffer modification tick.
@@ -2980,7 +2991,7 @@ pub struct WindowDisplaySnapshotFreshness {
     pub(crate) window_topology_generation: u64,
     pub(crate) frame: FrameLayoutInputState,
     pub(crate) window: WindowLayoutInputState,
-    pub(crate) buffer: BufferLayoutInputState,
+    pub(crate) buffer: WindowBufferLayoutInputState,
     pub(crate) face_change_count: u64,
     pub(crate) display_var_change_count: u64,
     pub(crate) redisplay_generation: u64,
@@ -3047,8 +3058,8 @@ pub struct WindowLayoutAttemptFreshness {
     window_topology_generation: u64,
     frame: FrameLayoutInputState,
     window: WindowLayoutInputState,
-    live_buffer: BufferLayoutInputState,
-    source_buffer: BufferLayoutInputState,
+    live_buffer: WindowBufferLayoutInputState,
+    source_buffer: WindowBufferLayoutInputState,
     source_layout_variables: WindowLayoutVariableState,
     selection: WindowLayoutSelectionState,
     face_change_count: u64,

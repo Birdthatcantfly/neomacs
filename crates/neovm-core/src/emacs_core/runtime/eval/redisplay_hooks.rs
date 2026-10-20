@@ -800,7 +800,7 @@ impl Context {
         let frame = self.frames.find_window_frame_id(window)?;
         let buffer = self.frames.get(frame)?.find_window(window)?.buffer_id()?;
         // GNU window_outdated compares source revisions, not point alone.
-        let current = self.buffer_layout_inputs(buffer)?;
+        let current = self.redisplay_buffer_layout_inputs(buffer)?;
         let old = self
             .last_redisplay_signature
             .as_ref()

@@ -2028,7 +2028,7 @@ impl Context {
     ) -> Option<RedisplayBufferSignature> {
         let buffer = self.buffers.get(id)?;
         Some(RedisplayBufferSignature {
-            layout: self.buffer_layout_inputs(id)?,
+            layout: self.redisplay_buffer_layout_inputs(id)?,
             save_modified_tick: buffer.save_modified_tick(),
             autosave_modified_tick: buffer.autosave_modified_tick,
             point: buffer.point_char_pos(),

@@ -2186,6 +2186,49 @@ fn overlay_property_change_invalidates_redisplay_signature() {
 }
 
 #[test]
+fn redisplay_frame_signature_omits_hook_identity_while_full_freshness_refuses() {
+    let mut ev = Context::new();
+    // Build the replacement before capturing function epochs. Installing the
+    // already-built list changes no function definition or text property.
+    ev.eval_str("(setq ttykey-signature-hook (list 'ignore) fontification-functions nil)")
+        .unwrap();
+    let buffer = ev.buffers.current_buffer_id().unwrap();
+    let frame = ev.frames.create_frame("signature-hook", 800, 600, buffer);
+    let window = ev.frames.get(frame).unwrap().selected_window;
+    ev.redisplay_signature();
+    let retained_before = ev
+        .window_display_snapshot_freshness(frame, window, buffer)
+        .unwrap();
+    let attempt_before = ev
+        .window_layout_attempt_freshness(frame, window, buffer)
+        .unwrap();
+    crate::emacs_core::intern::reset_intern_calls();
+    let signature_before = ev.redisplay_signature();
+    assert!(
+        crate::emacs_core::intern::intern_call_names()
+            .iter()
+            .all(|name| name != "fontification-functions"),
+        "actual frame signature capture must use the redisplay projection"
+    );
+    ev.eval_str("(setq fontification-functions ttykey-signature-hook)")
+        .unwrap();
+    let signature_after = ev.redisplay_signature();
+    let retained_after = ev
+        .window_display_snapshot_freshness(frame, window, buffer)
+        .unwrap();
+    let attempt_after = ev
+        .window_layout_attempt_freshness(frame, window, buffer)
+        .unwrap();
+    assert_eq!(signature_before.frame, signature_after.frame);
+    assert_ne!(retained_before, retained_after);
+    assert!(!retained_before.same_query_row_content(&retained_after));
+    assert!(!attempt_before.remains_valid_across(
+        &attempt_after,
+        crate::window::WindowLayoutLispBoundary::BufferBody,
+    ));
+}
+
+#[test]
 fn redisplay_skips_callback_after_unwatched_symbol_value_change() {
     let _policy = legacy_redisplay_fixture_policy();
     crate::test_utils::init_test_tracing();

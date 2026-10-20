@@ -547,7 +547,7 @@ impl crate::emacs_core::eval::Context {
         frame_id: FrameId,
         window_id: WindowId,
         source_buffer_id: BufferId,
-        mut capture: impl FnMut(&Self, BufferId) -> Option<BufferLayoutInputState>,
+        mut capture: impl FnMut(&Self, BufferId) -> Option<super::WindowBufferLayoutInputState>,
     ) -> Option<crate::window::WindowLayoutAttemptFreshness> {
         use strum::VariantArray;
 
@@ -854,11 +854,43 @@ impl crate::emacs_core::eval::Context {
         }
     }
 
-    /// Canonical buffer-layout projection shared with redisplay skipping.
+    /// Complete buffer projection for retained rows and speculative attempts.
+    /// Installing a hook can change canonical motion without changing text
+    /// ticks or the generic redisplay generation. Keep this effective identity
+    /// read and the attempt's namespace guard at their existing boundaries.
     pub(crate) fn buffer_layout_inputs(
         &self,
         buffer_id: BufferId,
+    ) -> Option<super::WindowBufferLayoutInputState> {
+        self.capture_buffer_layout_inputs(buffer_id, |buffer| {
+            super::FontificationHookIdentity(
+                self.variable_value_in_buffer_inline(
+                    Some(buffer),
+                    crate::emacs_core::intern::intern("fontification-functions"),
+                )
+                .map(super::WindowLayoutValueIdentity::of),
+            )
+        })
+    }
+
+    /// Redisplay scheduling projection. GNU does not make replacing the
+    /// fontification hook itself a repaint request. Fontification mutations
+    /// still participate through the shared text/property/overlay revisions.
+    /// Unit erases only that callback identity; full freshness consumers cannot
+    /// accept this type in place of their required fontification payload.
+    pub(crate) fn redisplay_buffer_layout_inputs(
+        &self,
+        buffer_id: BufferId,
     ) -> Option<BufferLayoutInputState> {
+        self.capture_buffer_layout_inputs(buffer_id, |_| ())
+    }
+
+    #[inline]
+    fn capture_buffer_layout_inputs<Fontification>(
+        &self,
+        buffer_id: BufferId,
+        capture_fontification: impl FnOnce(&crate::buffer::Buffer) -> Fontification,
+    ) -> Option<BufferLayoutInputState<Fontification>> {
         let buffer = self.buffers.get(buffer_id)?;
         Some(BufferLayoutInputState {
             id: buffer.id,
@@ -870,14 +902,7 @@ impl crate::emacs_core::eval::Context {
             accessible_bytes: buffer.accessible_emacs_byte_region().range(),
             total_chars: buffer.total_char_len(),
             total_emacs_bytes: buffer.total_emacs_byte_len(),
-            // Installing a hook can change the next canonical motion walk
-            // without changing text ticks or the generic redisplay generation.
-            fontification_functions: self
-                .variable_value_in_buffer_inline(
-                    Some(buffer),
-                    crate::emacs_core::intern::intern("fontification-functions"),
-                )
-                .map(super::WindowLayoutValueIdentity::of),
+            fontification_functions: capture_fontification(buffer),
             prefixes: self.layout_prefix_inputs(buffer_id)?,
             invisibility: self.layout_invisibility_input(buffer_id)?,
             display_table: self.layout_display_table_input(buffer_id)?,
@@ -933,8 +958,9 @@ impl crate::emacs_core::eval::Context {
     /// Capture the complete layout identity for one live window.
     ///
     /// This is the single freshness boundary for consumers of retained rows.
-    /// Its frame/window/buffer projections are also used by the redisplay skip
-    /// signature, so both cache policies evolve together.
+    /// Its frame/window/buffer projections share every geometry input with
+    /// redisplay scheduling. This full token additionally owns the effective
+    /// fontification callback identity, which is not a repaint request.
     pub fn window_display_snapshot_freshness(
         &self,
         frame_id: FrameId,
@@ -1427,3 +1453,7 @@ pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
 #[cfg(test)]
 #[path = "tests/attempt_freshness_reuse_test.rs"]
 mod attempt_freshness_reuse_tests;
+
+#[cfg(test)]
+#[path = "tests/buffer_layout_projection_test.rs"]
+mod buffer_layout_projection_tests;

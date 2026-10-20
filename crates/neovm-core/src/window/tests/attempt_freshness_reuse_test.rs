@@ -238,7 +238,7 @@ fn same_buffer_namespace_change_child() {
         .unwrap();
     let function_epoch = eval.obarray().function_epoch();
     let original_inputs = eval.buffer_layout_inputs(live).unwrap();
-    assert!(original_inputs.fontification_functions.is_some());
+    assert!(original_inputs.fontification_functions.0.is_some());
     reset_intern_calls();
     let mut reads = 0;
     let before = eval
@@ -263,7 +263,7 @@ fn same_buffer_namespace_change_child() {
         2
     );
     assert_eq!(before.live_buffer, original_inputs);
-    assert_eq!(before.source_buffer.fontification_functions, None);
+    assert_eq!(before.source_buffer.fontification_functions.0, None);
     let fresh_key = intern("fontification-functions");
     assert_ne!(fresh_key, old_key);
     assert_eq!(eval.obarray().function_epoch(), function_epoch);
