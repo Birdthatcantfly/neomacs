@@ -610,11 +610,15 @@ memory (ARM / Apple Silicon), where a StoreStore reorder could expose a
 torn/premature header. Fixed with option A, RELEASE/ACQUIRE ON THE
 PUBLICATION CHAIN (`header.rs`): every mutator store that can make a heap
 pointer GC-visible mid-mark — `ConsCell::set_car`/`set_cdr`,
-`LispValueVec::store_atomic`, `store_value_atomic` (symbol value/function/
-plist cells and object fields route through these) — is now `Release`, and
+`LispValueVec::store_atomic`, and `AtomicTaggedValue::store_atomic` (symbol
+function/plist, BLV and char-table cells) — is `Release`, and
 every GC-thread first-acquisition load — `ConsCell::load_car`/`load_cdr`,
-`LispValueVec::load_atomic`/`iter_atomic`, `load_value_atomic` (the obarray +
-Tier-B vector scans and the gray drain read through these) — is `Acquire`.
+`LispValueVec::load_atomic`/`iter_atomic` and `AtomicTaggedValue::load_atomic`
+(the obarray, mutable vector and char-table scans) — is `Acquire`.
+The free `load_value_atomic`/`store_value_atomic` helpers accept only
+`AtomicTaggedValue`, whose storage is interior mutable. Owner reads stay plain;
+immutable mapped spans and hash originals retained by a read lease also use
+plain reads. Unsupported worker payload kinds defer to owner-side tracing.
 The pairing makes the constructor's header write happen-before any dispatcher
 dereference, closing the whole class (tenured/kind/type_tag reads AND the
 born-black parity-bit visibility for mid-cycle objects in reused snapshot

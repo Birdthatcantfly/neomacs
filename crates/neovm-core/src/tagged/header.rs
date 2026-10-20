@@ -1579,10 +1579,18 @@ impl VectorScanSnapshot {
     }
 }
 
-/// Atomic (acquire) load of a single `TaggedValue` slot in place — for GC reads
-/// of individual object fields (char-table default/parent/..., symbol-with-pos,
-/// xwidget, overlay plist, module-function docs) and the concurrent obarray /
-/// vector-backing scans.
+/// Acquire a GC-visible interior-mutable value slot. Owner reads use
+/// [`AtomicTaggedValue::get`]; immutable mapped/leased words and fields traced
+/// only by their owner use ordinary Value reads.
+///
+/// A plain shared Value cannot supply atomic publication provenance:
+///
+/// ```compile_fail,E0308
+/// use neovm_core::tagged::header::load_value_atomic;
+/// use neovm_core::tagged::value::TaggedValue;
+/// let plain = TaggedValue::NIL;
+/// let _ = load_value_atomic(&plain);
+/// ```
 ///
 /// PUBLICATION-ORDERING CONTRACT (concurrent GC, task #24 fix A): every store
 /// that can make a heap pointer visible to the GC thread mid-mark (cons
@@ -1606,20 +1614,24 @@ impl VectorScanSnapshot {
 /// publish field data, and a claim's field reads are ordered by this
 /// contract's pointer chain, not by the bit.
 #[inline]
-pub fn load_value_atomic(slot: &TaggedValue) -> TaggedValue {
-    let p = slot as *const TaggedValue as *const AtomicUsize;
-    // SAFETY: the borrow identifies a live slot with pinned word alignment.
-    // Concurrent access uses the atomic publication contract documented above.
-    TaggedValue::from_bits(unsafe { (*p).load(Ordering::Acquire) })
+pub fn load_value_atomic(slot: &AtomicTaggedValue) -> TaggedValue {
+    slot.load_atomic()
 }
 
-/// Atomic (release) store to a single `TaggedValue` slot in place. See the
-/// publication-ordering contract on [`load_value_atomic`].
+/// Release-publish through the actual interior-mutable cell, without a unique
+/// slot borrow. See the publication contract on [`load_value_atomic`].
+///
+/// A plain mutable Value is also insufficient storage:
+///
+/// ```compile_fail,E0308
+/// use neovm_core::tagged::header::store_value_atomic;
+/// use neovm_core::tagged::value::TaggedValue;
+/// let mut plain = TaggedValue::NIL;
+/// store_value_atomic(&mut plain, TaggedValue::T);
+/// ```
 #[inline]
-pub fn store_value_atomic(slot: &mut TaggedValue, value: TaggedValue) {
-    // Write provenance, not a shared reborrow; see `LispValueVec::store_atomic`.
-    let p = std::ptr::addr_of_mut!(*slot).cast::<AtomicUsize>();
-    unsafe { (*p).store(value.0, Ordering::Release) };
+pub fn store_value_atomic(slot: &AtomicTaggedValue, value: TaggedValue) {
+    slot.store_atomic(value);
 }
 
 impl From<Vec<TaggedValue>> for LispValueVec {
