@@ -1,3 +1,4 @@
+mod compile_wave;
 mod dependency_coherence;
 mod gc_stress;
 mod production_capabilities;
@@ -3782,18 +3783,20 @@ fn run_preloaded_lisp_byte_compile(
         }
     } else {
         let pool = rayon::ThreadPoolBuilder::new().num_threads(jobs).build()?;
+        let wave = compile_wave::PlannedWave::create(&paths.lisp_root, &sources)?;
         let errors: Vec<String> = pool.install(|| {
-            sources
+            wave.jobs()
                 .par_iter()
-                .filter_map(|source| {
-                    run_preloaded_lisp_byte_compile_source(options, paths, envs, source)
+                .filter_map(|job| {
+                    run_preloaded_lisp_pending_source(options, paths, envs, job)
                         .err()
-                        .map(|err| format!("{} ({err})", source.display()))
+                        .map(|err| format!("{} ({err})", job.source().display()))
                 })
                 .collect()
         });
 
         if !errors.is_empty() {
+            let retained = wave.retain();
             eprintln!(
                 "  ERROR  {} preloaded .el file{} failed to byte-compile:",
                 errors.len(),
@@ -3803,12 +3806,14 @@ fn run_preloaded_lisp_byte_compile(
                 eprintln!("    - {error}");
             }
             return Err(format!(
-                "{} preloaded file{} failed to byte-compile",
+                "{} preloaded file{} failed to byte-compile; unpublished wave retained at {}",
                 errors.len(),
-                if errors.len() == 1 { "" } else { "s" }
+                if errors.len() == 1 { "" } else { "s" },
+                retained.display()
             )
             .into());
         }
+        wave.validate()?.publish()?.finish()?;
     }
 
     Ok(())
@@ -3833,28 +3838,36 @@ fn run_compile_main_parallel(
     let waves = compile_main_dependency_waves(sources, dependencies)?;
     let mut errors = Vec::new();
 
-    for wave in waves {
-        let wave_errors = if options.dry_run {
-            wave.iter()
-                .filter_map(|source| {
-                    run_final_compile_main_source(options, paths, envs, source)
+    for sources in waves {
+        if options.dry_run {
+            errors.extend(sources.iter().filter_map(|source| {
+                run_final_compile_main_source(options, paths, envs, source)
+                    .err()
+                    .map(|err| format!("{} ({err})", source.display()))
+            }));
+            continue;
+        }
+        let wave = compile_wave::PlannedWave::create(&paths.lisp_root, &sources)?;
+        let wave_errors: Vec<String> = pool.install(|| {
+            wave.jobs()
+                .par_iter()
+                .filter_map(|job| {
+                    run_final_compile_main_pending_source(options, paths, envs, job)
                         .err()
-                        .map(|err| format!("{} ({err})", source.display()))
+                        .map(|err| format!("{} ({err})", job.source().display()))
                 })
-                .collect::<Vec<_>>()
-        } else {
-            pool.install(|| {
-                wave.par_iter()
-                    .filter_map(|source| {
-                        run_final_compile_main_source(options, paths, envs, source)
-                            .err()
-                            .map(|err| format!("{} ({err})", source.display()))
-                    })
-                    .collect::<Vec<_>>()
-            })
-        };
-
-        errors.extend(wave_errors);
+                .collect()
+        });
+        if !wave_errors.is_empty() {
+            let retained = wave.retain();
+            errors.extend(wave_errors);
+            errors.push(format!(
+                "unpublished bytecode wave retained at {}",
+                retained.display()
+            ));
+            break;
+        }
+        wave.validate()?.publish()?.finish()?;
     }
 
     Ok(errors)
@@ -4026,6 +4039,40 @@ fn run_byte_compile_source_with(
 ) -> Result<()> {
     let args = compile_main_args_for_source(options.native_comp, source);
     run_command(options, &options.repo_root, program, &args, envs)
+}
+
+fn run_preloaded_lisp_pending_source(
+    options: &FreshBuildOptions,
+    paths: &PipelinePaths,
+    envs: &[(OsString, OsString)],
+    pending: &compile_wave::PendingOutput,
+) -> Result<()> {
+    let mut args = preloaded_lisp_args_for_source(options.native_comp, pending.source());
+    pending.redirect_args(&mut args)?;
+    run_command(
+        options,
+        &options.repo_root,
+        bootstrap_byte_compile_emacs(paths),
+        &args,
+        envs,
+    )
+}
+
+fn run_final_compile_main_pending_source(
+    options: &FreshBuildOptions,
+    paths: &PipelinePaths,
+    envs: &[(OsString, OsString)],
+    pending: &compile_wave::PendingOutput,
+) -> Result<()> {
+    let mut args = compile_main_args_for_source(options.native_comp, pending.source());
+    pending.redirect_args(&mut args)?;
+    run_command(
+        options,
+        &options.repo_root,
+        compile_main_emacs(paths),
+        &args,
+        envs,
+    )
 }
 
 fn compile_main_emacs(paths: &PipelinePaths) -> &Path {
