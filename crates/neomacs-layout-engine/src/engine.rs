@@ -3142,7 +3142,9 @@ impl LayoutEngine {
                         .body_rows
                         .retain(|row| Some(row.output_row) <= last);
                 }
-                for face_name in face_resolver.take_invalid_face_references() {
+                let invalid_face_references = face_resolver.take_invalid_face_references();
+                face_services.note_invalid_face_references(&invalid_face_references);
+                for face_name in invalid_face_references {
                     evaluator.add_to_log(&format!("Invalid face reference: {face_name}"));
                 }
                 frame_window_end_attempts.reject_all(evaluator);
@@ -4348,6 +4350,7 @@ impl LayoutEngine {
             );
             if let Some(producer) = lifetime.as_mut().and_then(|pending| pending.as_mut().ok()) {
                 producer.note_face_entry(Some(face_services.cold_entry()));
+                producer.note_diagnostic_effects(face_services.diagnostic_effects());
             }
             captured
         } else {

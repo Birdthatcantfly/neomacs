@@ -9,6 +9,37 @@ use strum::IntoEnumIterator;
 
 pub(crate) use crate::face::realization::{BasicFace, FaceChangeScope};
 
+/// Consumed authority for the two recorded same-epoch definition installers.
+///
+/// The private field restricts construction to this module. Do not expose a
+/// factory, return/store this permit, or derive Copy/Clone/Default: the two
+/// production constructions must remain inline at the audited installs below.
+/// All other installs use prepare, which retires the existing epoch. This ZST
+/// adds no persistent state, threading mechanism or ordinary mutation work.
+/// Each permit is created and consumed under one exclusive Context borrow;
+/// it is never stored or published to another mutator.
+///
+/// prepare_runtime_faces_result refreshes after recorded dirtiness without a
+/// Lisp callback before install. realize_default_after_global_merge can call
+/// Lisp after recording; its full builder always gives the table a fresh
+/// palette, so the retained palette identity also rejects an intermediate
+/// same-count/same-epoch receipt. Count and epoch alone are insufficient there.
+#[derive(Debug)]
+pub(crate) struct RecordedDefinitionsRefresh {
+    _private: (),
+}
+static_assertions::assert_eq_size!(RecordedDefinitionsRefresh, ());
+
+/// Constructor exclusively for cfg(test) raw lifecycle/fault fixtures.
+/// It grants no production caller access to an unrecorded replacement.
+#[cfg(test)]
+pub(crate) fn replace_definitions_for_test_fault(
+    cache: &mut crate::face::realization::FrameFaceRealizationCache,
+    table: crate::face::FaceTable,
+) {
+    cache.replace_recorded_definitions(table, RecordedDefinitionsRefresh { _private: () });
+}
+
 /// Faces such as `cursor` are marked `face-no-inherit`: changing them does
 /// not dirty realized dependents (GNU xfaces.c:3104,3194,3774-3780).
 pub(crate) fn named_face_change_scope<'a>(
@@ -615,7 +646,10 @@ pub(crate) fn prepare_runtime_faces_result(
     };
     if let Some(owner) = eval.frames.get_mut(frame) {
         if definitions_only {
-            owner.face_realization.replace_definitions(table.clone());
+            owner.face_realization.replace_recorded_definitions(
+                table.clone(),
+                RecordedDefinitionsRefresh { _private: () },
+            );
         } else {
             owner.face_realization.prepare(generation, table.clone());
         }
@@ -816,7 +850,10 @@ pub(crate) fn realize_default_after_global_merge(
         // GNU uses the merged absolute lface here, not TTY default normalization.
         let table = runtime_face_table_from_frame_lisp_faces(scope.context(), frame, false);
         if let Some(owner) = scope.context().frames.get_mut(frame) {
-            owner.face_realization.replace_definitions(table.clone());
+            owner.face_realization.replace_recorded_definitions(
+                table.clone(),
+                RecordedDefinitionsRefresh { _private: () },
+            );
         }
         *scope.context().face_table = table.clone();
         let mut attributes = table.resolve("default");

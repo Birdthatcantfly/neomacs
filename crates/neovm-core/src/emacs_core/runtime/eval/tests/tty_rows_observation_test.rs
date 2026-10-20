@@ -424,3 +424,187 @@ fn tty_rows_observation_palette_storage_is_part_of_native_table_identity() {
         Err(RowsObservationRefusal::FaceRealizationChanged)
     );
 }
+
+#[test]
+fn tty_rows_observation_same_palette_faces_clone_full_prepare_retires_epoch() {
+    let (mut context, frame, _restore) = ready();
+    let epoch = context.begin_tty_rows_observation(frame, None).unwrap();
+    let counter = context.face_change_count;
+    let cache = &mut context.frames.get_mut(frame).unwrap().face_realization;
+    let realization = cache.realization_epoch().unwrap();
+    let mut replacement = cache.table(counter).unwrap().clone();
+    let palette = replacement.rows_snapshot_identity();
+    let (source, paint) = cache.basic(BasicFace::Default).unwrap().clone();
+    replacement.define(
+        "rows-cloned-definitions",
+        crate::face::Face::new("rows-cloned-definitions"),
+    );
+    cache.prepare(counter, replacement);
+    cache.insert_basic(BasicFace::Default, source, paint);
+    assert!(
+        palette.matches(cache.table(counter).unwrap()),
+        "the cloned table deliberately shares its palette"
+    );
+    assert!(
+        !cache.retains_epoch(&realization),
+        "full prepare retires the actual native lifetime"
+    );
+    assert_eq!(context.face_change_count, counter);
+    assert_eq!(
+        context.static_rows_observation_current(&epoch),
+        Err(RowsObservationRefusal::FaceRealizationChanged)
+    );
+}
+
+#[test]
+fn tty_rows_observation_recorded_incremental_refresh_rejects_by_existing_count() {
+    let (mut context, frame, _restore) = ready();
+    let epoch = context.begin_tty_rows_observation(frame, None).unwrap();
+    let counter = context.face_change_count;
+    let cache = &context.frames.get(frame).unwrap().face_realization;
+    let realization = cache.realization_epoch().unwrap();
+    let palette = cache.table(counter).unwrap().rows_snapshot_identity();
+    crate::emacs_core::xfaces::realization::record_face_change_for(
+        &mut context,
+        crate::face::realization::FaceChangeScope::DefinitionsOnly(&[frame]),
+        Some("default"),
+    );
+    assert!(
+        context.sync_runtime_faces_for_frame(frame),
+        "the real recorded dirty source must be installed"
+    );
+    let cache = &context.frames.get(frame).unwrap().face_realization;
+    assert!(cache.retains_epoch(&realization));
+    assert!(
+        palette.matches(cache.table(context.face_change_count).unwrap()),
+        "the actual incremental builder preserves its palette"
+    );
+    assert_eq!(context.face_change_count, counter + 1);
+    assert_eq!(
+        context.static_rows_observation_current(&epoch),
+        Err(RowsObservationRefusal::RuntimeChanged)
+    );
+}
+
+#[test]
+fn tty_rows_observation_reentrant_global_merge_rejects_by_palette_at_equal_count_epoch() {
+    use crate::emacs_core::{composite, font, xfaces};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let (mut context, frame, _restore) = ready();
+    // A supported non-default functional height is inherited by default.
+    // Validation happens while unarmed; the outer real global merge later
+    // invokes the same Lisp function inside its recorded native lifecycle.
+    context.eval_str("(progn (setq rows-palette-probe-armed nil) (fset 'rows-palette-probe-height (lambda (height) (if rows-palette-probe-armed (font-shape-gstring rows-palette-probe-gstring nil)) height)))").unwrap();
+    xfaces::builtin_internal_make_lisp_face(
+        &mut context,
+        vec![Value::symbol("rows-palette-probe-inherited")],
+    )
+    .unwrap();
+    xfaces::builtin_internal_set_lisp_face_attribute(
+        &mut context,
+        vec![
+            Value::symbol("rows-palette-probe-inherited"),
+            Value::keyword(":height"),
+            Value::symbol("rows-palette-probe-height"),
+            Value::make_frame(frame.0),
+        ],
+    )
+    .unwrap();
+    xfaces::builtin_internal_set_lisp_face_attribute(
+        &mut context,
+        vec![
+            Value::symbol("default"),
+            Value::keyword(":inherit"),
+            Value::symbol("rows-palette-probe-inherited"),
+            Value::T,
+        ],
+    )
+    .unwrap();
+    // Keep the later global-merge parameter-publication branch out of this
+    // palette-specific fixture through supported default setters, so another
+    // recorded frame-parameter change cannot obscure the equal-count edge.
+    for attribute in [":foreground", ":background"] {
+        xfaces::builtin_internal_set_lisp_face_attribute(
+            &mut context,
+            vec![
+                Value::symbol("default"),
+                Value::keyword(attribute),
+                Value::symbol("unspecified"),
+                Value::T,
+            ],
+        )
+        .unwrap();
+    }
+    context.sync_runtime_faces_for_frame(frame);
+    let opened = font::build_font_object(&crate::face::Face::new("default"));
+    let gstring = composite::composition_get_gstring(
+        &mut context,
+        vec![
+            Value::fixnum(0),
+            Value::fixnum(2),
+            opened,
+            Value::string("ab"),
+        ],
+    )
+    .unwrap();
+    context
+        .obarray
+        .set_symbol_value("rows-palette-probe-gstring", gstring);
+    let captured = Rc::new(RefCell::new(None));
+    let callback_capture = Rc::clone(&captured);
+    context.font_shape_fn = Some(Box::new(move |context, _, _| {
+        // This is the actual installed font-shaping callback reached by Lisp,
+        // not a test-only producer seal or a fabricated epoch. The callback
+        // warms the recorded dirty table before taking a real Core receipt.
+        assert!(context.sync_runtime_faces_for_frame(frame));
+        let epoch = context.begin_tty_rows_observation(frame, None).unwrap();
+        let cache = &context.frames.get(frame).unwrap().face_realization;
+        let realization = cache.realization_epoch().unwrap();
+        let palette = cache
+            .table(context.face_change_count)
+            .unwrap()
+            .rows_snapshot_identity();
+        assert!(context.static_rows_observation_current(&epoch).is_ok());
+        assert!(callback_capture.borrow().is_none());
+        *callback_capture.borrow_mut() =
+            Some((epoch, realization, palette, context.face_change_count));
+        font::GstringShapeOutcome::NotShapable
+    }));
+    assert!(
+        context
+            .frames
+            .get(frame)
+            .unwrap()
+            .face_realization
+            .default_lface()
+            .is_some(),
+        "the actual immediate cached-default branch must be reachable"
+    );
+    context
+        .obarray
+        .set_symbol_value("rows-palette-probe-armed", Value::T);
+    xfaces::builtin_internal_merge_in_global_face(
+        &mut context,
+        vec![Value::symbol("default"), Value::make_frame(frame.0)],
+    )
+    .unwrap();
+    let (epoch, realization, palette, captured_count) = captured
+        .borrow_mut()
+        .take()
+        .expect("the inherited Lisp height must reach the actual shaper callback");
+    assert_eq!(context.face_change_count, captured_count);
+    let cache = &context.frames.get(frame).unwrap().face_realization;
+    assert!(cache.retains_epoch(&realization));
+    assert!(
+        !palette.matches(cache.table(captured_count).unwrap()),
+        "the outer full builder must replace the palette after the intermediate receipt"
+    );
+    assert_eq!(
+        context.static_rows_observation_current(&epoch),
+        Err(RowsObservationRefusal::FaceRealizationChanged)
+    );
+    // Core-only lifetime metadata: no Layout seal, source lease or row hit is
+    // manufactured, and no receipt is consumed across collection.
+}

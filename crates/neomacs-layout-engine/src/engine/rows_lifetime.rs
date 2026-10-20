@@ -1,6 +1,6 @@
 //! Private stage-3 closure for a GEN1, service-free numeric Rows producer.
 //! No cached query consumes this proof. Every completed proof is dropped.
-use super::{LayoutEngine, QueryRowCoverage};
+use super::{LayoutEngine, QueryRowCoverage, rows_face_services::DiagnosticEffects};
 use neovm_core::{
     buffer::{BufferId, BufferSourceAuthority, BufferSourceReadLease, LispCharPos1},
     emacs_core::{
@@ -29,6 +29,8 @@ pub(super) enum Refusal {
     Fontification,
     #[error("the TTY producer entered cold face realization or lacks its actual witness")]
     ColdFaceEntry,
+    #[error("the accepted producer logged face diagnostics or lacks its actual drain witness")]
+    DiagnosticEffects,
     #[error("the producer evaluated a dynamic display form or retried")]
     DynamicOrRetry,
     #[error("the completed query lacks complete numeric geometry")]
@@ -74,6 +76,7 @@ pub(super) struct Producer {
     epoch: RowsObservationEpoch,
     fontification: FontificationSeal,
     face_entry: FaceEntrySeal,
+    diagnostic_effects: DiagnosticEffects,
     tty: bool,
     _local: PhantomData<*const ()>,
 }
@@ -169,6 +172,7 @@ impl Producer {
             epoch,
             fontification: FontificationSeal::Unseen,
             face_entry: FaceEntrySeal::Unseen,
+            diagnostic_effects: DiagnosticEffects::Unseen,
             tty: frame_owner.effective_window_system().is_none(),
             _local: PhantomData,
         })
@@ -183,6 +187,22 @@ impl Producer {
             | (FaceEntrySeal::Unseen, None)
             | (FaceEntrySeal::WarmOnly, _)
             | (FaceEntrySeal::Cold, _) => FaceEntrySeal::Cold,
+        };
+    }
+
+    /// The request-local factory observed the actual accepted-query Vec
+    /// before canonical logging. Repeated or missing notes cannot certify it.
+    pub(super) fn note_diagnostic_effects(&mut self, effects: DiagnosticEffects) {
+        self.diagnostic_effects = match (self.diagnostic_effects, effects) {
+            (DiagnosticEffects::Unseen, DiagnosticEffects::Clear) => DiagnosticEffects::Clear,
+            (
+                DiagnosticEffects::Unseen,
+                DiagnosticEffects::Unseen | DiagnosticEffects::Observed,
+            )
+            | (
+                DiagnosticEffects::Clear | DiagnosticEffects::Observed,
+                DiagnosticEffects::Unseen | DiagnosticEffects::Clear | DiagnosticEffects::Observed,
+            ) => DiagnosticEffects::Observed,
         };
     }
 
@@ -215,6 +235,9 @@ impl Producer {
         }
         if self.tty && !matches!(self.face_entry, FaceEntrySeal::WarmOnly) {
             return Err(Refusal::ColdFaceEntry);
+        }
+        if self.diagnostic_effects != DiagnosticEffects::Clear {
+            return Err(Refusal::DiagnosticEffects);
         }
         // These retain the deliberately narrow producer scope. Lifetime no
         // longer depends on inferring that native callbacks did not execute.

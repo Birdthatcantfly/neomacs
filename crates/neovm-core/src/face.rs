@@ -1785,13 +1785,18 @@ pub struct FaceTable {
     tty_palette: std::rc::Rc<neomacs_display_protocol::TtyPalette>,
 }
 
-/// Rows-local identity of the existing native table allocations.
-/// Weak control blocks prevent address ABA without retaining any Lisp-valued
-/// table payload. Construction/validation performs no collection projection.
+/// Native palette identity for an eligible Rows attempt.
+///
+/// Existing exact global face count and realization epoch cover definition
+/// refreshes through the sealed recorded-writer seam. The palette additionally
+/// rejects a reentrant full refresh captured after its count was recorded but
+/// before its replacement table was installed. Its Weak control block prevents
+/// address ABA without retaining Lisp-valued definitions. Unlike Weak handles
+/// to those definitions, retaining this handle cannot make their Rc::make_mut
+/// operations dissociate storage during later ordinary face mutations.
+/// Palette replacement always assigns a fresh Rc, never Rc::make_mut.
 #[derive(Debug)]
 pub(crate) struct FaceTableIdentity {
-    faces: std::rc::Weak<FaceStorage>,
-    lisp_face_refs: std::rc::Weak<HashMap<LispFaceId, Value>>,
     tty_palette: std::rc::Weak<neomacs_display_protocol::TtyPalette>,
 }
 
@@ -1799,15 +1804,13 @@ static_assertions::assert_not_impl_any!(FaceTableIdentity: Send, Sync);
 
 impl FaceTableIdentity {
     pub(crate) fn matches(&self, table: &FaceTable) -> bool {
-        std::ptr::eq(self.faces.as_ptr(), std::rc::Rc::as_ptr(&table.faces))
-            && std::ptr::eq(
-                self.lisp_face_refs.as_ptr(),
-                std::rc::Rc::as_ptr(&table.lisp_face_refs),
-            )
-            && std::ptr::eq(
-                self.tty_palette.as_ptr(),
-                std::rc::Rc::as_ptr(&table.tty_palette),
-            )
+        // The retained Weak pins this control block, so allocator address
+        // reuse cannot make a replacement palette compare equal. No palette
+        // or Lisp-object header is dereferenced here.
+        std::ptr::eq(
+            self.tty_palette.as_ptr(),
+            std::rc::Rc::as_ptr(&table.tty_palette),
+        )
     }
 }
 
@@ -1840,12 +1843,11 @@ impl FaceTable {
         table
     }
 
-    /// Capture only existing allocation identity for an eligible Rows attempt.
-    /// No source-table contents, roots or mutable generation are copied.
+    /// Capture existing native palette identity for an eligible Rows attempt.
+    /// The consumer must also retain exact face count and realization epoch.
+    /// No definition-storage Weak, source contents, roots or new stamp is kept.
     pub(crate) fn rows_snapshot_identity(&self) -> FaceTableIdentity {
         FaceTableIdentity {
-            faces: std::rc::Rc::downgrade(&self.faces),
-            lisp_face_refs: std::rc::Rc::downgrade(&self.lisp_face_refs),
             tty_palette: std::rc::Rc::downgrade(&self.tty_palette),
         }
     }

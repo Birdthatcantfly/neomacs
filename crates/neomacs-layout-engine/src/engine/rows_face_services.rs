@@ -29,6 +29,11 @@ pub(super) trait FaceServiceFactory {
     where
         Self: 'a;
     fn bind<'a>(&'a self, resolver: &'a FaceResolver) -> Self::Bound<'a>;
+
+    /// Observe the actual accepted-query diagnostic drain before it is logged.
+    /// The ordinary specialization has no state or conditional observer work.
+    #[inline]
+    fn note_invalid_face_references(&self, _names: &[String]) {}
 }
 
 pub(super) struct NoopFaceServiceFactory;
@@ -40,18 +45,30 @@ impl FaceServiceFactory for NoopFaceServiceFactory {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DiagnosticEffects {
+    Unseen,
+    Clear,
+    Observed,
+}
+
 pub(super) struct RowsFaceServiceFactory {
     cold_entry: Cell<bool>,
+    diagnostic_effects: Cell<DiagnosticEffects>,
 }
 
 impl RowsFaceServiceFactory {
     pub(super) fn new() -> Self {
         Self {
             cold_entry: Cell::new(false),
+            diagnostic_effects: Cell::new(DiagnosticEffects::Unseen),
         }
     }
     pub(super) fn cold_entry(&self) -> &Cell<bool> {
         &self.cold_entry
+    }
+    pub(super) fn diagnostic_effects(&self) -> DiagnosticEffects {
+        self.diagnostic_effects.get()
     }
 }
 
@@ -60,6 +77,18 @@ impl FaceServiceFactory for RowsFaceServiceFactory {
     #[inline]
     fn bind<'a>(&'a self, resolver: &'a FaceResolver) -> ObservedFaceServices<'a> {
         ObservedFaceServices::new(resolver, &self.cold_entry)
+    }
+    #[inline]
+    fn note_invalid_face_references(&self, names: &[String]) {
+        if !names.is_empty() {
+            self.diagnostic_effects.set(DiagnosticEffects::Observed);
+            return;
+        }
+        self.diagnostic_effects
+            .set(match self.diagnostic_effects.get() {
+                DiagnosticEffects::Unseen | DiagnosticEffects::Clear => DiagnosticEffects::Clear,
+                DiagnosticEffects::Observed => DiagnosticEffects::Observed,
+            });
     }
 }
 

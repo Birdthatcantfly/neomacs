@@ -239,13 +239,30 @@ impl FrameFaceRealizationCache {
         self.default_lookup_position = DefaultLookupPosition::Shadowed;
     }
 
-    /// Refresh authoritative definitions without retiring existing realizations.
-    /// This cannot revive an invalid generation: only prepare publishes one.
-    pub(crate) fn replace_definitions(&mut self, table: FaceTable) {
+    /// Refresh definitions through the two audited recorded realization paths.
+    /// The opaque consumed permit is minted inline only in xfaces realization;
+    /// it adds no state, checks, counter writes or allocation. This cannot
+    /// revive an invalid generation: only prepare publishes one.
+    pub(crate) fn replace_recorded_definitions(
+        &mut self,
+        table: FaceTable,
+        _refresh: crate::emacs_core::xfaces::realization::RecordedDefinitionsRefresh,
+    ) {
         self.table = Some(table);
         self.root_lease = None;
         self.dirty_definitions.clear();
         self.definitions_all_dirty = false;
+    }
+
+    /// Test-only raw replacement fault seam; unavailable in production.
+    ///
+    /// Existing lifecycle tests intentionally bypass the recorded-writer
+    /// contract. A whole new table/palette must still reject a Rows receipt at
+    /// equal count/epoch. This seam does NOT promise detection of an unrecorded
+    /// faces-only replacement that preserves the palette and realization epoch.
+    #[cfg(test)]
+    pub(crate) fn replace_definitions(&mut self, table: FaceTable) {
+        crate::emacs_core::xfaces::realization::replace_definitions_for_test_fault(self, table);
     }
 
     /// The last derived table plus the names that drifted from it. Callers

@@ -230,3 +230,87 @@ fn tty_rows_lifetime_default_disabled_entry_keeps_legacy_tty_refusal() {
         ))]
     );
 }
+
+fn invalid_face_log_count(context: &Context, diagnostic: &str) -> usize {
+    let text = context
+        .buffer_manager()
+        .find_buffer_by_name("*Rows diagnostic log*")
+        .and_then(|id| context.buffer_manager().get(id))
+        .map_or_else(String::new, |buffer| buffer.buffer_string());
+    text.lines()
+        .filter_map(|line| {
+            let suffix = line.strip_prefix(diagnostic)?;
+            if suffix.is_empty() {
+                return Some(1);
+            }
+            Some(
+                suffix
+                    .strip_prefix(" [")
+                    .and_then(|suffix| suffix.strip_suffix(" times]"))
+                    .and_then(|count| count.parse::<usize>().ok())
+                    .expect("the actual log contains a plain or GNU-coalesced diagnostic"),
+            )
+        })
+        .sum()
+}
+
+fn assert_repeated_invalid_face_diagnostic_refuses(install_source: &str, refusal: Refusal) {
+    let (mut context, frame, window, _, _restore) = fixture();
+    context
+        .eval_str(r#"(setq message-log-max t messages-buffer-name "*Rows diagnostic log*")"#)
+        .unwrap();
+    context.eval_str(install_source).unwrap();
+    let mut engine = LayoutEngine::new_without_font_metrics();
+    let policy = terminal_policy();
+    // An invalid logical reference falls back to default, but that anonymous
+    // composition can first need a derived cache entry. Warm it through the
+    // actual canonical iterator; never synthesize the cold or drain seal.
+    let _ = query(&mut context, &mut engine, frame, window, &policy);
+    let diagnostic = "Invalid face reference: tty-rows-missing-diagnostic-face";
+    let before = invalid_face_log_count(&context, diagnostic);
+    assert!(
+        before > 0,
+        "the warmup actually reached and logged this reference"
+    );
+    let (_, first) = query(&mut context, &mut engine, frame, window, &policy);
+    let first_count = invalid_face_log_count(&context, diagnostic);
+    let (_, second) = query(&mut context, &mut engine, frame, window, &policy);
+    let second_count = invalid_face_log_count(&context, diagnostic);
+    assert_eq!(first, vec![Report::Refused(refusal)]);
+    assert_eq!(second, vec![Report::Refused(refusal)]);
+    assert!(
+        first_count > before,
+        "the first observed canonical walk still logs"
+    );
+    assert!(
+        second_count > first_count,
+        "the repeated walk still updates the log"
+    );
+    assert_eq!(
+        first_count - before,
+        second_count - first_count,
+        "unchanged canonical walks preserve every diagnostic, including coalesced counts"
+    );
+    // DiagnosticEffects is checked after ColdFaceEntry. That specific refusal
+    // also proves the repeated text-face fallback stayed warm. Inserted strings
+    // can fail complete fontification coverage first; they must still preserve
+    // every canonical diagnostic rather than widen that earlier proof.
+}
+
+#[test]
+fn tty_rows_lifetime_actual_warm_invalid_text_face_preserves_logs_and_refuses() {
+    assert_repeated_invalid_face_diagnostic_refuses(
+        "(put-text-property 1 8 'face 'tty-rows-missing-diagnostic-face)",
+        Refusal::DiagnosticEffects,
+    );
+}
+
+#[test]
+fn tty_rows_lifetime_actual_invalid_inserted_face_preserves_logs_and_refuses() {
+    assert_repeated_invalid_face_diagnostic_refuses(
+        r#"(let ((overlay (make-overlay 2 3)))
+          (overlay-put overlay 'before-string
+            (propertize "!" 'face 'tty-rows-missing-diagnostic-face)))"#,
+        Refusal::Fontification,
+    );
+}

@@ -1056,3 +1056,36 @@ fn face_table_trace_roots_clone_keeps_the_previous_snapshot() {
     table.trace_roots(&mut fresh);
     assert!(fresh.iter().any(|v| *v == key));
 }
+
+#[test]
+fn rows_palette_identity_does_not_add_definition_cow_weak_owners() {
+    use std::rc::Rc;
+
+    let mut table = FaceTable::new();
+    assert_eq!(Rc::strong_count(&table.faces), 1);
+    assert_eq!(Rc::strong_count(&table.lisp_face_refs), 1);
+    assert_eq!(Rc::weak_count(&table.faces), 0);
+    assert_eq!(Rc::weak_count(&table.lisp_face_refs), 0);
+    let identity = table.rows_snapshot_identity();
+    assert_eq!(Rc::weak_count(&table.faces), 0);
+    assert_eq!(Rc::weak_count(&table.lisp_face_refs), 0);
+    assert_eq!(Rc::weak_count(&table.tty_palette), 1);
+    let faces = Rc::as_ptr(&table.faces);
+    let references = Rc::as_ptr(&table.lisp_face_refs);
+    table.ensure_face("rows-unique-native-face");
+    table.define_lisp_face(
+        LispFaceId::new(37001).unwrap(),
+        "rows-unique-native-face",
+        Face::new("rows-unique-native-face"),
+    );
+    assert_eq!(Rc::as_ptr(&table.faces), faces);
+    assert_eq!(Rc::as_ptr(&table.lisp_face_refs), references);
+    assert_eq!(Rc::weak_count(&table.faces), 0);
+    assert_eq!(Rc::weak_count(&table.lisp_face_refs), 0);
+    assert!(identity.matches(&table));
+    // These assertions cover Rc control-block identity and Weak ownership;
+    // ordinary map growth/interning may still allocate. The identity is not
+    // itself a freshness proof for this deliberately mutated table.
+    table.set_tty_palette(neomacs_display_protocol::TtyPalette::default());
+    assert!(!identity.matches(&table));
+}
