@@ -1,0 +1,11 @@
+error[E0505]: cannot move out of `stopped` because it is borrowed
+ --> tests/p1rv_ui/p3sym_keeper_borrow.rs:4:13
+  |
+2 | fn resume_while_keeping(mut stopped: AllStopped<'_>, key: SymbolHandle) {
+  |                         ----------- binding `stopped` declared here
+3 |     let keeper = stopped.symbols().unwrap();
+  |                  ------- borrow of `stopped` occurs here
+4 |     let _ = stopped.complete();
+  |             ^^^^^^^ move out of `stopped` occurs here
+5 |     let _ = keeper.backing(&key);
+  |             ------ borrow later used here

@@ -270,6 +270,7 @@ pub(super) fn verify_stopped(
     gate: &RegistryState,
 ) -> Result<(), RendezvousError> {
     gate.rendezvous.live()?;
+    registry.symbols.ready()?;
     if registry.park.poisoned.load(Ordering::Acquire) {
         return Err(RendezvousError::Poisoned);
     }

@@ -28,6 +28,8 @@ pub use root_slot::OwnerRootSlot;
 pub use run_slice::{RunSlice, SliceRoot};
 mod rendezvous;
 mod summaries;
+mod symbol_authority;
+pub use symbol_authority::{KeeperSymbols, PlainSymbolBacking, SymbolHandle, SymbolMut, SymbolRef};
 mod token;
 // The extent API ships ahead of its first production call site (the Green
 // mutex/condition release points); the re-export is for that integration.
@@ -236,6 +238,7 @@ struct Registry {
     keeper_thread: ThreadId,
     root_epoch: super::FacadeEpochRetention,
     cons_catalog: super::cons_storage::ConsCatalog,
+    symbols: symbol_authority::SymbolSidecar,
 }
 
 impl Registry {
@@ -404,6 +407,8 @@ impl<'heap> ParallelHeapEra<'heap> {
         });
         let mut young_index = FxHashMap::default();
         young_index.insert(young, 0);
+        let symbols =
+            symbol_authority::SymbolSidecar::new(keeper.parallel_symbol_backing(), generation);
         Ok(Self {
             collector: RefCell::new(Some(collector)),
             suspended_cons: RefCell::new(None),
@@ -436,6 +441,7 @@ impl<'heap> ParallelHeapEra<'heap> {
                 keeper_thread: std::thread::current().id(),
                 root_epoch,
                 cons_catalog: super::cons_storage::ConsCatalog::new(heap),
+                symbols,
             })),
             _thread: PhantomData,
         })
@@ -545,6 +551,7 @@ impl<'heap> ParallelHeapEra<'heap> {
     }
 
     fn prepare_finish(&mut self) -> Result<(), RegistrationError> {
+        self.registry().symbols.ready()?;
         if self.suspended_cons.get_mut().is_some() {
             return Err(RegistrationError::OpenRegion);
         }

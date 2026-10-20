@@ -99,6 +99,22 @@ impl fmt::Debug for Baton {
 }
 
 impl Baton {
+    /// Cold proof-3 backing admission. Original allocation roots only; no
+    /// Context view, heap reference or ordinary mutable manager borrow.
+    pub(crate) fn parallel_symbol_backing(
+        &self,
+    ) -> crate::emacs_core::symbol::parallel::SymbolBacking {
+        assert!(self.held_here(), "symbol backing keeper must be held here");
+        // SAFETY: era admission has escrowed the serial Context and retains
+        // this Baton for every owner loan, including abandoned-era retention.
+        unsafe {
+            crate::emacs_core::symbol::parallel::SymbolBacking::new(
+                std::ptr::NonNull::new(self.world.obarray.get()).expect("World obarray root"),
+                std::ptr::NonNull::from(&self.world.thread_projections),
+                Arc::as_ptr(&self.world) as usize,
+            )
+        }
+    }
     /// The calling OS thread has received the Baton: it is the holder.
     pub(crate) fn enter(&self) {
         self.world

@@ -13,7 +13,7 @@ fn finish(era: ParallelHeapEra<'_>) {
     drop(keeper);
 }
 
-fn activate_retry<'era>(
+pub(super) fn activate_retry<'era>(
     mut permit: MutatorPermit<'era>,
     heap: HeapIdentity,
     owner: u64,
@@ -29,7 +29,7 @@ fn activate_retry<'era>(
         }
     }
 }
-fn finish_retry(mut token: Mutator<'_>, epoch: NonZeroU64) {
+pub(super) fn finish_retry(mut token: Mutator<'_>, epoch: NonZeroU64) {
     loop {
         match token.finish(epoch) {
             Ok(()) => return,

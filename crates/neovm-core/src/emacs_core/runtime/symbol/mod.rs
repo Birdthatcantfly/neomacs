@@ -28,6 +28,7 @@
 mod canonical_access;
 mod cell;
 mod fn_stamps;
+pub(crate) mod parallel;
 mod projection;
 mod property_revision;
 pub use canonical_access::CanonicalAccess;

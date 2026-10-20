@@ -120,6 +120,13 @@ impl<'era> MutatorPermit<'era> {
 }
 impl Drop for RunAccess<'_, '_> {
     fn drop(&mut self) {
+        if self.symbol_loan {
+            // A forgotten symbol lease must not clear IN_SLICE and allow ACK.
+            // Its word and the retained World stay pinned in a poisoned era.
+            self.owner.registry.symbols.poison();
+            self.owner.registry.poison();
+            return;
+        }
         if self
             .owner
             .local
@@ -225,6 +232,7 @@ impl std::fmt::Debug for MutatorFinishFailure<'_> {
 /// objects. A4/A5 must supply the separate shared-storage/stop protocol.
 pub struct RunAccess<'owner, 'era> {
     pub(super) owner: &'owner mut Mutator<'era>,
+    pub(super) symbol_loan: bool,
 }
 
 /// The owner publication capability is produced before stop-all. Its unique
@@ -292,7 +300,10 @@ impl<'era> Mutator<'era> {
             return Err(self.admission_backout());
         }
         self.run_admitted = true;
-        Ok(RunAccess { owner: self })
+        Ok(RunAccess {
+            owner: self,
+            symbol_loan: false,
+        })
     }
 
     /// Cold backout: clear the admission word and report the gated refusal.

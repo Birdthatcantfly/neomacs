@@ -1,0 +1,5 @@
+error[E0599]: no method named `value` found for reference `&SymbolRef<'_, '_, '_>` in the current scope
+ --> tests/p1rv_ui/p3sym_value_export.rs:3:20
+  |
+3 |     let _ = reader.value();
+  |                    ^^^^^ method not found in `&SymbolRef<'_, '_, '_>`

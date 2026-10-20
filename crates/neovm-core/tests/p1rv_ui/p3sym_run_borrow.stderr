@@ -1,0 +1,11 @@
+error[E0505]: cannot move out of `run` because it is borrowed
+ --> tests/p1rv_ui/p3sym_run_borrow.rs:4:10
+  |
+2 | fn release_while_reading(mut run: RunAccess<'_, '_>, key: SymbolHandle) {
+  |                          ------- binding `run` declared here
+3 |     let reader = run.symbol_ref(&key).unwrap();
+  |                  --- borrow of `run` occurs here
+4 |     drop(run);
+  |          ^^^ move out of `run` occurs here
+5 |     let _ = reader.backing();
+  |             ------ borrow later used here

@@ -1,0 +1,5 @@
+error[E0599]: no method named `obarray_mut` found for mutable reference `&mut SymbolMut<'_, '_, '_>` in the current scope
+ --> tests/p1rv_ui/p3sym_raw_receiver.rs:3:20
+  |
+3 |     let _ = writer.obarray_mut();
+  |                    ^^^^^^^^^^^ method not found in `&mut SymbolMut<'_, '_, '_>`

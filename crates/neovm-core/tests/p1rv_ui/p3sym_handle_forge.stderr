@@ -1,0 +1,5 @@
+error[E0616]: field `world` of struct `SymbolHandle` is private
+ --> tests/p1rv_ui/p3sym_handle_forge.rs:3:9
+  |
+3 |     key.world = 7;
+  |         ^^^^^ private field

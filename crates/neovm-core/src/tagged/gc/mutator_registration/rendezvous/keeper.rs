@@ -182,6 +182,10 @@ impl ParallelHeapEra<'_> {
 }
 
 impl<'era> AllStopped<'era> {
+    pub fn symbols(&mut self) -> Result<super::super::KeeperSymbols<'_>, RendezvousError> {
+        let registry = self.registry;
+        super::super::symbol_authority::KeeperSymbols::mint(self, registry)
+    }
     pub(crate) fn check_world_roots(
         &self,
         heap: super::super::HeapIdentity,

@@ -1,0 +1,5 @@
+error[E0599]: no method named `symbols` found for mutable reference `&mut RunAccess<'_, '_>` in the current scope
+ --> tests/p1rv_ui/p3sym_keeper_from_run.rs:3:17
+  |
+3 |     let _ = run.symbols();
+  |                 ^^^^^^^ method not found in `&mut RunAccess<'_, '_>`
