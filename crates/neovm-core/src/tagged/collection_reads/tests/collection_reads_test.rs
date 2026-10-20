@@ -127,7 +127,7 @@ fn vector_string_and_character_table_mutations_invalidate_reads() {
     let (_, reads) = capture(|| string.as_str_owned());
     string.set_string_byte_same_char_count(0, b'z');
     assert!(!reads.unwrap().unchanged());
-    let (_, reads) = capture(|| table.as_char_table_obj().unwrap().defalt);
+    let (_, reads) = capture(|| table.as_char_table_obj().unwrap().defalt.get());
     table.with_char_table_mut(|table| table.set_default(Value::T));
     assert!(!reads.unwrap().unchanged());
 }

@@ -4022,11 +4022,11 @@ impl TaggedValue {
     pub fn char_table_external_slots(self) -> Option<Vec<Value>> {
         let table = self.as_char_table_obj()?;
         let mut slots = Vec::with_capacity(4 + CHAR_TABLE_TOP_SLOTS + table.extras.len());
-        slots.push(table.defalt);
-        slots.push(table.parent);
-        slots.push(table.purpose);
-        slots.push(table.ascii);
-        slots.extend_from_slice(&table.contents);
+        slots.push(table.defalt.get());
+        slots.push(table.parent.get());
+        slots.push(table.purpose.get());
+        slots.push(table.ascii.get());
+        slots.extend(table.contents.iter().map(|cell| cell.get()));
         slots.extend_from_slice(table.extras.as_slice());
         Some(slots)
     }
@@ -4678,11 +4678,11 @@ impl StructuralPseudovectorView<'_> {
         match self {
             Self::Vector(slots) | Self::Record(slots) => slots[index],
             Self::CharTable(table) => match index {
-                0 => table.defalt,
-                1 => table.parent,
-                2 => table.purpose,
-                3 => table.ascii,
-                index if index < 4 + CHAR_TABLE_TOP_SLOTS => table.contents[index - 4],
+                0 => table.defalt.get(),
+                1 => table.parent.get(),
+                2 => table.purpose.get(),
+                3 => table.ascii.get(),
+                index if index < 4 + CHAR_TABLE_TOP_SLOTS => table.contents[index - 4].get(),
                 _ => table.extras.as_slice()[index - 4 - CHAR_TABLE_TOP_SLOTS],
             },
             // GNU stores DEPTH and MIN_CHAR in the packed, non-Lisp prefix of

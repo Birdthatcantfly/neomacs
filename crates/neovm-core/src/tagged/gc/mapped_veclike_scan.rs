@@ -10,8 +10,8 @@ use std::ptr::NonNull;
 use super::scan_contract::SingleMutatorWorld;
 use super::{MarkWord, TaggedHeap, knobs};
 use crate::tagged::header::{
-    CHAR_TABLE_TOP_SLOTS, CharTableObj, RecordObj, SubCharTableObj, VecLikeHeader, VecLikeType,
-    VectorObj, VectorScanEntry, load_value_atomic,
+    AtomicTaggedValue, CHAR_TABLE_TOP_SLOTS, CharTableObj, RecordObj, SubCharTableObj,
+    VecLikeHeader, VecLikeType, VectorObj, VectorScanEntry,
 };
 use crate::tagged::value::TaggedValue;
 
@@ -252,19 +252,19 @@ impl MappedVeclikeScanSnapshot {
                     for slot in fields {
                         // SAFETY: each captured fixed field remains initialized
                         // and aligned; overlapping writes use atomic publication.
-                        let value = load_value_atomic(unsafe { &*slot });
+                        let value = unsafe { &*slot }.load_atomic();
                         visit(MappedVeclikeScanItem::Child(value));
                     }
                     // SAFETY: the retained object has this fixed-size inline
                     // array; computing its address does not borrow the owner.
                     let contents = unsafe {
-                        std::ptr::addr_of!((*fixed.object).contents).cast::<TaggedValue>()
+                        std::ptr::addr_of!((*fixed.object).contents).cast::<AtomicTaggedValue>()
                     };
                     for index in 0..CHAR_TABLE_TOP_SLOTS {
                         // SAFETY: capture recorded this fixed-size inline array;
                         // index stays in bounds and atomic writes retain it.
                         let slot = unsafe { &*contents.add(index) };
-                        visit(MappedVeclikeScanItem::Child(load_value_atomic(slot)));
+                        visit(MappedVeclikeScanItem::Child(slot.load_atomic()));
                     }
                     // SAFETY: extras have the same retained span and atomic
                     // publication contract as sub-table contents.

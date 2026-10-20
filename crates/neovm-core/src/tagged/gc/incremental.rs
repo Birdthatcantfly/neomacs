@@ -908,15 +908,15 @@ impl TaggedHeap {
             VecLikeType::CharTable => {
                 let obj = unsafe { &*(ptr as *const CharTableObj) };
                 for (value, origin) in [
-                    (load_value_atomic(&obj.defalt), "char-table-default"),
-                    (load_value_atomic(&obj.parent), "char-table-parent"),
-                    (load_value_atomic(&obj.purpose), "char-table-purpose"),
-                    (load_value_atomic(&obj.ascii), "char-table-ascii"),
+                    (obj.defalt.load_atomic(), "char-table-default"),
+                    (obj.parent.load_atomic(), "char-table-parent"),
+                    (obj.purpose.load_atomic(), "char-table-purpose"),
+                    (obj.ascii.load_atomic(), "char-table-ascii"),
                 ] {
                     self.mark_or_push_child(value, origin);
                 }
                 for slot in &obj.contents {
-                    let val = load_value_atomic(slot);
+                    let val = slot.load_atomic();
                     self.mark_or_push_child(val, "char-table-content");
                 }
                 for val in obj.extras.iter_atomic() {

@@ -2358,7 +2358,13 @@ impl<'value> LiteralSlots<'value> {
     fn len(&self) -> usize {
         match self.source {
             LiteralSlotSource::CharTable(owner) => owner.as_char_table_obj().map_or(0, |table| {
-                [table.defalt, table.parent, table.purpose, table.ascii].len()
+                [
+                    table.defalt.get(),
+                    table.parent.get(),
+                    table.purpose.get(),
+                    table.ascii.get(),
+                ]
+                .len()
                     + table.contents.len()
                     + table.extras.len()
             }),
@@ -2378,13 +2384,18 @@ impl<'value> LiteralSlots<'value> {
         match self.source {
             LiteralSlotSource::CharTable(owner) => {
                 let table = owner.as_char_table_obj()?;
-                let header = [table.defalt, table.parent, table.purpose, table.ascii];
+                let header = [
+                    table.defalt.get(),
+                    table.parent.get(),
+                    table.purpose.get(),
+                    table.ascii.get(),
+                ];
                 if let Some(value) = header.get(index) {
                     return Some(*value);
                 }
                 let index = index.checked_sub(header.len())?;
                 if let Some(value) = table.contents.get(index) {
-                    return Some(*value);
+                    return Some(value.get());
                 }
                 table
                     .extras

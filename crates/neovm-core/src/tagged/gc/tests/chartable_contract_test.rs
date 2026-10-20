@@ -48,11 +48,11 @@ fn image_with_child(
     let image = Box::leak(Box::new(ChartableImage {
         table: CharTableObj {
             header: VecLikeHeader::new(VecLikeType::CharTable),
-            defalt: TaggedValue::NIL,
-            parent: TaggedValue::NIL,
-            purpose: TaggedValue::NIL,
-            ascii: TaggedValue::NIL,
-            contents: [TaggedValue::NIL; CHAR_TABLE_TOP_SLOTS],
+            defalt: TaggedValue::NIL.into(),
+            parent: TaggedValue::NIL.into(),
+            purpose: TaggedValue::NIL.into(),
+            ascii: TaggedValue::NIL.into(),
+            contents: [TaggedValue::NIL; CHAR_TABLE_TOP_SLOTS].map(AtomicTaggedValue::new),
             extras: LispValueVec::owned(vec![TaggedValue::NIL; 3]),
         },
         child: SubCharTableObj {
@@ -77,7 +77,7 @@ fn image_with_child(
     // SAFETY: headers are fully initialized in process-lifetime storage and are
     // exclusively owned until registration and the admitted collection start.
     let child = unsafe { TaggedValue::from_veclike_ptr(&image.child.header) };
-    image.table.ascii = child;
+    image.table.ascii.store_atomic(child);
     // SAFETY: the registered extents are adjacent, live, initialized image
     // headers. The leaked allocation outlives the heap and its marker.
     unsafe {
@@ -148,12 +148,12 @@ fn mapped_char_table_fields_and_extras_mutation_follows_collector_contract() {
     }
     heap.join_concurrent_mark();
     let obj = table.as_char_table_obj().unwrap();
-    assert_eq!(obj.defalt, TaggedValue::fixnum(4_095));
-    assert_eq!(obj.ascii, TaggedValue::fixnum(4_095));
+    assert_eq!(obj.defalt.get(), TaggedValue::fixnum(4_095));
+    assert_eq!(obj.ascii.get(), TaggedValue::fixnum(4_095));
     assert!(
         obj.contents
             .iter()
-            .all(|value| *value == TaggedValue::fixnum(4_095))
+            .all(|value| value.get() == TaggedValue::fixnum(4_095))
     );
     assert_eq!(obj.extras[1], TaggedValue::fixnum(4_095));
 }
@@ -291,5 +291,61 @@ fn readable_subtable_outside_its_span_preserves_optional_slot_policy() {
     assert_eq!(
         child.as_sub_char_table_obj().unwrap().contents[9],
         TaggedValue::fixnum(11)
+    );
+}
+
+/// Keep a marker's raw cell provenance across the real fixed-slot capability.
+/// No Context or bootstrap obarray is needed for this storage regression.
+#[test]
+fn miriub3_char_table_fixed_slots_keep_cell_provenance() {
+    let mut heap = TaggedHeap::new();
+    set_tagged_heap(&mut heap);
+    let table = heap.alloc_char_table(TaggedValue::NIL, TaggedValue::NIL, 1);
+    let object = table.as_veclike_ptr().unwrap().cast::<CharTableObj>();
+    // SAFETY: the live table owns these initialized fixed cells until heap drop.
+    // Raw field projection retains the allocation's provenance across stores.
+    let slots = unsafe {
+        [
+            std::ptr::addr_of!((*object).defalt),
+            std::ptr::addr_of!((*object).parent),
+            std::ptr::addr_of!((*object).purpose),
+            std::ptr::addr_of!((*object).ascii),
+            std::ptr::addr_of!((*object).contents).cast::<AtomicTaggedValue>(),
+            std::ptr::addr_of!((*object).contents)
+                .cast::<AtomicTaggedValue>()
+                .add(63),
+        ]
+    };
+    for slot in slots {
+        // SAFETY: the retained pointers address the actual cells, not owner views.
+        assert_eq!(unsafe { &*slot }.load_atomic(), TaggedValue::NIL);
+    }
+    table
+        .with_char_table_mut(|writer| {
+            writer.set_default(TaggedValue::fixnum(11));
+            writer.set_parent(TaggedValue::NIL);
+            writer.set_purpose(TaggedValue::NIL);
+            writer.set_ascii(TaggedValue::fixnum(13));
+            writer.set_contents(0, TaggedValue::fixnum(17));
+            writer.set_contents(63, TaggedValue::fixnum(19));
+            writer.set_extra(0, TaggedValue::fixnum(23));
+        })
+        .unwrap();
+    let expected = [11, 0, 0, 13, 17, 19];
+    for (index, slot) in slots.into_iter().enumerate() {
+        // SAFETY: fixed-shape stores neither move nor uniquely borrow the cells.
+        let value = unsafe { &*slot }.load_atomic();
+        assert_eq!(
+            value,
+            if index == 1 || index == 2 {
+                TaggedValue::NIL
+            } else {
+                TaggedValue::fixnum(expected[index])
+            }
+        );
+    }
+    assert_eq!(
+        table.as_char_table_obj().unwrap().extras[0],
+        TaggedValue::fixnum(23)
     );
 }

@@ -1426,8 +1426,13 @@ impl TaggedHeap {
                 }
                 VecLikeType::CharTable => {
                     let o = &*(ptr as *const CharTableObj);
-                    sink.children([o.defalt, o.parent, o.purpose, o.ascii]);
-                    sink.children(o.contents.iter().copied());
+                    sink.children([
+                        o.defalt.get(),
+                        o.parent.get(),
+                        o.purpose.get(),
+                        o.ascii.get(),
+                    ]);
+                    sink.children(o.contents.iter().map(AtomicTaggedValue::get));
                     sink.children(o.extras.iter().copied());
                 }
                 VecLikeType::SubCharTable => {

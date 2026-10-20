@@ -31,7 +31,7 @@ fn fixture_headers(table: TaggedValue) -> Vec<usize> {
                 object
                     .contents
                     .iter()
-                    .copied()
+                    .map(AtomicTaggedValue::get)
                     .filter(|child| child.veclike_type() == Some(VecLikeType::SubCharTable)),
             );
         } else if let Some(object) = value.as_sub_char_table_obj() {

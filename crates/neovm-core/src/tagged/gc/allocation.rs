@@ -222,17 +222,17 @@ impl TaggedHeap {
         extras: Vec<TaggedValue>,
     ) -> TaggedValue {
         let n_extras = extras.len();
-        let contents = [init; CHAR_TABLE_TOP_SLOTS];
+        let contents = [init; CHAR_TABLE_TOP_SLOTS].map(AtomicTaggedValue::new);
         self.add_memory_use_count(
             MemoryUseCountSlot::VectorCells,
             (4 + CHAR_TABLE_TOP_SLOTS + n_extras) as u64,
         );
         let obj = Box::new(CharTableObj {
             header: VecLikeHeader::new(VecLikeType::CharTable),
-            defalt: init,
-            parent: TaggedValue::NIL,
-            purpose,
-            ascii: init,
+            defalt: init.into(),
+            parent: TaggedValue::NIL.into(),
+            purpose: purpose.into(),
+            ascii: init.into(),
             contents,
             extras: extras.into(),
         });

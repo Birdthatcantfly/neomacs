@@ -1587,8 +1587,7 @@ impl VectorScanSnapshot {
 /// PUBLICATION-ORDERING CONTRACT (concurrent GC, task #24 fix A): every store
 /// that can make a heap pointer visible to the GC thread mid-mark (cons
 /// car/cdr, vector slots, symbol value/function/plist cells — this module's
-/// atomic store helpers) is `Release`, or is preceded by a Release fence
-/// (the fixed-slot char-table seam uses fence-then-Relaxed publication), and
+/// atomic store helpers, including fixed char-table cells) is `Release`, and
 /// every GC-thread load that can be
 /// the first acquisition of such a pointer (cons car/cdr, slot/field loads —
 /// this module's atomic load helpers) is `Acquire`. The pairing makes the
@@ -1605,9 +1604,7 @@ impl VectorScanSnapshot {
 /// already-snapshotted cell and read back mid-cycle. The mark bits themselves
 /// (`GcHeader.marked`, cons block bitmaps) stay `Relaxed`: they never
 /// publish field data, and a claim's field reads are ordered by this
-/// contract's pointer chain, not by the bit. Fence-then-Relaxed publication
-/// likewise compiles to a plain `mov` on x86-64, but uses `dmb` plus `str`
-/// rather than `stlr` on AArch64.
+/// contract's pointer chain, not by the bit.
 #[inline]
 pub fn load_value_atomic(slot: &TaggedValue) -> TaggedValue {
     let p = slot as *const TaggedValue as *const AtomicUsize;
@@ -1701,11 +1698,11 @@ pub const CHAR_TABLE_TOP_SLOTS: usize = 64;
 #[repr(C)]
 pub struct CharTableObj {
     pub header: VecLikeHeader,
-    pub defalt: TaggedValue,
-    pub parent: TaggedValue,
-    pub purpose: TaggedValue,
-    pub ascii: TaggedValue,
-    pub contents: [TaggedValue; CHAR_TABLE_TOP_SLOTS],
+    pub defalt: AtomicTaggedValue,
+    pub parent: AtomicTaggedValue,
+    pub purpose: AtomicTaggedValue,
+    pub ascii: AtomicTaggedValue,
+    pub contents: [AtomicTaggedValue; CHAR_TABLE_TOP_SLOTS],
     pub extras: LispValueVec,
 }
 
