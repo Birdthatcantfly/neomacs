@@ -8,6 +8,7 @@ use std::num::{NonZeroU16, NonZeroU32};
 
 mod rows_authority;
 pub use rows_authority::InertRowsHostAuthority;
+pub(crate) use rows_authority::actual_rows_host_type;
 
 mod system_fonts;
 pub use system_fonts::{SystemFontName, SystemFontRole, SystemFonts};
@@ -338,7 +339,29 @@ impl GuiResourceQuery {
     }
 }
 
-pub trait DisplayHost: std::any::Any {
+pub trait DisplayHost {
+    /// Concrete host identity for the closed numeric Rows authority check.
+    ///
+    /// The return type is public only to make this provided method a valid
+    /// public interface. Its module is private and it is not re-exported, so
+    /// external host implementations cannot name the return type to override
+    /// this method or forward another host's identity. They inherit this
+    /// default, whose `Self` is their actual concrete implementor even when
+    /// called through a stored `dyn DisplayHost`.
+    ///
+    /// Keep the return type and its constructor sealed. Implementations in
+    /// this trusted module subtree must preserve the same concrete-`Self`
+    /// identity invariant. This identity grants no geometry, lifetime or
+    /// cache authority by itself; Rows still requires the audited host-type
+    /// contract and every producer, owner and freshness check.
+    #[doc(hidden)]
+    fn __rows_host_identity(&self) -> rows_authority::ActualHostType
+    where
+        Self: 'static,
+    {
+        rows_authority::ActualHostType::of::<Self>()
+    }
+
     #[cfg(target_os = "macos")]
     fn ns_resource(&self, _name: &str) -> Option<String> {
         None

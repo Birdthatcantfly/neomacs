@@ -1,14 +1,14 @@
 //! Partial physical-owner observations for the private numeric Rows producer.
 //! No public API here grants geometry, coverage or cached-query authority.
 use super::Context;
-use crate::emacs_core::display_host::InertRowsHostAuthority;
+use crate::emacs_core::display_host::{InertRowsHostAuthority, actual_rows_host_type};
 use crate::face::{FaceTableIdentity, realization::RealizationEpoch};
 use crate::tagged::{
     collection_reads::CollectionReads,
     gc::{self, HeapIdentity, RowsOwnedDomain},
 };
 use crate::window::FrameId;
-use std::any::{Any, TypeId};
+use std::any::TypeId;
 use std::{marker::PhantomData, ops::Range};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -271,12 +271,13 @@ impl Context {
                 table,
                 host,
             } => {
-                // Standard Any and native identities only; no host virtual
-                // service, face normalization, collection or saved-key read.
+                // The sealed concrete-Self default and native identities
+                // only; no host-provided service, face normalization,
+                // collection or saved-key read.
                 let current_host = self
                     .display_host
                     .as_deref()
-                    .map(|host| RowsHostIdentity::Inert(Any::type_id(host)))
+                    .map(|host| RowsHostIdentity::Inert(actual_rows_host_type(host)))
                     .unwrap_or(RowsHostIdentity::Absent);
                 if current_host != *host {
                     return Err(RowsObservationRefusal::HostTypeChanged);

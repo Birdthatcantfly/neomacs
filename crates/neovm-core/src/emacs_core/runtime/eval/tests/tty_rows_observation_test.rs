@@ -156,7 +156,7 @@ fn tty_rows_observation_approved_actual_type_needs_no_host_virtual_probe() {
         .begin_tty_rows_observation(frame, Some(&authority))
         .unwrap();
     assert!(context.static_rows_observation_current(&epoch).is_ok());
-    // This would be wrong if Any::type_id were applied to Box<dyn DisplayHost>.
+    // The sealed default must identify the implementor, not Box<dyn DisplayHost>.
     assert!(authority.accepts(context.display_host.as_deref().unwrap()));
 }
 
