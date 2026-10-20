@@ -917,6 +917,7 @@ fn hash_table_user_hash(
         _ => Value::fixnum(super::super::hashtab::sxhash_for(
             &hash,
             HashTableTest::Equal,
+            eval.symbol_mode(),
         )),
     })
 }

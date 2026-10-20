@@ -224,6 +224,7 @@ mod pcase_deep_or_app_pred_pattern_functions_combo;
 mod pcase_pred_and_guard_app_backquote_combo;
 mod plist_lax_member_put_to_alist_combo;
 mod position_bytes_byte_to_position_multibyte_combo;
+mod positioned_symbol_sxhash_repro_combo;
 mod pp_buffer_pp_to_string_pretty_print_combo;
 mod print_circle_gensym_read_backref_cl_assert_deep;
 mod print_circle_number_table_var_indent_relative_electric_indent;

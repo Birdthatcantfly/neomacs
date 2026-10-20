@@ -14,6 +14,7 @@ use super::value::*;
 use crate::buffer::{CharLen, CharPos0, CharRange};
 use crate::emacs_core::error::LispCondition;
 use crate::emacs_core::error::{expect_args, expect_max_args, expect_min_args};
+use crate::tagged::SymbolMode;
 use crate::tagged::gc::with_tagged_heap;
 use std::collections::{BTreeMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
@@ -237,10 +238,10 @@ pub(crate) fn emacs_hash_char_array(bytes: &[u8]) -> u64 {
     hash
 }
 
-fn fallback_sxhash_emacs_uint(value: &Value, test: HashTableTest) -> u64 {
+fn fallback_sxhash_emacs_uint(value: &Value, test: HashTableTest, symbol_mode: SymbolMode) -> u64 {
     let mut hasher = DefaultHasher::new();
     match test {
-        HashTableTest::Equal => hash_value_for_equal(value, &mut hasher, 0),
+        HashTableTest::Equal => hash_value_for_equal(value, &mut hasher, 0, symbol_mode),
         _ => value.to_hash_key(&test).hash(&mut hasher),
     }
     // Keep fallback hashes in the non-negative fixnum lane. Exact Emacs
@@ -248,12 +249,12 @@ fn fallback_sxhash_emacs_uint(value: &Value, test: HashTableTest) -> u64 {
     hasher.finish() & SXHASH_FALLBACK_NONNEG_MASK
 }
 
-fn emacs_sxhash_obj_with_fallback(value: &Value, depth: usize) -> u64 {
-    emacs_sxhash_obj(value, depth)
-        .unwrap_or_else(|| fallback_sxhash_emacs_uint(value, HashTableTest::Equal))
+fn emacs_sxhash_obj_with_fallback(value: &Value, depth: usize, symbol_mode: SymbolMode) -> u64 {
+    emacs_sxhash_obj(value, depth, symbol_mode)
+        .unwrap_or_else(|| fallback_sxhash_emacs_uint(value, HashTableTest::Equal, symbol_mode))
 }
 
-fn emacs_sxhash_list(value: &Value, depth: usize) -> u64 {
+fn emacs_sxhash_list(value: &Value, depth: usize, symbol_mode: SymbolMode) -> u64 {
     let mut hash = 0_u64;
     let mut cursor = *value;
     if depth < SXHASH_MAX_DEPTH {
@@ -263,17 +264,27 @@ fn emacs_sxhash_list(value: &Value, depth: usize) -> u64 {
             };
             let pair_car = cursor.cons_car();
             let pair_cdr = cursor.cons_cdr();
-            hash = sxhash_combine(hash, emacs_sxhash_obj_with_fallback(&pair_car, depth + 1));
+            hash = sxhash_combine(
+                hash,
+                emacs_sxhash_obj_with_fallback(&pair_car, depth + 1, symbol_mode),
+            );
             cursor = pair_cdr;
         }
     }
     if !cursor.is_nil() {
-        hash = sxhash_combine(hash, emacs_sxhash_obj_with_fallback(&cursor, depth + 1));
+        hash = sxhash_combine(
+            hash,
+            emacs_sxhash_obj_with_fallback(&cursor, depth + 1, symbol_mode),
+        );
     }
     hash
 }
 
-fn emacs_sxhash_structural_pseudovector(value: &Value, depth: usize) -> Option<u64> {
+fn emacs_sxhash_structural_pseudovector(
+    value: &Value,
+    depth: usize,
+    symbol_mode: SymbolMode,
+) -> Option<u64> {
     let kind = value.veclike_type()?;
     // GNU deliberately does not traverse the packed prefix and deep tree of a
     // sub-char-table. All such nodes use the same valid (collision-heavy)
@@ -287,7 +298,7 @@ fn emacs_sxhash_structural_pseudovector(value: &Value, depth: usize) -> Option<u
     for index in 0..count {
         hash = sxhash_combine(
             hash,
-            emacs_sxhash_obj_with_fallback(&view.slot(index), depth + 1),
+            emacs_sxhash_obj_with_fallback(&view.slot(index), depth + 1, symbol_mode),
         );
     }
     Some(hash)
@@ -306,12 +317,15 @@ fn emacs_sxhash_marker(value: &Value) -> Option<u64> {
     ))
 }
 
-fn emacs_sxhash_overlay(value: &Value, depth: usize) -> Option<u64> {
+fn emacs_sxhash_overlay(value: &Value, depth: usize, symbol_mode: SymbolMode) -> Option<u64> {
     let overlay = value.as_overlay_data()?;
     let (start, end) = overlay.current_range();
     let mut hash = start as u64;
     hash = sxhash_combine(hash, end as u64);
-    hash = sxhash_combine(hash, emacs_sxhash_obj_with_fallback(&overlay.plist, depth));
+    hash = sxhash_combine(
+        hash,
+        emacs_sxhash_obj_with_fallback(&overlay.plist, depth, symbol_mode),
+    );
     Some(hash)
 }
 
@@ -323,7 +337,7 @@ fn emacs_sxhash_overlay(value: &Value, depth: usize) -> Option<u64> {
 /// including a captured environment beside the constants, moves the hash --
 /// folded like `sxhash_vector`: seeded with the slot count, at most
 /// `SXHASH_MAX_LEN` elements.
-fn emacs_sxhash_bytecode(value: &Value, depth: usize) -> Option<u64> {
+fn emacs_sxhash_bytecode(value: &Value, depth: usize, symbol_mode: SymbolMode) -> Option<u64> {
     use crate::emacs_core::bytecode::ByteCodeStructuralPart as Part;
     let bc = value.get_bytecode_data()?;
     let mut parts = bc.structural_parts();
@@ -336,7 +350,7 @@ fn emacs_sxhash_bytecode(value: &Value, depth: usize) -> Option<u64> {
             Part::ObservableSlotCount(_) => {
                 unreachable!("byte-code structure contains one leading shape")
             }
-            Part::Value(value) => emacs_sxhash_obj_with_fallback(&value, depth + 1),
+            Part::Value(value) => emacs_sxhash_obj_with_fallback(&value, depth + 1, symbol_mode),
             Part::Bytes(bytes) => emacs_hash_char_array(bytes),
             Part::Ops(ops) => {
                 let mut hasher = DefaultHasher::new();
@@ -348,7 +362,7 @@ fn emacs_sxhash_bytecode(value: &Value, depth: usize) -> Option<u64> {
                 for value in values.iter().take(SXHASH_MAX_LEN) {
                     vector_hash = sxhash_combine(
                         vector_hash,
-                        emacs_sxhash_obj_with_fallback(value, depth + 2),
+                        emacs_sxhash_obj_with_fallback(value, depth + 2, symbol_mode),
                     );
                 }
                 vector_hash
@@ -363,10 +377,11 @@ fn emacs_sxhash_bytecode(value: &Value, depth: usize) -> Option<u64> {
     Some(hash)
 }
 
-fn emacs_sxhash_obj(value: &Value, depth: usize) -> Option<u64> {
+fn emacs_sxhash_obj(value: &Value, depth: usize, symbol_mode: SymbolMode) -> Option<u64> {
     if depth > SXHASH_MAX_DEPTH {
         return Some(0);
     }
+    let value = &symbol_mode.unwrap(*value);
     match value.kind() {
         ValueKind::Fixnum(n) => Some(n as u64),
         ValueKind::Float => Some(value.xfloat().to_bits()),
@@ -376,18 +391,20 @@ fn emacs_sxhash_obj(value: &Value, depth: usize) -> Option<u64> {
                 .expect("ValueKind::String must carry LispString payload")
                 .as_bytes(),
         )),
-        ValueKind::Cons => Some(emacs_sxhash_list(value, depth)),
+        ValueKind::Cons => Some(emacs_sxhash_list(value, depth, symbol_mode)),
         ValueKind::Veclike(VecLikeType::Vector)
         | ValueKind::Veclike(VecLikeType::Record)
         | ValueKind::Veclike(VecLikeType::CharTable)
         | ValueKind::Veclike(VecLikeType::SubCharTable) => {
-            emacs_sxhash_structural_pseudovector(value, depth)
+            emacs_sxhash_structural_pseudovector(value, depth, symbol_mode)
         }
-        ValueKind::Veclike(VecLikeType::ByteCode) => emacs_sxhash_bytecode(value, depth),
+        ValueKind::Veclike(VecLikeType::ByteCode) => {
+            emacs_sxhash_bytecode(value, depth, symbol_mode)
+        }
         ValueKind::Veclike(VecLikeType::Bignum) => sxhash_bignum(value),
         ValueKind::Veclike(VecLikeType::BoolVector) => sxhash_bool_vector(value),
         ValueKind::Veclike(VecLikeType::Marker) => emacs_sxhash_marker(value),
-        ValueKind::Veclike(VecLikeType::Overlay) => emacs_sxhash_overlay(value, depth),
+        ValueKind::Veclike(VecLikeType::Overlay) => emacs_sxhash_overlay(value, depth, symbol_mode),
         _ => None,
     }
 }
@@ -401,8 +418,8 @@ fn plist_pairs_to_value(plist: &[(Value, Value)]) -> Value {
     out
 }
 
-fn sxhash_equal_including_properties_emacs_uint(value: &Value) -> u64 {
-    let mut hash = sxhash_emacs_uint_for(value, HashTableTest::Equal);
+fn sxhash_equal_including_properties_emacs_uint(value: &Value, symbol_mode: SymbolMode) -> u64 {
+    let mut hash = sxhash_emacs_uint_for(value, HashTableTest::Equal, symbol_mode);
     if !value.is_string() {
         return hash;
     }
@@ -417,7 +434,10 @@ fn sxhash_equal_including_properties_emacs_uint(value: &Value) -> u64 {
                 hash = sxhash_combine(hash, range.start().get() as u64);
                 hash = sxhash_combine(hash, range.len().get() as u64);
                 let plist_value = plist_pairs_to_value(plist);
-                hash = sxhash_combine(hash, emacs_sxhash_obj_with_fallback(&plist_value, 0));
+                hash = sxhash_combine(
+                    hash,
+                    emacs_sxhash_obj_with_fallback(&plist_value, 0, symbol_mode),
+                );
                 Ok::<(), ()>(())
             },
         );
@@ -458,11 +478,17 @@ pub(crate) fn knuth_hash_index(hash: u32, bits: u32) -> usize {
     ((product as u64) >> (32 - bits)) as usize
 }
 
-fn hash_value_for_equal(value: &Value, hasher: &mut DefaultHasher, depth: usize) {
+fn hash_value_for_equal(
+    value: &Value,
+    hasher: &mut DefaultHasher,
+    depth: usize,
+    symbol_mode: SymbolMode,
+) {
     if depth > 4096 {
         0_u8.hash(hasher);
         return;
     }
+    let value = &symbol_mode.unwrap(*value);
     match value.kind() {
         ValueKind::Nil => 0_u8.hash(hasher),
         ValueKind::T => 1_u8.hash(hasher),
@@ -491,8 +517,8 @@ fn hash_value_for_equal(value: &Value, hasher: &mut DefaultHasher, depth: usize)
             7_u8.hash(hasher);
             let pair_car = value.cons_car();
             let pair_cdr = value.cons_cdr();
-            hash_value_for_equal(&pair_car, hasher, depth + 1);
-            hash_value_for_equal(&pair_cdr, hasher, depth + 1);
+            hash_value_for_equal(&pair_car, hasher, depth + 1, symbol_mode);
+            hash_value_for_equal(&pair_cdr, hasher, depth + 1, symbol_mode);
         }
         ValueKind::Veclike(VecLikeType::Vector) | ValueKind::Veclike(VecLikeType::Record) => {
             8_u8.hash(hasher);
@@ -507,7 +533,7 @@ fn hash_value_for_equal(value: &Value, hasher: &mut DefaultHasher, depth: usize)
                 .clone();
             items.len().hash(hasher);
             for item in items.iter() {
-                hash_value_for_equal(item, hasher, depth + 1);
+                hash_value_for_equal(item, hasher, depth + 1, symbol_mode);
             }
         }
         ValueKind::Veclike(VecLikeType::Window) => {
@@ -571,7 +597,7 @@ fn hash_value_for_equal(value: &Value, hasher: &mut DefaultHasher, depth: usize)
                 overlay.buffer.map(|buffer| buffer.0).hash(hasher);
                 start.hash(hasher);
                 end.hash(hasher);
-                hash_value_for_equal(&overlay.plist, hasher, depth + 1);
+                hash_value_for_equal(&overlay.plist, hasher, depth + 1, symbol_mode);
             } else {
                 value.bits().hash(hasher);
             }
@@ -584,24 +610,30 @@ fn hash_value_for_equal(value: &Value, hasher: &mut DefaultHasher, depth: usize)
     }
 }
 
-fn sxhash_emacs_uint_for(value: &Value, test: HashTableTest) -> u64 {
+fn sxhash_emacs_uint_for(value: &Value, test: HashTableTest, symbol_mode: SymbolMode) -> u64 {
+    let value = &symbol_mode.unwrap(*value);
     match test {
-        HashTableTest::Equal => emacs_sxhash_obj_with_fallback(value, 0),
+        HashTableTest::Equal => emacs_sxhash_obj_with_fallback(value, 0, symbol_mode),
         HashTableTest::Eq | HashTableTest::Eql => match value.kind() {
             ValueKind::Fixnum(n) => sxhash_eq_fixnum_uint(n as u64),
             ValueKind::Float if matches!(test, HashTableTest::Eql) => value.xfloat().to_bits(),
             // GNU `sxhash_eql` hashes floats and bignums by value (full
             // `sxhash`); only `eq` uses object identity for bignums.
             ValueKind::Veclike(VecLikeType::Bignum) if matches!(test, HashTableTest::Eql) => {
-                sxhash_bignum(value).unwrap_or_else(|| fallback_sxhash_emacs_uint(value, test))
+                sxhash_bignum(value)
+                    .unwrap_or_else(|| fallback_sxhash_emacs_uint(value, test, symbol_mode))
             }
-            _ => fallback_sxhash_emacs_uint(value, test),
+            _ => fallback_sxhash_emacs_uint(value, test, symbol_mode),
         },
     }
 }
 
-pub(crate) fn sxhash_for(value: &Value, test: HashTableTest) -> i64 {
-    reduce_emacs_uint_to_fixnum(sxhash_emacs_uint_for(value, test))
+/// Hash one operation using its owning mutator's symbol policy. This copied
+/// policy owns no Lisp state and is threaded through recursive hashing; it is
+/// never recovered from global/TLS state. GNU fns.c sxhash_obj unwraps a
+/// positioned symbol only while symbols_with_pos_enabled (line 5555).
+pub(crate) fn sxhash_for(value: &Value, test: HashTableTest, symbol_mode: SymbolMode) -> i64 {
+    reduce_emacs_uint_to_fixnum(sxhash_emacs_uint_for(value, test, symbol_mode))
 }
 
 fn next_pow2_saturating(value: usize) -> usize {
@@ -624,14 +656,22 @@ fn internal_hash_table_diagnostic_hash(key: &HashKey, test: HashTableTest) -> u3
             HashKey::Ptr(ptr) => reduce_emacs_uint_to_hash_hash(*ptr as u64),
             _ => {
                 let value = hash_key_to_value(key);
-                reduce_emacs_uint_to_hash_hash(sxhash_emacs_uint_for(&value, HashTableTest::Eq))
+                reduce_emacs_uint_to_hash_hash(sxhash_emacs_uint_for(
+                    &value,
+                    HashTableTest::Eq,
+                    SymbolMode::Bare,
+                ))
             }
         },
         HashTableTest::Eql => match key {
             HashKey::Ptr(ptr) => reduce_emacs_uint_to_hash_hash(*ptr as u64),
             _ => {
                 let value = hash_key_to_value(key);
-                reduce_emacs_uint_to_hash_hash(sxhash_emacs_uint_for(&value, HashTableTest::Eql))
+                reduce_emacs_uint_to_hash_hash(sxhash_emacs_uint_for(
+                    &value,
+                    HashTableTest::Eql,
+                    SymbolMode::Bare,
+                ))
             }
         },
         HashTableTest::Equal => match key {
@@ -644,7 +684,11 @@ fn internal_hash_table_diagnostic_hash(key: &HashKey, test: HashTableTest) -> u3
             }
             _ => {
                 let value = hash_key_to_value(key);
-                reduce_emacs_uint_to_hash_hash(sxhash_emacs_uint_for(&value, HashTableTest::Equal))
+                reduce_emacs_uint_to_hash_hash(sxhash_emacs_uint_for(
+                    &value,
+                    HashTableTest::Equal,
+                    SymbolMode::Bare,
+                ))
             }
         },
     }
@@ -825,31 +869,73 @@ pub(crate) fn builtin_hash_table_values(args: Vec<Value>) -> EvalResult {
 }
 
 /// `(sxhash-eq OBJECT)` -- hash OBJECT according to `eq` semantics.
-pub(crate) fn builtin_sxhash_eq(args: Vec<Value>) -> EvalResult {
+pub(crate) fn builtin_sxhash_eq_with_mode(args: Vec<Value>, symbol_mode: SymbolMode) -> EvalResult {
     expect_args("sxhash-eq", &args, 1)?;
-    Ok(Value::fixnum(sxhash_for(&args[0], HashTableTest::Eq)))
+    Ok(Value::fixnum(sxhash_for(
+        &args[0],
+        HashTableTest::Eq,
+        symbol_mode,
+    )))
 }
 
 /// `(sxhash-eql OBJECT)` -- hash OBJECT according to `eql` semantics.
-pub(crate) fn builtin_sxhash_eql(args: Vec<Value>) -> EvalResult {
+pub(crate) fn builtin_sxhash_eql_with_mode(
+    args: Vec<Value>,
+    symbol_mode: SymbolMode,
+) -> EvalResult {
     expect_args("sxhash-eql", &args, 1)?;
-    Ok(Value::fixnum(sxhash_for(&args[0], HashTableTest::Eql)))
+    Ok(Value::fixnum(sxhash_for(
+        &args[0],
+        HashTableTest::Eql,
+        symbol_mode,
+    )))
 }
 
 /// `(sxhash-equal OBJECT)` -- hash OBJECT according to `equal` semantics.
-pub(crate) fn builtin_sxhash_equal(args: Vec<Value>) -> EvalResult {
+pub(crate) fn builtin_sxhash_equal_with_mode(
+    args: Vec<Value>,
+    symbol_mode: SymbolMode,
+) -> EvalResult {
     expect_args("sxhash-equal", &args, 1)?;
-    Ok(Value::fixnum(sxhash_for(&args[0], HashTableTest::Equal)))
+    Ok(Value::fixnum(sxhash_for(
+        &args[0],
+        HashTableTest::Equal,
+        symbol_mode,
+    )))
 }
 
 /// `(sxhash-equal-including-properties OBJECT)` -- hash OBJECT like
 /// `equal-including-properties`. NeoVM currently has no text properties, so
 /// this matches `sxhash-equal`.
-pub(crate) fn builtin_sxhash_equal_including_properties(args: Vec<Value>) -> EvalResult {
+pub(crate) fn builtin_sxhash_equal_including_properties_with_mode(
+    args: Vec<Value>,
+    symbol_mode: SymbolMode,
+) -> EvalResult {
     expect_args("sxhash-equal-including-properties", &args, 1)?;
     Ok(Value::fixnum(reduce_emacs_uint_to_fixnum(
-        sxhash_equal_including_properties_emacs_uint(&args[0]),
+        sxhash_equal_including_properties_emacs_uint(&args[0], symbol_mode),
     )))
+}
+
+// Bare adapters are available only to existing low-level unit tests.
+#[cfg(test)]
+pub(crate) fn builtin_sxhash_eq(args: Vec<Value>) -> EvalResult {
+    builtin_sxhash_eq_with_mode(args, SymbolMode::Bare)
+}
+
+#[cfg(test)]
+pub(crate) fn builtin_sxhash_eql(args: Vec<Value>) -> EvalResult {
+    builtin_sxhash_eql_with_mode(args, SymbolMode::Bare)
+}
+
+#[cfg(test)]
+pub(crate) fn builtin_sxhash_equal(args: Vec<Value>) -> EvalResult {
+    builtin_sxhash_equal_with_mode(args, SymbolMode::Bare)
+}
+
+#[cfg(test)]
+pub(crate) fn builtin_sxhash_equal_including_properties(args: Vec<Value>) -> EvalResult {
+    builtin_sxhash_equal_including_properties_with_mode(args, SymbolMode::Bare)
 }
 
 /// `(internal--hash-table-index-size TABLE)` -- report hash index width.
@@ -1198,3 +1284,7 @@ mod bignum_sxhash_tests;
 #[cfg(test)]
 #[path = "tests/hashtab_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/symbol_mode_sxhash_test.rs"]
+mod symbol_mode_sxhash_tests;

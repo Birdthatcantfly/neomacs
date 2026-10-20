@@ -5693,23 +5693,32 @@ pub(crate) fn register_subrs(ctx: &mut crate::emacs_core::eval::Context) {
     ));
     ctx.register_subr(SubrSpec::new(
         "sxhash-eq",
-        NativeFn::ContextVec(|_ctx, args| crate::emacs_core::hashtab::builtin_sxhash_eq(args)),
+        NativeFn::ContextVec(|ctx, args| {
+            crate::emacs_core::hashtab::builtin_sxhash_eq_with_mode(args, ctx.symbol_mode())
+        }),
         SubrArity::new(1, Some(1)),
     ));
     ctx.register_subr(SubrSpec::new(
         "sxhash-eql",
-        NativeFn::ContextVec(|_ctx, args| crate::emacs_core::hashtab::builtin_sxhash_eql(args)),
+        NativeFn::ContextVec(|ctx, args| {
+            crate::emacs_core::hashtab::builtin_sxhash_eql_with_mode(args, ctx.symbol_mode())
+        }),
         SubrArity::new(1, Some(1)),
     ));
     ctx.register_subr(SubrSpec::new(
         "sxhash-equal",
-        NativeFn::ContextVec(|_ctx, args| crate::emacs_core::hashtab::builtin_sxhash_equal(args)),
+        NativeFn::ContextVec(|ctx, args| {
+            crate::emacs_core::hashtab::builtin_sxhash_equal_with_mode(args, ctx.symbol_mode())
+        }),
         SubrArity::new(1, Some(1)),
     ));
     ctx.register_subr(SubrSpec::new(
         "sxhash-equal-including-properties",
-        NativeFn::ContextVec(|_ctx, args| {
-            crate::emacs_core::hashtab::builtin_sxhash_equal_including_properties(args)
+        NativeFn::ContextVec(|ctx, args| {
+            crate::emacs_core::hashtab::builtin_sxhash_equal_including_properties_with_mode(
+                args,
+                ctx.symbol_mode(),
+            )
         }),
         SubrArity::new(1, Some(1)),
     ));
