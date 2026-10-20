@@ -1,6 +1,7 @@
 //! Explicit red semantics on real C2 handles; never run in a normal gate.
 //! Run each ignored test and require its P3SYM_C3_RED assertion, not an
-//! arbitrary failure. Teardown completes before the intentional assertion.
+//! arbitrary failure. The missing-op assertion unwinds through RAII cleanup;
+//! era finish must succeed before the original assertion is propagated.
 use super::*;
 use crate::emacs_core::eval::Context;
 use crate::tagged::gc::PlainSymbolBacking;
@@ -15,19 +16,54 @@ fn oracle() -> Vec<&'static str> {
     lines
 }
 
-fn red_case(op: GlobalOp, kind: PlainSymbolBacking) {
-    let expected = match op {
-        GlobalOp::Value { .. } => oracle()[0],
-        GlobalOp::Set { .. } => oracle()[1],
-        GlobalOp::Boundp { .. } => oracle()[2],
-        GlobalOp::Makunbound { .. } => oracle()[3],
-    };
-    let result = Context::with_test_symbol_backing_era(kind, |era, id| {
+/// Own every fixture obligation, independently of the operation's result.
+/// An inner RunAccess/lease must drop before this guard can regain the owner.
+struct FixtureGuard<'era> {
+    owner: Option<super::super::Mutator<'era>>,
+    roots: Option<(SharedRoot, SharedRoot)>,
+    homes: Option<(OwnerRootSlot<'era>, OwnerRootSlot<'era>)>,
+    cleanup: std::rc::Rc<std::cell::RefCell<Option<Result<(), String>>>>,
+}
+
+impl Drop for FixtureGuard<'_> {
+    fn drop(&mut self) {
+        // Drop cannot assert while the missing-op assertion is unwinding.
+        // Record any teardown error for the outer harness to reject instead.
+        let result = (|| {
+            drop(self.homes.take());
+            let mut owner = self.owner.take().ok_or("fixture owner absent")?;
+            {
+                let mut run = owner
+                    .run_access()
+                    .map_err(|e| format!("cleanup run: {e:?}"))?;
+                run.clear_root_slots()
+                    .map_err(|e| format!("clear census: {e:?}"))?;
+            }
+            drop(self.roots.take());
+            owner
+                .retire_rooted(&[])
+                .map_err(|e| format!("retire: {e:?}"))?;
+            Ok(())
+        })();
+        *self.cleanup.borrow_mut() = Some(result);
+    }
+}
+
+fn fixture_case(
+    kind: PlainSymbolBacking,
+    body: impl for<'owner, 'era> FnOnce(
+        &mut RunAccess<'owner, 'era>,
+        &SymbolHandle,
+        &OwnerRootSlot<'era>,
+        &mut OwnerRootSlot<'era>,
+    ),
+) -> std::thread::Result<()> {
+    Context::with_test_symbol_backing_era(kind, |era, id| {
         let handle = era.admit_plain_symbol(id).unwrap();
         // Explicit matching stopped heap for serial immediate-root setup;
         // no collection, current-heap TLS access or raw global read.
         let mut stopped = era.stop().unwrap();
-        let (input, output) = era
+        let roots = era
             .with_stopped_heap_for_test(&stopped, |heap| unsafe {
                 // SAFETY: live scalar immediates on the matching stopped heap.
                 (
@@ -38,49 +74,94 @@ fn red_case(op: GlobalOp, kind: PlainSymbolBacking) {
             .unwrap();
         stopped.trace(|_, _| Ok(())).unwrap();
         stopped.complete().unwrap();
-        let mut owner = era
+        let owner = era
             .register(1, 4)
             .unwrap()
             .activate(era.heap_identity(), 1)
             .unwrap();
-        let result = {
-            let mut run = owner.run_access().unwrap();
-            assert_eq!(run.symbol_ref(&handle).unwrap().backing(), kind);
-            let src = run.root_slot(&input).unwrap();
-            let mut dst = run.root_slot(&output).unwrap();
-            let outcome = match op {
-                GlobalOp::Value { .. } => run.sym_value_into(&handle, &mut dst),
-                GlobalOp::Set { .. } => run.sym_set_into(&handle, &src, &mut dst),
-                GlobalOp::Boundp { .. } => run.sym_boundp_into(&handle, &mut dst),
-                GlobalOp::Makunbound { .. } => run.sym_makunbound_into(&handle, &mut dst),
+        let cleanup = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let cleanup_receipt = std::rc::Rc::clone(&cleanup);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let mut fixture = FixtureGuard {
+                owner: Some(owner),
+                roots: Some(roots),
+                homes: None,
+                cleanup: cleanup_receipt,
             };
-            outcome.map(|()| {
-                let value = Value::from_bits(dst.word_for_test(&run));
-                let value = if matches!(op, GlobalOp::Makunbound { .. }) {
-                    if value.bits() == Value::from_sym_id(id).bits() {
-                        Value::T
-                    } else {
-                        Value::NIL
-                    }
-                } else {
-                    value
-                };
-                crate::emacs_core::print_value(&value)
-            })
-        };
-        drop(input);
-        drop(output);
-        owner.retire_rooted(&[]).unwrap();
-        let (collector, keeper) = era.finish().unwrap();
+            let mut run = fixture.owner.as_mut().unwrap().run_access().unwrap();
+            {
+                let reader = run.symbol_ref(&handle).unwrap();
+                assert_eq!(reader.backing(), kind);
+            }
+            let (input, output) = fixture.roots.as_ref().unwrap();
+            fixture.homes = Some((
+                run.root_slot(input).unwrap(),
+                run.root_slot(output).unwrap(),
+            ));
+            let (src, dst) = fixture.homes.as_mut().unwrap();
+            // Assertions in body run BEFORE teardown. On panic, this run and
+            // any nested lease unwind before FixtureGuard clears its census.
+            body(&mut run, &handle, src, dst);
+        }));
+        assert_eq!(
+            cleanup.borrow().as_ref(),
+            Some(&Ok(())),
+            "C3 fixture teardown failed independently of operation outcome"
+        );
+        let (collector, keeper) = era
+            .finish()
+            .expect("C3 fixture era finish after root cleanup");
         drop(collector);
         drop(keeper);
-        result
+        eprintln!("P3SYM_C3_TEARDOWN_OK {kind:?}");
+        outcome
+    })
+}
+
+fn red_case(op: GlobalOp, kind: PlainSymbolBacking) {
+    let name = match op {
+        GlobalOp::Value { .. } => "sym_value_into",
+        GlobalOp::Set { .. } => "sym_set_into",
+        GlobalOp::Boundp { .. } => "sym_boundp_into",
+        GlobalOp::Makunbound { .. } => "sym_makunbound_into",
+    };
+    let result = fixture_case(kind, |run, handle, src, dst| {
+        let outcome = match op {
+            GlobalOp::Value { .. } => run.sym_value_into(handle, dst),
+            GlobalOp::Set { .. } => run.sym_set_into(handle, src, dst),
+            GlobalOp::Boundp { .. } => run.sym_boundp_into(handle, dst),
+            GlobalOp::Makunbound { .. } => run.sym_makunbound_into(handle, dst),
+        };
+        assert_eq!(
+            outcome,
+            Err(GlobalError::AwaitingB143),
+            "unexpected result from missing executor op {name}"
+        );
+        assert!(
+            outcome.is_ok(),
+            "P3SYM_C3_RED missing executor op {name}: {outcome:?}"
+        );
     });
-    assert_eq!(
-        result.as_deref(),
-        Ok(expected),
-        "P3SYM_C3_RED {op:?} {kind:?}: storage implementation awaits b143"
-    );
+    let failure = result.expect_err("missing executor op produced no red witness");
+    let text = failure
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| failure.downcast_ref::<&str>().copied())
+        .expect("non-string panic cannot be a missing-op witness");
+    assert!(text.contains(&format!("P3SYM_C3_RED missing executor op {name}")));
+    // Teardown is proved successful before propagating the ORIGINAL assertion.
+    std::panic::resume_unwind(failure);
+}
+
+#[test]
+fn p3sym_c3_noop_fixture_releases_roots_and_finishes() {
+    for kind in [
+        PlainSymbolBacking::Unprojected,
+        PlainSymbolBacking::Projected,
+    ] {
+        fixture_case(kind, |_run, _handle, _src, _dst| {})
+            .expect("no-op body must finish without a fixture panic");
+    }
 }
 
 macro_rules! red {
