@@ -85,6 +85,10 @@ impl Drop for ParkTicket<'_> {
 }
 
 impl Registry {
+    pub(super) fn gate_is_held_by_current_thread(&self) -> bool {
+        self.gate.gate_owner.load(Ordering::Acquire) == current_thread()
+    }
+
     /// Internal stopped image prepare/commit only. Never wait while retaining a gate,
     /// entry/root-table/allocator guard, or a callback into owner code.
     pub(super) fn lock_blocking(&self) -> Result<RegistryGuard<'_>, RegistrationError> {

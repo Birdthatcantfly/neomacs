@@ -714,3 +714,184 @@ fn native_publication_is_not_stopped_until_root_and_image_commit() {
         finish_era(era);
     });
 }
+
+/// A real returning owner holds the predicate mutex after ACK/stop, before its
+/// atomic Condvar wait. Scope installation occurs inside the terminal trace.
+#[test]
+fn a6_ht_b9_table_scope_gate_contention_retries_before_job() {
+    use super::super::super::collector_tables;
+    Context::with_test_rooted_mutator_era(|era, roots| {
+        let heap = era.heap_identity();
+        let permit = era.register(1911, 1).unwrap();
+        let input = vec![roots[0].clone()];
+        thread::scope(|scope| {
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (return_tx, return_rx) = mpsc::channel();
+            let (held_tx, held_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let worker = scope.spawn(move || {
+                let mut owner = activate(permit, heap, 1911);
+                retry(|| owner.enter_native(&input));
+                ready_tx.send(()).unwrap();
+                receive(&return_rx);
+                owner.protocol.restore_wait_hook = Some(Box::new(move || {
+                    held_tx.send(()).unwrap();
+                    receive(&release_rx);
+                }));
+                let restored = match owner.begin_restore_retry(true) {
+                    Ok(image) => {
+                        apply(image);
+                        true
+                    }
+                    Err(RendezvousError::Poisoned) => false,
+                    Err(error) => panic!("unexpected restore refusal: {error:?}"),
+                };
+                if restored {
+                    retire(owner, &input);
+                } else {
+                    drop(owner);
+                }
+                restored
+            });
+            receive(&ready_rx);
+            let mut stopped = retry(|| era.stop());
+            let mut release_tx = Some(release_tx);
+            let mut body_calls = 0;
+            let mut busy_observed = 0;
+            let result = stopped.trace(|guard, _proof| {
+                return_tx.send(()).unwrap();
+                receive(&held_rx);
+                let mut collector = era.collector.try_borrow_mut().unwrap();
+                let heap = collector.as_mut().unwrap().registration_heap_mut();
+                collector_tables::with_stopped_tables_for_trace_observing_busy(
+                    heap,
+                    guard,
+                    |heap| {
+                        assert_eq!(
+                            collector_tables::with_stopped_tables_for_trace(heap, guard, |_| ()),
+                            Err(RendezvousError::Busy)
+                        );
+                        body_calls += 1;
+                        Ok(())
+                    },
+                    || {
+                        busy_observed += 1;
+                        if let Some(tx) = release_tx.take() {
+                            tx.send(()).unwrap();
+                        }
+                    },
+                )?
+            });
+            if result.is_ok() {
+                complete(stopped);
+            } else {
+                drop(stopped);
+            }
+            let restored = worker.join().unwrap();
+            assert_eq!(
+                result,
+                Ok(()),
+                "pre-job gate contention must not poison trace"
+            );
+            assert!(
+                busy_observed >= 1,
+                "the real gate refusal must be exercised"
+            );
+            assert_eq!(body_calls, 1, "only the installed job runs");
+            assert!(
+                restored,
+                "the same owner must restore after keeper completion"
+            );
+        });
+        finish_era(era);
+    });
+}
+
+#[test]
+fn a6_ht_b9_table_scope_body_error_stays_terminal_after_image_mutation() {
+    use super::super::super::collector_tables;
+    Context::with_test_rooted_mutator_era(|era, roots| {
+        let mut owner = era
+            .register(1912, 1)
+            .unwrap()
+            .activate(era.heap_identity(), 1912)
+            .unwrap();
+        let key = owner.key();
+        seed(&mut owner, 1912);
+        owner.enter_native(&roots[..1]).unwrap();
+        let rv = era.rendezvous();
+        let mut stopped = era.stop().unwrap();
+        let mut body_calls = 0;
+        let mut busy_observed = 0;
+        let result = stopped.trace::<()>(|guard, _proof| {
+            let mut collector = era.collector.try_borrow_mut().unwrap();
+            let heap = collector.as_mut().unwrap().registration_heap_mut();
+            collector_tables::with_stopped_tables_for_trace_observing_busy(
+                heap,
+                guard,
+                |_| {
+                    body_calls += 1;
+                    guard.with_owner_image(key, |image| {
+                        assert_eq!(
+                            image
+                                .consume_synthetic_remembered_for_test(MarkWord::of(
+                                    TaggedValue::fixnum(1912)
+                                ))
+                                .unwrap(),
+                            1
+                        );
+                    })?;
+                    Err(RendezvousError::Busy)
+                },
+                || {
+                    busy_observed += 1;
+                },
+            )?
+        });
+        assert_eq!(result, Err(RendezvousError::Busy));
+        assert_eq!(body_calls, 1);
+        assert_eq!(busy_observed, 0, "body Busy is never an installation retry");
+        assert_eq!(rv.request(), Err(RendezvousError::Poisoned));
+        drop(stopped);
+        drop(owner);
+        assert_eq!(
+            era.finish().unwrap_err().reason,
+            RegistrationError::Poisoned
+        );
+    });
+}
+
+#[test]
+fn a6_ht_b9_table_scope_keeper_gate_reentry_refuses_without_retry() {
+    use super::super::super::collector_tables;
+    Context::with_test_rooted_mutator_era(|era, _roots| {
+        let mut stopped = era.stop().unwrap();
+        let mut body_calls = 0;
+        let mut busy_observed = 0;
+        stopped
+            .trace(|guard, _proof| {
+                let _gate = era.registry().lock().unwrap();
+                let mut collector = era.collector.try_borrow_mut().unwrap();
+                let heap = collector.as_mut().unwrap().registration_heap_mut();
+                assert_eq!(
+                    collector_tables::with_stopped_tables_for_trace_observing_busy(
+                        heap,
+                        guard,
+                        |_| {
+                            body_calls += 1;
+                        },
+                        || {
+                            busy_observed += 1;
+                        },
+                    ),
+                    Err(RendezvousError::Busy)
+                );
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(body_calls, 0);
+        assert_eq!(busy_observed, 0, "same-keeper gate reentry must not retry");
+        complete(stopped);
+        finish_era(era);
+    });
+}

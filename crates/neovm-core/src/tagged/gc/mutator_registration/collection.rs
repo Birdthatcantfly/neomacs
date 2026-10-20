@@ -320,7 +320,7 @@ impl<'heap> ParallelHeapEra<'heap> {
             // registry entry. ImageSession::take temporarily removes those
             // images, so a fresh verify_stopped after that transfer must fail.
             // Retain this actual guard through the job and image restoration.
-            collector_tables::with_stopped_tables(
+            collector_tables::with_stopped_tables_for_trace(
                 collector.registration_heap_mut(),
                 guard,
                 |heap| {

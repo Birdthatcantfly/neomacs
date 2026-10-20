@@ -194,6 +194,10 @@ impl<'era> AllStopped<'era> {
         self.validate(&gate)
     }
 
+    pub(in crate::tagged::gc) fn gate_is_held_by_current_thread(&self) -> bool {
+        self.registry.gate_is_held_by_current_thread()
+    }
+
     pub(in crate::tagged::gc::mutator_registration) fn matches_registry(
         &self,
         registry: &Registry,

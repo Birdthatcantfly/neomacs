@@ -88,6 +88,51 @@ pub(super) fn with_stopped_tables<R>(
     Ok(body(heap))
 }
 
+/// Cold collector trace entry. The job callback has not run when installation
+/// refuses; callback errors remain a distinct inner Result at the call site.
+pub(super) fn with_stopped_tables_for_trace<R>(
+    heap: &mut TaggedHeap,
+    stopped: &AllStopped<'_>,
+    body: impl FnOnce(&mut TaggedHeap) -> R,
+) -> Result<R, RendezvousError> {
+    with_stopped_tables_for_trace_observing_busy(heap, stopped, body, || {})
+}
+
+/// The observer exposes only a refused pre-job attempt for the deterministic
+/// restore-contention regression. Production supplies the no-op above.
+pub(super) fn with_stopped_tables_for_trace_observing_busy<R>(
+    heap: &mut TaggedHeap,
+    stopped: &AllStopped<'_>,
+    body: impl FnOnce(&mut TaggedHeap) -> R,
+    mut on_busy: impl FnMut(),
+) -> Result<R, RendezvousError> {
+    // The unique keeper enters without control, entry or root-table guards.
+    // A live scope is reentry, not another owner's transient gate contention.
+    if !heap._satb_layout_reserve.collector_tables().is_null() {
+        return Err(RendezvousError::Busy);
+    }
+    let mut body = Some(body);
+    loop {
+        // Outer errors precede the callback. A callback's own Err(Busy) is
+        // inside R and must still make AllStopped::trace poison the era.
+        match with_stopped_tables(heap, stopped, |heap| {
+            body.take().expect("collector job runs once")(heap)
+        }) {
+            Err(RendezvousError::Busy) => {
+                // A keeper callback retaining its own gate cannot make
+                // progress by yielding. Preserve immediate refusal there.
+                if stopped.gate_is_held_by_current_thread() {
+                    return Err(RendezvousError::Busy);
+                }
+                debug_assert!(body.is_some(), "refused scope never invokes the job");
+                on_busy();
+                std::thread::yield_now();
+            }
+            result => return result,
+        }
+    }
+}
+
 impl Drop for CollectorTableScope<'_, '_> {
     fn drop(&mut self) {
         let installed = self.slot.replace(std::ptr::null());
