@@ -2,7 +2,7 @@
 //!
 //! | Native startup option | Default | Meaning |
 //! | --- | --- | --- |
-//! | `--rows-query-admission=off\|exact-proven` | `off` | Request only privately certified original-scope Rows hits. |
+//! | `--rows-query-admission=off\|exact-proven` | `exact-proven` | Request only privately certified original-scope Rows hits. |
 //!
 //! The existing boxed frontend query adapter owns this native configuration.
 //! No engine, Context, runtime or TLS field stores it. Independent mutators
@@ -11,9 +11,9 @@ use neovm_core::emacs_core::display_host::InertRowsHostAuthority;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, strum::EnumString)]
 pub enum RowsQueryAdmission {
-    #[default]
     #[strum(serialize = "off")]
     Off,
+    #[default]
     #[strum(serialize = "exact-proven")]
     ExactProven,
 }

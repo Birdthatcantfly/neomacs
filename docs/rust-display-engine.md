@@ -268,6 +268,8 @@ The important ownership boundaries are:
 - The latest redisplay cache supports GNU logical/TTY behavior. It is private
   state populated by preparation, not an independently published visual truth.
 
+Certified TTY row-query reuse is enabled by default; pass `--rows-query-admission=off` to opt out.
+
 Popup placement follows the same rule. A request carries an anchor rectangle,
 preferred side, offset, and constraint policy. Popup layout measures the
 content, then resolves flip/shift constraints against the owning frame's

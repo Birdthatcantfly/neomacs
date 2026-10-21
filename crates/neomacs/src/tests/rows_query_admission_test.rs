@@ -6,45 +6,73 @@ fn parse(args: &[&str]) -> Result<StartupOptions, String> {
 }
 
 #[test]
-fn rows_query_admission_defaults_off_and_is_not_forwarded() {
+fn rows_query_admission_defaults_exact_proven_and_preserves_typed_opt_out() {
     let default = parse(&["neomacs", "-Q", "-nw"]).unwrap();
-    assert_eq!(default.rows_query_admission, RowsQueryAdmission::Off);
-    for args in [
-        vec![
-            "neomacs",
-            "-nw",
-            "--rows-query-admission=exact-proven",
-            "file.txt",
-        ],
-        vec![
-            "neomacs",
-            "file.txt",
-            "--rows-query-admission",
-            "exact-proven",
-            "-nw",
-        ],
+    assert_eq!(
+        RowsQueryAdmission::default(),
+        RowsQueryAdmission::ExactProven
+    );
+    assert_eq!(
+        default.rows_query_admission,
+        RowsQueryAdmission::ExactProven
+    );
+    assert_eq!(
+        neomacs_layout_engine::RowsQueryPolicy::default().admission(),
+        RowsQueryAdmission::Off,
+    );
+    assert!(render_help_text("neomacs").contains(
+        "--rows-query-admission=MODE  TTY Rows reuse: exact-proven (default) or off",
+    ));
+    for (args, admission) in [
+        (
+            vec![
+                "neomacs",
+                "-nw",
+                "--rows-query-admission=exact-proven",
+                "file.txt",
+            ],
+            RowsQueryAdmission::ExactProven,
+        ),
+        (
+            vec![
+                "neomacs",
+                "file.txt",
+                "--rows-query-admission",
+                "exact-proven",
+                "-nw",
+            ],
+            RowsQueryAdmission::ExactProven,
+        ),
+        (
+            vec!["neomacs", "-nw", "--rows-query-admission=off", "file.txt"],
+            RowsQueryAdmission::Off,
+        ),
+        (
+            vec![
+                "neomacs",
+                "file.txt",
+                "--rows-query-admission",
+                "off",
+                "-nw",
+            ],
+            RowsQueryAdmission::Off,
+        ),
     ] {
         let selected = parse(&args).unwrap();
-        assert_eq!(
-            selected.rows_query_admission,
-            RowsQueryAdmission::ExactProven
-        );
-        assert!(
-            !selected
-                .forwarded_args
-                .iter()
-                .any(|arg| arg.contains("rows-query-admission") || arg == "exact-proven")
-        );
+        assert_eq!(selected.rows_query_admission, admission);
+        assert!(!selected.forwarded_args.iter().any(|arg| {
+            arg.contains("rows-query-admission") || arg == "exact-proven" || arg == "off"
+        }));
         assert!(selected.forwarded_args.iter().any(|arg| arg == "file.txt"));
     }
 }
 
 #[test]
 fn rows_query_admission_preserves_option_looking_eval_operand_and_terminator() {
-    let operand = "--rows-query-admission=exact-proven";
+    let operand = "--rows-query-admission=off";
     for switch in ["--eval", "-eval", "--execute"] {
         let parsed = parse(&["neomacs", "-nw", switch, operand]).unwrap();
-        assert_eq!(parsed.rows_query_admission, RowsQueryAdmission::Off);
+        assert_eq!(parsed.rows_query_admission, RowsQueryAdmission::ExactProven);
         assert!(
             parsed
                 .forwarded_args
@@ -53,7 +81,7 @@ fn rows_query_admission_preserves_option_looking_eval_operand_and_terminator() {
         );
     }
     let parsed = parse(&["neomacs", "-nw", "--", operand]).unwrap();
-    assert_eq!(parsed.rows_query_admission, RowsQueryAdmission::Off);
+    assert_eq!(parsed.rows_query_admission, RowsQueryAdmission::ExactProven);
     assert_eq!(parsed.forwarded_args.last().unwrap(), operand);
 }
 

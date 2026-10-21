@@ -429,6 +429,7 @@ const EARLY_HELP_BODY: &str = concat!(
     "--no-splash                 do not display a splash screen on startup\n",
     "--no-window-system, -nw     do not communicate with X, ignoring $DISPLAY\n",
     "--init-directory=DIR        use DIR when looking for the Emacs init files.\n",
+    "--rows-query-admission=MODE  TTY Rows reuse: exact-proven (default) or off\n",
     "--quick, -Q                 equivalent to:\n",
     "                              -q --no-site-file --no-site-lisp --no-splash\n",
     "                              --no-x-resources\n",
@@ -585,7 +586,7 @@ fn parse_startup_options(args: impl IntoIterator<Item = String>) -> Result<Start
     let mut no_site_lisp = false;
     let mut no_loadup = false;
     let mut no_build_details = false;
-    let mut rows_query_admission = neomacs_layout_engine::RowsQueryAdmission::Off;
+    let mut rows_query_admission = neomacs_layout_engine::RowsQueryAdmission::default();
     let mut gui = startup_resources::GuiStartupOptions::default();
     let mut idx = 0usize;
 
