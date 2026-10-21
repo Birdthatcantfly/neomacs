@@ -3292,24 +3292,74 @@ impl WindowDisplaySnapshot {
             .iter()
             .find_map(|row| row.start_buffer_pos)
             .or_else(|| self.iter_points().next().map(|point| point.buffer_pos))?;
+        // A right-truncated last row owns the tail it skipped (GNU's
+        // `row->end` lies past it, src/xdisp.c:26695,26736), so the span the
+        // window can answer for extends through that tail.
         let end = self
             .rows
             .iter()
             .rev()
-            .find_map(|row| row.end_buffer_pos)
+            .find_map(|row| row.truncated_end_buffer_pos.or(row.end_buffer_pos))
             .or_else(|| self.iter_points().last().map(|point| point.buffer_pos))?;
         Some(WindowVisibleBufferSpan::new(start, end))
     }
 
+    /// The row whose source span holds POS: through its last drawn glyph, or
+    /// through the tail a right-truncated row skipped (the line terminator, or
+    /// ZV when the truncated line ends the buffer), which GNU's
+    /// `pos_visible_p` still lands on that row (src/xdisp.c:11122-11146).
     fn row_for_buffer_pos(&self, pos: LispCharPos1) -> Option<&DisplayRowSnapshot> {
         self.rows.iter().find(|row| {
             let Some(start) = row.start_buffer_pos else {
                 return false;
             };
-            let Some(end) = row.end_buffer_pos else {
+            let Some(end) = row.truncated_end_buffer_pos.or(row.end_buffer_pos) else {
                 return false;
             };
             start <= pos && pos <= end
+        })
+    }
+
+    /// Whether POS lies in the tail ROW skipped by right truncation: after its
+    /// last drawn glyph and no further than the terminator (or ZV).
+    fn pos_in_truncated_tail(row: &DisplayRowSnapshot, pos: LispCharPos1) -> bool {
+        row.end_buffer_pos.is_some_and(|end| pos > end)
+            && row.truncated_end_buffer_pos.is_some_and(|tail| pos <= tail)
+    }
+
+    /// The display point GNU reports for a position in ROW's truncated tail.
+    ///
+    /// `pos_visible_p` (src/xdisp.c:1772-1830) runs `move_it_to` to the
+    /// position; on a truncated line `move_it_in_display_line_to` stops at the
+    /// truncation column with MOVE_LINE_TRUNCATED, `move_it_to` reseats past
+    /// the line and, now at or past the position, returns with the iterator's
+    /// x still at that column and its y still on the row (xdisp.c:11122-11146,
+    /// `reached = 9` before the row advance).  So the position is visible at
+    /// the truncation marker's column of its row -- the `$` slot the walk
+    /// published as an overlaid marker point, whose own position (the first
+    /// character the row did not draw) is what `posn-at-point` then reports
+    /// as `posn-point` (GNU 31.1: 102938 for every point of a tail starting
+    /// there) -- and on a frame that shows no marker glyph, at the column the
+    /// row stopped drawing.
+    fn truncated_tail_point(&self, row: &DisplayRowSnapshot) -> Option<DisplayPointSnapshot> {
+        let marker = self
+            .iter_row_points(row.row)
+            .filter(|point| point.role == DisplayPointRole::OverlaidMarker)
+            .last();
+        marker.or_else(|| {
+            let first_hidden = row.end_buffer_pos?.as_i64().checked_add(1)?;
+            self.iter_row_points(row.row)
+                .last()
+                .map(|last| DisplayPointSnapshot {
+                    buffer_pos: LispCharPos1::new(first_hidden),
+                    role: DisplayPointRole::OverlaidMarker,
+                    x: row.end_x,
+                    y: last.y,
+                    width: last.width,
+                    height: last.height,
+                    row: row.row,
+                    col: row.end_col,
+                })
         })
     }
 
@@ -3353,6 +3403,9 @@ impl WindowDisplaySnapshot {
             return exact;
         }
         let row = self.row_for_buffer_pos(pos)?;
+        if Self::pos_in_truncated_tail(row, pos) {
+            return self.truncated_tail_point(row);
+        }
         let next = self
             .iter_row_points(row.row)
             .find(|point| point.buffer_pos > pos);

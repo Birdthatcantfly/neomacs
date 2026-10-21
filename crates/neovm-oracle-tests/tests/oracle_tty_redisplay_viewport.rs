@@ -179,3 +179,43 @@ fn tty_window_end_after_a_truncated_last_row_is_the_next_line_start() {
     );
     terminal.finish();
 }
+
+/// Point moved into the tail a right-truncated row did not draw, before the
+/// redisplay that would hscroll it into view.  GNU `pos_visible_p' runs
+/// `move_it_to' there: the line stops at the truncation column with
+/// MOVE_LINE_TRUNCATED, `move_it_to' reseats past the line and returns at or
+/// past the position with x still at that column (src/xdisp.c:11122-11146,
+/// :1798-1830), so the position is visible at the `$' column of its row and
+/// `posn-at-point' reports the `$' glyph's own position.
+#[test]
+fn tty_positions_in_a_truncated_tail_are_visible_at_the_truncation_column() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    let terminal = TestTerminal::with_size(40, 120);
+    let form = format!(
+        r##"(progn {VIEWPORT_SUPPORT}
+  (setq vp-long t)
+  (vp-fill "vp-truncate")
+  (setq-local truncate-lines t)
+  (goto-char (+ (vp-line 509) 10))
+  (redisplay t)
+  (defun vp-tail ()
+    (let ((p (posn-at-point)))
+      (list (and p (posn-x-y p)) (and p (posn-point p))
+            (pos-visible-in-window-p (point) nil t) (pos-visible-in-window-p (point)))))
+  (goto-char (+ (vp-line 509) 150))
+  (setq vp-inside (vp-tail))
+  (end-of-line)
+  (setq vp-eol (vp-tail))
+  (goto-char (vp-line 510))
+  (setq vp-next (vp-tail))
+  (list vp-inside vp-eol vp-next (window-hscroll)))"##
+    );
+    common::assert_oracle_parity_with_env_expect(
+        &form,
+        &[("VIEWPORT_TEST_TTY", &terminal.name)],
+        expect_test::expect![[
+            r#""OK (((119 . 10) 102938 (119 10) t) ((119 . 10) 102938 (119 10) t) ((0 . 11) 103021 (0 11) t) 0)""#
+        ]],
+    );
+    terminal.finish();
+}

@@ -171,10 +171,26 @@ fn truncated_target_edge_keeps_the_real_end_distinct() {
             after.point_for_buffer_pos(LispCharPos1::new(81)),
             reference.point_for_buffer_pos(LispCharPos1::new(81)),
         );
-        assert_eq!(
-            after.point_for_buffer_pos(LispCharPos1::new(81)).is_some(),
-            length == 80,
-        );
+        // Position 81 is visible either way: the end-of-buffer slot of the
+        // 80-character line, and for the long line a position in the tail
+        // the truncated row did not draw -- which GNU `pos_visible_p` reports
+        // at the truncation column with the `$' glyph's own position
+        // (src/xdisp.c:11122-11146; GNU 31.1 (119 . 10)/102938 in the ttykey
+        // `truncate' scene).  The real end stays distinct: the complete query
+        // still had to walk to find that out.
+        let point = after
+            .point_for_buffer_pos(LispCharPos1::new(81))
+            .expect("position 81 is visible");
+        if length == 80 {
+            assert_eq!(point.buffer_pos, LispCharPos1::new(81));
+        } else {
+            assert_eq!((point.col, point.row), (79, 0));
+            assert_eq!(point.buffer_pos, LispCharPos1::new(80));
+            assert_eq!(
+                point.role,
+                neovm_core::window::DisplayPointRole::OverlaidMarker
+            );
+        }
     }
 }
 

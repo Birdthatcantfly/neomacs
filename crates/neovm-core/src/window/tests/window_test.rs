@@ -4299,3 +4299,100 @@ fn selected_window_read_tracks_exact_ids_live_contents_and_sparse_tables() {
     frames.selected = Some(first);
     assert_eq!(frames.selected_window().unwrap().id(), root);
 }
+
+/// GNU `pos_visible_p` on a right-truncated line (src/xdisp.c:1772-1830,
+/// :11122-11146): every position of the tail the row did not draw, through
+/// the line terminator, is visible at the truncation column of its row, and
+/// `posn-point` there is the `$` glyph's own position (the first hidden
+/// character; GNU 31.1 answers 102938 for the whole tail of a line starting at
+/// 102819 in a 120-column window).  One past the terminator is the next row.
+#[test]
+fn positions_in_a_truncated_tail_resolve_to_the_truncation_marker() {
+    let glyph = |pos: i64, col: i64| DisplayPointSnapshot {
+        role: DisplayPointRole::Glyph,
+        buffer_pos: LispCharPos1::new(pos),
+        x: col,
+        y: 10,
+        width: 1,
+        height: 1,
+        row: 10,
+        col,
+    };
+    // Row 10 shows positions 101..=219 in columns 0..=118, then the `$`
+    // marker at column 119 standing for position 220, the first character
+    // not drawn; the line's terminator is at 302 and the next row starts at
+    // 303.
+    let mut points: Vec<DisplayPointSnapshot> = (0..119).map(|i| glyph(101 + i, i)).collect();
+    points.push(DisplayPointSnapshot {
+        role: DisplayPointRole::OverlaidMarker,
+        ..glyph(220, 119)
+    });
+    points.push(glyph(303, 0));
+    points[120].row = 11;
+    points[120].y = 11;
+    let row = |row: i64, y: i64, start: i64, end: i64, end_col: i64| DisplayRowSnapshot {
+        row,
+        y,
+        height: 1,
+        start_x: 0,
+        start_col: 0,
+        end_x: end_col,
+        end_col,
+        start_buffer_pos: Some(LispCharPos1::new(start)),
+        end_buffer_pos: Some(LispCharPos1::new(end)),
+        truncated_end_buffer_pos: None,
+        end_source: Default::default(),
+        fringe: Default::default(),
+    };
+    let mut truncated = row(10, 10, 101, 219, 120);
+    truncated.truncated_end_buffer_pos = Some(LispCharPos1::new(302));
+    let snapshot = WindowDisplaySnapshot {
+        point_rows: None,
+        window_id: WindowId(11),
+        points,
+        rows: vec![truncated, row(11, 11, 303, 303, 1)],
+        ..WindowDisplaySnapshot::default()
+    };
+
+    let at = |pos: i64| snapshot.point_for_buffer_pos(LispCharPos1::new(pos));
+    // A drawn glyph answers for itself.
+    let drawn = at(150).expect("drawn glyph");
+    assert_eq!(
+        (drawn.x, drawn.row, drawn.buffer_pos.as_i64()),
+        (49, 10, 150)
+    );
+    // The first hidden character is the marker's own position.
+    let marker = at(220).expect("marker column");
+    assert_eq!(
+        (marker.x, marker.row, marker.role),
+        (119, 10, DisplayPointRole::OverlaidMarker)
+    );
+    // Deeper into the tail, and the terminator itself: the same marker, with
+    // the marker's position as GNU's `posn-point`.
+    for pos in [221, 250, 301, 302] {
+        let point = at(pos).unwrap_or_else(|| panic!("tail position {pos} is visible"));
+        assert_eq!((point.x, point.row, point.col), (119, 10, 119), "pos {pos}");
+        assert_eq!(point.buffer_pos.as_i64(), 220, "posn-point for {pos}");
+        assert_eq!(point.role, DisplayPointRole::OverlaidMarker);
+    }
+    // The next line starts on the next row.
+    let next = at(303).expect("next row start");
+    assert_eq!((next.row, next.x), (11, 0));
+    // The window's span now reaches through the truncated tail of its last
+    // row, so `pos-visible-in-window-p` does not refuse the tail up front.
+    let mut last_truncated = snapshot.clone();
+    last_truncated.rows.truncate(1);
+    last_truncated.points.truncate(120);
+    let span = last_truncated.visible_buffer_span().expect("span");
+    assert_eq!((span.start().as_i64(), span.end().as_i64()), (101, 302));
+    assert!(
+        last_truncated
+            .point_for_buffer_pos(LispCharPos1::new(302))
+            .is_some()
+    );
+    assert!(
+        last_truncated
+            .point_for_buffer_pos(LispCharPos1::new(303))
+            .is_none()
+    );
+}
