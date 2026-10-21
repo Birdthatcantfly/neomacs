@@ -2819,7 +2819,9 @@ pub use mutator_registration::{
     SymbolRef, TableMut, TableRef, YoungWorkerLoan,
 };
 
-pub(crate) use mutator_registration::{OwnerRootAdmission, StoppedRootAdmission, SymbolReadToken};
+pub(crate) use mutator_registration::{
+    OwnerRootAdmission, StoppedRootAdmission, SymbolReadToken, SymbolWriteToken,
+};
 
 mod alloc_region;
 #[cfg(test)]

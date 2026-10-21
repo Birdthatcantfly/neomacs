@@ -1,7 +1,7 @@
 //! Sealed symbol authority; running values move only between owner root homes.
 mod globals;
 pub use globals::GlobalError;
-pub(crate) use globals::SymbolReadToken;
+pub(crate) use globals::{SymbolReadToken, SymbolWriteToken};
 mod word;
 use super::*;
 use crate::emacs_core::intern::SymId;
@@ -211,9 +211,10 @@ impl Drop for SymbolMut<'_, '_, '_> {
         if panicking {
             registry.symbols.poison();
         }
+        let poisoned = panicking || registry.symbols.poisoned.load(Ordering::Acquire);
         word::writer_exit(&registry.symbols.word);
         self.run.symbol_loan = false;
-        if panicking {
+        if poisoned {
             registry.poison();
         }
     }

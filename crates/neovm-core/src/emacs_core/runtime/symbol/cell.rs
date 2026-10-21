@@ -9,8 +9,10 @@
 //! - [`LispSymbol::value_cell`] reads the tag and then the word the tag
 //!   selects, as one [`ValueCell`]. No reader can take the word without the
 //!   tag, so none can read the wrong arm.
-//! - [`CellWrite`] is the only writer of either half, and
-//!   [`CellWrite::publish`] the one place a word or tag is stored. The moves
+//! - Serial transitions use [`CellWrite`]; sealed parallel Plain stores use
+//!   the private token-routed `parallel` child while all markers are excluded.
+//!   For serial code, [`CellWrite::publish`] is the one place a word or tag
+//!   is stored. The moves
 //!   it offers are typed by the arm the cell is in ([`ArmMut`]): a plain cell
 //!   can be stored, aliased, localized or forwarded; an alias re-aliased or
 //!   undone; a forwarded cell re-forwarded or localized; a localized cell
@@ -31,6 +33,8 @@
 //! [`LispSymbol::value_cell_acquire`] is the reader for code that does not
 //! own the writer side. Nothing here makes a symbol shareable between
 //! mutators, and no `Send`/`Sync` is claimed for any type in this module.
+
+mod parallel;
 
 use super::{
     LispBufferLocalValue, SYMBOL_NAME_SENTINEL, SymbolInterned, SymbolRedirect, SymbolTrappedWrite,

@@ -46,6 +46,8 @@
 //! are compiled for tests only, so production code reaches the routing only
 //! through a projected cell, which it cannot create.
 
+mod parallel;
+
 use super::{FwdRef, LispBufferObjFwd, LispObjFwd};
 use crate::buffer::buffer::BUFFER_SLOT_COUNT;
 use crate::emacs_core::symbol::BlvPtr;

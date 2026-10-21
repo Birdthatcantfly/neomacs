@@ -1,14 +1,12 @@
-//! Explicit red semantics on real C2 handles; never run in a normal gate.
-//! Run each ignored test and require its P3SYM_C3_RED assertion, not an
-//! arbitrary failure. The missing-op assertion unwinds through RAII cleanup;
-//! era finish must succeed before the original assertion is propagated.
+//! Real retained-World primitive twins; RAII cleanup runs for every outcome.
 use super::*;
 use crate::emacs_core::eval::Context;
+use crate::emacs_core::intern::SymId;
 use crate::tagged::gc::PlainSymbolBacking;
 use crate::tagged::transport::SharedRoot;
 use crate::tagged::value::TaggedValue as Value;
 
-fn oracle() -> Vec<&'static str> {
+pub(super) fn oracle() -> Vec<&'static str> {
     let lines: Vec<_> = include_str!("../symbol_globals_oracle.expected")
         .lines()
         .collect();
@@ -49,13 +47,14 @@ impl Drop for FixtureGuard<'_> {
     }
 }
 
-fn fixture_case(
+pub(super) fn fixture_case(
     kind: PlainSymbolBacking,
     body: impl for<'owner, 'era> FnOnce(
         &mut RunAccess<'owner, 'era>,
         &SymbolHandle,
         &OwnerRootSlot<'era>,
         &mut OwnerRootSlot<'era>,
+        SymId,
     ),
 ) -> std::thread::Result<()> {
     Context::with_test_symbol_backing_era(kind, |era, id| {
@@ -101,7 +100,7 @@ fn fixture_case(
             let (src, dst) = fixture.homes.as_mut().unwrap();
             // Assertions in body run BEFORE teardown. On panic, this run and
             // any nested lease unwind before FixtureGuard clears its census.
-            body(&mut run, &handle, src, dst);
+            body(&mut run, &handle, src, dst, id);
         }));
         assert_eq!(
             cleanup.borrow().as_ref(),
@@ -118,54 +117,43 @@ fn fixture_case(
     })
 }
 
-fn red_case(op: GlobalOp, kind: PlainSymbolBacking) {
-    let name = match op {
-        GlobalOp::Value { .. } => "sym_value_into",
-        GlobalOp::Set { .. } => "sym_set_into",
-        GlobalOp::Boundp { .. } => "sym_boundp_into",
-        GlobalOp::Makunbound { .. } => "sym_makunbound_into",
-    };
-    let result = fixture_case(kind, |run, handle, src, dst| {
-        let outcome = match op {
+fn primitive_case(op: GlobalOp, kind: PlainSymbolBacking) {
+    fixture_case(kind, |run, handle, src, dst, id| {
+        match op {
             GlobalOp::Value { .. } => run.sym_value_into(handle, dst),
             GlobalOp::Set { .. } => run.sym_set_into(handle, src, dst),
             GlobalOp::Boundp { .. } => run.sym_boundp_into(handle, dst),
             GlobalOp::Makunbound { .. } => run.sym_makunbound_into(handle, dst),
-        };
-        if matches!(op, GlobalOp::Value { .. } | GlobalOp::Boundp { .. }) {
-            outcome.expect("sealed reader operation");
-            let value = Value::from_bits(dst.word_for_test(run));
-            let expected = if matches!(op, GlobalOp::Value { .. }) {
-                oracle()[0]
-            } else {
-                oracle()[2]
-            };
-            assert_eq!(crate::emacs_core::print_value(&value), expected);
-            return;
         }
-        assert_eq!(
-            outcome,
-            Err(GlobalError::AwaitingB143),
-            "unexpected result from missing executor op {name}"
-        );
-        assert!(
-            outcome.is_ok(),
-            "P3SYM_C3_RED missing executor op {name}: {outcome:?}"
-        );
-    });
-    if matches!(op, GlobalOp::Value { .. } | GlobalOp::Boundp { .. }) {
-        result.expect("reader twin and fixture teardown must pass");
-        return;
-    }
-    let failure = result.expect_err("missing executor op produced no red witness");
-    let text = failure
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| failure.downcast_ref::<&str>().copied())
-        .expect("non-string panic cannot be a missing-op witness");
-    assert!(text.contains(&format!("P3SYM_C3_RED missing executor op {name}")));
-    // Teardown is proved successful before propagating the ORIGINAL assertion.
-    std::panic::resume_unwind(failure);
+        .expect("sealed global primitive");
+        let value = Value::from_bits(dst.word_for_test(run));
+        let (printed, expected) = match op {
+            GlobalOp::Value { .. } => (crate::emacs_core::print_value(&value), oracle()[0]),
+            GlobalOp::Set { .. } => (crate::emacs_core::print_value(&value), oracle()[1]),
+            GlobalOp::Boundp { .. } => (crate::emacs_core::print_value(&value), oracle()[2]),
+            GlobalOp::Makunbound { .. } => {
+                // The real symbol identity is rooted, not a borrowed cell.
+                let same = value.bits() == Value::from_sym_id(id).bits();
+                (
+                    crate::emacs_core::print_value(&Value::bool_val(same)),
+                    oracle()[3],
+                )
+            }
+        };
+        assert_eq!(printed, expected);
+        if matches!(op, GlobalOp::Set { .. }) {
+            run.sym_value_into(handle, dst).unwrap();
+            assert_eq!(
+                crate::emacs_core::print_value(&Value::from_bits(dst.word_for_test(run))),
+                oracle()[1]
+            );
+        }
+        if matches!(op, GlobalOp::Makunbound { .. }) {
+            run.sym_boundp_into(handle, dst).unwrap();
+            assert_eq!(dst.word_for_test(run), Value::NIL.bits());
+        }
+    })
+    .expect("primitive twin and RAII teardown");
 }
 
 #[test]
@@ -174,29 +162,28 @@ fn p3sym_c3_noop_fixture_releases_roots_and_finishes() {
         PlainSymbolBacking::Unprojected,
         PlainSymbolBacking::Projected,
     ] {
-        fixture_case(kind, |_run, _handle, _src, _dst| {})
+        fixture_case(kind, |_run, _handle, _src, _dst, _id| {})
             .expect("no-op body must finish without a fixture panic");
     }
 }
 
-macro_rules! red {
+macro_rules! primitive {
     ($(#[$attr:meta])* $name:ident, $kind:ident, $op:expr) => {
         #[test]
         $(#[$attr])*
         fn $name() {
-            red_case($op, PlainSymbolBacking::$kind);
+            primitive_case($op, PlainSymbolBacking::$kind);
         }
     };
 }
 
-red!(
-    p3sym_c3_red_plain_value,
+primitive!(
+    p3sym_c3_plain_value,
     Unprojected,
     GlobalOp::Value { symbol: 0, dst: 1 }
 );
-red!(
-    #[ignore = "writer implementation follows the sealed reader commit"]
-    p3sym_c3_red_plain_set,
+primitive!(
+    p3sym_c3_plain_set,
     Unprojected,
     GlobalOp::Set {
         symbol: 0,
@@ -204,25 +191,23 @@ red!(
         dst: 1
     }
 );
-red!(
-    p3sym_c3_red_plain_boundp,
+primitive!(
+    p3sym_c3_plain_boundp,
     Unprojected,
     GlobalOp::Boundp { symbol: 0, dst: 1 }
 );
-red!(
-    #[ignore = "writer implementation follows the sealed reader commit"]
-    p3sym_c3_red_plain_makunbound,
+primitive!(
+    p3sym_c3_plain_makunbound,
     Unprojected,
     GlobalOp::Makunbound { symbol: 0, dst: 1 }
 );
-red!(
-    p3sym_c3_red_projected_value,
+primitive!(
+    p3sym_c3_projected_value,
     Projected,
     GlobalOp::Value { symbol: 0, dst: 1 }
 );
-red!(
-    #[ignore = "writer implementation follows the sealed reader commit"]
-    p3sym_c3_red_projected_set,
+primitive!(
+    p3sym_c3_projected_set,
     Projected,
     GlobalOp::Set {
         symbol: 0,
@@ -230,20 +215,19 @@ red!(
         dst: 1
     }
 );
-red!(
-    p3sym_c3_red_projected_boundp,
+primitive!(
+    p3sym_c3_projected_boundp,
     Projected,
     GlobalOp::Boundp { symbol: 0, dst: 1 }
 );
-red!(
-    #[ignore = "writer implementation follows the sealed reader commit"]
-    p3sym_c3_red_projected_makunbound,
+primitive!(
+    p3sym_c3_projected_makunbound,
     Projected,
     GlobalOp::Makunbound { symbol: 0, dst: 1 }
 );
 
 #[test]
-fn p3sym_c3_api_is_test_only_and_slot_to_slot() {
+fn p3sym_c3_surface_is_slot_to_slot() {
     let api = include_str!("../symbol_globals.rs");
     for forbidden in [
         "-> Value",
@@ -259,6 +243,23 @@ fn p3sym_c3_api_is_test_only_and_slot_to_slot() {
     }
     let parent = include_str!("../../mutator_registration.rs");
     assert!(parent.contains("#[cfg(test)]\nmod symbol_globals;"));
+    let production = include_str!("../symbol_authority/globals.rs");
+    for forbidden in [
+        "-> Value",
+        "-> TaggedValue",
+        "-> &Obarray",
+        "pub trait",
+        "unwrap(",
+        "expect(",
+        "panic!(",
+        "from_current_heap",
+        "note_root_overwrite",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "C3 production surface contains {forbidden}"
+        );
+    }
     let fixture = oracle();
     assert_ne!(fixture[7], fixture[8], "GNU records both writer orders");
     assert_ne!(fixture[10], fixture[11], "GNU permits a lost update");

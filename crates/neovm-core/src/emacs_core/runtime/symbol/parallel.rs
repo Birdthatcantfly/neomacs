@@ -1,6 +1,8 @@
 //! Narrow backing for proof-3 authority. No serial accessor calls this module.
 #![allow(dead_code)]
 
+mod write;
+
 use super::{Obarray, SymbolTrappedWrite, ValueCell};
 use crate::emacs_core::forward::{CanonicalArm, ThreadProjectionTable};
 use crate::emacs_core::intern::SymId;
