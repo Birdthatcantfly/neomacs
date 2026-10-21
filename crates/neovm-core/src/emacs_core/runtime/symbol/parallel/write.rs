@@ -6,6 +6,10 @@ use crate::tagged::gc::{RegistrationError, SymbolWriteToken};
 impl SymbolBacking {
     /// Return storage growth even on fallible reservation refusal. No reference
     /// or descriptor leaves the backing bridge, and no operation can poll.
+    ///
+    /// # Safety
+    /// The token's exclusive word must belong to this retained backing's World.
+    /// The era excludes legacy views, markers and structural symbol changes.
     pub(crate) unsafe fn write_plain(
         &self,
         id: SymId,

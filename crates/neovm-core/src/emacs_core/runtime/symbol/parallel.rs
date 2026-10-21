@@ -27,9 +27,10 @@ pub(crate) struct SymbolBacking {
 }
 
 // SAFETY: only the keeper constructs this bridge from retained World roots.
-// All dereferences require the era's exclusive word or matching AllStopped;
-// no reference, Value or RefCell loan leaves this module. Read leases in C2
-// use already-admitted metadata and never borrow the shared RefCell. This is
+// Every dereference requires this World's held reader/writer word, or matching
+// AllStopped. Shared readers never mutate or borrow the projection RefCell;
+// only a writer or keeper may borrow that table. No reference, Value or RefCell
+// loan leaves the sealed bridge and its private callers. This is
 // not a Send/Sync implementation for Obarray, FwdRef, a descriptor or World.
 unsafe impl Send for SymbolBacking {}
 unsafe impl Sync for SymbolBacking {}
@@ -91,6 +92,10 @@ impl SymbolBacking {
     /// Only a live sealed reader can reach this copy. No projection-table
     /// RefCell borrow: admission checked ownership, and the closed operations
     /// preserve that fact while the era retains the original World.
+    ///
+    /// # Safety
+    /// The token's held word must belong to this retained backing's World.
+    /// Membership/arms remain frozen and no legacy view or marker may run.
     pub(crate) unsafe fn read_plain(
         &self,
         id: SymId,
