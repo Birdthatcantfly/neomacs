@@ -538,3 +538,156 @@ fn tty_rows_hit_normal_gc_hook_query_observes_actual_driver_extent() {
         "a real post-GC callback query must refuse while the original driver remains active"
     );
 }
+
+// CONT13: real producer seeds only; these tests never construct a receipt.
+fn original_refused_matches_complete_off(
+    context: &mut Context,
+    engine: &mut LayoutEngine,
+    frame: FrameId,
+    window: WindowId,
+    source: BufferId,
+) {
+    assert!(
+        engine
+            .query_cache
+            .get_certified(context, frame, window, rows())
+            .is_none(),
+        "the stale original attempt must refuse before returning saved geometry",
+    );
+    let actual = miss(context, engine, frame, window, rows());
+    let mut canonical = LayoutEngine::new_without_font_metrics();
+    let (expected, _) = request(
+        context,
+        &mut canonical,
+        frame,
+        window,
+        rows(),
+        &terminal_policy(),
+    );
+    same_complete_query(&actual, &expected);
+    assert_eq!(
+        actual.geometry().unwrap().layout_freshness,
+        context.window_display_snapshot_freshness(frame, window, source),
+        "canonical fallback must return complete CURRENT freshness",
+    );
+}
+
+#[test]
+fn tty_rows_hit_actual_detached_overlay_move_refuses_original_attempt() {
+    let (mut context, frame, window, source, _restore) = fixture();
+    // Like paren.el's persistent overlays, create and DELETE before the
+    // canonical seed. A detached OverlayObj must not be projected by it.
+    let detached = context
+        .eval_str(
+            "(progn (setq cont13-moving-overlay (make-overlay (point-max) (point-max))) (delete-overlay cont13-moving-overlay) (overlay-buffer cont13-moving-overlay))",
+        )
+        .unwrap();
+    assert!(
+        detached.is_nil(),
+        "the retained overlay must actually be detached"
+    );
+    let mut engine = LayoutEngine::new_without_font_metrics();
+    seed(&mut context, &mut engine, frame, window);
+    let original = context
+        .window_layout_attempt_freshness(frame, window, source)
+        .unwrap();
+    let _ = hit(&mut context, &mut engine, frame, window);
+    let before_move = context
+        .window_layout_attempt_freshness(frame, window, source)
+        .unwrap();
+    assert_eq!(
+        original, before_move,
+        "the positive seed/hit must precede the ONLY intervening overlay move",
+    );
+    let (overlay_tick, text_ticks, point) = {
+        let buffer = context.buffer_manager().get(source).unwrap();
+        (
+            buffer.overlay_modified_tick(),
+            (
+                buffer.modified_tick(),
+                buffer.chars_modified_tick(),
+                buffer.props_modified_tick(),
+            ),
+            buffer.point_lisp_char_pos(),
+        )
+    };
+    context
+        .eval_str("(move-overlay cont13-moving-overlay 2 6)")
+        .unwrap();
+    let after_move = context
+        .window_layout_attempt_freshness(frame, window, source)
+        .unwrap();
+    let buffer = context.buffer_manager().get(source).unwrap();
+    assert_eq!(buffer.overlay_modified_tick(), overlay_tick.wrapping_add(1));
+    assert_eq!(
+        (
+            buffer.modified_tick(),
+            buffer.chars_modified_tick(),
+            buffer.props_modified_tick(),
+        ),
+        text_ticks,
+        "moving an overlay must exercise overlay revision, not text/property edits",
+    );
+    assert_eq!(buffer.point_lisp_char_pos(), point);
+    assert_ne!(
+        before_move, after_move,
+        "the move ALONE changes the full attempt"
+    );
+    assert_ne!(
+        original, after_move,
+        "original full-attempt equality must refuse"
+    );
+    // No creation, deletion or property edit intervened after the real
+    // positive seed/hit. Reattaching this detached overlay is the mutation.
+    // Active native OverlayObj Boxes still receive no broadened authority.
+    original_refused_matches_complete_off(&mut context, &mut engine, frame, window, source);
+}
+
+#[test]
+fn tty_rows_hit_actual_frame_resize_refuses_original_geometry_in_both_directions() {
+    for ((from_width, from_height), (to_width, to_height)) in
+        [((120, 40), (100, 32)), ((100, 32), (120, 40))]
+    {
+        let (mut context, frame, window, source, _restore) = fixture();
+        context
+            .frame_manager_mut()
+            .get_mut(frame)
+            .unwrap()
+            .resize_pixelwise(from_width, from_height);
+        let mut engine = LayoutEngine::new_without_font_metrics();
+        seed(&mut context, &mut engine, frame, window);
+        let _ = hit(&mut context, &mut engine, frame, window);
+        let original = context
+            .window_layout_attempt_freshness(frame, window, source)
+            .unwrap();
+        let snapshot = context
+            .window_display_snapshot_freshness(frame, window, source)
+            .unwrap();
+        let frame_inputs = context.frame_manager().get(frame).unwrap().layout_inputs();
+        context
+            .frame_manager_mut()
+            .get_mut(frame)
+            .unwrap()
+            .resize_pixelwise(to_width, to_height);
+        assert_ne!(
+            frame_inputs,
+            context.frame_manager().get(frame).unwrap().layout_inputs(),
+            "real resize changes the existing frame geometry projection",
+        );
+        assert_ne!(
+            original,
+            context
+                .window_layout_attempt_freshness(frame, window, source)
+                .unwrap(),
+            "original full-attempt equality must refuse changed frame/window geometry",
+        );
+        let current = context
+            .window_display_snapshot_freshness(frame, window, source)
+            .unwrap();
+        assert!(
+            !snapshot.same_query_row_content(&current),
+            "placement compatibility must not align away width/height or window bounds",
+        );
+        original_refused_matches_complete_off(&mut context, &mut engine, frame, window, source);
+    }
+}
