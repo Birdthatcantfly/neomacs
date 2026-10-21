@@ -62,7 +62,7 @@ pub(crate) fn open_terminal_capability_database(
     }
     for name in [
         "so", "us", "md", "mh", "ZH", "me", "ue", "op", "AF", "AB", "Sf", "Sb", "cs", "cm", "DL",
-        "AL", "dl", "al", "sf", "sr", "IC", "DC", "ce",
+        "AL", "dl", "al", "sf", "sr", "IC", "DC", "ce", "vs",
     ] {
         queries.push(Query::String(Termcap(name)));
     }
@@ -103,6 +103,9 @@ pub(crate) fn open_terminal_capability_database(
 /// | `smxx` | terminfo | `TS_enter_strike_through_mode` | strike-through |
 /// | `Co` | termcap | `TN_max_colors` | color cells |
 /// | `NC` | termcap | `TN_no_color_video` | attributes unusable with colors |
+/// | `vi` | termcap | `TS_cursor_invisible` | hide the cursor while writing |
+/// | `ve` | termcap | `TS_cursor_normal` | show the cursor |
+/// | `vs` | termcap | `TS_cursor_visible` | the very visible cursor (`visible-cursor') |
 ///
 /// The namespace column is not decoration; see [`StringCapability`].  Reading
 /// `Smulx` and `smxx` out of termcap answers "absent" on every terminal that
@@ -210,6 +213,17 @@ pub(crate) fn resolve_tty_attribute_capabilities(
         // comes back with the setters rather than beside them (ledger 193).
         colors: resolve_tty_color_capabilities(database, colorterm),
         no_color_video,
+        // GNU `TS_cursor_normal = tgetstr ("ve")`, `TS_cursor_visible =
+        // tgetstr ("vs")`, `TS_cursor_invisible = tgetstr ("vi")`
+        // (src/term.c:4572-4574): `tty_hide_cursor` emits `vi`, and
+        // `tty_show_cursor` emits `ve` then, with `visible-cursor' non-nil,
+        // `vs` (src/term.c:345-372).  Before these were read the writer
+        // hardcoded `ESC[?25l`/`ESC[?25h`, so a screen or xterm entry never
+        // received its `vs` and its cursor stayed "normal" where GNU's is
+        // very visible (blinking on xterm, mode 34 reset on screen).
+        cursor_invisible: sequence(database, Termcap("vi")),
+        cursor_normal: sequence(database, Termcap("ve")),
+        cursor_visible: sequence(database, Termcap("vs")),
     }
 }
 

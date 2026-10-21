@@ -699,12 +699,12 @@ impl TtyRif {
                     self.damage.shape = Some(self.cursor_shape);
                 }
                 if !matches!(before, EmittedCursor::Shown { .. }) {
-                    self.output.extend_from_slice(b"\x1b[?25h");
+                    write_show_cursor(&mut self.output, self.very_visible_cursor);
                 }
             }
             EmittedCursor::Hidden => {
                 if before != EmittedCursor::Hidden {
-                    self.output.extend_from_slice(b"\x1b[?25l");
+                    write_hide_cursor(&mut self.output);
                 }
             }
             EmittedCursor::Unknown => unreachable!("a frame always knows its cursor"),

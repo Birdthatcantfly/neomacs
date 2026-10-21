@@ -305,12 +305,24 @@ fn prepare_tty_tree_before_activation(
     Some((root, children))
 }
 
+/// Lisp `visible-cursor' for this redisplay: GNU `tty_show_cursor` reads
+/// the C variable when it shows the cursor at `update_end`
+/// (src/term.c:362-372); its default is 1, so an unbound variable reads
+/// as non-nil here too.  One variable read per redisplay.
+pub(crate) fn very_visible_cursor(evaluator: &Context) -> bool {
+    evaluator
+        .variable_value_by_name("visible-cursor")
+        .is_none_or(|value| value.is_truthy())
+}
+
 /// Rasterize the display state into a `TtyRif` and write ANSI output to stdout.
 pub fn run_tty_rif_redisplay(
     tty_rif: &mut TtyRif,
     root: &SealedFramePresentation,
     children: &[SealedFramePresentation],
+    very_visible_cursor: bool,
 ) {
+    tty_rif.set_very_visible_cursor(very_visible_cursor);
     tty_rif.rasterize_presentations(root, children);
     #[cfg(windows)]
     let result = super::tty_output::windows::render(tty_rif);
@@ -329,7 +341,9 @@ pub fn run_tty_rif_redisplay_to(
     children: &[SealedFramePresentation],
     output: &mut impl std::io::Write,
     capabilities: &super::tty_output::Capabilities,
+    very_visible_cursor: bool,
 ) {
+    tty_rif.set_very_visible_cursor(very_visible_cursor);
     tty_rif.rasterize_presentations(root, children);
     if let Err(error) = super::tty_output::paint_to(tty_rif, output, capabilities) {
         tracing::error!(%error, "secondary TTY redisplay failed");
@@ -439,7 +453,8 @@ pub fn install_tty_redisplay_callback_with_popup_redraw(
             if full_redraw {
                 tty_rif.force_redraw();
             }
-            run_tty_rif_redisplay(&mut tty_rif, &root, &children);
+            let very_visible = very_visible_cursor(eval);
+            run_tty_rif_redisplay(&mut tty_rif, &root, &children, very_visible);
         }
     }));
     install_frame_snapshot_fn(evaluator);

@@ -485,6 +485,10 @@ pub struct TtyRif {
     cursor_visible: bool,
     /// Visible terminal cursor shape when the hardware cursor is shown.
     cursor_shape: TerminalCursorShape,
+    /// Lisp `visible-cursor' as of this frame: GNU `tty_show_cursor` follows
+    /// the entry's `ve` with its `vs` only when it is non-nil
+    /// (src/term.c:362-372).  Its C default is 1.
+    very_visible_cursor: bool,
     /// Face lookup table (face_id -> Face).
     faces: FrameFaceMap,
     /// The default face's realized terminal background.
@@ -877,6 +881,7 @@ impl TtyRif {
             cursor_col: 0,
             cursor_visible: false,
             cursor_shape: TerminalCursorShape::Block,
+            very_visible_cursor: true,
             faces: rustc_hash::FxHashMap::default(),
             default_bg: None,
             default_fg: None,
@@ -897,6 +902,14 @@ impl TtyRif {
 
     /// Declare what the connected terminal can do. The planner consults this
     /// before proposing operations; see [`TermCaps`].
+    /// Publish Lisp `visible-cursor' for the next frame: whether showing the
+    /// cursor also emits the entry's `vs` (GNU `tty_show_cursor`,
+    /// src/term.c:362-372).  One bool per redisplay from the frontend; the
+    /// encoder never reads Lisp itself.
+    pub fn set_very_visible_cursor(&mut self, very_visible: bool) {
+        self.very_visible_cursor = very_visible;
+    }
+
     pub fn set_caps(&mut self, caps: TermCaps) {
         self.caps = caps;
     }
@@ -1477,8 +1490,9 @@ impl TtyRif {
             // no equivalent.
             self.output.extend_from_slice(b"\x1b[?2026h");
         }
-        // Hide cursor during update to avoid flicker.
-        self.output.extend_from_slice(b"\x1b[?25l");
+        // Hide cursor during update to avoid flicker (GNU `tty_hide_cursor`
+        // before the frame's glyphs are written, src/term.c:763).
+        write_hide_cursor(&mut self.output);
 
         self.encode_ops(&ops);
 
@@ -1501,7 +1515,9 @@ impl TtyRif {
             if shape_written {
                 write_cursor_shape(&mut self.output, self.cursor_shape);
             }
-            self.output.extend_from_slice(b"\x1b[?25h");
+            // GNU `tty_update_end` -> `tty_show_cursor` (src/term.c:258):
+            // the entry's `ve`, then `vs` for a very visible cursor.
+            write_show_cursor(&mut self.output, self.very_visible_cursor);
         }
         self.note_framed_cursor(shape_written);
 
@@ -3031,6 +3047,35 @@ fn row_has_terminal_resolved_advance(row: &[TtyCell]) -> bool {
 fn write_cursor_goto(buf: &mut Vec<u8>, row: u16, col: u16) {
     use std::io::Write;
     let _ = write!(buf, "\x1b[{};{}H", row, col);
+}
+
+/// GNU `tty_hide_cursor` (src/term.c:345-357): the entry's `vi`, or nothing
+/// for an entry without one (its cursor then stays where it is drawn, as on
+/// GNU).
+fn write_hide_cursor(buf: &mut Vec<u8>) {
+    with_capabilities(|caps| write_hide_cursor_with(buf, caps));
+}
+
+fn write_hide_cursor_with(buf: &mut Vec<u8>, caps: &TtyAttributeCapabilities) {
+    if let Some(vi) = caps.cursor_invisible.as_deref() {
+        buf.extend_from_slice(vi);
+    }
+}
+
+/// GNU `tty_show_cursor` (src/term.c:362-372): the entry's `ve`, then its
+/// `vs` when `visible-cursor' is non-nil.  Both are optional in the entry
+/// and emitted only when present (`OUTPUT_IF`).
+fn write_show_cursor(buf: &mut Vec<u8>, very_visible: bool) {
+    with_capabilities(|caps| write_show_cursor_with(buf, caps, very_visible));
+}
+
+fn write_show_cursor_with(buf: &mut Vec<u8>, caps: &TtyAttributeCapabilities, very_visible: bool) {
+    if let Some(ve) = caps.cursor_normal.as_deref() {
+        buf.extend_from_slice(ve);
+    }
+    if very_visible && let Some(vs) = caps.cursor_visible.as_deref() {
+        buf.extend_from_slice(vs);
+    }
 }
 
 fn write_cursor_shape(buf: &mut Vec<u8>, shape: TerminalCursorShape) {

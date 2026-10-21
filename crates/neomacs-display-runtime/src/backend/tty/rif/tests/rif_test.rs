@@ -3121,6 +3121,50 @@ fn a_run_is_turned_off_with_the_terminals_own_me_and_op() {
 /// `masscomp` and the rest -- and thirty more have a `me` that is pure padding,
 /// for which `tputs` emits a DELAY and no bytes.
 #[test]
+fn cursor_visibility_follows_the_entrys_vi_ve_vs_and_visible_cursor() {
+    // GNU `tty_hide_cursor`/`tty_show_cursor` (src/term.c:345-372): `vi` to
+    // hide; `ve`, then `vs` only with `visible-cursor' non-nil, to show.
+    // The strings are the entry's own and absent ones emit nothing --
+    // screen's `vs=\E[34l` is what makes GNU's cursor "very visible"
+    // there, recorded at every GNU READY of the ttykey differential scenes
+    // where this port's hardcoded `ESC[?25h` left the cursor normal.
+    let screen = TtyAttributeCapabilities {
+        cursor_invisible: Some(b"\x1b[?25l".to_vec()),
+        cursor_normal: Some(b"\x1b[34h\x1b[?25h".to_vec()),
+        cursor_visible: Some(b"\x1b[34l".to_vec()),
+        ..TtyAttributeCapabilities::full()
+    };
+
+    let mut buf = Vec::new();
+    write_hide_cursor_with(&mut buf, &screen);
+    assert_eq!(buf, b"\x1b[?25l");
+
+    let mut buf = Vec::new();
+    write_show_cursor_with(&mut buf, &screen, true);
+    assert_eq!(buf, b"\x1b[34h\x1b[?25h\x1b[34l", "ve then vs");
+
+    let mut buf = Vec::new();
+    write_show_cursor_with(&mut buf, &screen, false);
+    assert_eq!(
+        buf, b"\x1b[34h\x1b[?25h",
+        "(setq visible-cursor nil) drops vs and nothing else"
+    );
+
+    // No entry strings (a dumb terminal): GNU's OUTPUT_IF emits nothing.
+    let dumb = TtyAttributeCapabilities::none();
+    let mut buf = Vec::new();
+    write_hide_cursor_with(&mut buf, &dumb);
+    write_show_cursor_with(&mut buf, &dumb, true);
+    assert!(buf.is_empty(), "no vi/ve/vs, no bytes: {buf:?}");
+
+    // The no-database fallback keeps the old normal cursor and claims no vs.
+    let fallback = TtyAttributeCapabilities::full();
+    let mut buf = Vec::new();
+    write_show_cursor_with(&mut buf, &fallback, true);
+    assert_eq!(buf, b"\x1b[?25h");
+}
+
+#[test]
 fn a_terminal_without_me_undoes_only_the_underline_like_gnu() {
     let no_me = TtyAttributeCapabilities {
         exit_attribute_mode: None,

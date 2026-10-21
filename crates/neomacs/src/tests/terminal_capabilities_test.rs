@@ -423,6 +423,37 @@ use neomacs_display_runtime::backend::tty::rif::{
     BlankTailMethod, RegionScrollMethod, RightMarginBehavior,
 };
 
+/// GNU `init_tty` reads `vi`, `ve` and `vs` (src/term.c:4572-4574) and
+/// `tty_show_cursor` emits `ve` then `vs` (src/term.c:362-372): the entry's
+/// own strings, carried as bytes, present or absent exactly as the entry
+/// has them.  screen-256color: `vi=\E[?25l`, `ve=\E[34h\E[?25h`,
+/// `vs=\E[34l`.
+#[test]
+fn cursor_visibility_strings_are_the_entrys_own_vi_ve_vs() {
+    let mut database = FakeCapabilityDatabase::screen_256color()
+        .with_string("vi", "\x1b[?25l")
+        .with_string("ve", "\x1b[34h\x1b[?25h")
+        .with_string("vs", "\x1b[34l");
+    let caps = resolve_tty_attribute_capabilities(&mut database, "");
+    assert_eq!(
+        caps.cursor_invisible.as_deref(),
+        Some(b"\x1b[?25l".as_slice())
+    );
+    assert_eq!(
+        caps.cursor_normal.as_deref(),
+        Some(b"\x1b[34h\x1b[?25h".as_slice())
+    );
+    assert_eq!(caps.cursor_visible.as_deref(), Some(b"\x1b[34l".as_slice()));
+
+    // An entry without them has none: GNU's `OUTPUT_IF` emits nothing, and
+    // so must the writer -- no hardcoded `ESC[?25h` stands in.
+    let mut bare = FakeCapabilityDatabase::screen_256color();
+    let caps = resolve_tty_attribute_capabilities(&mut bare, "");
+    assert!(caps.cursor_invisible.is_none());
+    assert!(caps.cursor_normal.is_none());
+    assert!(caps.cursor_visible.is_none());
+}
+
 #[test]
 fn xterm_shaped_entry_resolves_every_planner_capability() {
     let mut database = FakeCapabilityDatabase::xterm_like().with_flag("ut");

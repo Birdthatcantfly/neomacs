@@ -538,6 +538,17 @@ pub struct TtyAttributeCapabilities {
     pub colors: TtyColorSource,
     /// `NC` — GNU `TN_no_color_video`.
     pub no_color_video: TtyNoColorVideo,
+    /// `vi` — GNU `TS_cursor_invisible` (src/term.c:4574), what
+    /// `tty_hide_cursor` emits while a frame is written.
+    pub cursor_invisible: Option<Vec<u8>>,
+    /// `ve` — GNU `TS_cursor_normal` (src/term.c:4572), the first string
+    /// `tty_show_cursor` emits when the update ends.
+    pub cursor_normal: Option<Vec<u8>>,
+    /// `vs` — GNU `TS_cursor_visible` (src/term.c:4573), emitted after `ve`
+    /// when `visible-cursor' is non-nil: the "very visible" cursor, which
+    /// on an xterm entry is `\E[?12;25h` (blinking) and on a screen entry
+    /// `\E[34l`.
+    pub cursor_visible: Option<Vec<u8>>,
 }
 
 impl TtyAttributeCapabilities {
@@ -555,6 +566,9 @@ impl TtyAttributeCapabilities {
             &self.strike_through_sequence,
             &self.exit_attribute_mode,
             &self.exit_underline_mode,
+            &self.cursor_invisible,
+            &self.cursor_normal,
+            &self.cursor_visible,
         ];
         attributes.into_iter().flatten().any(|bytes| padded(bytes))
             || self.styled_underline.as_ref().is_some_and(|styles| {
@@ -621,6 +635,12 @@ impl TtyAttributeCapabilities {
             exit_underline_mode: Some(b"\x1b[24m".to_vec()),
             colors: TtyColorSource::NoDatabase { max_colors },
             no_color_video: TtyNoColorVideo::NONE,
+            cursor_invisible: Some(b"\x1b[?25l".to_vec()),
+            cursor_normal: Some(b"\x1b[?25h".to_vec()),
+            // No entry to take a `vs` from: the cursor is shown normally,
+            // which is what this port emitted before the entry's strings
+            // were read at all.
+            cursor_visible: None,
         }
     }
 
@@ -638,6 +658,9 @@ impl TtyAttributeCapabilities {
             exit_attribute_mode: None,
             exit_underline_mode: None,
             colors: TtyColorSource::Absent,
+            cursor_invisible: None,
+            cursor_normal: None,
+            cursor_visible: None,
             no_color_video: TtyNoColorVideo::NONE,
         }
     }

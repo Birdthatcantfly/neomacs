@@ -91,12 +91,14 @@ impl SecondaryTtyRegistry {
             if full_redraw {
                 session.rif.force_redraw();
             }
+            let very_visible = frame_layout::very_visible_cursor(eval);
             frame_layout::run_tty_rif_redisplay_to(
                 &mut session.rif,
                 &root,
                 &children,
                 &mut session.device.file,
                 &session.device.capabilities,
+                very_visible,
             );
         }
         true
