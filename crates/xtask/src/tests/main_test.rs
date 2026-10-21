@@ -1209,7 +1209,7 @@ fn compile_main_dependency_waves_follow_gnu_cc_mode_rules() {
         source("progmodes/js.el"),
     ];
 
-    let waves = compile_main_dependency_waves(sources, &deps).unwrap();
+    let waves = compile_main_dependency_waves(sources, &deps);
     let wave_index = |path: PathBuf| {
         waves
             .iter()

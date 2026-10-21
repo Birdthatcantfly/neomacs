@@ -3708,13 +3708,19 @@ fn run_compile_main(
             "  INFO  byte-compiling {} general .el files with {jobs} parallel jobs",
             general.len()
         );
+        // GNU make lets a compiler see whatever bytecode happens to exist;
+        // order instead by what each compile loads, so every file compiles
+        // against published dependency bytecode and the result does not
+        // depend on timing.  The Makefile prerequisites stay in the graph.
+        let mut order = scan_compile_main_load_dependencies(options, paths, envs, &general)?;
+        for (source, deps) in &dependencies {
+            order
+                .entry(source.clone())
+                .or_default()
+                .extend(deps.iter().cloned());
+        }
         errors.extend(run_compile_main_parallel(
-            options,
-            paths,
-            envs,
-            general,
-            &dependencies,
-            jobs,
+            options, paths, envs, general, &order, jobs,
         )?);
     }
 
@@ -3829,6 +3835,63 @@ fn compile_main_jobs() -> usize {
         .max(1)
 }
 
+/// Run `compile-deps.el` with the final binary to list the files each of
+/// `sources` loads while it is byte-compiled, as edges between `sources`.
+fn scan_compile_main_load_dependencies(
+    options: &FreshBuildOptions,
+    paths: &PipelinePaths,
+    envs: &[(OsString, OsString)],
+    sources: &[PathBuf],
+) -> Result<BTreeMap<PathBuf, BTreeSet<PathBuf>>> {
+    let scratch = tempfile::Builder::new()
+        .prefix("neomacs-compile-deps-")
+        .tempdir()?;
+    let program = scratch.path().join("compile-deps.el");
+    let input = scratch.path().join("sources");
+    let output = scratch.path().join("edges");
+    fs::write(&program, compile_wave::LOAD_SCAN_PROGRAM)?;
+    let mut listing = String::new();
+    for source in sources {
+        let source = source
+            .to_str()
+            .ok_or_else(|| format!("non-UTF-8 Lisp source path: {}", source.display()))?;
+        listing.push_str(source);
+        listing.push('\n');
+    }
+    fs::write(&input, listing)?;
+
+    let args = [
+        OsString::from("--batch"),
+        OsString::from("--no-site-file"),
+        OsString::from("--no-site-lisp"),
+        OsString::from("-l"),
+        program.into_os_string(),
+        OsString::from("--eval"),
+        OsString::from(format!(
+            "(xtask-compile-deps-batch {} {})",
+            elisp_string_literal(&input),
+            elisp_string_literal(&output)
+        )),
+    ];
+    run_command(
+        options,
+        &options.repo_root,
+        compile_main_emacs(paths),
+        &args,
+        envs,
+    )?;
+    if options.dry_run {
+        return Ok(BTreeMap::new());
+    }
+    let edges = compile_wave::parse_load_dependencies(&fs::read_to_string(&output)?, sources);
+    println!(
+        "  INFO  compile-main load scan: {} edges among {} files",
+        edges.values().map(BTreeSet::len).sum::<usize>(),
+        sources.len()
+    );
+    Ok(edges)
+}
+
 fn run_compile_main_parallel(
     options: &FreshBuildOptions,
     paths: &PipelinePaths,
@@ -3838,7 +3901,12 @@ fn run_compile_main_parallel(
     jobs: usize,
 ) -> Result<Vec<String>> {
     let pool = rayon::ThreadPoolBuilder::new().num_threads(jobs).build()?;
-    let waves = compile_main_dependency_waves(sources, dependencies)?;
+    let waves = compile_main_dependency_waves(sources, dependencies);
+    println!(
+        "  INFO  compile-main dependency order: {} waves of {:?} files",
+        waves.len(),
+        waves.iter().map(Vec::len).collect::<Vec<_>>()
+    );
     let mut errors = Vec::new();
 
     for sources in waves {
@@ -3895,36 +3963,8 @@ fn run_compile_main_serial(
 fn compile_main_dependency_waves(
     sources: Vec<PathBuf>,
     dependencies: &BTreeMap<PathBuf, BTreeSet<PathBuf>>,
-) -> Result<Vec<Vec<PathBuf>>> {
-    let mut pending = sources.into_iter().collect::<BTreeSet<_>>();
-    let mut waves = Vec::new();
-
-    while !pending.is_empty() {
-        let ready = pending
-            .iter()
-            .filter(|source| {
-                dependencies
-                    .get(*source)
-                    .is_none_or(|deps| deps.iter().all(|dep| !pending.contains(dep)))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-
-        if ready.is_empty() {
-            return Err(format!(
-                "compile-main dependency cycle or missing wave among {} pending files",
-                pending.len()
-            )
-            .into());
-        }
-
-        for source in &ready {
-            pending.remove(source);
-        }
-        waves.push(ready);
-    }
-
-    Ok(waves)
+) -> Vec<Vec<PathBuf>> {
+    compile_wave::dependency_waves(sources, dependencies)
 }
 
 fn compile_main_sources_needing_rebuild(

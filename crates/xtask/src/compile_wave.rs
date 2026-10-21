@@ -2,7 +2,7 @@
 //! The coordinator joins all Rayon workers before validation/publication.
 //! Children share immutable job references and write independent private targets;
 //! no Lisp value, Context, or mutator-owned state crosses these worker threads.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -172,6 +172,190 @@ impl PublishedWave {
     }
 }
 
+/// The Lisp program that lists each source's compile-time loads
+/// (`require`s the compiler evaluates and autoloads it triggers).  Run with
+/// the final dumped binary before compile-main; see the file's commentary.
+pub(crate) const LOAD_SCAN_PROGRAM: &str = include_str!("../compile-deps.el");
+
+/// Parse the scanner's "SOURCE<TAB>DEPENDENCY" lines into edges between
+/// members of `sources`.  Edges to files outside the set (bytecode compiled by
+/// an earlier stage, or no file at all) and self-edges are dropped.  The
+/// scanner prints dependencies as true names, so they are matched through
+/// canonical paths.
+pub(crate) fn parse_load_dependencies(
+    output: &str,
+    sources: &[PathBuf],
+) -> BTreeMap<PathBuf, BTreeSet<PathBuf>> {
+    let by_canonical = sources
+        .iter()
+        .map(|source| (canonical_or_same(source), source.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut edges = BTreeMap::<PathBuf, BTreeSet<PathBuf>>::new();
+    for line in output.lines() {
+        let Some((source, dependency)) = line.split_once('\t') else {
+            continue;
+        };
+        let (Some(source), Some(dependency)) = (
+            by_canonical.get(&canonical_or_same(Path::new(source))),
+            by_canonical.get(&canonical_or_same(Path::new(dependency))),
+        ) else {
+            continue;
+        };
+        if source != dependency {
+            edges
+                .entry(source.clone())
+                .or_default()
+                .insert(dependency.clone());
+        }
+    }
+    edges
+}
+
+fn canonical_or_same(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Order `sources` into compile waves so a file compiles only after the
+/// bytecode of every source it depends on has been published.
+///
+/// Each wave is a topological layer: a file's wave is one past the deepest
+/// wave among its dependencies, so every wave runs fully in parallel and
+/// sees exactly the bytecode of the waves before it.  The waves depend only
+/// on the sources and the edges, never on process completion order.
+///
+/// Dependency cycles are broken deterministically: inside a strongly
+/// connected component the members are ordered by path, and a member keeps
+/// only its edges to earlier members.  It compiles against the bytecode of
+/// the earlier members and the sources of the later ones.
+pub(crate) fn dependency_waves(
+    sources: Vec<PathBuf>,
+    dependencies: &BTreeMap<PathBuf, BTreeSet<PathBuf>>,
+) -> Vec<Vec<PathBuf>> {
+    let nodes = sources.into_iter().collect::<BTreeSet<_>>();
+    let index = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, node)| (node, i))
+        .collect::<BTreeMap<_, _>>();
+    let edges = nodes
+        .iter()
+        .map(|node| {
+            dependencies
+                .get(node)
+                .into_iter()
+                .flatten()
+                .filter_map(|dep| index.get(dep).copied())
+                .filter(|dep| *dep != index[node])
+                .collect::<BTreeSet<usize>>()
+        })
+        .collect::<Vec<_>>();
+
+    let component = strongly_connected_components(&edges);
+    // Nodes are numbered in path order, so "earlier member" is a smaller
+    // index within the same component.
+    let kept = |node: usize, dep: usize| component[node] != component[dep] || dep < node;
+
+    let mut depth = vec![None::<usize>; edges.len()];
+    for start in 0..edges.len() {
+        // Iterative post-order over the kept (acyclic) edges.
+        let mut stack = vec![(start, false)];
+        while let Some((node, expanded)) = stack.pop() {
+            if depth[node].is_some() {
+                continue;
+            }
+            if expanded {
+                let deepest = edges[node]
+                    .iter()
+                    .filter(|dep| kept(node, **dep))
+                    .map(|dep| depth[*dep].expect("dependency depth computed first") + 1)
+                    .max()
+                    .unwrap_or(0);
+                depth[node] = Some(deepest);
+            } else {
+                stack.push((node, true));
+                for dep in edges[node].iter().filter(|dep| kept(node, **dep)) {
+                    if depth[*dep].is_none() {
+                        stack.push((*dep, false));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut waves = Vec::<Vec<PathBuf>>::new();
+    for (node, path) in nodes.into_iter().enumerate() {
+        let wave = depth[node].expect("every node has a depth");
+        if waves.len() <= wave {
+            waves.resize_with(wave + 1, Vec::new);
+        }
+        waves[wave].push(path);
+    }
+    waves
+}
+
+/// Tarjan's algorithm, iterative.  Returns each node's component number.
+fn strongly_connected_components(edges: &[BTreeSet<usize>]) -> Vec<usize> {
+    const UNVISITED: usize = usize::MAX;
+    let count = edges.len();
+    let mut order = vec![UNVISITED; count];
+    let mut low = vec![0; count];
+    let mut on_stack = vec![false; count];
+    let mut component = vec![UNVISITED; count];
+    let mut stack = Vec::new();
+    let mut next_order = 0;
+    let mut next_component = 0;
+
+    for root in 0..count {
+        if order[root] != UNVISITED {
+            continue;
+        }
+        // (node, iterator position over its sorted successors)
+        let mut frames = vec![(root, 0usize)];
+        order[root] = next_order;
+        low[root] = next_order;
+        next_order += 1;
+        stack.push(root);
+        on_stack[root] = true;
+        while let Some(frame) = frames.last_mut() {
+            let node = frame.0;
+            if let Some(&dep) = edges[node].iter().nth(frame.1) {
+                frame.1 += 1;
+                if order[dep] == UNVISITED {
+                    order[dep] = next_order;
+                    low[dep] = next_order;
+                    next_order += 1;
+                    stack.push(dep);
+                    on_stack[dep] = true;
+                    frames.push((dep, 0));
+                } else if on_stack[dep] {
+                    low[node] = low[node].min(order[dep]);
+                }
+                continue;
+            }
+            frames.pop();
+            if let Some(&(parent, _)) = frames.last() {
+                low[parent] = low[parent].min(low[node]);
+            }
+            if low[node] == order[node] {
+                loop {
+                    let member = stack.pop().expect("Tarjan stack holds the component");
+                    on_stack[member] = false;
+                    component[member] = next_component;
+                    if member == node {
+                        break;
+                    }
+                }
+                next_component += 1;
+            }
+        }
+    }
+    component
+}
+
 #[cfg(test)]
 #[path = "compile_wave/tests/publication_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "compile_wave/tests/order_test.rs"]
+mod order_tests;
