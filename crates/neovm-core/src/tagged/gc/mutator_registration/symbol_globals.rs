@@ -15,3 +15,8 @@ pub(super) enum GlobalOp {
 
 #[cfg(not(feature = "gc-memory-telemetry"))]
 mod tests;
+#[cfg(not(feature = "gc-memory-telemetry"))]
+mod transitions;
+
+#[cfg(not(feature = "gc-memory-telemetry"))]
+mod histories;
