@@ -2771,6 +2771,11 @@ use cons_blocks::*;
 
 mod aliasable;
 pub(crate) use aliasable::AliasableBox;
+#[cfg(test)]
+#[path = "gc/tests/test_heap.rs"]
+mod test_heap;
+#[cfg(test)]
+pub(crate) use test_heap::TestHeap;
 
 mod arena_pages;
 pub(crate) use arena_pages::*;
