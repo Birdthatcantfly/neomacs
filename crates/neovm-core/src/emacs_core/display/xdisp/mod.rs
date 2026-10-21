@@ -8951,7 +8951,17 @@ fn compute_live_window_geometry_scope(
     // GNU's coordinate queries walk from the live window start even on a
     // graphical frame. Using the renderer's older presentation during queued
     // pixel-scroll commands makes point correction undo part of the gesture.
-    if frame.initial || eval.noninteractive() {
+    //
+    // The only gate GNU has here is the initial frame: `pos_visible_p`
+    // returns false for FRAME_INITIAL_P (src/xdisp.c:1703) and runs its
+    // iterator for every other frame, batch or not.  Ledger 201 also refused
+    // batch, taking the `noninteractive` test of `window-end' with UPDATE
+    // (src/window.c:1861) and `window-line-height' for a gate of this path;
+    // it is not one, and `pos-visible-in-window-p' already walked here in
+    // batch while `posn-at-point' answered nil for every position before
+    // the first redisplay of a terminal frame made in batch (GNU 31.1:
+    // (10 . 10) for column 10).  Both now share this one walk.
+    if frame.initial {
         return Ok(None);
     }
     // A populated snapshot that is still FRESH already answered (or correctly

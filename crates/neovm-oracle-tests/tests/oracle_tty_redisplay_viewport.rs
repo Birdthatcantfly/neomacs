@@ -219,3 +219,37 @@ fn tty_positions_in_a_truncated_tail_are_visible_at_the_truncation_column() {
     );
     terminal.finish();
 }
+
+/// Before the first redisplay of a terminal frame made in `--batch', GNU's
+/// `posn-at-point' already answers: `pos_visible_p' is gated on the initial
+/// frame only (src/xdisp.c:1703) and walks from the window start for every
+/// other frame, batch or not; the `noninteractive' test belongs to
+/// `window-end' with UPDATE (src/window.c:1861), not here.
+#[test]
+fn tty_posn_at_point_answers_in_batch_before_the_first_redisplay() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    let terminal = TestTerminal::with_size(40, 120);
+    let form = format!(
+        r##"(progn {VIEWPORT_SUPPORT}
+  (setq vp-long t)
+  (vp-fill "vp-truncate")
+  (setq-local truncate-lines t)
+  (defun vp-tail ()
+    (let ((p (posn-at-point)))
+      (list (and p (posn-x-y p)) (and p (posn-point p))
+            (pos-visible-in-window-p (point) nil t) (pos-visible-in-window-p (point)))))
+  (goto-char (+ (vp-line 509) 10))
+  (setq vp-col10 (vp-tail))
+  (goto-char (vp-line 509))
+  (setq vp-col0 (vp-tail))
+  (goto-char (vp-line 499))
+  (setq vp-top (vp-tail))
+  (list vp-col10 vp-col0 vp-top (window-hscroll)))"##
+    );
+    common::assert_oracle_parity_with_env_expect(
+        &form,
+        &[("VIEWPORT_TEST_TTY", &terminal.name)],
+        expect_test::expect![[r#""OK (((10 . 10) 102829 (10 10) t) ((0 . 10) 102819 (0 10) t) ((0 . 0) 100799 (0 0) t) 0)""#]],
+    );
+    terminal.finish();
+}
