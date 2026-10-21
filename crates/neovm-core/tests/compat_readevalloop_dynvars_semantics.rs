@@ -129,3 +129,30 @@ fn compat_readevalloop_compiled_closure_env_excludes_other_files() {
     (delete-directory dir t)))"#,
     );
 }
+
+/// `eval-region' runs a `readevalloop' too: the region starts from a fresh
+/// interpreter environment (the caller's lexical variables are not visible)
+/// and its top-level `defvar's stay out of the caller's `macroexp--dynvars'.
+#[test]
+fn compat_readevalloop_eval_region_opens_fresh_scope() {
+    assert_case(
+        "eval_region_opens_fresh_scope",
+        r#"(progn
+  (defvar neovm-dynvars-region-seen nil)
+  (defvar neovm-dynvars-region-lexical nil)
+  (let ((before macroexp--dynvars)
+        (neovm-dynvars-lexical-probe 7))
+    (ignore neovm-dynvars-lexical-probe)
+    (with-temp-buffer
+      (setq-local lexical-binding t)
+      (insert "(defvar neovm-dynvars-region-a 1)\n"
+              "(setq neovm-dynvars-region-seen macroexp--dynvars)\n"
+              "(setq neovm-dynvars-region-lexical\n"
+              "      (condition-case nil neovm-dynvars-lexical-probe\n"
+              "        (void-variable 'void)))\n")
+      (eval-region (point-min) (point-max)))
+    (list (equal before macroexp--dynvars)
+          neovm-dynvars-region-seen
+          neovm-dynvars-region-lexical)))"#,
+    );
+}

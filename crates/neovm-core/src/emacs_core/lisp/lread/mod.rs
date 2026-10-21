@@ -507,8 +507,20 @@ pub(crate) fn builtin_eval_buffer(eval: &mut super::eval::Context, args: Vec<Val
 ///
 /// Evaluate forms in the [START, END) region of the current buffer.
 pub(crate) fn builtin_eval_region(eval: &mut super::eval::Context, args: Vec<Value>) -> EvalResult {
+    // GNU `Feval_region' evaluates through `readevalloop', which opens a
+    // fresh interpreter scope from the current buffer's `lexical-binding'.
+    let specpdl_count = eval.specpdl.len();
+    let lexical_binding = eval
+        .visible_variable_value_or_nil("lexical-binding")
+        .is_truthy();
+    enter_readevalloop_scope(eval, specpdl_count, lexical_binding)?;
+    let result = eval_region_in_scope(eval, &args);
+    eval.unbind_to_with_result(specpdl_count, result)
+}
+
+fn eval_region_in_scope(eval: &mut super::eval::Context, args: &[Value]) -> EvalResult {
     if let FormReader::Lisp(read_function) = FormReader::resolve(eval, args.get(3).copied()) {
-        let (start, end) = eval_region_bounds_in_state(&eval.buffers, &args)?;
+        let (start, end) = eval_region_bounds_in_state(&eval.buffers, args)?;
         if start >= end {
             return Ok(Value::NIL);
         }
@@ -525,7 +537,7 @@ pub(crate) fn builtin_eval_region(eval: &mut super::eval::Context, args: Vec<Val
         );
     }
 
-    let source = eval_region_source_text_in_state(&eval.buffers, &args)?;
+    let source = eval_region_source_text_in_state(&eval.buffers, args)?;
     if source.as_bytes().is_empty() {
         return Ok(Value::NIL);
     }
