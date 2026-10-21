@@ -1,6 +1,7 @@
 mod compile_wave;
 mod dependency_coherence;
 mod gc_stress;
+mod pgo;
 mod production_capabilities;
 mod window_icon;
 
@@ -782,143 +783,14 @@ impl BuildProfile {
     }
 }
 
-/// Where a PGO build keeps its raw counters and merged profile.
-fn pgo_dirs(options: &FreshBuildOptions) -> (PathBuf, PathBuf) {
-    let base = options.repo_root.join("target").join("pgo");
-    (base.join("raw"), base.join("merged.profdata"))
-}
-
-/// Build the runtime once with instrumentation, run the committed training
-/// workload against it, and merge the counters into a profile.
-///
-/// Split out because PGO is inherently two-pass: the profile has to come from
-/// a binary that already exists, so `--profile release-pgo` runs this first and
-/// then rebuilds normally with `-Cprofile-use`.
-fn run_pgo_training(options: &FreshBuildOptions) -> Result<PathBuf> {
-    let (raw_dir, merged) = pgo_dirs(options);
-    let train = options.repo_root.join("crates/xtask").join("pgo-train.el");
-    if !train.exists() {
-        return Err(format!("missing PGO training workload: {}", train.display()).into());
-    }
-
-    // Instrumented pass: its own profile (and so its own target dir), so the
-    // instrumented binary never displaces a normal build.
-    let gen_options = FreshBuildOptions {
-        profile: BuildProfile::ReleasePgoGen,
-        ..options.clone()
-    };
-    let gen_options = FreshBuildOptions {
-        bin_dir: default_bin_dir(&gen_options.repo_root, &gen_options.profile),
-        ..gen_options
-    };
-    if !options.dry_run {
-        let _ = std::fs::remove_dir_all(&raw_dir);
-        std::fs::create_dir_all(&raw_dir)?;
-        // Same stale-artifact hazard as the optimized pass below: the
-        // instrumented build's RUSTFLAGS is also constant across runs.
-        let stale = default_bin_dir(&gen_options.repo_root, &gen_options.profile);
-        if stale.exists() {
-            std::fs::remove_dir_all(&stale)?;
-        }
-    }
-    println!("+ PGO pass 1/2: instrumented build");
-    run_fresh_build_inner(
-        &gen_options,
-        &[(
-            OsString::from("RUSTFLAGS"),
-            OsString::from(format!("-Cprofile-generate={}", raw_dir.display())),
-        )],
-    )?;
-
-    println!("+ PGO: running training workload {}", train.display());
-    let gen_paths = pipeline_paths(&gen_options);
-    run_command(
-        options,
-        &options.repo_root,
-        &gen_paths.final_bin,
-        &[
-            OsString::from("--batch"),
-            OsString::from("-Q"),
-            OsString::from("-l"),
-            train.as_os_str().to_os_string(),
-        ],
-        &[(
-            OsString::from("NEOMACS_RUNTIME_ROOT"),
-            options.runtime_root.as_os_str().to_os_string(),
-        )],
-    )?;
-
-    println!("+ PGO: merging counters -> {}", merged.display());
-    let profdata = llvm_profdata_path()?;
-    let mut merge_args = vec![OsString::from("merge"), OsString::from("-o")];
-    merge_args.push(merged.as_os_str().to_os_string());
-    merge_args.push(raw_dir.as_os_str().to_os_string());
-    run_command(options, &options.repo_root, &profdata, &merge_args, &[])?;
-    Ok(merged)
-}
-
-/// `llvm-profdata` from the active toolchain -- it must match rustc's LLVM, so
-/// a system copy is not a safe substitute.
-fn llvm_profdata_path() -> Result<PathBuf> {
-    let sysroot = Command::new("rustc")
-        .arg("--print")
-        .arg("sysroot")
-        .output()?;
-    let sysroot = String::from_utf8(sysroot.stdout)?.trim().to_string();
-    // The tool lives under the HOST triple's rustlib dir: every release job
-    // runs on a native runner (x86_64/aarch64 Linux, aarch64 macOS,
-    // x86_64/aarch64 Windows), so the host is also the target being trained.
-    let host = Command::new("rustc")
-        .arg("--print")
-        .arg("host-tuple")
-        .output()?;
-    let host = String::from_utf8(host.stdout)?.trim().to_string();
-    let tool = if cfg!(windows) {
-        "llvm-profdata.exe"
-    } else {
-        "llvm-profdata"
-    };
-    let path = PathBuf::from(&sysroot)
-        .join("lib/rustlib")
-        .join(&host)
-        .join("bin")
-        .join(tool);
-    if path.exists() {
-        return Ok(path);
-    }
-    Err(format!(
-        "llvm-profdata not found at {}.\n\nInstall it with:\n    rustup component add llvm-tools",
-        path.display()
-    )
-    .into())
-}
-
+/// A skipped Rust build never starts instrumentation, training, or deletion.
 fn run_fresh_build(options: &FreshBuildOptions) -> Result<()> {
-    if options.profile.consumes_pgo() {
-        let merged = run_pgo_training(options)?;
-        // Cargo cannot see that the profile CONTENTS changed: RUSTFLAGS is
-        // byte-identical between runs (`-Cprofile-use=<same path>`), so its
-        // fingerprint matches and it happily reuses objects compiled against
-        // the PREVIOUS profile. With LTO on, mixing them fails at link time
-        // with "failed to load bitcode of module ...". Dropping the output
-        // directory is the honest fix -- a changed profile invalidates every
-        // object anyway, so there is nothing to salvage.
-        if !options.dry_run {
-            let stale = default_bin_dir(&options.repo_root, &options.profile);
-            if stale.exists() {
-                std::fs::remove_dir_all(&stale)?;
-            }
+    match pgo::FreshBuildOperation::for_options(options) {
+        pgo::FreshBuildOperation::ExistingProduct | pgo::FreshBuildOperation::BuildProduct => {
+            run_fresh_build_inner(options, &[])
         }
-        println!("+ PGO pass 2/2: optimized build using {}", merged.display());
-        return run_fresh_build_inner(
-            options,
-            &[(
-                OsString::from("RUSTFLAGS"),
-                OsString::from(format!("-Cprofile-use={}", merged.display())),
-            )],
-        );
+        pgo::FreshBuildOperation::NativePgo => pgo::run(options),
     }
-    run_fresh_build_inner(options, &[])
 }
 
 /// Normal build-owned image producers omit volatile build metadata.
@@ -949,6 +821,16 @@ fn dump_producer_args(stage: DumpProducerStage) -> [OsString; 5] {
 fn run_fresh_build_inner(
     options: &FreshBuildOptions,
     build_envs: &[(OsString, OsString)],
+) -> Result<()> {
+    run_fresh_build_pipeline(options, build_envs, &[])
+}
+
+/// Extra runtime environment belongs only to this synchronous producer tree.
+/// PGO uses it to keep preparation counters outside the two training passes.
+fn run_fresh_build_pipeline(
+    options: &FreshBuildOptions,
+    build_envs: &[(OsString, OsString)],
+    runtime_envs: &[(OsString, OsString)],
 ) -> Result<()> {
     let paths = pipeline_paths(options);
     ensure_runtime_inputs(&paths)?;
@@ -994,10 +876,11 @@ fn run_fresh_build_inner(
         ensure_binaries_exist(&paths)?;
     }
 
-    let envs = [(
+    let mut envs = runtime_envs.to_vec();
+    envs.push((
         OsString::from("NEOMACS_RUNTIME_ROOT"),
         options.runtime_root.as_os_str().to_os_string(),
-    )];
+    ));
     let loaddefs_el = paths.lisp_root.join("loaddefs.el");
     let theme_loaddefs_el = paths.lisp_root.join("theme-loaddefs.el");
     let ldefs_boot = paths.lisp_root.join("ldefs-boot.el");
