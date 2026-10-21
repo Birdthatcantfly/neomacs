@@ -23,3 +23,7 @@ RUST_MIN_STACK = "134217728"
 # a RUSTFLAGS environment variable replaces them, so it must repeat this one.
 [target.'cfg(target_arch = "x86_64")']
 rustflags = ["-Cllvm-args=-align-all-functions=6"]
+
+# Keep an ELF Build-ID on every Linux product, including native PGO releases.
+[target.'cfg(target_os = "linux")']
+rustflags = ["-Clink-arg=-Wl,--build-id"]

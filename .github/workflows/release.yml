@@ -73,27 +73,32 @@ jobs:
           url: https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${{ matrix.arch }}.AppImage
           cache_key: continuous-${{ matrix.arch }}
 
-      # Split so a compile failure is distinguishable from a bootstrap failure,
-      # and so the expensive half is a step of its own.  This build must match
-      # xtask's own EXACTLY - same package, same features, same profile - or the
-      # bootstrap below rebuilds it instead of reusing it, and where nothing
-      # verifies the result it blesses a product missing a capability the
-      # manifest promises (macOS shipped without `webview` that way).  Hence one
-      # RELEASE_FEATURES for both steps.  crates/neomacs/build.rs declares
-      # rerun-if-env-changed on NEOMACS_BUILD_PROFILE, so the profile has to
-      # agree the same way.  `-p neomacs` covers neomacs and neomacsclient;
-      # they are the shipped bins of one package (mock-display is an example
-      # and deliberately not built or shipped here).
-      - name: Compile release binaries
-        env:
-          NEOMACS_BUILD_PROFILE: release
-        run: >-
-          cargo build -p neomacs
-          --features "$RELEASE_FEATURES"
-          --profile release
-
-      - name: Bootstrap and dump
-        run: cargo xtask fresh-build --release --features "$RELEASE_FEATURES" --skip-build
+      # One native release owner keeps package/features/profile and the final
+      # runnable runtime together. For Linux x86_64, xtask owns instrumented
+      # build, default + interpreter training, merge, optimized build and dump.
+      # Other native targets retain the ordinary non-PGO release path.
+      - name: Build release runtime
+        run: |
+          host="$(rustc --print host-tuple)"
+          target="${{ matrix.target }}"
+          if [[ "$host" != "$target" ]]; then
+            echo "This native release job cannot bootstrap cross target $target on $host" >&2
+            exit 1
+          fi
+          if [[ "$target" == "x86_64-unknown-linux-gnu" ]]; then
+            profile=release-pgo
+            env -u RUST_LOG cargo xtask fresh-build --profile "$profile" --features "$RELEASE_FEATURES"
+          else
+            profile=release
+            env -u RUST_LOG NEOMACS_BUILD_PROFILE=release cargo build -p neomacs \
+              --features "$RELEASE_FEATURES" --profile release
+            env -u RUST_LOG cargo xtask fresh-build --release --features "$RELEASE_FEATURES" --skip-build
+          fi
+          target_root="${CARGO_TARGET_DIR:-$GITHUB_WORKSPACE/target}"
+          if [[ "$target_root" != /* ]]; then
+            target_root="$GITHUB_WORKSPACE/$target_root"
+          fi
+          echo "NEOMACS_RELEASE_DIR=$target_root/$profile" >> "$GITHUB_ENV"
 
       - name: Set version env
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
@@ -282,16 +287,32 @@ jobs:
           cache-key: release-linux-rpm-el9-${{ matrix.arch }}
           target: ${{ matrix.target }}
 
-      - name: Compile release binaries
-        env:
-          NEOMACS_BUILD_PROFILE: release
-        run: >-
-          cargo build -p neomacs
-          --features "$RELEASE_FEATURES"
-          --profile release
-
-      - name: Bootstrap and dump
-        run: cargo xtask fresh-build --release --features "$RELEASE_FEATURES" --skip-build
+      # One native release owner keeps package/features/profile and the final
+      # runnable runtime together. For Linux x86_64, xtask owns instrumented
+      # build, default + interpreter training, merge, optimized build and dump.
+      # Other native targets retain the ordinary non-PGO release path.
+      - name: Build release runtime
+        run: |
+          host="$(rustc --print host-tuple)"
+          target="${{ matrix.target }}"
+          if [[ "$host" != "$target" ]]; then
+            echo "This native release job cannot bootstrap cross target $target on $host" >&2
+            exit 1
+          fi
+          if [[ "$target" == "x86_64-unknown-linux-gnu" ]]; then
+            profile=release-pgo
+            env -u RUST_LOG cargo xtask fresh-build --profile "$profile" --features "$RELEASE_FEATURES"
+          else
+            profile=release
+            env -u RUST_LOG NEOMACS_BUILD_PROFILE=release cargo build -p neomacs \
+              --features "$RELEASE_FEATURES" --profile release
+            env -u RUST_LOG cargo xtask fresh-build --release --features "$RELEASE_FEATURES" --skip-build
+          fi
+          target_root="${CARGO_TARGET_DIR:-$GITHUB_WORKSPACE/target}"
+          if [[ "$target_root" != /* ]]; then
+            target_root="$GITHUB_WORKSPACE/$target_root"
+          fi
+          echo "NEOMACS_RELEASE_DIR=$target_root/$profile" >> "$GITHUB_ENV"
 
       # `%{?dist}` is defined here, so the file is
       # neomacs-<version>-1.el9.<arch>.rpm.

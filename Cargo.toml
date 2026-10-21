@@ -442,8 +442,11 @@ opt-level = 2
 # Optimized build driven by a PGO profile. Same codegen settings as release,
 # but cargo gives it its own target/release-pgo directory, so a PGO build never
 # replaces an ordinary release binary (or invalidates its pdump fingerprint).
-# The profile data itself is supplied by RUSTFLAGS, which xtask sets --
-# see `cargo xtask fresh-build --profile release-pgo`.
+# Native Linux x86_64 releases use the xtask-owned generation, default and
+# interpreter training passes, merge, and optimized build. xtask supplies the
+# exact consumer profile through CARGO_ENCODED_RUSTFLAGS; see
+# `cargo xtask fresh-build --profile release-pgo`.
+# Other platforms and cross targets use ordinary non-PGO release builds.
 [profile.release-pgo]
 inherits = "release"
 
@@ -455,18 +458,14 @@ inherits = "release-pgo"
 debug = true
 strip = "none"
 
-# Instrumented pass of a PGO build. Separate from release-pgo so the
-# counter-collecting binary (which is slow, and useless afterwards) never
-# occupies the directory the optimized one lands in.
+# Internal instrumented stage of native Linux x86_64 release PGO. xtask uses
+# matching fat-LTO/codegen settings for generation and consumption. It preserves
+# the instrumented artifacts and profiles as receipts, but excludes them from
+# shipment; the separate directory keeps them out of the optimized product.
+# This does not enable PGO on macOS, Windows, or cross targets; those retain
+# ordinary release builds, outside this native training/bootstrap pipeline.
 [profile.release-pgo-gen]
 inherits = "release"
-# NOT for release builds. The v0.0.18 attempt to ship this profile failed on two
-# of five targets: fat LTO together with `-Cprofile-generate` crashed rustc with
-# STATUS_ACCESS_VIOLATION compiling `yoke` for aarch64-pc-windows-msvc, and the
-# Linux x86_64 runner was SIGTERMed during the instrumented links. Releases
-# build `release` (see .github/workflows/release.yml). Anyone reviving this for
-# release should try `lto = false` here first -- the instrumented binary is
-# discarded after training, so LTO buys it nothing.
 
 [profile.profiling]
 inherits = "release"
