@@ -1530,8 +1530,8 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
 /// `&mut`-derived tag is popped by the owning `&mut`'s next use (Stacked
 /// Borrows) or disabled by it (Tree Borrows).
 ///
-/// All production installers use this form. [`set_tagged_heap`] remains for
-/// test fixtures that own a bare heap directly.
+/// All production installers use this form. Root-owning test fixtures use it
+/// too; the legacy borrow installer is restricted to test builds.
 pub(crate) fn set_tagged_heap_root(mut root: std::ptr::NonNull<TaggedHeap>) {
     // SAFETY: the caller supplies the live allocation's root pointer.
     if !tagged_heap_is_current(unsafe { root.as_ref() }) {
@@ -1546,13 +1546,14 @@ pub(crate) fn set_tagged_heap_root(mut root: std::ptr::NonNull<TaggedHeap>) {
     sync_heap_tls_mirrors(unsafe { root.as_mut() });
 }
 
-/// Set the thread-local tagged heap pointer, borrowing the heap directly.
+/// Legacy borrow installer for test fixtures awaiting TestHeap migration.
 ///
-/// This form derives the stored pointer from a `&mut TaggedHeap`, so it is
-/// only sound while the owner never uses that same borrow path again after
-/// the call, and never holds a `&mut TaggedHeap` across a TLS-derived access.
-/// It exists for test fixtures whose heap they own directly; production code
-/// installs through [`set_tagged_heap_root`].
+/// The stored child pointer cannot survive sibling owner/root accesses, and
+/// mirror synchronization can itself invalidate it. New fixtures must own an
+/// AliasableBox root and install with `set_tagged_heap_root` (use TestHeap).
+/// Restrict this legacy surface to unit-test builds while that inventory is
+/// migrated; no production or integration-test caller can use it.
+#[cfg(test)]
 pub fn set_tagged_heap(heap: &mut TaggedHeap) {
     if !tagged_heap_is_current(heap) {
         super::super::collection_reads::reset_recent_reads_for_heap_installation();
