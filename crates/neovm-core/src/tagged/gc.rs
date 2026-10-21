@@ -2810,7 +2810,7 @@ pub use facade_mark::{
     QuiescentCollector,
 };
 pub use mutator_registration::{
-    AllStopped, AllStoppedFailure, CollectionError, CollectionReport, KeeperSymbols,
+    AllStopped, AllStoppedFailure, CollectionError, CollectionReport, GlobalError, KeeperSymbols,
     KeeperTableMut, Mode, Mutator, MutatorEntry, MutatorFinishFailure, MutatorKey, MutatorPermit,
     MutatorStartFailure, NativeReturn, NativeRoots, OwnerPublication, OwnerRootSlot,
     ParallelHeapEra, Phase, PlainSymbolBacking, RegistrationCensus, RegistrationError, Rendezvous,
@@ -2819,7 +2819,7 @@ pub use mutator_registration::{
     SymbolRef, TableMut, TableRef, YoungWorkerLoan,
 };
 
-pub(crate) use mutator_registration::{OwnerRootAdmission, StoppedRootAdmission};
+pub(crate) use mutator_registration::{OwnerRootAdmission, StoppedRootAdmission, SymbolReadToken};
 
 mod alloc_region;
 #[cfg(test)]

@@ -86,6 +86,33 @@ impl SymbolBacking {
         }
     }
 
+    /// Only a live sealed reader can reach this copy. No projection-table
+    /// RefCell borrow: admission checked ownership, and the closed operations
+    /// preserve that fact while the era retains the original World.
+    pub(crate) unsafe fn read_plain(
+        &self,
+        id: SymId,
+        _authority: &crate::tagged::gc::SymbolReadToken<'_>,
+    ) -> Option<super::Value> {
+        let obarray = unsafe { self.obarray.as_ref() };
+        if obarray.generation() != self.generation {
+            return None;
+        }
+        let symbol = obarray.get_by_id(id)?;
+        if symbol.trapped_write() != SymbolTrappedWrite::Untrapped {
+            return None;
+        }
+        match symbol.value_cell() {
+            ValueCell::Plain(value) if !symbol.flags().runtime_projected() => Some(value),
+            ValueCell::Forwarded(fwd) if symbol.flags().runtime_projected() => {
+                let projection = fwd.thread_projection()?;
+                (projection.arm() == CanonicalArm::Plain && !projection.host_projected())
+                    .then(|| projection.plain_value())
+            }
+            _ => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) unsafe fn probe(&self, id: SymId) -> usize {
         // SAFETY: the test holds the real read/write/keeper lease. Only the

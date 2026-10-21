@@ -132,6 +132,17 @@ fn red_case(op: GlobalOp, kind: PlainSymbolBacking) {
             GlobalOp::Boundp { .. } => run.sym_boundp_into(handle, dst),
             GlobalOp::Makunbound { .. } => run.sym_makunbound_into(handle, dst),
         };
+        if matches!(op, GlobalOp::Value { .. } | GlobalOp::Boundp { .. }) {
+            outcome.expect("sealed reader operation");
+            let value = Value::from_bits(dst.word_for_test(run));
+            let expected = if matches!(op, GlobalOp::Value { .. }) {
+                oracle()[0]
+            } else {
+                oracle()[2]
+            };
+            assert_eq!(crate::emacs_core::print_value(&value), expected);
+            return;
+        }
         assert_eq!(
             outcome,
             Err(GlobalError::AwaitingB143),
@@ -142,6 +153,10 @@ fn red_case(op: GlobalOp, kind: PlainSymbolBacking) {
             "P3SYM_C3_RED missing executor op {name}: {outcome:?}"
         );
     });
+    if matches!(op, GlobalOp::Value { .. } | GlobalOp::Boundp { .. }) {
+        result.expect("reader twin and fixture teardown must pass");
+        return;
+    }
     let failure = result.expect_err("missing executor op produced no red witness");
     let text = failure
         .downcast_ref::<String>()
@@ -165,9 +180,9 @@ fn p3sym_c3_noop_fixture_releases_roots_and_finishes() {
 }
 
 macro_rules! red {
-    ($name:ident, $kind:ident, $op:expr) => {
+    ($(#[$attr:meta])* $name:ident, $kind:ident, $op:expr) => {
         #[test]
-        #[ignore = "C3 red semantics; real storage implementation waits for b143"]
+        $(#[$attr])*
         fn $name() {
             red_case($op, PlainSymbolBacking::$kind);
         }
@@ -180,6 +195,7 @@ red!(
     GlobalOp::Value { symbol: 0, dst: 1 }
 );
 red!(
+    #[ignore = "writer implementation follows the sealed reader commit"]
     p3sym_c3_red_plain_set,
     Unprojected,
     GlobalOp::Set {
@@ -194,6 +210,7 @@ red!(
     GlobalOp::Boundp { symbol: 0, dst: 1 }
 );
 red!(
+    #[ignore = "writer implementation follows the sealed reader commit"]
     p3sym_c3_red_plain_makunbound,
     Unprojected,
     GlobalOp::Makunbound { symbol: 0, dst: 1 }
@@ -204,6 +221,7 @@ red!(
     GlobalOp::Value { symbol: 0, dst: 1 }
 );
 red!(
+    #[ignore = "writer implementation follows the sealed reader commit"]
     p3sym_c3_red_projected_set,
     Projected,
     GlobalOp::Set {
@@ -218,6 +236,7 @@ red!(
     GlobalOp::Boundp { symbol: 0, dst: 1 }
 );
 red!(
+    #[ignore = "writer implementation follows the sealed reader commit"]
     p3sym_c3_red_projected_makunbound,
     Projected,
     GlobalOp::Makunbound { symbol: 0, dst: 1 }

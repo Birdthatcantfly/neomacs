@@ -1,4 +1,7 @@
-//! C2 authority only: no executor operations or Value-exporting receiver.
+//! Sealed symbol authority; running values move only between owner root homes.
+mod globals;
+pub use globals::GlobalError;
+pub(crate) use globals::SymbolReadToken;
 mod word;
 use super::*;
 use crate::emacs_core::intern::SymId;

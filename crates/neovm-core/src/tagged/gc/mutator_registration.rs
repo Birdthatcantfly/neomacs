@@ -32,7 +32,10 @@ mod summaries;
 mod symbol_authority;
 #[cfg(test)]
 mod symbol_globals;
-pub use symbol_authority::{KeeperSymbols, PlainSymbolBacking, SymbolHandle, SymbolMut, SymbolRef};
+pub(crate) use symbol_authority::SymbolReadToken;
+pub use symbol_authority::{
+    GlobalError, KeeperSymbols, PlainSymbolBacking, SymbolHandle, SymbolMut, SymbolRef,
+};
 mod token;
 // The extent API ships ahead of its first production call site (the Green
 // mutex/condition release points); the re-export is for that integration.
