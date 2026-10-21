@@ -111,6 +111,9 @@ mod compat_pcase_semantics;
 #[path = "compat_provide_require_semantics.rs"]
 mod compat_provide_require_semantics;
 
+#[path = "compat_readevalloop_dynvars_semantics.rs"]
+mod compat_readevalloop_dynvars_semantics;
+
 #[path = "compat_source_bootstrap_macro_surface.rs"]
 mod compat_source_bootstrap_macro_surface;
 

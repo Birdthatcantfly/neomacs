@@ -1789,19 +1789,10 @@ where
         )
         .map_err(map_flow)?;
 
-        // Mirrors GNU readevalloop's internal-interpreter-environment
-        // specbinding. Keep lexenv restoration on the same specpdl scope.
-        {
-            use super::eval::SpecBinding;
-            eval.specpdl.push(SpecBinding::LexicalEnv {
-                old_lexenv: eval.lexenv,
-            });
-        }
-        eval.lexenv = if lexical_binding {
-            Value::list(vec![Value::T])
-        } else {
-            Value::NIL
-        };
+        // Mirrors GNU readevalloop's internal-interpreter-environment and
+        // macroexp--dynvars specbindings, on the same specpdl scope.
+        super::lread::enter_readevalloop_scope(eval, specpdl_count, lexical_binding)
+            .map_err(map_flow)?;
 
         let load_file_value = Value::heap_string(hist_file_name.clone());
         eval.push_specpdl_root(load_file_value);

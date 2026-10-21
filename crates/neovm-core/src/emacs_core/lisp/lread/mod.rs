@@ -50,6 +50,37 @@ fn expect_lisp_string(value: &Value) -> Result<LispString, Flow> {
     }
 }
 
+/// Open the interpreter scope GNU `readevalloop' gives every evaluated stream
+/// (`src/lread.c', after `specbind (Qstandard_input, ...)').
+///
+/// `internal-interpreter-environment' starts afresh as `(t)' or nil, and
+/// `macroexp--dynvars' is specbound to its current value.  Eager
+/// macroexpansion records each top-level `defvar' of the stream in
+/// `macroexp--dynvars'; the binding keeps those names local to the stream.
+/// Without it every source file a load pulls in leaks its variable names into
+/// its caller, and `eval-and-compile' (byte-run.el) then captures all of them
+/// as the environment of each interpreted closure it builds -- closures that a
+/// byte-compiled file can embed as constants.
+///
+/// Both bindings live on the specpdl above `scope_count'; the caller unwinds
+/// them with the rest of its scope.
+pub(crate) fn enter_readevalloop_scope(
+    eval: &mut super::eval::Context,
+    scope_count: usize,
+    lexical_binding: bool,
+) -> Result<(), Flow> {
+    eval.specpdl.push(super::eval::SpecBinding::LexicalEnv {
+        old_lexenv: eval.lexenv,
+    });
+    eval.lexenv = if lexical_binding {
+        Value::list(vec![Value::T])
+    } else {
+        Value::NIL
+    };
+    let dynvars = eval.visible_variable_value_or_nil("macroexp--dynvars");
+    eval.try_specbind_or_unwind_to(scope_count, intern("macroexp--dynvars"), dynvars)
+}
+
 // ---------------------------------------------------------------------------
 // Eval-dependent builtins
 // ---------------------------------------------------------------------------
@@ -410,14 +441,7 @@ pub(crate) fn builtin_eval_buffer(eval: &mut super::eval::Context, args: Vec<Val
         // nested source loads may have swapped the active buffer-local binding
         // cell by the time `eval-buffer` returns.
         let lexical_binding = eval.visible_variable_value_or_nil("lexical-binding");
-        eval.specpdl.push(super::eval::SpecBinding::LexicalEnv {
-            old_lexenv: eval.lexenv,
-        });
-        eval.lexenv = if lexical_binding.is_truthy() {
-            Value::list(vec![Value::T])
-        } else {
-            Value::NIL
-        };
+        enter_readevalloop_scope(eval, specpdl_count, lexical_binding.is_truthy())?;
 
         let loading_source_file = eval
             .visible_variable_value_or_nil("load-in-progress")
