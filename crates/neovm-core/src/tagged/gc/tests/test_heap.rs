@@ -85,3 +85,34 @@ fn heapborrow_r7_displaced_fixture_drop_preserves_new_installation() {
     drop(second);
     assert!(!tagged_heap_is_installed());
 }
+
+#[test]
+fn heapborrow_r7_stress_fixtures_do_not_reintroduce_borrow_installers() {
+    for (path, source) in [
+        (
+            "satb_gc_stress_test.rs",
+            include_str!("satb_gc_stress_test.rs"),
+        ),
+        (
+            "concurrent_major_worker_test.rs",
+            include_str!("concurrent_major_worker_test.rs"),
+        ),
+        (
+            "concurrent_hash_worker_tests.rs",
+            include_str!("concurrent_hash_worker_tests.rs"),
+        ),
+        (
+            "concurrent_leaf_claim_tests.rs",
+            include_str!("concurrent_leaf_claim_tests.rs"),
+        ),
+        (
+            "chartable_concurrent_write_test.rs",
+            include_str!("chartable_concurrent_write_test.rs"),
+        ),
+    ] {
+        assert!(
+            !source.contains(concat!("set_tagged", "_heap(")),
+            "{path} must install TLS through its TestHeap root"
+        );
+    }
+}

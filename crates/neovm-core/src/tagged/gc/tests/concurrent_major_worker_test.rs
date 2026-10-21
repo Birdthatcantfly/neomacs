@@ -37,7 +37,7 @@ enum ClaimKind {
 impl ClaimKind {
     const ALL: [Self; 4] = [Self::String, Self::Float, Self::Vector, Self::ByteCode];
 
-    fn allocate(self, heap: &mut TaggedHeap) -> TaggedValue {
+    fn allocate(self, heap: &mut TestHeap) -> TaggedValue {
         match self {
             Self::String => heap.alloc_string(LispString::from_utf8("major worker claim")),
             Self::Float => heap.alloc_float(4.25),
@@ -83,7 +83,7 @@ fn set_age(value: TaggedValue, age: Age) {
     }
 }
 
-fn claim_job(heap: &TaggedHeap, major: bool) -> ConcurrentClaimJob {
+fn claim_job(heap: &TestHeap, major: bool) -> ConcurrentClaimJob {
     ConcurrentClaimJob {
         major,
         parity: heap.mark_parity.flip(),
@@ -131,7 +131,7 @@ struct WorkerHarness {
     satb: Arc<SatbHandoff>,
 }
 impl WorkerHarness {
-    fn new(heap: &TaggedHeap, major: bool) -> Self {
+    fn new(heap: &TestHeap, major: bool) -> Self {
         let (exited, result) = std::sync::mpsc::channel();
         let satb = Arc::new(SatbHandoff::new());
         Self {
@@ -171,10 +171,7 @@ impl WorkerHarness {
     }
 }
 
-fn snapshot(
-    heap: &mut TaggedHeap,
-    vector: TaggedValue,
-) -> crate::tagged::header::VectorScanSnapshot {
+fn snapshot(heap: &mut TestHeap, vector: TaggedValue) -> crate::tagged::header::VectorScanSnapshot {
     // SAFETY: the test owns the live vector and admits its only heap writer.
     let object = unsafe { &*(vector.as_veclike_ptr().unwrap() as *const VectorObj) };
     // SAFETY: capture occurs before the test starts its marker job.
@@ -201,9 +198,9 @@ fn assert_symbol_once(result: &ConcurrentMarkResult, symbol: TaggedValue) {
 fn generational_worker_major_claims_promote_only_young_headers() {
     for kind in ClaimKind::ALL {
         for age in Age::ALL {
-            let mut heap = TaggedHeap::new();
+            let mut heap = TestHeap::new();
             heap.set_generational_enabled(true);
-            set_tagged_heap(&mut heap);
+            heap.install();
             let roots = ScratchRoots::new();
             let value = roots.keep(kind.allocate(&mut heap));
             heap.close_alloc_regions();
@@ -250,9 +247,9 @@ fn generational_worker_major_claims_promote_only_young_headers() {
 fn generational_worker_legacy_claim_parity_and_tenured_rules_are_unchanged() {
     for kind in ClaimKind::ALL {
         for age in Age::ALL {
-            let mut heap = TaggedHeap::new();
+            let mut heap = TestHeap::new();
             heap.set_generational_enabled(false);
-            set_tagged_heap(&mut heap);
+            heap.install();
             let roots = ScratchRoots::new();
             let value = roots.keep(kind.allocate(&mut heap));
             heap.close_alloc_regions();
@@ -280,8 +277,8 @@ fn generational_worker_legacy_claim_parity_and_tenured_rules_are_unchanged() {
 #[test]
 fn generational_worker_born_black_claims_have_no_promo_or_child_handoff() {
     for kind in ClaimKind::ALL {
-        let mut heap = TaggedHeap::new();
-        set_tagged_heap(&mut heap);
+        let mut heap = TestHeap::new();
+        heap.install();
         let roots = ScratchRoots::new();
         let value = roots.keep(kind.allocate(&mut heap));
         heap.close_alloc_regions();
@@ -301,8 +298,8 @@ fn generational_worker_born_black_claims_have_no_promo_or_child_handoff() {
 
 #[test]
 fn generational_worker_born_black_bytecode_does_not_read_its_value_children() {
-    let mut heap = TaggedHeap::new();
-    set_tagged_heap(&mut heap);
+    let mut heap = TestHeap::new();
+    heap.install();
     let roots = ScratchRoots::new();
     let child = roots.keep(heap.alloc_cons(TaggedValue::fixnum(1), TaggedValue::fixnum(2)));
     let key = symbol("u34-worker-unpublished-bc-child");
@@ -326,8 +323,8 @@ fn generational_worker_born_black_bytecode_does_not_read_its_value_children() {
 
 #[test]
 fn generational_worker_refuses_interval_strings_and_snapshot_misses_before_claiming() {
-    let mut heap = TaggedHeap::new();
-    set_tagged_heap(&mut heap);
+    let mut heap = TestHeap::new();
+    heap.install();
     let roots = ScratchRoots::new();
     let string = roots.keep(heap.alloc_string(LispString::from_utf8("has interval")));
     crate::tagged::mutate::with_string_text_props_mut(string, |_| {});
@@ -356,8 +353,8 @@ fn generational_worker_refuses_interval_strings_and_snapshot_misses_before_claim
 
 #[test]
 fn generational_worker_snapshot_misses_never_claim_or_promote_any_header_class() {
-    let mut heap = TaggedHeap::new();
-    set_tagged_heap(&mut heap);
+    let mut heap = TestHeap::new();
+    heap.install();
     let roots = ScratchRoots::new();
     let mut values = Vec::new();
     for kind in ClaimKind::ALL {
@@ -392,8 +389,8 @@ fn generational_worker_snapshot_misses_never_claim_or_promote_any_header_class()
 #[test]
 fn generational_worker_bytecode_routes_each_symbol_field_and_keeps_legacy_heap_filter() {
     for major in [false, true] {
-        let mut heap = TaggedHeap::new();
-        set_tagged_heap(&mut heap);
+        let mut heap = TestHeap::new();
+        heap.install();
         let roots = ScratchRoots::new();
         let child = roots.keep(heap.alloc_cons(TaggedValue::fixnum(3), TaggedValue::fixnum(4)));
         let symbols: Vec<TaggedValue> = (0..6)
@@ -433,8 +430,8 @@ fn generational_worker_bytecode_routes_each_symbol_field_and_keeps_legacy_heap_f
 #[test]
 fn generational_worker_vector_and_obarray_snapshots_deduplicate_bare_symbols() {
     for major in [false, true] {
-        let mut heap = TaggedHeap::new();
-        set_tagged_heap(&mut heap);
+        let mut heap = TestHeap::new();
+        heap.install();
         let roots = ScratchRoots::new();
         let symbols = [
             symbol("u34-worker-value"),
@@ -472,7 +469,7 @@ fn generational_worker_vector_and_obarray_snapshots_deduplicate_bare_symbols() {
 #[test]
 fn generational_worker_gray_and_satb_symbols_reach_major_result_only() {
     for major in [false, true] {
-        let heap = TaggedHeap::new();
+        let heap = TestHeap::new();
         let first = symbol("u34-worker-gray");
         let second = symbol("u34-worker-satb");
         let mut harness = WorkerHarness::new(&heap, major);
@@ -497,8 +494,8 @@ fn generational_worker_gray_and_satb_symbols_reach_major_result_only() {
 #[test]
 fn generational_worker_first_partition_symbols_survive_in_span_child_drops() {
     for major in [false, true] {
-        let mut heap = TaggedHeap::new();
-        set_tagged_heap(&mut heap);
+        let mut heap = TestHeap::new();
+        heap.install();
         let roots = ScratchRoots::new();
         let image = super::super::fake_image::FakeImage::leak(false);
         let cons = roots.keep(image.register_cons(&mut heap));
@@ -546,8 +543,8 @@ fn generational_worker_first_partition_symbols_survive_in_span_child_drops() {
 
 #[test]
 fn generational_worker_early_cdr_stop_retains_initial_claims_symbols_and_tail() {
-    let mut heap = TaggedHeap::new();
-    set_tagged_heap(&mut heap);
+    let mut heap = TestHeap::new();
+    heap.install();
     let roots = ScratchRoots::new();
     let key = symbol("u34-worker-stop-prefix");
     let terminal = symbol("u34-worker-stop-terminal");
@@ -587,8 +584,8 @@ fn generational_worker_early_cdr_stop_retains_initial_claims_symbols_and_tail() 
 
 #[test]
 fn generational_worker_outer_stop_preserves_unprocessed_gray_and_owned_logs() {
-    let mut heap = TaggedHeap::new();
-    set_tagged_heap(&mut heap);
+    let mut heap = TestHeap::new();
+    heap.install();
     let roots = ScratchRoots::new();
     let value = roots.keep(heap.alloc_float(8.5));
     let key = symbol("u34-worker-outer-stop");
@@ -626,7 +623,7 @@ fn concurrent_worker_channel_dispatch_preserves_legacy_and_enabled_symbol_polici
             for chunk_map in [false, true] {
                 knobs::set_concurrent_claims_for_test(Some(enabled));
                 knobs::set_chunk_map_for_test(Some(chunk_map));
-                let mut heap = Box::new(TaggedHeap::new());
+                let mut heap = TestHeap::new();
                 knobs::set_concurrent_claims_for_test(None);
                 knobs::set_chunk_map_for_test(None);
                 heap.set_generational_enabled(major);

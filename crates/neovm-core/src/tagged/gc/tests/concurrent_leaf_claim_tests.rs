@@ -23,7 +23,7 @@ impl Leaf {
         }
     }
 
-    fn allocate(self, heap: &mut TaggedHeap) -> TaggedValue {
+    fn allocate(self, heap: &mut TestHeap) -> TaggedValue {
         match self {
             Self::Marker => heap.alloc_marker(marker()),
             Self::Bignum => heap.alloc_bignum(Integer::from(1u64 << 62)),
@@ -33,7 +33,7 @@ impl Leaf {
         }
     }
 
-    fn page_count(self, heap: &TaggedHeap) -> usize {
+    fn page_count(self, heap: &TestHeap) -> usize {
         match self {
             Self::Marker => heap.marker_arena.pages.len(),
             Self::Bignum => heap.bignum_arena.pages.len(),
@@ -55,14 +55,14 @@ fn marker() -> LispMarker {
     }
 }
 
-fn heap(enabled: bool, chunk_map: bool, generational: bool) -> Box<TaggedHeap> {
+fn heap(enabled: bool, chunk_map: bool, generational: bool) -> TestHeap {
     knobs::set_concurrent_claims_for_test(Some(enabled));
     knobs::set_chunk_map_for_test(Some(chunk_map));
-    let mut heap = Box::new(TaggedHeap::new());
+    let mut heap = TestHeap::new();
     knobs::set_concurrent_claims_for_test(None);
     knobs::set_chunk_map_for_test(None);
     heap.set_generational_enabled(generational);
-    set_tagged_heap(&mut heap);
+    heap.install();
     heap
 }
 
@@ -96,7 +96,7 @@ impl LeafClaimFixture {
     }
 }
 
-fn job(heap: &mut TaggedHeap, major: bool) -> LeafClaimFixture {
+fn job(heap: &mut TestHeap, major: bool) -> LeafClaimFixture {
     heap.close_alloc_regions();
     let mut pages = heap.page_snapshot_for_mark();
     let enabled = heap.concurrent_claims().then(|| EnabledClaims {
@@ -338,7 +338,7 @@ fn concurrent_leaf_symbol_positions_route_both_fields_and_skip_born_black_payloa
     }
 }
 
-fn concurrent_cycle(heap: &mut TaggedHeap, roots: &[TaggedValue]) {
+fn concurrent_cycle(heap: &mut TestHeap, roots: &[TaggedValue]) {
     heap.concurrent_begin();
     for &root in roots {
         heap.seed_root(root);
@@ -358,7 +358,8 @@ fn concurrent_cycle(heap: &mut TaggedHeap, roots: &[TaggedValue]) {
         heap.seed_root(root);
     }
     heap.incremental_drain_all();
-    heap.incremental_finish(heap.live_bytes(), std::time::Instant::now());
+    let live_bytes = heap.live_bytes();
+    heap.incremental_finish(live_bytes, std::time::Instant::now());
     heap.finish_incremental_sweep_now();
 }
 
@@ -484,7 +485,7 @@ fn concurrent_leaf_claims_lost_worker_result_fails_closed_with_generations_off()
         heap.join_concurrent_mark();
     }));
     heap.concurrent_mark_running = false;
-    set_tagged_heap(&mut heap);
+    heap.install();
     assert!(result.is_err());
     assert!(!heap.sweep_in_progress);
 }

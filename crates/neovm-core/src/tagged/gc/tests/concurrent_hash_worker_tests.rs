@@ -9,29 +9,30 @@ use crate::emacs_core::value::{
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-fn heap(generational: bool) -> Box<TaggedHeap> {
+fn heap(generational: bool) -> TestHeap {
     knobs::set_concurrent_claims_for_test(Some(true));
-    let mut heap = Box::new(TaggedHeap::new());
+    let mut heap = TestHeap::new();
     knobs::set_concurrent_claims_for_test(None);
     heap.set_generational_enabled(generational);
-    set_tagged_heap(&mut heap);
+    heap.install();
     heap
 }
 
-fn finish_cycle(heap: &mut TaggedHeap, roots: &[TaggedValue]) {
+fn finish_cycle(heap: &mut TestHeap, roots: &[TaggedValue]) {
     heap.join_concurrent_mark();
     heap.reseed_runtime_and_remembered_roots();
     for &root in roots {
         heap.seed_root(root);
     }
     heap.incremental_drain_all();
-    heap.incremental_finish(heap.live_bytes(), Instant::now());
+    let live_bytes = heap.live_bytes();
+    heap.incremental_finish(live_bytes, Instant::now());
     heap.finish_incremental_sweep_now();
 }
 
 /// Inspect only the joined worker's owned handoff, then relay the entire
 /// result through the normal finish seam so promotion and symbol logs survive.
-fn inspect_completed_deferred(heap: &mut TaggedHeap, inspect: impl FnOnce(&[MarkWord])) {
+fn inspect_completed_deferred(heap: &mut TestHeap, inspect: impl FnOnce(&[MarkWord])) {
     let result = heap
         .gc_exited
         .take()
@@ -45,7 +46,7 @@ fn inspect_completed_deferred(heap: &mut TaggedHeap, inspect: impl FnOnce(&[Mark
     heap.gc_exited = Some(receive);
 }
 
-fn ordinary_cycle(heap: &mut TaggedHeap, roots: &[TaggedValue]) {
+fn ordinary_cycle(heap: &mut TestHeap, roots: &[TaggedValue]) {
     heap.concurrent_begin();
     for &root in roots {
         heap.seed_root(root);
@@ -70,10 +71,10 @@ fn transitive_bare_symbol_cycle(claims: bool, generational: bool, ancestor: Symb
     // The ordinary helper freezes claims ON. Construct both policies explicitly
     // without changing process environment while nextest runs other tests.
     knobs::set_concurrent_claims_for_test(Some(claims));
-    let mut heap = Box::new(TaggedHeap::new());
+    let mut heap = TestHeap::new();
     knobs::set_concurrent_claims_for_test(None);
     heap.set_generational_enabled(generational);
-    set_tagged_heap(&mut heap);
+    heap.install();
 
     let symbol = TaggedValue::from_sym_id(intern_uninterned("u35-transitive-worker-weak-key"));
     let id = symbol.as_bare_symbol_id().unwrap();
@@ -217,7 +218,7 @@ impl PausedWorker {
             .expect("worker did not reach its hash claim rendezvous");
     }
 
-    fn resume_and_stop(self, heap: &TaggedHeap) {
+    fn resume_and_stop(self, heap: &TestHeap) {
         heap.gc_stop.store(true, Ordering::Release);
         self.resume.send(()).unwrap();
         self.thread.join().expect("Tier-H worker panicked");
@@ -225,7 +226,7 @@ impl PausedWorker {
 }
 
 fn paused_worker(
-    heap: &mut TaggedHeap,
+    heap: &mut TestHeap,
     owner: TaggedValue,
     other_roots: &[TaggedValue],
     pause_at: PauseAt,
@@ -240,7 +241,7 @@ fn paused_worker(
 }
 
 fn paused_worker_with_policy(
-    heap: &mut TaggedHeap,
+    heap: &mut TestHeap,
     owner: TaggedValue,
     other_roots: &[TaggedValue],
     pause_at: PauseAt,
@@ -304,7 +305,7 @@ fn paused_worker_with_policy(
     };
     heap.concurrent_mark_running = true;
     heap.gc_exited = Some(result);
-    set_tagged_heap(heap);
+    heap.install();
     let (reached, receiver) = std::sync::mpsc::channel();
     let (resume, continue_scan) = std::sync::mpsc::channel();
     let thread = std::thread::spawn(move || {
@@ -583,7 +584,8 @@ fn tier_h_actual_worker_first_write_before_and_after_claim_preserves_both_child_
                 );
             }
             drop(snapshot);
-            heap.incremental_finish(heap.live_bytes(), Instant::now());
+            let live_bytes = heap.live_bytes();
+            heap.incremental_finish(live_bytes, Instant::now());
             assert!(heap.concurrent_hash_snapshot().is_none());
             assert_eq!(heap.last_concurrent_claim_counts().1, 1);
             assert!(
@@ -810,7 +812,7 @@ fn tier_h_builtin_cold_mutation_paths_keep_deleted_and_inserted_children_live() 
     }
 }
 
-fn wait_for_hash_worker(heap: &TaggedHeap) {
+fn wait_for_hash_worker(heap: &TestHeap) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !heap.concurrent_mark_done() {
         assert!(Instant::now() < deadline, "Tier-H worker did not finish");

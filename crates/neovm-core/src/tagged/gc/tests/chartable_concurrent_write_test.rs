@@ -56,11 +56,7 @@ fn fixture_headers(table: TaggedValue) -> Vec<usize> {
         .collect()
 }
 
-fn finish_fixture_epoch(
-    heap: &mut TaggedHeap,
-    table: TaggedValue,
-    completed: ConcurrentMarkResult,
-) {
+fn finish_fixture_epoch(heap: &mut TestHeap, table: TaggedValue, completed: ConcurrentMarkResult) {
     // The explicit fixture join proved this exact handoff is final. Relay its
     // owned result into the normal completion seam, preserving every symbol
     // and promotion record rather than resetting the phase by hand.
@@ -86,8 +82,8 @@ fn finish_fixture_epoch(
 
 #[test]
 fn concurrent_mapped_chartable_scan_and_builtin_range_writes_are_atomic() {
-    let mut heap = TaggedHeap::new();
-    set_tagged_heap(&mut heap);
+    let mut heap = TestHeap::new();
+    heap.install();
     let purpose_id = intern_uninterned("ctrace-purpose");
     let sentinel_id = intern_uninterned("ctrace-untouched-leaf");
     let purpose = TaggedValue::from_sym_id(purpose_id);
@@ -104,7 +100,7 @@ fn concurrent_mapped_chartable_scan_and_builtin_range_writes_are_atomic() {
     // use the real SATB preimage barrier while the job reads its slots.
     heap.concurrent_begin();
     heap.concurrent_mark_running = true;
-    set_tagged_heap(&mut heap);
+    heap.install();
     let mapped_scan = {
         // SAFETY: the fixture's only heap writer is stopped. Every header was
         // allocated here and its fixed-size backing remains alive until join;
@@ -230,8 +226,8 @@ fn concurrent_subchartable_snapshot_retains_mapped_span_after_builtin_cow() {
     // This simulates a pdump slot span without a pdump dependency. Declaring
     // the image first also keeps it alive beyond the heap's ordinary teardown.
     let original = vec![TaggedValue::fixnum(70); 128];
-    let mut heap = TaggedHeap::new();
-    set_tagged_heap(&mut heap);
+    let mut heap = TestHeap::new();
+    heap.install();
     let table = TaggedValue::make_char_table(TaggedValue::NIL, TaggedValue::fixnum(-1), 0);
     set_range(table, TaggedValue::fixnum(0), TaggedValue::fixnum(0));
     let headers = fixture_headers(table);
@@ -247,7 +243,7 @@ fn concurrent_subchartable_snapshot_retains_mapped_span_after_builtin_cow() {
     }
     heap.concurrent_begin();
     heap.concurrent_mark_running = true;
-    set_tagged_heap(&mut heap);
+    heap.install();
     let snapshot = {
         // SAFETY: the sole fixture writer is stopped; there is no callback or
         // active reader, and the heap owns the supplied leaf header.

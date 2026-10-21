@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 const WRITES: usize = 10_000;
 
-fn heap() -> TaggedHeap {
-    let mut heap = TaggedHeap::new();
+fn heap() -> TestHeap {
+    let mut heap = TestHeap::new();
     // GEN1's independent dirty-cons insertion retrace would repair a missing
     // SATB log and invalidate these transport mutation witnesses.
     heap.generational.enabled = false;
@@ -21,12 +21,12 @@ fn heap() -> TaggedHeap {
     heap
 }
 
-fn begin(heap: &mut TaggedHeap, roots: &[TaggedValue], payloads: &[TaggedValue]) {
+fn begin(heap: &mut TestHeap, roots: &[TaggedValue], payloads: &[TaggedValue]) {
     heap.concurrent_begin();
     for &root in roots {
         heap.seed_root(root);
     }
-    set_tagged_heap(heap);
+    heap.install();
     heap.launch_concurrent_mark();
     let deadline = Instant::now() + Duration::from_secs(60);
     while !heap.concurrent_mark_done() {
@@ -48,13 +48,13 @@ fn begin(heap: &mut TaggedHeap, roots: &[TaggedValue], payloads: &[TaggedValue])
     );
 }
 
-fn payloads(heap: &mut TaggedHeap) -> Vec<TaggedValue> {
+fn payloads(heap: &mut TestHeap) -> Vec<TaggedValue> {
     (0..WRITES)
         .map(|i| heap.alloc_cons(TaggedValue::fixnum(i as i64), TaggedValue::NIL))
         .collect()
 }
 
-fn check_survivors(heap: &TaggedHeap, payloads: &[TaggedValue]) {
+fn check_survivors(heap: &TestHeap, payloads: &[TaggedValue]) {
     for (i, &value) in payloads.iter().enumerate() {
         let ptr = value.xcons_ptr();
         let base = ConsBlock::block_base_for_ptr(ptr);
@@ -75,7 +75,7 @@ fn check_survivors(heap: &TaggedHeap, payloads: &[TaggedValue]) {
     }
 }
 
-fn finish(heap: &mut TaggedHeap, payloads: &[TaggedValue]) {
+fn finish(heap: &mut TestHeap, payloads: &[TaggedValue]) {
     heap.finish_concurrent_mark().unwrap();
     heap.incremental_drain_all();
     // Every orphan has its own already-black destination. Missing full or
@@ -98,7 +98,7 @@ fn finish(heap: &mut TaggedHeap, payloads: &[TaggedValue]) {
 #[test]
 fn satb_gc_orphan_cons_preimages_survive_10000_writes() {
     let mut heap = heap();
-    set_tagged_heap(&mut heap);
+    heap.install();
     let payloads = payloads(&mut heap);
     let sources: Vec<_> = payloads
         .iter()
@@ -121,7 +121,7 @@ fn satb_gc_orphan_cons_preimages_survive_10000_writes() {
 #[test]
 fn satb_gc_orphan_vector_preimages_survive_10000_writes() {
     let mut heap = heap();
-    set_tagged_heap(&mut heap);
+    heap.install();
     let payloads = payloads(&mut heap);
     let black: Vec<_> = (0..WRITES)
         .map(|_| heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL))
@@ -140,7 +140,7 @@ fn satb_gc_orphan_vector_preimages_survive_10000_writes() {
 #[test]
 fn satb_gc_orphan_symbol_cell_preimages_survive_10000_writes() {
     let mut heap = heap();
-    set_tagged_heap(&mut heap);
+    heap.install();
     let payloads = payloads(&mut heap);
     let black: Vec<_> = (0..WRITES)
         .map(|_| heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL))
@@ -160,7 +160,7 @@ fn satb_gc_orphan_symbol_cell_preimages_survive_10000_writes() {
 #[test]
 fn satb_gc_orphan_string_interval_preimages_survive_10000_writes() {
     let mut heap = heap();
-    set_tagged_heap(&mut heap);
+    heap.install();
     let payloads = payloads(&mut heap);
     let mut sources = Vec::with_capacity(WRITES);
     for &x in &payloads {
@@ -197,8 +197,8 @@ fn satb_gc_orphan_string_interval_preimages_survive_10000_writes() {
 
 #[test]
 fn satb_gc_k_registered_mutators_and_midmark_retirement_preserve_10000_preimages() {
-    let mut heap = AliasableBox::new(heap());
-    set_tagged_heap_root(heap.root());
+    let mut heap = heap();
+    heap.install();
     let payloads = payloads(&mut heap);
     let sources: Vec<_> = payloads
         .iter()
@@ -216,7 +216,7 @@ fn satb_gc_k_registered_mutators_and_midmark_retirement_preserve_10000_preimages
             .collect::<Vec<_>>()
     };
     begin(&mut heap, &black, &payloads);
-    set_tagged_heap_root(heap.root());
+    heap.install();
     for (i, source) in sources.into_iter().enumerate() {
         if i == WRITES / 2 {
             // Other mutators are parked on this physical thread; the marker
@@ -255,7 +255,7 @@ fn satb_gc_k_registered_mutators_and_midmark_retirement_preserve_10000_preimages
 #[test]
 fn satb_gc_unpublished_facade_folds_orphan_partial() {
     let mut heap = heap();
-    set_tagged_heap(&mut heap);
+    heap.install();
     let x = heap.alloc_cons(TaggedValue::fixnum(0), TaggedValue::NIL);
     heap.concurrent_begin();
     heap.note_root_overwrite_value(x);
@@ -270,7 +270,7 @@ fn satb_gc_unpublished_facade_folds_orphan_partial() {
 #[test]
 fn satb_gc_begin_rejects_and_preserves_orphan_residual() {
     let mut heap = heap();
-    set_tagged_heap(&mut heap);
+    heap.install();
     let x = heap.alloc_cons(TaggedValue::fixnum(0), TaggedValue::NIL);
     heap.note_root_overwrite_value(x);
     let rejected =
@@ -291,7 +291,7 @@ fn satb_gc_begin_rejects_and_preserves_orphan_residual() {
 #[test]
 fn satb_gc_root_feed_publish_is_only_a_pacing_optimization() {
     let mut heap = heap();
-    set_tagged_heap(&mut heap);
+    heap.install();
     let x = heap.alloc_cons(TaggedValue::fixnum(0), TaggedValue::NIL);
     let black = heap.alloc_cons(TaggedValue::NIL, TaggedValue::NIL);
     begin(&mut heap, &[black], &[x]);
