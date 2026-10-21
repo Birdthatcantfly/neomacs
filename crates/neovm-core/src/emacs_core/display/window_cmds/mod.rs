@@ -2919,9 +2919,15 @@ fn set_window_force_start(window: &mut Window, force: bool) {
     if let Window::Leaf { force_start, .. } = window {
         *force_start = force;
     }
-    if force {
-        window.invalidate_window_end();
-    }
+    // GNU `Fset_window_start` clears `w->window_end_valid` for every call,
+    // NOFORCE or not (src/window.c:1970, "Bug#15957"): the recorded end
+    // belongs to the rows the previous start produced, and the next
+    // redisplay must not take it as evidence about the new start.  With
+    // NOFORCE this used to keep the record current, so a start set near
+    // EOB from a window that had shown an earlier page was recentered
+    // around point instead of being displayed as GNU's "same window start"
+    // branch does (src/xdisp.c:20972-21060) when point is visible from it.
+    window.invalidate_window_end();
 }
 
 /// `(set-window-point WINDOW POS)` -> POS.

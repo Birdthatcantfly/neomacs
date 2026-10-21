@@ -1373,6 +1373,7 @@ impl FrameManager {
             buffer_id: leaf_buffer_id,
             window_start: leaf_window_start,
             position_markers,
+            window_end,
             point: leaf_point,
             old_point,
             hscroll,
@@ -1389,6 +1390,17 @@ impl FrameManager {
             *leaf_buffer_id = buffer_id;
             *leaf_window_start = window_start.max(LispCharPos1::ONE);
             *position_markers = super::WindowPositionMarkerState::Detached;
+            // GNU `set_window_buffer` zeroes `w->window_end_pos` and
+            // `w->window_end_vpos` for every buffer install, same buffer or
+            // not (src/window.c:4360-4361): the recorded end is an offset
+            // from Z and describes rows of the buffer that produced it.  An
+            // unrecorded end reads back as Z, which is GNU's zero offset.
+            // Kept across a buffer switch, the old buffer's end was
+            // reinterpreted in the new one and told the viewport policy
+            // that point lay hundreds of lines below the window, so a
+            // `set-window-start` NOFORCE near EOB was recentered where
+            // GNU's "same window start" branch (src/xdisp.c:20972) keeps it.
+            *window_end = super::WindowEndState::Unrecorded;
             *leaf_point = point.max(LispCharPos1::ONE);
             if !preserve_display_state {
                 *old_point = point.max(LispCharPos1::ONE);
