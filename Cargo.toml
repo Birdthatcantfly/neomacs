@@ -464,6 +464,12 @@ strip = "none"
 # shipment; the separate directory keeps them out of the optimized product.
 # This does not enable PGO on macOS, Windows, or cross targets; those retain
 # ordinary release builds, outside this native training/bootstrap pipeline.
+# Linux x86_64 CI budget: 4 vCPU / 16 GB RAM; v0.0.18 fat-LTO +
+# profile-generate links were SIGTERMed on the hosted runner. Local
+# four-core check (2026-10-21, warm host tools): gen/use peak RSS
+# 9.74/4.51 GiB, full pipeline 47m19s, target growth 50.18 GiB
+# (45.10 GiB preparation profiles). Recheck memory, time, and disk
+# budgets before changing this recipe; Linux jobs currently allow 2h.
 [profile.release-pgo-gen]
 inherits = "release"
 
