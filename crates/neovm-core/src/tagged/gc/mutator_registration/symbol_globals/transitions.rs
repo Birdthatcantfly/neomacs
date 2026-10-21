@@ -44,9 +44,12 @@ fn p3sym_c3_nil_void_and_first_projected_assignment() {
             run.sym_set_into(handle, src, dst).unwrap();
             assert_eq!(dst.word_for_test(run), Value::NIL.bits());
             if kind == PlainSymbolBacking::VoidProjection {
-                assert!(
-                    run.owner.local.as_ref().unwrap().hot.bytes_since_gc > before_issue,
-                    "first VOID assignment charges materialized projection storage"
+                // Serial VOID setup reserved a page and issued-list capacity.
+                // Materialization reuses them, so no new storage is charged.
+                assert_eq!(
+                    run.owner.local.as_ref().unwrap().hot.bytes_since_gc,
+                    before_issue,
+                    "first VOID assignment reuses already reserved storage"
                 );
             }
             run.sym_boundp_into(handle, dst).unwrap();
