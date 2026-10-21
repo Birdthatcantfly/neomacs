@@ -297,7 +297,7 @@ impl ChildEnvironment {
         result.set("NEOMACS_PGO_TRAIN_ROOT", work.as_os_str());
         result.set(
             "LLVM_PROFILE_FILE",
-            raw.join("default_%m_%p.profraw").into_os_string(),
+            RunPaths::profile_file(raw).into_os_string(),
         );
         match mode {
             TrainingMode::Default => {}
@@ -341,8 +341,9 @@ impl RunPaths {
         }
         let parent = target.join("pgo");
         fs::create_dir_all(&parent)?;
-        // Keep the unique profile/receipts after success or failure. A different
-        // path changes Cargo/sccache's treatment key without deleting old data.
+        // Keep the unique merged profile/receipts after success or failure.
+        // Its fresh path changes Cargo/sccache's treatment key; intermediate
+        // raw profiles and instrumented products are pruned only after merge.
         let root = tempfile::Builder::new()
             .prefix("run-")
             .tempdir_in(parent)?
@@ -355,13 +356,269 @@ impl RunPaths {
             preparation_raw,
         })
     }
+    /// Online merging shares four slots per instrumented module, including
+    /// across the trainer's fully drained child processes. Each owner/pass
+    /// still has a distinct directory, so preparation never enters training.
+    fn profile_file(raw: &Path) -> PathBuf {
+        raw.join("default_%4m.profraw")
+    }
     fn raw(&self, mode: TrainingMode) -> PathBuf {
         self.root.join("training-raw").join(mode.name())
     }
     fn work(&self, mode: TrainingMode) -> PathBuf {
         self.root.join("training").join(mode.name())
     }
+    fn training_fixture(&self, passes: &Value) -> Result<PathBuf> {
+        let row = passes
+            .as_array()
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|row| row["mode"] == json!(TrainingMode::Default))
+            })
+            .ok_or("default training proof missing")?;
+        let proof = row["receipts"]
+            .as_array()
+            .and_then(|rows| rows.first())
+            .ok_or("default batch receipt missing")?;
+        let path = PathBuf::from(
+            proof["path"]
+                .as_str()
+                .ok_or("default batch receipt path missing")?,
+        );
+        let run = path.parent().ok_or("default training run missing")?;
+        if path.file_name() != Some(OsStr::new(TrainingMode::Default.result_name()))
+            || run.parent() != Some(self.work(TrainingMode::Default).as_path())
+            || !run
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("run-"))
+            || identity(&path)? != *proof
+        {
+            return Err("default batch receipt does not prove the owned training fixture".into());
+        }
+        Ok(run.join("repository"))
+    }
 }
+/// A native PGO invocation owns these shared generation profile directories
+/// until its explicit cleanup completes. The file lock is released by File's
+/// Drop on every exit; independent processes using this owner serialize.
+#[derive(Debug)]
+struct TargetOwnership {
+    target: PathBuf,
+    canonical_target: PathBuf,
+    _lock: File,
+}
+impl TargetOwnership {
+    fn acquire(target: &Path) -> Result<Self> {
+        if !target.is_absolute()
+            || target
+                .components()
+                .any(|p| matches!(p, std::path::Component::ParentDir))
+        {
+            return Err("PGO cleanup requires an absolute target without parent traversal".into());
+        }
+        fs::create_dir_all(target)?;
+        let canonical_target = target.canonicalize()?;
+        let parent = target.join("pgo");
+        match fs::symlink_metadata(&parent) {
+            Ok(meta) if !meta.file_type().is_dir() => {
+                return Err("PGO ownership directory must not be a symlink or file".into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&parent)?,
+            Err(error) => return Err(error.into()),
+        }
+        let path = parent.join("owner.lock");
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if !meta.file_type().is_file() => {
+                return Err("PGO ownership lock must be a regular file".into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let lock = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        lock.lock()?;
+        if path.canonicalize()? != canonical_target.join("pgo/owner.lock") {
+            return Err("PGO target ownership path changed".into());
+        }
+        Ok(Self {
+            target: target.to_owned(),
+            canonical_target,
+            _lock: lock,
+        })
+    }
+    fn validate_run(&self, paths: &RunPaths) -> Result<()> {
+        if self.target.canonicalize()? != self.canonical_target
+            || paths.root.parent() != Some(self.target.join("pgo").as_path())
+            || !paths
+                .root
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("run-"))
+            || paths.preparation_raw != paths.root.join("preparation-raw")
+            || paths.merged != paths.root.join("merged.profdata")
+        {
+            return Err("PGO cleanup paths do not belong to this target/run".into());
+        }
+        Ok(())
+    }
+    fn validate_directory(&self, path: &Path) -> Result<()> {
+        let relative = path.strip_prefix(&self.target)?;
+        let mut current = self.target.clone();
+        for part in relative.components() {
+            let std::path::Component::Normal(part) = part else {
+                return Err("PGO cleanup traversal rejected".into());
+            };
+            current.push(part);
+            match fs::symlink_metadata(&current) {
+                Ok(meta) if !meta.file_type().is_dir() => {
+                    return Err(format!(
+                        "PGO cleanup refuses symlink/non-directory {}",
+                        current.display()
+                    )
+                    .into());
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Only this closed set of disposable generation artifacts can be removed.
+/// The runtime-named fixture parent comes from the validated batch receipt;
+/// only its fixed repository child is removable. Consumer products are excluded.
+#[derive(Clone, Copy, Debug, Serialize, strum::EnumIter)]
+#[serde(rename_all = "kebab-case")]
+enum DisposableArtifact {
+    PreparationRaw,
+    TrainingRaw,
+    GenerationRawLinked,
+    GenerationStaged,
+    GenerationPublic,
+    GenerationNative,
+    TrainingFixture,
+}
+impl DisposableArtifact {
+    fn path(self, owner: &TargetOwnership, paths: &RunPaths, fixture: &Path) -> PathBuf {
+        match self {
+            Self::PreparationRaw => paths.preparation_raw.clone(),
+            Self::TrainingRaw => paths.root.join("training-raw"),
+            Self::GenerationRawLinked => paths.root.join("generation/raw-linked"),
+            Self::GenerationStaged => paths.root.join("generation/staged"),
+            Self::GenerationPublic => owner
+                .target
+                .join(BuildProfile::ReleasePgoGen.target_subdir()),
+            Self::GenerationNative => owner
+                .target
+                .join(HOST)
+                .join(BuildProfile::ReleasePgoGen.target_subdir()),
+            Self::TrainingFixture => fixture.to_owned(),
+        }
+    }
+}
+
+/// Sealed only after a successful matching merge and a second inventory check.
+/// No raw/profile data is deleted when merge fails or its inputs change.
+#[derive(Debug)]
+struct VerifiedMerge {
+    profile: Value,
+    inputs: Value,
+    training_fixture: PathBuf,
+}
+impl VerifiedMerge {
+    fn seal(paths: &RunPaths, passes: &Value, command: &Value) -> Result<Self> {
+        let args = merge_arguments(paths, passes)?;
+        let expected = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        if command["returncode"] != 0 || command["args"] != json!(expected) {
+            return Err("successful matching PGO merge required before cleanup".into());
+        }
+        let profile = identity(&paths.merged)?;
+        if profile["bytes"].as_u64().unwrap_or(0) == 0 {
+            return Err("merged PGO profile is empty".into());
+        }
+        let inputs = json!({"preparation":inventory(&paths.preparation_raw)?,"training":passes});
+        let training_fixture = paths.training_fixture(passes)?;
+        Ok(Self {
+            profile,
+            inputs,
+            training_fixture,
+        })
+    }
+    fn verify_retained(&self, paths: &RunPaths, receipt: &Value) -> Result<()> {
+        if identity(&paths.merged)? != self.profile
+            || receipt["merged_profile"] != self.profile
+            || receipt["cleanup"]["merged_profile"] != self.profile
+            || receipt["cleanup"]["pre_prune_inventory"] != self.inputs
+            || receipt["preparation_profiles"] != self.inputs["preparation"]
+            || receipt["training_passes"] != self.inputs["training"]
+            || receipt["cleanup"]["status"] != "complete"
+        {
+            return Err("sealed PGO merge/cleanup evidence changed during consumption".into());
+        }
+        Ok(())
+    }
+    fn prune(
+        &self,
+        owner: &TargetOwnership,
+        paths: &RunPaths,
+        receipt: &mut Value,
+        receipt_path: &Path,
+    ) -> Result<()> {
+        owner.validate_run(paths)?;
+        if identity(&paths.merged)? != self.profile
+            || receipt["merged_profile"] != self.profile
+            || receipt["preparation_profiles"] != self.inputs["preparation"]
+            || receipt["training_passes"] != self.inputs["training"]
+            || json!(inventory(&paths.preparation_raw)?) != self.inputs["preparation"]
+        {
+            return Err("sealed PGO merge/preparation changed before cleanup".into());
+        }
+        merge_arguments(paths, &self.inputs["training"])?;
+        let artifacts = DisposableArtifact::iter()
+            .map(|kind| (kind, kind.path(owner, paths, &self.training_fixture)))
+            .collect::<Vec<_>>();
+        // Validate every boundary before removing even the first directory.
+        for (_, path) in &artifacts {
+            owner.validate_directory(path)?;
+        }
+        receipt["cleanup"] = json!({"status":"running","after":"verified-merge-before-consumer","started":clock(),"merged_profile":self.profile,"pre_prune_inventory":self.inputs,"paths":artifacts.iter().map(|(kind,path)| json!({"kind":kind,"path":path,"status":"pending"})).collect::<Vec<_>>()});
+        write_json(receipt_path, receipt)?;
+        for (index, (_, path)) in artifacts.iter().enumerate() {
+            // remove_dir_all does not follow symlink children. The target and
+            // all ancestors/leaf were separately validated as directories.
+            let result = match fs::remove_dir_all(path) {
+                Ok(()) => Ok("removed"),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("absent"),
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(status) => receipt["cleanup"]["paths"][index]["status"] = json!(status),
+                Err(error) => {
+                    receipt["cleanup"]["status"] = json!("failed");
+                    receipt["cleanup"]["paths"][index]["error"] = json!(error.to_string());
+                    write_json(receipt_path, receipt)?;
+                    return Err(error.into());
+                }
+            }
+            write_json(receipt_path, receipt)?;
+        }
+        receipt["cleanup"]["status"] = json!("complete");
+        receipt["cleanup"]["finished"] = json!(clock());
+        write_json(receipt_path, receipt)?;
+        Ok(())
+    }
+}
+
 fn target_root(options: &FreshBuildOptions) -> PathBuf {
     // Existing default_bin_dir already resolves absolute/relative target roots.
     super::default_bin_dir(&options.repo_root, &BuildProfile::ReleasePgo)
@@ -676,6 +933,7 @@ pub(super) fn run(options: &FreshBuildOptions) -> Result<()> {
         );
         return Ok(());
     }
+    let owner = TargetOwnership::acquire(&target)?;
     let paths = RunPaths::new(&target)?;
     let path = paths.root.join("manifest.json");
     let mut receipt = json!({"schema":"neomacs-native-pgo-v1","status":"running","started":clock(),"source":source(&options.repo_root),"selected_profile":options.profile.as_name(),"runtime_root":options.runtime_root,"initial_cargo_args":super::initial_cargo_build_args(options).iter().map(|s|s.to_string_lossy().into_owned()).collect::<Vec<_>>(),"toolchain":toolchain,"run_root":paths.root,"preparation_raw":paths.preparation_raw,"merged_path":paths.merged,"common_rustflags":flags.0,"commands":[],"training_passes":[]});
@@ -689,6 +947,7 @@ pub(super) fn run(options: &FreshBuildOptions) -> Result<()> {
             skip_build: true,
             ..options.clone()
         };
+        let mut verified_merge = None;
         for role in BuildRole::iter() {
             let label = role.name();
             let (build, treatment, products) = match role {
@@ -713,12 +972,15 @@ pub(super) fn run(options: &FreshBuildOptions) -> Result<()> {
                     &merge_args,
                     &ChildEnvironment::default(),
                 )?;
+                let merged = VerifiedMerge::seal(&paths, &receipt["training_passes"], &row)?;
                 receipt["commands"]
                     .as_array_mut()
                     .ok_or("commands schema")?
                     .push(row);
-                receipt["merged_profile"] = identity(&paths.merged)?;
+                receipt["merged_profile"] = merged.profile.clone();
                 write_json(&path, &receipt)?;
+                merged.prune(&owner, &paths, &mut receipt, &path)?;
+                verified_merge = Some(merged);
             }
             let phase = paths.root.join(label);
             fs::create_dir(&phase)?;
@@ -726,10 +988,7 @@ pub(super) fn run(options: &FreshBuildOptions) -> Result<()> {
             if matches!(role, BuildRole::Generation) {
                 environment.set(
                     "LLVM_PROFILE_FILE",
-                    paths
-                        .preparation_raw
-                        .join("default_%m_%p.profraw")
-                        .into_os_string(),
+                    RunPaths::profile_file(&paths.preparation_raw).into_os_string(),
                 );
             }
             // The first library pass produces dependencies, the second settles
@@ -789,10 +1048,7 @@ pub(super) fn run(options: &FreshBuildOptions) -> Result<()> {
             let runtime_envs = if matches!(role, BuildRole::Generation) {
                 vec![(
                     OsString::from("LLVM_PROFILE_FILE"),
-                    paths
-                        .preparation_raw
-                        .join("default_%m_%p.profraw")
-                        .into_os_string(),
+                    RunPaths::profile_file(&paths.preparation_raw).into_os_string(),
                 )]
             } else {
                 Vec::new()
@@ -845,10 +1101,9 @@ pub(super) fn run(options: &FreshBuildOptions) -> Result<()> {
                 }
             }
         }
-        if identity(&paths.merged)? != receipt["merged_profile"] {
-            return Err("sealed merged profile changed during consumer build/stage".into());
-        }
-        merge_arguments(&paths, &receipt["training_passes"])?;
+        verified_merge
+            .ok_or("PGO consumer completed without a verified merge")?
+            .verify_retained(&paths, &receipt)?;
         receipt["status"] = json!("complete");
         Ok(())
     })();

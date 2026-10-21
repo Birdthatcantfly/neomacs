@@ -459,14 +459,15 @@ debug = true
 strip = "none"
 
 # Internal instrumented stage of native Linux x86_64 release PGO. xtask uses
-# matching fat-LTO/codegen settings for generation and consumption. It preserves
-# the instrumented artifacts and profiles as receipts, but excludes them from
-# shipment; the separate directory keeps them out of the optimized product.
+# matching fat-LTO/codegen settings for generation and consumption. Raw profiles
+# use bounded LLVM merge pools. After a verified merge, xtask removes raw
+# profiles and the instrumented product, retaining the merged profile and
+# receipts separately from the optimized product.
 # This does not enable PGO on macOS, Windows, or cross targets; those retain
 # ordinary release builds, outside this native training/bootstrap pipeline.
 # Linux x86_64 CI budget: 4 vCPU / 16 GB RAM; v0.0.18 fat-LTO +
 # profile-generate links were SIGTERMed on the hosted runner. Local
-# four-core check (2026-10-21, warm host tools): gen/use peak RSS
+# four-core check before pooling/cleanup (2026-10-21, warm host tools): peak RSS
 # 9.74/4.51 GiB, full pipeline 47m19s, target growth 50.18 GiB
 # (45.10 GiB preparation profiles). Recheck memory, time, and disk
 # budgets before changing this recipe; Linux jobs currently allow 2h.

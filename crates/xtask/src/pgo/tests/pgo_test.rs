@@ -354,3 +354,351 @@ fn default_receipt_rejects_duplicate_or_missing_retained_phases() {
     write_json(&run.join("batch-result.json"), &receipt).unwrap();
     assert!(check_training_receipts(directory.path(), TrainingMode::Default).is_err());
 }
+
+#[test]
+fn preparation_and_training_use_the_same_module_pool_with_separate_owners() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = RunPaths::new(directory.path()).unwrap();
+    assert_eq!(
+        RunPaths::profile_file(&paths.preparation_raw),
+        paths.preparation_raw.join("default_%4m.profraw")
+    );
+    for mode in TrainingMode::iter() {
+        let raw = paths.raw(mode);
+        let child =
+            ChildEnvironment::training(mode, Path::new("/runtime"), &raw, &paths.work(mode));
+        assert_eq!(
+            child.set[OsStr::new("LLVM_PROFILE_FILE")],
+            RunPaths::profile_file(&raw).into_os_string()
+        );
+        assert_ne!(
+            RunPaths::profile_file(&raw),
+            RunPaths::profile_file(&paths.preparation_raw)
+        );
+    }
+}
+
+fn cleanup_fixture(target: &Path) -> (TargetOwnership, RunPaths, Value, Value) {
+    let owner = TargetOwnership::acquire(target).unwrap();
+    let paths = RunPaths::new(target).unwrap();
+    fs::write(paths.preparation_raw.join("prep.profraw"), b"preparation").unwrap();
+    let mut passes = vec![];
+    for mode in TrainingMode::iter() {
+        let raw = paths.raw(mode);
+        fs::create_dir_all(&raw).unwrap();
+        fs::write(raw.join("train.profraw"), mode.name()).unwrap();
+        let work = paths.work(mode).join("run-owned");
+        fs::create_dir_all(&work).unwrap();
+        let result = work.join(mode.result_name());
+        fs::write(&result, b"retained unit-test trainer proof").unwrap();
+        passes.push(json!({"mode":mode,"raw_inventory":inventory(&raw).unwrap(),"receipts":[identity(&result).unwrap()]}));
+    }
+    let passes = json!(passes);
+    let args = merge_arguments(&paths, &passes).unwrap();
+    fs::write(&paths.merged, b"unit-test merged output").unwrap();
+    let command = json!({"returncode":0,"args":args.iter().map(|arg|arg.to_string_lossy().into_owned()).collect::<Vec<_>>()});
+    (owner, paths, passes, command)
+}
+
+fn cleanup_receipt(proof: &VerifiedMerge) -> Value {
+    json!({"merged_profile":proof.profile,"preparation_profiles":proof.inputs["preparation"],"training_passes":proof.inputs["training"]})
+}
+
+#[test]
+fn verified_merge_prunes_only_generation_intermediates_and_keeps_sealed_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let (owner, paths, passes, command) = cleanup_fixture(directory.path());
+    let earlier = RunPaths::new(directory.path()).unwrap();
+    fs::write(
+        earlier.preparation_raw.join("earlier.profraw"),
+        b"keep earlier run",
+    )
+    .unwrap();
+    let proof = VerifiedMerge::seal(&paths, &passes, &command).unwrap();
+    for kind in DisposableArtifact::iter() {
+        fs::create_dir_all(kind.path(&owner, &paths, &proof.training_fixture)).unwrap();
+    }
+    fs::write(
+        proof.training_fixture.join("notes.txt"),
+        b"discard scratch Git repository",
+    )
+    .unwrap();
+    fs::write(
+        paths.root.join("generation/raw-linked/neomacs"),
+        b"instrumented ELF",
+    )
+    .unwrap();
+    fs::write(
+        paths.root.join("generation/staged/neomacs.pdump"),
+        b"instrumented dump",
+    )
+    .unwrap();
+    let log = paths.root.join("generation/binary-command.json");
+    fs::write(&log, b"keep command evidence").unwrap();
+    let training = paths.work(TrainingMode::Default).join("batch-result.json");
+    fs::create_dir_all(training.parent().unwrap()).unwrap();
+    fs::write(&training, b"keep trainer receipt").unwrap();
+    let consumer = owner
+        .target
+        .join(BuildProfile::ReleasePgo.target_subdir())
+        .join("neomacs");
+    fs::create_dir_all(consumer.parent().unwrap()).unwrap();
+    fs::write(&consumer, b"keep optimized product").unwrap();
+    let mut receipt = cleanup_receipt(&proof);
+    proof
+        .prune(
+            &owner,
+            &paths,
+            &mut receipt,
+            &paths.root.join("manifest.json"),
+        )
+        .unwrap();
+    for kind in DisposableArtifact::iter() {
+        assert!(!kind.path(&owner, &paths, &proof.training_fixture).exists());
+    }
+    assert_eq!(fs::read(&consumer).unwrap(), b"keep optimized product");
+    assert!(earlier.preparation_raw.join("earlier.profraw").is_file());
+    assert!(log.is_file());
+    assert!(training.is_file());
+    assert!(
+        proof
+            .training_fixture
+            .parent()
+            .unwrap()
+            .join(TrainingMode::Default.result_name())
+            .is_file()
+    );
+    assert!(!proof.training_fixture.exists());
+    assert_eq!(receipt["cleanup"]["status"], "complete");
+    assert_eq!(
+        receipt["cleanup"]["pre_prune_inventory"]["training"],
+        passes
+    );
+    // End-of-consumption verification uses sealed evidence, not deleted raw paths.
+    proof.verify_retained(&paths, &receipt).unwrap();
+    fs::write(&paths.merged, b"changed profile").unwrap();
+    assert!(proof.verify_retained(&paths, &receipt).is_err());
+}
+
+#[test]
+fn failed_or_changed_merge_cannot_authorize_cleanup() {
+    let directory = tempfile::tempdir().unwrap();
+    let (owner, paths, passes, mut command) = cleanup_fixture(directory.path());
+    command["returncode"] = json!(7);
+    assert!(VerifiedMerge::seal(&paths, &passes, &command).is_err());
+    assert!(paths.preparation_raw.join("prep.profraw").is_file());
+    for mode in TrainingMode::iter() {
+        assert!(paths.raw(mode).join("train.profraw").is_file());
+    }
+    command["returncode"] = json!(0);
+    let proof = VerifiedMerge::seal(&paths, &passes, &command).unwrap();
+    fs::write(&paths.merged, b"changed after merge").unwrap();
+    let mut receipt = cleanup_receipt(&proof);
+    assert!(
+        proof
+            .prune(
+                &owner,
+                &paths,
+                &mut receipt,
+                &paths.root.join("manifest.json")
+            )
+            .is_err()
+    );
+    assert!(paths.preparation_raw.join("prep.profraw").is_file());
+    for mode in TrainingMode::iter() {
+        assert!(paths.raw(mode).join("train.profraw").is_file());
+    }
+}
+
+#[test]
+fn changed_training_after_merge_preserves_every_raw_before_cleanup() {
+    let directory = tempfile::tempdir().unwrap();
+    let (owner, paths, passes, command) = cleanup_fixture(directory.path());
+    let proof = VerifiedMerge::seal(&paths, &passes, &command).unwrap();
+    fs::write(
+        paths.raw(TrainingMode::Vm).join("train.profraw"),
+        b"late writer",
+    )
+    .unwrap();
+    let mut receipt = cleanup_receipt(&proof);
+    assert!(
+        proof
+            .prune(
+                &owner,
+                &paths,
+                &mut receipt,
+                &paths.root.join("manifest.json")
+            )
+            .is_err()
+    );
+    assert!(paths.preparation_raw.join("prep.profraw").is_file());
+    for mode in TrainingMode::iter() {
+        assert!(paths.raw(mode).join("train.profraw").is_file());
+    }
+}
+
+#[test]
+fn cleanup_rejects_a_different_run_owner_before_deleting_anything() {
+    let own = tempfile::tempdir().unwrap();
+    let owner = TargetOwnership::acquire(own.path()).unwrap();
+    let foreign = tempfile::tempdir().unwrap();
+    let (_foreign_owner, paths, passes, command) = cleanup_fixture(foreign.path());
+    let proof = VerifiedMerge::seal(&paths, &passes, &command).unwrap();
+    let mut receipt = cleanup_receipt(&proof);
+    assert!(
+        proof
+            .prune(
+                &owner,
+                &paths,
+                &mut receipt,
+                &paths.root.join("manifest.json")
+            )
+            .is_err()
+    );
+    assert!(paths.preparation_raw.join("prep.profraw").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_rejects_symlinked_generation_ancestor_before_any_removal() {
+    let directory = tempfile::tempdir().unwrap();
+    let (owner, paths, passes, command) = cleanup_fixture(directory.path());
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("retained"), b"outside").unwrap();
+    std::os::unix::fs::symlink(outside.path(), paths.root.join("generation")).unwrap();
+    let proof = VerifiedMerge::seal(&paths, &passes, &command).unwrap();
+    let mut receipt = cleanup_receipt(&proof);
+    assert!(
+        proof
+            .prune(
+                &owner,
+                &paths,
+                &mut receipt,
+                &paths.root.join("manifest.json")
+            )
+            .is_err()
+    );
+    assert!(paths.preparation_raw.join("prep.profraw").is_file());
+    assert_eq!(
+        fs::read(outside.path().join("retained")).unwrap(),
+        b"outside"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_rejects_symlinked_profile_directory_before_any_removal() {
+    let directory = tempfile::tempdir().unwrap();
+    let (owner, paths, passes, command) = cleanup_fixture(directory.path());
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("retained"), b"outside").unwrap();
+    std::os::unix::fs::symlink(
+        outside.path(),
+        directory
+            .path()
+            .join(BuildProfile::ReleasePgoGen.target_subdir()),
+    )
+    .unwrap();
+    let proof = VerifiedMerge::seal(&paths, &passes, &command).unwrap();
+    let mut receipt = cleanup_receipt(&proof);
+    assert!(
+        proof
+            .prune(
+                &owner,
+                &paths,
+                &mut receipt,
+                &paths.root.join("manifest.json")
+            )
+            .is_err()
+    );
+    assert!(paths.preparation_raw.join("prep.profraw").is_file());
+    assert_eq!(
+        fs::read(outside.path().join("retained")).unwrap(),
+        b"outside"
+    );
+}
+
+#[test]
+fn target_owner_lock_is_exclusive_and_released_on_drop() {
+    let directory = tempfile::tempdir().unwrap();
+    let owner = TargetOwnership::acquire(directory.path()).unwrap();
+    let contender = File::options()
+        .read(true)
+        .write(true)
+        .open(directory.path().join("pgo/owner.lock"))
+        .unwrap();
+    assert!(contender.try_lock().is_err());
+    drop(owner);
+    contender.try_lock().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_does_not_follow_internal_symlinks_and_accepts_trusted_target_alias() {
+    let directory = tempfile::tempdir().unwrap();
+    let real = directory.path().join("real");
+    fs::create_dir(&real).unwrap();
+    let alias = directory.path().join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let (owner, paths, passes, command) = cleanup_fixture(&alias);
+    let outside = tempfile::tempdir().unwrap();
+    let retained = outside.path().join("retained");
+    fs::write(&retained, b"keep outside data").unwrap();
+    let staged = paths.root.join("generation/staged");
+    fs::create_dir_all(&staged).unwrap();
+    std::os::unix::fs::symlink(outside.path(), staged.join("link")).unwrap();
+    let proof = VerifiedMerge::seal(&paths, &passes, &command).unwrap();
+    let mut receipt = cleanup_receipt(&proof);
+    proof
+        .prune(
+            &owner,
+            &paths,
+            &mut receipt,
+            &paths.root.join("manifest.json"),
+        )
+        .unwrap();
+    proof.verify_retained(&paths, &receipt).unwrap();
+    assert_eq!(fs::read(retained).unwrap(), b"keep outside data");
+    assert!(!staged.exists());
+    assert!(paths.merged.is_file());
+}
+
+#[test]
+fn unrelated_batch_receipt_cannot_select_a_training_fixture_for_deletion() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_owner, paths, mut passes, command) = cleanup_fixture(directory.path());
+    let outside = tempfile::tempdir().unwrap();
+    let receipt = outside.path().join(TrainingMode::Default.result_name());
+    fs::write(&receipt, b"unrelated receipt").unwrap();
+    passes[0]["receipts"][0] = identity(&receipt).unwrap();
+    assert!(VerifiedMerge::seal(&paths, &passes, &command).is_err());
+    assert!(paths.preparation_raw.join("prep.profraw").is_file());
+    assert!(receipt.is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_training_repository_is_rejected_before_removing_profiles() {
+    let directory = tempfile::tempdir().unwrap();
+    let (owner, paths, passes, command) = cleanup_fixture(directory.path());
+    let proof = VerifiedMerge::seal(&paths, &passes, &command).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("retained"), b"outside fixture").unwrap();
+    std::os::unix::fs::symlink(outside.path(), &proof.training_fixture).unwrap();
+    let mut receipt = cleanup_receipt(&proof);
+    assert!(
+        proof
+            .prune(
+                &owner,
+                &paths,
+                &mut receipt,
+                &paths.root.join("manifest.json")
+            )
+            .is_err()
+    );
+    assert!(paths.preparation_raw.join("prep.profraw").is_file());
+    assert_eq!(
+        fs::read(outside.path().join("retained")).unwrap(),
+        b"outside fixture"
+    );
+}
