@@ -304,6 +304,8 @@ pub(crate) struct TextWindowBodyInstallRequest<'a> {
 pub(crate) struct TextWindowBodyInstallRenderContext<'a> {
     window_id: u64,
     window_start: i64,
+    /// The walk's ZV (layout 0-based), for the truncated-last-row window end.
+    accessible_end: i64,
     text_start_byte: usize,
     byte_idx: usize,
     reserve_right_special_col: bool,
@@ -738,6 +740,7 @@ impl<'a> TextWindowBodyInstallRenderContext<'a> {
     pub(crate) fn new(
         window_id: u64,
         window_start: i64,
+        accessible_end: i64,
         text_start_byte: usize,
         byte_idx: usize,
         reserve_right_special_col: bool,
@@ -752,6 +755,7 @@ impl<'a> TextWindowBodyInstallRenderContext<'a> {
         Self {
             window_id,
             window_start,
+            accessible_end,
             text_start_byte,
             byte_idx,
             reserve_right_special_col,
@@ -793,6 +797,7 @@ impl<'a> TextWindowBodyInstallRequest<'a> {
             TextWindowBodyOutputInstall {
                 window_id: context.window_id,
                 window_start: context.window_start,
+                accessible_end: context.accessible_end,
                 text_start_byte: context.text_start_byte,
                 byte_idx: context.byte_idx,
                 right_edge_markers,

@@ -687,6 +687,9 @@ fn finish_output_rows(
 pub(crate) struct TextWindowBodyOutputInstall<'a> {
     pub(crate) window_id: u64,
     pub(crate) window_start: i64,
+    /// The walk's ZV (layout 0-based), see
+    /// [`TextWindowRedisplayPositions::from_output_rows`].
+    pub(crate) accessible_end: i64,
     pub(crate) text_start_byte: usize,
     pub(crate) byte_idx: usize,
     pub(crate) right_edge_markers: Option<TextWindowRightEdgeMarkers<'a>>,
@@ -962,19 +965,36 @@ pub(crate) struct DisplayTextRowFinish {
 pub(crate) type DisplayTextRowStoredMetrics = DisplayOutputRowStoredMetrics;
 
 impl TextWindowRedisplayPositions {
+    /// `accessible_end` is the walk's ZV as a layout (0-based) position: the
+    /// end a right-truncated last row reports is clamped to it.
     pub(crate) fn from_output_rows(
         output_emitter: &WindowOutputEmitter,
         window_start: i64,
+        accessible_end: i64,
         text_start_byte: usize,
         byte_idx: usize,
     ) -> Self {
         let window_start = layout_i64_char_pos_to_lisp_char_pos(window_start);
+        // GNU's `row->end` is `it->current` when `display_line` is done with
+        // the row (src/xdisp.c:26736).  A row that ended by right truncation
+        // first reseated past the rest of its line
+        // (`reseat_at_next_visible_line_start`, xdisp.c:26695), so its end --
+        // and `window-end`, which is `Z - w->window_end_pos` from the last
+        // row -- is the following line's first position, or ZV when the
+        // truncated line ends the buffer; not the position after its last
+        // drawn glyph.  The skipped tail is on the row as
+        // `truncated_end_buffer_pos` (its last position, the terminator or
+        // ZV), so one position past it, clamped to ZV, is GNU's end.
         let window_end_char = output_emitter
             .rows()
             .iter()
             .rev()
-            .find_map(|row| row.end_buffer_pos)
-            .map(|pos| layout_i64_char_pos_to_lisp_char_pos(pos.as_i64()))
+            .find_map(|row| {
+                row.truncated_end_buffer_pos
+                    .map(|tail| tail.as_i64().min(accessible_end))
+                    .or_else(|| row.end_buffer_pos.map(|pos| pos.as_i64()))
+            })
+            .map(layout_i64_char_pos_to_lisp_char_pos)
             .unwrap_or_else(|| LispCharPos1::from_one_based_usize(1));
         let window_end_row = output_emitter
             .rows()
@@ -1218,6 +1238,7 @@ pub(crate) fn install_text_window_body_output(
     let redisplay_positions = TextWindowRedisplayPositions::from_output_rows(
         output_emitter,
         request.window_start,
+        request.accessible_end,
         request.text_start_byte,
         request.byte_idx,
     );

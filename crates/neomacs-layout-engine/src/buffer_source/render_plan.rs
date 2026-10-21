@@ -935,6 +935,7 @@ impl BufferSourceOutputSetup {
             let mut redisplay_positions = TextWindowRedisplayPositions::from_output_rows(
                 &output_emitter,
                 tail_context.window_start,
+                source.accessible_end(),
                 source.text_start_byte(),
                 0,
             );
@@ -1244,6 +1245,7 @@ impl BufferSourceOutputSetup {
                 TextWindowRedisplayPositions::from_output_rows(
                     &output_emitter,
                     scroll.new_window_start,
+                    source.accessible_end(),
                     source.text_start_byte(),
                     walk_setup.byte_idx,
                 )
@@ -1331,6 +1333,7 @@ impl BufferSourceOutputSetup {
                 TextWindowRedisplayPositions::from_output_rows(
                     &output_emitter,
                     scroll.new_window_start,
+                    source.accessible_end(),
                     source.text_start_byte(),
                     walk_setup.byte_idx,
                 )

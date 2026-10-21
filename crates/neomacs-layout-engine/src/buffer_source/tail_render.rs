@@ -112,6 +112,7 @@ impl BufferSourceBodyInstallContext {
     pub(crate) fn request<'a>(
         self,
         window_start: i64,
+        accessible_end: i64,
         text_start_byte: usize,
         byte_idx: usize,
         reserve_right_special_col: bool,
@@ -124,6 +125,7 @@ impl BufferSourceBodyInstallContext {
         TextWindowBodyInstallRequest::new(TextWindowBodyInstallRenderContext::new(
             self.output_window_id,
             window_start,
+            accessible_end,
             text_start_byte,
             byte_idx,
             reserve_right_special_col,
@@ -270,6 +272,7 @@ impl<'a> BufferSourceTailRequestContext<'a> {
     ) -> TextWindowBodyInstallRequest<'request> {
         self.body_install_context.request(
             self.window_start,
+            self.params.accessible_end_charpos().get(),
             self.text_start_byte,
             byte_idx,
             self.reserve_right_special_col,

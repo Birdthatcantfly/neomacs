@@ -147,3 +147,35 @@ fn tty_size_change_functions_observe_the_window_before_its_auto_hscroll() {
     );
     terminal.finish();
 }
+
+/// The ttykey `truncate' scene's buffer with point kept inside the first 119
+/// columns, so nothing hscrolls and every row is right-truncated.  GNU's
+/// `display_line` reseats a truncated row past the rest of its line before
+/// recording the row's end (src/xdisp.c:26695, :26736), so `window-end' --
+/// `Z - w->window_end_pos' from the last row -- is the following line's
+/// first position, not the position after the last drawn glyph.  In
+/// `--batch' UPDATE never runs the iterator (window.c:1861), so both forms
+/// read the recorded end.
+#[test]
+fn tty_window_end_after_a_truncated_last_row_is_the_next_line_start() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    let terminal = TestTerminal::with_size(40, 120);
+    let form = format!(
+        r##"(progn {VIEWPORT_SUPPORT}
+  (setq vp-long t)
+  (vp-fill "vp-truncate")
+  (setq-local truncate-lines t)
+  (goto-char (+ (vp-line 509) 10))
+  (redisplay t)
+  (setq vp-first (list (window-end) (window-end nil t) (window-hscroll)))
+  (goto-char (vp-line 537))
+  (redisplay t)
+  (list vp-first (list (window-end) (window-end nil t) (window-hscroll) (window-start))))"##
+    );
+    common::assert_oracle_parity_with_env_expect(
+        &form,
+        &[("VIEWPORT_TEST_TTY", &terminal.name)],
+        expect_test::expect![[r#""OK ((108677 108677 0) (108677 108677 0 100799))""#]],
+    );
+    terminal.finish();
+}

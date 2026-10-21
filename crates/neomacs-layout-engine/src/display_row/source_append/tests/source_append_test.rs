@@ -8117,6 +8117,7 @@ fn buffer_text_window_body_install_request_records_positions_and_edge_markers() 
     let positions = TextWindowBodyInstallRequest::new(TextWindowBodyInstallRenderContext::new(
         41,
         3,
+        i64::MAX,
         100,
         4,
         true,

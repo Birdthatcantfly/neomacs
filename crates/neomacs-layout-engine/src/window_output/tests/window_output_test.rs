@@ -732,7 +732,7 @@ fn text_window_redisplay_positions_use_last_row_with_buffer_position() {
         },
     );
 
-    let positions = TextWindowRedisplayPositions::from_output_rows(&emitter, 3, 100, 4);
+    let positions = TextWindowRedisplayPositions::from_output_rows(&emitter, 3, i64::MAX, 100, 4);
 
     assert_eq!(positions.window_start(), LispCharPos1::new(4));
     assert_eq!(positions.window_end_lisp(), LispCharPos1::new(8));
@@ -1447,6 +1447,7 @@ fn install_text_window_body_output_records_redisplay_and_installs_rows() {
         TextWindowBodyOutputInstall {
             window_id: 41,
             window_start: 3,
+            accessible_end: i64::MAX,
             text_start_byte: 100,
             byte_idx: 4,
             right_edge_markers: None,
@@ -1639,4 +1640,85 @@ fn text_matrix_row_transition_emits_finish_and_begin() {
     builder.end_window();
     let state = builder.finish(10, 1, 8.0, 16.0);
     assert_eq!(state.window_matrices[0].matrix.rows.len(), 2);
+}
+
+/// GNU's `row->end` for a right-truncated row is where `display_line` landed
+/// after reseating past the rest of the line (src/xdisp.c:26695, :26736):
+/// the following line's first position, or ZV when the truncated line ends
+/// the buffer.  `window-end` is that end of the last row, not the position
+/// after its last drawn glyph -- the ttykey `truncate' scene read 108594 here
+/// where GNU 31.1 reads 108677, the next line's start.
+#[test]
+fn text_window_redisplay_positions_end_a_truncated_last_row_at_the_next_line() {
+    let mut eval = Context::new();
+    let buf_id = eval
+        .buffer_manager()
+        .current_buffer()
+        .expect("current buffer")
+        .id();
+    let frame_id = eval.frame_manager_mut().create_frame(
+        "output-emitter-truncated-window-end",
+        320,
+        120,
+        buf_id,
+    );
+    let window_id = eval
+        .frame_manager()
+        .get(frame_id)
+        .expect("frame")
+        .selected_window;
+
+    let mut builder = DisplayOutputBuilder::new();
+    builder.begin_window(1, 2, 10, Rect::new(0.0, 0.0, 80.0, 32.0), true);
+    let mut emitter = WindowOutputEmitter::new(frame_id, window_id, 0, 0.0, 0.0);
+    emitter.begin_update(&mut eval);
+
+    begin_text_window_row(
+        TextWindowOutputTarget::from_builder(&mut builder),
+        &mut emitter,
+        &mut eval,
+        DisplayTextRowBegin {
+            display_row_index: 0,
+            row: 0,
+            col: 0,
+            y: 0.0,
+            x: 0.0,
+            start_charpos: LayoutCharPos0::new(0),
+        },
+    );
+    // The row drew through position 7 and skipped the rest of its line,
+    // whose terminator is at 30; the next line starts at 31.
+    emitter.note_display_buffer_pos(LispCharPos1::new(7));
+    emitter.note_truncated_end(LispCharPos1::new(30));
+    finish_text_window_row(
+        TextWindowOutputTarget::from_builder(&mut builder),
+        &mut emitter,
+        DisplayTextRowMetrics {
+            line_spacing: 0.0,
+            y: 0.0,
+            height: 16.0,
+            ascent: 12.0,
+        },
+    );
+    builder.end_row();
+
+    let positions = TextWindowRedisplayPositions::from_output_rows(&emitter, 3, 200, 100, 31);
+    assert_eq!(
+        positions.window_end_lisp(),
+        LispCharPos1::new(31),
+        "GNU row->end: the first position of the following line"
+    );
+    assert_eq!(
+        positions.window_end_position().anchor().emacs_byte_pos(),
+        EmacsBytePos::new(131)
+    );
+
+    // A truncated line that ends the buffer: the tail's last position is ZV
+    // itself, and the end cannot pass it.
+    let positions = TextWindowRedisplayPositions::from_output_rows(&emitter, 3, 29, 100, 29);
+    assert_eq!(
+        positions.window_end_lisp(),
+        LispCharPos1::new(30),
+        "clamped to ZV (layout 29 is Lisp 30)"
+    );
 }
