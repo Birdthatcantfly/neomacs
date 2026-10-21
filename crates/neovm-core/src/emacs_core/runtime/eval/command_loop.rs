@@ -1800,6 +1800,20 @@ impl Context {
             return Ok(());
         }
         self.resize_minibuffer_only_frames();
+        // GNU `redisplay_internal` lifts labeled restrictions first
+        // (`reset_outermost_restrictions`, src/xdisp.c:17415) and runs the
+        // window change functions next (`run_window_change_functions`,
+        // xdisp.c:17563), BEFORE any window is hscrolled or laid out
+        // (`redisplay_windows`, then `hscroll_windows` at xdisp.c:17942).
+        // A `window-size-change-functions` member therefore observes the
+        // window as the previous redisplay left it: a fresh buffer in a
+        // `truncate-lines` window with point past the right edge reads
+        // `window-hscroll' 0 there, and the ttykey `truncate' scene recorded
+        // exactly that from GNU while this path ran the hooks after layout
+        // and read the auto-hscroll of 85 it had just computed. Same hook
+        // pass per redisplay as before; only its position moved.
+        let saved = self.buffers.reset_outermost_restrictions();
+        let _ = super::super::builtins::run_redisplay_window_change_hooks(self);
         // GNU `redisplay_internal` calls `hscroll_window_tree` (src/xdisp.c)
         // before laying out windows so each window's `hscroll` follows point;
         // for a truncated line whose point has moved off the right edge (the
@@ -1810,7 +1824,6 @@ impl Context {
         let has_fn = self.redisplay_fn.is_some();
         tracing::debug!("redisplay called (has_fn={})", has_fn);
         if let Some(mut f) = self.redisplay_fn.take() {
-            let saved = self.buffers.reset_outermost_restrictions();
             f(self);
             // The layout pass inside `f` consumes any pending exact echo-area
             // resize (GNU `resize_echo_area_exactly`). Clear it now, once per
@@ -1833,12 +1846,11 @@ impl Context {
                 self.redisplay_fn = Some(f);
                 return Err(flow);
             }
-            let _ = super::super::builtins::run_redisplay_window_change_hooks(self);
             self.buffers.restore_outermost_restrictions(saved);
             self.redisplay_fn = Some(f);
         } else {
             self.echo_area_resize_exact_pending = false;
-            let _ = super::super::builtins::run_redisplay_window_change_hooks(self);
+            self.buffers.restore_outermost_restrictions(saved);
         }
         *self.last_redisplay_signature = Some(self.redisplay_signature());
         Ok(())
