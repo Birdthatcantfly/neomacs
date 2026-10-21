@@ -249,7 +249,48 @@ fn tty_posn_at_point_answers_in_batch_before_the_first_redisplay() {
     common::assert_oracle_parity_with_env_expect(
         &form,
         &[("VIEWPORT_TEST_TTY", &terminal.name)],
-        expect_test::expect![[r#""OK (((10 . 10) 102829 (10 10) t) ((0 . 10) 102819 (0 10) t) ((0 . 0) 100799 (0 0) t) 0)""#]],
+        expect_test::expect![[
+            r#""OK (((10 . 10) 102829 (10 10) t) ((0 . 10) 102819 (0 10) t) ((0 . 0) 100799 (0 0) t) 0)""#
+        ]],
+    );
+    terminal.finish();
+}
+
+/// Positions a window's hscroll hides on a visible row.  GNU `pos_visible_p'
+/// keeps the iterator's x counting from the line start while it skips to
+/// `first_visible_x', so such a position is visible at its line x minus the
+/// hscroll, left of the text area (src/xdisp.c:1772-1830): fully visible,
+/// and `(X Y)' with a negative X when PARTIALLY is non-nil.  `posn-at-point'
+/// refuses X < -1 (src/keyboard.c:13085) and sends X = -1 through
+/// `posn-at-x-y' like any other coordinate.
+#[test]
+fn tty_positions_hidden_by_hscroll_are_visible_left_of_the_text_area() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    let terminal = TestTerminal::with_size(40, 120);
+    let form = format!(
+        r##"(progn {VIEWPORT_SUPPORT}
+  (setq vp-long t)
+  (vp-fill "vp-truncate")
+  (setq-local truncate-lines t)
+  (redisplay t)
+  (defun vp-tail ()
+    (let ((p (posn-at-point)))
+      (list (and p (posn-x-y p)) (and p (posn-point p))
+            (pos-visible-in-window-p (point) nil t) (pos-visible-in-window-p (point)))))
+  (setq vp-seen nil)
+  (dolist (col '(0 40 84 85 86))
+    (goto-char (+ (vp-line 509) col))
+    (push (vp-tail) vp-seen))
+  (goto-char (vp-line 520))
+  (push (vp-tail) vp-seen)
+  (list (window-hscroll) (nreverse vp-seen)))"##
+    );
+    common::assert_oracle_parity_with_env_expect(
+        &form,
+        &[("VIEWPORT_TEST_TTY", &terminal.name)],
+        expect_test::expect![[
+            r#""OK (85 ((nil nil (-85 10) t) (nil nil (-45 10) t) ((-1 . 10) nil (-1 10) t) ((0 . 10) 102904 (0 10) t) ((1 . 10) 102905 (1 10) t) (nil nil (-85 21) t)))""#
+        ]],
     );
     terminal.finish();
 }

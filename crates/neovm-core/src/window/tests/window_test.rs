@@ -4396,3 +4396,61 @@ fn positions_in_a_truncated_tail_resolve_to_the_truncation_marker() {
             .is_none()
     );
 }
+
+/// A row hscrolled by 85 starts at its line start but draws from column 85:
+/// positions before its first drawn glyph are hidden by the hscroll (GNU still
+/// reports them, left of the text area), positions at or after it are not,
+/// and positions on no row are not either.
+#[test]
+fn positions_left_of_a_rows_first_glyph_are_hidden_by_hscroll() {
+    let glyph = |pos: i64, col: i64| DisplayPointSnapshot {
+        role: DisplayPointRole::Glyph,
+        buffer_pos: LispCharPos1::new(pos),
+        x: col,
+        y: 10,
+        width: 1,
+        height: 1,
+        row: 10,
+        col,
+    };
+    // Line starts at 101; columns 0..85 (positions 101..=185) are hidden;
+    // the row draws positions 186.. from x 0.
+    let points: Vec<DisplayPointSnapshot> = (0..30).map(|i| glyph(186 + i, i)).collect();
+    let snapshot = WindowDisplaySnapshot {
+        point_rows: None,
+        window_id: WindowId(11),
+        points,
+        rows: vec![DisplayRowSnapshot {
+            row: 10,
+            y: 10,
+            height: 1,
+            start_x: 0,
+            start_col: 0,
+            end_x: 30,
+            end_col: 30,
+            start_buffer_pos: Some(LispCharPos1::new(101)),
+            end_buffer_pos: Some(LispCharPos1::new(215)),
+            truncated_end_buffer_pos: None,
+            end_source: Default::default(),
+            fringe: Default::default(),
+        }],
+        ..WindowDisplaySnapshot::default()
+    };
+    for pos in [101, 150, 185] {
+        assert!(
+            snapshot.position_hidden_by_hscroll(LispCharPos1::new(pos)),
+            "pos {pos}"
+        );
+        assert!(
+            snapshot
+                .point_for_buffer_pos(LispCharPos1::new(pos))
+                .is_none()
+        );
+    }
+    for pos in [100, 186, 200, 215, 216] {
+        assert!(
+            !snapshot.position_hidden_by_hscroll(LispCharPos1::new(pos)),
+            "pos {pos}"
+        );
+    }
+}

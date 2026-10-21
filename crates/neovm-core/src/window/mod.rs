@@ -3320,6 +3320,28 @@ impl WindowDisplaySnapshot {
         })
     }
 
+    /// Whether POS is on one of this snapshot's rows but left of the first
+    /// glyph that row drew: hidden by the window's hscroll.  GNU `pos_visible_p`
+    /// still reports such a position, at its x left of the text area
+    /// (src/xdisp.c:1772-1830 with the iterator's line-relative x), so a
+    /// snapshot that has no point for it has not answered; the caller re-walks
+    /// as GNU does on every call.  A row's `start_buffer_pos` is its LINE
+    /// start even when hscrolled (`note_row_walk_start`), which is what
+    /// bounds the hidden prefix on the left; on the right it is the first
+    /// glyph the row DREW -- the left-truncation `$` is an overlaid marker
+    /// standing for the glyph that straddles the boundary, and GNU reports
+    /// that glyph's own position at its hidden x too (a tab at columns 2-7
+    /// under hscroll 3: (-1 1), `posn-point' nil; GNU 31.1).
+    pub fn position_hidden_by_hscroll(&self, pos: LispCharPos1) -> bool {
+        self.rows.iter().any(|row| {
+            row.start_buffer_pos.is_some_and(|start| start <= pos)
+                && self
+                    .iter_row_points(row.row)
+                    .find(|point| point.role.is_position())
+                    .is_some_and(|first_drawn| pos < first_drawn.buffer_pos)
+        })
+    }
+
     /// Whether POS lies in the tail ROW skipped by right truncation: after its
     /// last drawn glyph and no further than the terminator (or ZV).
     fn pos_in_truncated_tail(row: &DisplayRowSnapshot, pos: LispCharPos1) -> bool {

@@ -600,6 +600,38 @@ fn position_queries_preserve_wrap_overlay_hidden_and_partial_row_geometry() {
                     .unwrap();
                 let actual = prefix.point_for_buffer_pos(target);
                 let expected = full.point_for_buffer_pos(target);
+                if full.position_hidden_by_hscroll(target) {
+                    // A position the hscroll hides: the untargeted walk
+                    // publishes nothing for it (redisplay draws nothing
+                    // there), while the targeted query publishes GNU's
+                    // `pos_visible_p` answer -- the position's line x minus
+                    // the hscroll, left of the text area, on its row (see
+                    // `hscrolled_out_query_target_is_published_left_of_the_text_area`).
+                    // The bounded walk still measures the row exactly.  The
+                    // untargeted walk may hold the left-truncation `$' marker
+                    // for the glyph straddling the boundary; that is a
+                    // `posn-at-x-y' answer for column 0, not the position's x.
+                    assert!(
+                        expected.as_ref().is_none_or(|point| {
+                            point.role == neovm_core::window::DisplayPointRole::OverlaidMarker
+                        }),
+                        "target={target:?}: {expected:?}, {decoration}"
+                    );
+                    let point = actual.unwrap_or_else(|| {
+                        panic!("hidden target={target:?} is reported, {decoration}")
+                    });
+                    assert!(
+                        point.x < 0 && point.col < 0 && point.role.is_position(),
+                        "target={target:?}: {point:?}, {decoration}"
+                    );
+                    assert_eq!(prefix.regions, full.regions);
+                    assert_eq!(
+                        prefix.row_metrics(point.row),
+                        full.row_metrics(point.row),
+                        "target row incomplete: target={target:?}, {decoration}"
+                    );
+                    continue;
+                }
                 assert_eq!(
                     actual, expected,
                     "target={target:?}, vscroll={vscroll}, {decoration}"

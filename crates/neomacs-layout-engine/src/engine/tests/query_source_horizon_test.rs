@@ -427,3 +427,71 @@ fn selective_query_classifies_complete_indentation_and_carriage_return_tails() {
         assert_eq!(point.col, 0);
     }
 }
+
+/// GNU `pos_visible_p` on an hscrolled line keeps the iterator's x counting
+/// from the line start while it skips to `first_visible_x`, so a position
+/// the hscroll hides is reported at its line x minus the hscroll, left of
+/// the text area, on its row (GNU 31.1: (-85 10) for column 0 and (-45 10)
+/// for column 40 under hscroll 85).  Redisplay publishes nothing for those
+/// characters; a `Position` query publishes the one it is asked about.
+#[test]
+fn hscrolled_out_query_target_is_published_left_of_the_text_area() {
+    let text = format!("{}\n{}\n", "x".repeat(300), "y".repeat(300));
+    for (col, expected_x) in [(0i64, -85i64), (40, -45), (84, -1)] {
+        let (mut eval, frame, window) = query_fixture(&text, "(setq truncate-lines t)", 1);
+        {
+            let frame = eval.frame_manager_mut().get_mut(frame).unwrap();
+            if let neovm_core::window::Window::Leaf { hscroll, .. } =
+                frame.find_window_mut(window).unwrap()
+            {
+                *hscroll = 85;
+            }
+        }
+        let target = LispCharPos1::new(1 + col);
+        let mut engine = LayoutEngine::new_without_font_metrics();
+        let geometry = engine
+            .query_window_layout(
+                &mut eval,
+                frame,
+                window,
+                WindowLayoutQueryScope::Position { target },
+            )
+            .unwrap()
+            .into_geometry()
+            .unwrap();
+        let point = geometry
+            .point_for_buffer_pos(target)
+            .unwrap_or_else(|| panic!("column {col} is reported under hscroll 85"));
+        assert_eq!(
+            (point.x, point.row, point.col),
+            (expected_x, 0, expected_x),
+            "column {col}"
+        );
+        assert_eq!(point.buffer_pos, target);
+        // The first drawn glyph, column 85, is still at x 0 and the row still
+        // starts at its line start (GNU `row->start`, src/xdisp.c:25857).
+        let first_drawn = geometry
+            .point_for_buffer_pos(LispCharPos1::new(86))
+            .expect("column 85 is drawn");
+        assert_eq!((first_drawn.x, first_drawn.row), (0, 0));
+        assert_eq!(
+            geometry.rows.first().and_then(|row| row.start_buffer_pos),
+            Some(LispCharPos1::new(1))
+        );
+        // A walk without a target (redisplay's shape) publishes nothing for
+        // the hidden prefix: no per-frame cost in the common case.
+        let untargeted = engine
+            .query_window_layout(&mut eval, frame, window, WindowLayoutQueryScope::Viewport)
+            .unwrap()
+            .into_geometry()
+            .unwrap();
+        assert!(
+            untargeted.point_for_buffer_pos(target).is_none(),
+            "column {col}"
+        );
+        assert!(
+            untargeted.position_hidden_by_hscroll(target),
+            "column {col}"
+        );
+    }
+}

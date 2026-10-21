@@ -884,6 +884,11 @@ impl HorizontalScrollSkipState {
         )
     }
 
+    /// The window's hscroll in columns: GNU's `first_visible_x` in cells.
+    pub(crate) fn configured_columns(self) -> i32 {
+        self.configured_columns
+    }
+
     pub(crate) fn consumed_columns(self) -> i32 {
         match self.phase {
             HorizontalScrollSkipPhase::Disabled => 0,

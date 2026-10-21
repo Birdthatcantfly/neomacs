@@ -1668,6 +1668,25 @@ impl WindowOutputEmitter {
             .push_text_display_point(buffer_pos, glyph_x, glyph_y, width, height, row, col)
     }
 
+    /// Publish a position the hscroll hides, at its x left of the text area
+    /// (GNU `pos_visible_p` on an hscrolled line).  Unlike a drawn glyph it
+    /// is not the row's first or last display position: the row still starts
+    /// at its line start and ends at its last drawn glyph.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn push_text_hidden_display_point(
+        &mut self,
+        buffer_pos: LispCharPos1,
+        glyph_x: f32,
+        glyph_y: f32,
+        width: f32,
+        height: f32,
+        row: usize,
+        col: i64,
+    ) {
+        self.geometry
+            .push_text_hidden_display_point(buffer_pos, glyph_x, glyph_y, width, height, row, col);
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn push_text_overlaid_marker_point(
         &mut self,

@@ -7934,7 +7934,15 @@ fn live_position_visibility(
         }
     };
     if let Some(snapshot) = eval.fresh_window_display_snapshot(fid, wid, buffer_id) {
-        return Ok(Some(measure(snapshot)));
+        let visibility = measure(snapshot);
+        // A position the hscroll hides has no point in the snapshot; GNU
+        // still reports it (left of the text area), so re-walk for it below
+        // as GNU re-walks for every call.
+        let hidden = matches!(visibility, PositionVisibility::NotVisible)
+            && pos.is_some_and(|pos| snapshot.position_hidden_by_hscroll(pos));
+        if !hidden {
+            return Ok(Some(visibility));
+        }
     }
     let scope = pos.map_or(crate::window::WindowLayoutQueryScope::Viewport, |target| {
         crate::window::WindowLayoutQueryScope::Position { target }
@@ -8888,6 +8896,26 @@ pub(crate) fn builtin_posn_at_point(
     else {
         return Ok(Value::NIL);
     };
+    // GNU `Fposn_at_point` (src/keyboard.c:13073-13097) builds the posn from
+    // `pos-visible-in-window-p's (X Y): "Point invisible due to hscrolling?
+    // X can be -1 when a newline in a R2L line overflows into the left
+    // fringe", so X < -1 answers nil, and X = -1 goes through
+    // `posn-at-x-y' like any other coordinate.
+    if metrics.x < -1 {
+        return Ok(Value::NIL);
+    }
+    if metrics.x == -1 {
+        let window = args.get(1).copied().unwrap_or(Value::NIL);
+        return builtin_posn_at_x_y(
+            eval,
+            vec![
+                Value::fixnum(metrics.x),
+                Value::fixnum(metrics.y),
+                window,
+                Value::NIL,
+            ],
+        );
+    }
     Ok(make_text_area_position(window_id, metrics))
 }
 
@@ -8990,10 +9018,26 @@ fn compute_live_window_geometry_scope(
     // `pos_visible_p` re-run the iterator on EVERY call (src/dispnew.c:6277-6286,
     // src/xdisp.c:1772-1774).  Recomputing when the rows are invalid is that
     // behaviour expressed as a cache.
+    //
+    // One exception: a position the hscroll hides on a visible row has no
+    // point in any snapshot redisplay produced (it drew nothing there), yet
+    // GNU reports it at its x left of the text area.  That is not a snapshot
+    // that answered "not visible"; it is a question only the walk can answer,
+    // so it recomputes, as GNU recomputes every time.
     let buffer_id = frame.find_window(wid).and_then(|window| window.buffer_id());
+    let hidden_target = match scope {
+        crate::window::WindowLayoutQueryScope::Position { target } => Some(target),
+        _ => None,
+    };
     if buffer_id
         .and_then(|buffer_id| eval.fresh_window_display_snapshot(fid, wid, buffer_id))
-        .is_some_and(|snapshot| snapshot.has_points())
+        .is_some_and(|snapshot| {
+            snapshot.has_points()
+                && !hidden_target.is_some_and(|target| {
+                    snapshot.point_for_buffer_pos(target).is_none()
+                        && snapshot.position_hidden_by_hscroll(target)
+                })
+        })
     {
         return Ok(None);
     }

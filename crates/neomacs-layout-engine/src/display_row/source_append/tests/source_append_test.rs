@@ -1343,6 +1343,7 @@ fn buffer_hscroll_skip_render_request_appends_left_truncation_marker() {
         &active_face,
         DisplayRowFallbackMetrics::from_default_face_extents(8.0, 16.0, 12.0),
         99,
+        None,
         false,
         context.defaults,
         0,

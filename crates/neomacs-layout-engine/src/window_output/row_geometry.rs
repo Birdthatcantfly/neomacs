@@ -556,6 +556,34 @@ impl WindowRowGeometry {
         );
     }
 
+    /// A position hidden by the hscroll, at the x GNU's iterator reports for
+    /// it (left of the text area); see
+    /// `WindowOutputEmitter::push_text_hidden_display_point`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn push_text_hidden_display_point(
+        &mut self,
+        buffer_pos: LispCharPos1,
+        glyph_x: f32,
+        glyph_y: f32,
+        width: f32,
+        height: f32,
+        row: usize,
+        col: i64,
+    ) {
+        self.note_query_y(glyph_y);
+        self.note_query_metrics(height, 0.0);
+        self.points.push(DisplayPointSnapshot {
+            role: neovm_core::window::DisplayPointRole::Glyph,
+            buffer_pos,
+            x: (glyph_x - self.text_x).round() as i64,
+            y: (glyph_y - self.window_top).round() as i64,
+            width: width.max(0.0).round() as i64,
+            height: height.max(1.0).round() as i64,
+            row: self.text_row_base + row as i64,
+            col,
+        });
+    }
+
     /// [`Self::push_overlaid_marker_point`] for a BODY row, whose row index is
     /// relative to the window's first text row.
     #[allow(clippy::too_many_arguments)]

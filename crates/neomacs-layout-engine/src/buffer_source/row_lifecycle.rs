@@ -593,6 +593,8 @@ pub(crate) struct BufferSourceHscrollSkipRenderContext<'a> {
     active_face_state: &'a DisplayRowActiveFaceState,
     metrics: DisplayRowFallbackMetrics,
     point_charpos: i64,
+    /// See `BufferSourceLoopRequestContext::query_target`.
+    query_target: Option<i64>,
     has_prefix: bool,
     row_geometry_defaults: DisplayRowGeometryDefaults,
     display_text_row_base: usize,
@@ -726,6 +728,8 @@ impl<'a> BufferSourceHscrollSkipRenderContext<'a> {
         let mut source_render = source_render;
         let context = self;
 
+        let columns_before = row_carryover.hscroll_skip.consumed_columns();
+        let hscroll_columns = row_carryover.hscroll_skip.configured_columns();
         let Some(hscroll_action) = source_walk
             .consume_hscroll_skip(
                 context.text,
@@ -737,6 +741,34 @@ impl<'a> BufferSourceHscrollSkipRenderContext<'a> {
         else {
             return DisplayRowTransitionContinuation::Exhausted;
         };
+
+        // GNU `pos_visible_p` answers for a position the hscroll hides: its
+        // iterator keeps counting x from the line start while it skips
+        // (`move_it_in_display_line_to` up to `first_visible_x`), so the
+        // position is reported at its line x minus the hscroll, left of the
+        // text area, on its row (GNU 31.1: (-85 10) for column 0 under
+        // hscroll 85; `posn-at-point' then refuses x < -1).  Redisplay draws
+        // nothing for these characters and publishes nothing; a synchronous
+        // query that asks about one of them publishes exactly that one point,
+        // which is also the whole per-query cost.
+        if let Some(target) = context.query_target
+            && !hscroll_action.is_line_break()
+            && hscroll_action.hidden_prefix_end_charpos() == target
+        {
+            let char_width = context.metrics.char_width;
+            let hidden_col = i64::from(columns_before) - i64::from(hscroll_columns);
+            source_render
+                .output_emitter()
+                .push_text_hidden_display_point(
+                    LispCharPos1::new(target + 1),
+                    context.content_x + hidden_col as f32 * char_width,
+                    row_build.row_geometry.y(),
+                    char_width,
+                    row_build.row_geometry.height(),
+                    row_build.row_geometry.row(),
+                    hidden_col,
+                );
+        }
 
         // GNU records a row's start BEFORE it skips the hscrolled columns
         // (`row->start = it->start`, src/xdisp.c:25857; the skip is at
@@ -855,6 +887,7 @@ impl<'a> BufferSourceHscrollSkipRenderContext<'a> {
         active_face_state: &'a DisplayRowActiveFaceState,
         metrics: DisplayRowFallbackMetrics,
         point_charpos: i64,
+        query_target: Option<i64>,
         has_prefix: bool,
         row_geometry_defaults: DisplayRowGeometryDefaults,
         display_text_row_base: usize,
@@ -869,6 +902,7 @@ impl<'a> BufferSourceHscrollSkipRenderContext<'a> {
             active_face_state,
             metrics,
             point_charpos,
+            query_target,
             has_prefix,
             row_geometry_defaults,
             display_text_row_base,

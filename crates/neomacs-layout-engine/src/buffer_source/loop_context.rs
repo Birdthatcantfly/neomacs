@@ -25,6 +25,10 @@ pub(crate) struct BufferSourceLoopRequestContext {
     accessible_end: i64,
     read_boundary: crate::buffer_source::window_source::BufferWindowReadBoundary,
     point_charpos: i64,
+    /// The position a synchronous `Position` query asks about (layout
+    /// 0-based), so a walk that skips it under the hscroll can still publish
+    /// where GNU's iterator would have reported it.  `None` for redisplay.
+    query_target: Option<i64>,
     selective_display: i32,
     tab_width: i32,
     extra_line_spacing: f32,
@@ -68,6 +72,7 @@ impl BufferSourceLoopRequestContext {
             read_boundary:
                 crate::buffer_source::window_source::BufferWindowReadBoundary::WindowRows,
             point_charpos,
+            query_target: params.query_target.map(|target| target.get()),
             selective_display: params.selective_display,
             tab_width: params.tab_width,
             extra_line_spacing: params.extra_line_spacing,
@@ -162,6 +167,7 @@ impl BufferSourceLoopRequestContext {
             active_face_state,
             self.metrics,
             self.point_charpos,
+            self.query_target,
             self.has_prefix,
             self.row_geometry_defaults,
             self.display_text_row_base,
