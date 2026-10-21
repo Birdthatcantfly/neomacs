@@ -18,7 +18,12 @@ impl Context {
     /// (`jit::cache::pin_redefined_function`): rooted while a backtrace frame
     /// -- this thread's or a suspended one's -- records the symbol.
     #[cfg(feature = "jit")]
-    fn trace_jit_redefined_functions(&self, visit: &mut dyn FnMut(Value), called: &mut Vec<SymId>) {
+    fn trace_jit_redefined_functions(
+        &self,
+        heap_id: usize,
+        visit: &mut dyn FnMut(Value),
+        called: &mut Vec<SymId>,
+    ) {
         let symbol_mode = self.symbol_mode();
         use crate::emacs_core::jit::cache;
         called.clear();
@@ -46,21 +51,26 @@ impl Context {
         called.sort_unstable_by_key(|sym| sym.0);
         called.dedup();
         cache::trace_redefined_pins(
-            self.tagged_heap.identity(),
+            heap_id,
             &|sym| called.binary_search_by_key(&sym.0, |s| s.0).is_ok(),
             visit,
         );
         called.clear();
     }
 
-    /// Every root this Context holds, in named groups.
+    /// Every root this Context holds, in named groups. Identity and shared-root
+    /// access come from the caller's current heap loan. The shared-root reader
+    /// runs to completion before visiting its values: holding `&TaggedHeap`
+    /// across `visit` would prohibit the visitor's writes to the gray queue.
     #[inline(always)]
     pub(super) fn trace_roots(
         &self,
+        heap_id: usize,
+        collect_shared_roots: impl FnOnce(&mut Vec<Value>),
         group: &mut dyn FnMut(&'static str),
         visit: &mut dyn FnMut(Value),
     ) {
-        self.trace_root_groups::<true>(group, visit);
+        self.trace_root_groups::<true>(heap_id, collect_shared_roots, group, visit);
     }
 
     /// Only this owner's execution roots. World cells are traced by the
@@ -78,22 +88,25 @@ impl Context {
         roots: &mut Vec<Value>,
         called: &mut Vec<SymId>,
     ) {
-        self.trace_root_groups::<false>(&mut |_| {}, &mut |value| roots.push(value));
+        let heap_id = self.tagged_heap.identity();
+        self.trace_root_groups::<false>(heap_id, |_| {}, &mut |_| {}, &mut |value| {
+            roots.push(value)
+        });
         #[cfg(feature = "jit")]
-        self.trace_jit_redefined_functions(&mut |value| roots.push(value), called);
+        self.trace_jit_redefined_functions(heap_id, &mut |value| roots.push(value), called);
         #[cfg(not(feature = "jit"))]
         let _ = called;
-        self.collect_in_flight_roots(roots);
+        self.collect_in_flight_roots(heap_id, roots);
     }
 
     /// Flow payloads belong to the owner. The full walk supplies its registry
     /// scratch, while parking appends directly to its reusable census buffer.
     #[inline(always)]
-    fn collect_in_flight_roots(&self, roots: &mut Vec<Value>) {
+    fn collect_in_flight_roots(&self, heap_id: usize, roots: &mut Vec<Value>) {
         super::super::error::collect_in_flight_registry_gc_roots(
             roots,
             &self.in_flight_registry,
-            self.tagged_heap.identity(),
+            heap_id,
         );
     }
 
@@ -102,7 +115,12 @@ impl Context {
     #[cfg(test)]
     pub(super) fn private_root_group_names(&self) -> Vec<&'static str> {
         let mut names = Vec::new();
-        self.trace_root_groups::<false>(&mut |name| names.push(name), &mut |_| {});
+        self.trace_root_groups::<false>(
+            self.tagged_heap.identity(),
+            |_| {},
+            &mut |name| names.push(name),
+            &mut |_| {},
+        );
         names
     }
 
@@ -111,6 +129,8 @@ impl Context {
     #[inline(always)]
     fn trace_root_groups<const WORLD: bool>(
         &self,
+        heap_id: usize,
+        collect_shared_roots: impl FnOnce(&mut Vec<Value>),
         group: &mut dyn FnMut(&'static str),
         visit: &mut dyn FnMut(Value),
     ) {
@@ -124,7 +144,7 @@ impl Context {
             group("owned_native");
             self.owned_roots.trace_roots(visit);
             group("owner_bindings");
-            self.trace_owner_slabs(visit);
+            self.trace_owner_slabs(heap_id, visit);
         }
         group("eval_temp");
         for root in self.eval_temp_roots.iter().copied() {
@@ -276,7 +296,7 @@ impl Context {
         {
             group("jit_redefined");
             if WORLD {
-                self.trace_jit_redefined_functions(visit, &mut Vec::new());
+                self.trace_jit_redefined_functions(heap_id, visit, &mut Vec::new());
             }
         }
         group("profiler");
@@ -356,16 +376,13 @@ impl Context {
         if WORLD {
             let mut registry_roots = Vec::new();
             // Rust-held signals, throws and yields stay rooted when this Context moves.
-            self.collect_in_flight_roots(&mut registry_roots);
+            self.collect_in_flight_roots(heap_id, &mut registry_roots);
             for root in registry_roots.drain(..) {
                 visit(root);
             }
             // Values that any thread holds through this heap's `SharedRoot`s.
             group("shared_roots");
-            crate::tagged::transport::collect_shared_root_gc_roots(
-                &self.tagged_heap,
-                &mut registry_roots,
-            );
+            collect_shared_roots(&mut registry_roots);
             for root in registry_roots.drain(..) {
                 visit(root);
             }

@@ -116,13 +116,18 @@ fn parked_roots_equal_full_census_without_world_plus_parked_tls() {
     let current_group = Cell::new("");
     let mut private = Vec::new();
     let mut world = Vec::new();
-    owner.trace_roots(&mut |group| current_group.set(group), &mut |value| {
-        if private_groups.contains(current_group.get()) {
-            private.push(value);
-        } else {
-            world.push(value);
-        }
-    });
+    owner.trace_roots(
+        owner.tagged_heap.identity(),
+        |roots| crate::tagged::transport::collect_shared_root_gc_roots(&owner.tagged_heap, roots),
+        &mut |group| current_group.set(group),
+        &mut |value| {
+            if private_groups.contains(current_group.get()) {
+                private.push(value);
+            } else {
+                world.push(value);
+            }
+        },
+    );
     let mut tls = Vec::new();
     let mut stats = Vec::new();
     collect_thread_local_gc_roots(

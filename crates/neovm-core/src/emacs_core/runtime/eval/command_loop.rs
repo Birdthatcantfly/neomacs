@@ -2439,7 +2439,17 @@ impl Context {
         // Share the count with the group recorder, but capture the stable heap
         // pointer by value so each root does not reload it through a reference.
         let root_count = &cur_count;
+        let heap_identity = unsafe { (*heap_ptr).identity() };
         self.trace_roots(
+            heap_identity,
+            |roots| {
+                // SAFETY: borrow only from the live collector loan, and end
+                // this read before the root visitor writes through heap_ptr.
+                crate::tagged::transport::collect_shared_root_gc_roots(
+                    unsafe { &*heap_ptr },
+                    roots,
+                );
+            },
             &mut |name| {
                 close_group();
                 cur_name.set(Some(name));
@@ -2466,7 +2476,6 @@ impl Context {
         );
         close_group();
         let mut groups = groups.into_inner();
-        let heap_identity = unsafe { (*heap_ptr).identity() };
         let mut thread_local_roots = Vec::new();
         // A JIT leaf may keep addresses inside the obarray it was compiled
         // against; drop the cache before its roots are walked if this

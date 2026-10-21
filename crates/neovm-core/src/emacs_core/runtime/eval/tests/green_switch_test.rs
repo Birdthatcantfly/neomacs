@@ -1303,7 +1303,12 @@ fn parking_traces_private_roots_without_world_cells() {
     let private = Value::list(vec![Value::fixnum(37)]);
     ev.eval_temp_roots.push(private);
     let mut full = Vec::new();
-    ev.trace_roots(&mut |_| {}, &mut |v| full.push(v));
+    ev.trace_roots(
+        ev.tagged_heap.identity(),
+        |roots| crate::tagged::transport::collect_shared_root_gc_roots(&ev.tagged_heap, roots),
+        &mut |_| {},
+        &mut |v| full.push(v),
+    );
     assert!(full.contains(&world));
     let mut parked = Vec::new();
     ev.trace_private_roots(&mut parked);
@@ -1312,6 +1317,8 @@ fn parking_traces_private_roots_without_world_cells() {
     let is_world = std::cell::Cell::new(false);
     let mut expected = Vec::new();
     ev.trace_roots(
+        ev.tagged_heap.identity(),
+        |roots| crate::tagged::transport::collect_shared_root_gc_roots(&ev.tagged_heap, roots),
         &mut |name| {
             is_world.set(matches!(
                 name,

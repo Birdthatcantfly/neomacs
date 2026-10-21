@@ -1234,10 +1234,9 @@ impl Context {
     /// Visit every owner slab's values -- each owner's bindings are roots,
     /// whether or not that owner is running -- and the canonical plain word
     /// of every projected variable, which the World's table roots.
-    pub(super) fn trace_owner_slabs(&self, visit: &mut dyn FnMut(Value)) {
-        let heap = self.tagged_heap.identity();
+    pub(super) fn trace_owner_slabs(&self, heap_id: usize, visit: &mut dyn FnMut(Value)) {
         let world = &self.obarray.lease.0;
-        world.owner_slabs.borrow().trace_roots(heap, visit);
+        world.owner_slabs.borrow().trace_roots(heap_id, visit);
         world.thread_projections.borrow().trace_roots(visit);
         if let Some(runtime) = world.green.borrow().as_ref() {
             runtime.trace_roots(visit);
