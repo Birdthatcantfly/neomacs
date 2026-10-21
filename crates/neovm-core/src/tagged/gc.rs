@@ -1686,7 +1686,7 @@ impl TaggedHeap {
                         .push(record.owner);
                 }
                 if let Some(value) = record.value
-                    && let crate::tagged::value::ValueKind::Symbol(id) = value.kind()
+                    && let crate::tagged::value::ValueKind::Symbol(id) = value.gc_kind()
                 {
                     // Bare symbols have no born-black heap header. Keep the
                     // inserted-symbol fact for roots and non-cons owners too.
@@ -1754,7 +1754,7 @@ impl TaggedHeap {
                     .old_cons_trailer(owner)
                     .is_some_and(|(trailer, index)| trailer.age_is_old(index))
                 {
-                    self.mark_owner_card(owner.xcons_ptr() as usize);
+                    self.mark_owner_card(owner.gc_cons_ptr() as usize);
                 }
             } else if let Some(addr) = Self::value_heap_addr(owner) {
                 let header = unsafe { &*(addr as *const GcHeader) };
@@ -1814,17 +1814,7 @@ impl TaggedHeap {
     /// Raw object address for a heap-tagged value (cons/veclike/string/float),
     /// used for the dump-partition address-span test.
     fn value_heap_addr(value: TaggedValue) -> Option<usize> {
-        if value.is_cons() {
-            Some(value.xcons_ptr() as usize)
-        } else if value.is_veclike() {
-            value.as_veclike_ptr().map(|ptr| ptr as usize)
-        } else if value.is_string() {
-            value.as_string_ptr().map(|ptr| ptr as usize)
-        } else if value.is_float() {
-            value.as_float_ptr().map(|ptr| ptr as usize)
-        } else {
-            None
-        }
+        value.gc_heap_ptr().map(|ptr| ptr as usize)
     }
 
     /// True if `value` is a mapped (pdump) object, via the address span that
@@ -2770,6 +2760,7 @@ pub(crate) use cons_block_trailer::{
 use cons_blocks::*;
 
 mod aliasable;
+mod collector_reads;
 pub(crate) use aliasable::AliasableBox;
 #[cfg(test)]
 #[path = "gc/tests/test_heap.rs"]

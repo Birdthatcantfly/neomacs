@@ -269,7 +269,7 @@ impl ConsBlock {
         if !value.is_cons() {
             return false;
         }
-        let ptr = value.xcons_ptr();
+        let ptr = value.gc_cons_ptr();
         Self::block_base_for_ptr(ptr) == self.base_addr()
             && Self::ptr_is_cell_aligned(ptr)
             && self.trailer().is_old(Self::index_of_ptr(ptr))

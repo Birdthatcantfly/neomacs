@@ -1568,7 +1568,7 @@ impl DrainKinds {
         } else if val.is_float() {
             self.float += 1;
         } else if val.is_veclike() {
-            let ptr = val.as_veclike_ptr().unwrap();
+            let ptr = val.gc_veclike_ptr().unwrap();
             match unsafe { (*ptr).type_tag } {
                 VecLikeType::Vector => self.vector += 1,
                 VecLikeType::Record => self.record += 1,

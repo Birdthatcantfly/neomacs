@@ -64,7 +64,7 @@ impl TaggedHeap {
         if !owner.is_cons() || self.owner_is_mapped(owner) {
             return None;
         }
-        let ptr = owner.xcons_ptr();
+        let ptr = owner.gc_cons_ptr();
         if !ConsBlock::ptr_is_cell_aligned(ptr) {
             return None;
         }
@@ -509,7 +509,7 @@ impl TaggedHeap {
     #[inline]
     pub(super) fn owner_card_addr(owner: TaggedValue) -> Option<usize> {
         if owner.is_cons() {
-            Some(owner.xcons_ptr() as usize)
+            Some(owner.gc_cons_ptr() as usize)
         } else {
             Self::value_heap_addr(owner)
         }

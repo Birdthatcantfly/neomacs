@@ -42,7 +42,7 @@ impl WeakSweepPermit {
                 let header = &*(address as *const GcHeader);
                 if header.kind != HeapObjectKind::VecLike
                     || (*(address as *const VecLikeHeader)).type_tag != VecLikeType::HashTable
-                    || table.veclike_type() != Some(VecLikeType::HashTable)
+                    || table.gc_veclike_type() != Some(VecLikeType::HashTable)
                 {
                     return Err(RegistrationError::Publication);
                 }

@@ -580,7 +580,7 @@ impl TaggedHeap {
         if !self.generational.enabled {
             return self.is_heap_young(value);
         }
-        if let crate::tagged::value::ValueKind::Symbol(id) = value.kind() {
+        if let crate::tagged::value::ValueKind::Symbol(id) = value.gc_kind() {
             return !crate::emacs_core::intern::is_canonical_id(id);
         }
         if self.owner_is_mapped(value) {
@@ -815,13 +815,13 @@ impl TaggedHeap {
     /// both need. Mirrors `trace_veclike`/cons/string child enumeration.
     pub(super) fn push_value_children_to_gray(&mut self, owner: TaggedValue, origin: &'static str) {
         if owner.is_cons() {
-            let ptr = owner.xcons_ptr();
+            let ptr = owner.gc_cons_ptr();
             let car = unsafe { (*ptr).load_car() };
             let cdr = unsafe { (*ptr).load_cdr() };
             self.mark_or_push_child(car, origin);
             self.mark_or_push_child(cdr, origin);
         } else if owner.is_veclike() {
-            if let Some(ptr) = owner.as_veclike_ptr() {
+            if let Some(ptr) = owner.gc_veclike_ptr() {
                 // A dumped/tenured WEAK hash table is permanent-black, so the main
                 // mark never re-runs `trace_veclike` on it and it would otherwise
                 // never re-register for the weak sweep. Register it here (the
@@ -855,7 +855,7 @@ impl TaggedHeap {
                 }
             }
         } else if owner.is_string()
-            && let Some(ptr) = owner.as_string_ptr()
+            && let Some(ptr) = owner.gc_string_ptr()
         {
             let intervals = unsafe { (*ptr).data.intervals() };
             if !intervals.is_empty() {
@@ -884,7 +884,7 @@ impl TaggedHeap {
     /// side bits, which its pre-mark (`premark_mapped_image`) has set for
     /// the whole image: the same answer again.
     pub(super) fn is_value_marked(&self, value: TaggedValue) -> bool {
-        if let crate::tagged::value::ValueKind::Symbol(id) = value.kind() {
+        if let crate::tagged::value::ValueKind::Symbol(id) = value.gc_kind() {
             // Skipping old owners removes their historical symbol-mark
             // repair. Symbol ids have no generation byte, so retain them
             // conservatively on minors; current full cycles still mark them.
@@ -894,7 +894,7 @@ impl TaggedHeap {
         }
         let image_live = self.partition_dump && !self.dump_blackened && self.first_cycle_concurrent;
         if value.is_cons() {
-            let ptr = value.xcons_ptr();
+            let ptr = value.gc_cons_ptr();
             if ConsBlock::ptr_is_cell_aligned(ptr) {
                 let base = ConsBlock::block_base_for_ptr(ptr);
                 let found = match self.chunk_map.as_ref() {
@@ -989,7 +989,7 @@ impl TaggedHeap {
             } else if child.is_float() {
                 "float".to_string()
             } else if child.is_veclike() {
-                format!("{:?}", child.veclike_type())
+                format!("{:?}", child.gc_veclike_type())
             } else {
                 "other".to_string()
             };
@@ -1558,7 +1558,7 @@ impl TaggedHeap {
     }
 
     pub(crate) fn seed_root_with_origin(&mut self, root: TaggedValue, origin: &str) {
-        if let crate::tagged::value::ValueKind::Symbol(id) = root.kind() {
+        if let crate::tagged::value::ValueKind::Symbol(id) = root.gc_kind() {
             self.mark_symbol(id);
             return;
         }

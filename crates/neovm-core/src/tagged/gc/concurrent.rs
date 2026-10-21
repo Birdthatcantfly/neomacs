@@ -922,7 +922,7 @@ impl TaggedHeap {
         let (mutator, handoff) = self.satb_parts();
         for &value in values {
             if value.is_heap_object()
-                || (major && matches!(value.kind(), crate::tagged::value::ValueKind::Symbol(_)))
+                || (major && matches!(value.gc_kind(), crate::tagged::value::ValueKind::Symbol(_)))
             {
                 mutator.satb.push(MarkWord::of(value), handoff);
             }
@@ -937,7 +937,7 @@ impl TaggedHeap {
     /// heap children directly to the owner's log, never through gray scratch.
     #[inline(always)]
     fn push_satb_child(&mut self, value: TaggedValue) {
-        match value.kind() {
+        match value.gc_kind() {
             crate::tagged::value::ValueKind::Symbol(id) => self.mark_symbol(id),
             _ if value.is_heap_object() => {
                 self.debug_assert_heap_tag_matches_header(value, "satb-concurrent");
@@ -964,13 +964,13 @@ impl TaggedHeap {
             }
         }
         if owner.is_cons() {
-            let ptr = owner.xcons_ptr();
+            let ptr = owner.gc_cons_ptr();
             // SAFETY: the pre-store barrier retains this owner's allocation;
             // the marker reads the same slots atomically and no sweep can run.
             let (car, cdr) = unsafe { ((*ptr).load_car(), (*ptr).load_cdr()) };
             self.push_satb_child(car);
             self.push_satb_child(cdr);
-        } else if let Some(ptr) = owner.as_veclike_ptr() {
+        } else if let Some(ptr) = owner.gc_veclike_ptr() {
             // Match ordinary gray enumeration: register weak tables, strongly
             // log only their custom closures, and let weak fixpoint handle KV.
             if let Some(children) = self.register_weak_hash_table_for_sweep(ptr) {
@@ -986,7 +986,7 @@ impl TaggedHeap {
                     }),
                 );
             }
-        } else if let Some(ptr) = owner.as_string_ptr() {
+        } else if let Some(ptr) = owner.gc_string_ptr() {
             // SAFETY: this is the owner's pre-store interval table, retained
             // until this barrier returns; enumeration performs no Lisp GC.
             let intervals = unsafe { (*ptr).data.intervals() };
@@ -998,7 +998,7 @@ impl TaggedHeap {
     /// existing major-symbol preimage protocol; heap values enter this owner's
     /// bounded buffer. The caller already admitted the concurrent TLS gate.
     pub(super) fn note_root_overwrite_value(&mut self, pre_image: TaggedValue) {
-        if let crate::tagged::value::ValueKind::Symbol(id) = pre_image.kind() {
+        if let crate::tagged::value::ValueKind::Symbol(id) = pre_image.gc_kind() {
             if self.generational.major_in_progress && self.concurrent_mark_running {
                 self.current_mutator_gc_mut()
                     .major_symbol_preimages
@@ -1038,7 +1038,7 @@ impl TaggedHeap {
         if !self.concurrent_cloned_vectors.insert(owner.bits()) {
             return;
         }
-        let Some(header) = owner.as_veclike_ptr() else {
+        let Some(header) = owner.gc_veclike_ptr() else {
             return;
         };
         let obj = unsafe { &mut *(header as *mut VectorObj) };
@@ -1087,7 +1087,7 @@ pub(crate) fn concurrent_hash_snapshot(
         let snapshot = heap.concurrent_hash_snapshot()?;
         // Most P5 writes initialize post-start tables. A map miss needs no
         // shared lifetime guard, avoiding two Arc RMWs on that common path.
-        snapshot.get(owner.as_veclike_ptr()? as usize)?;
+        snapshot.get(owner.gc_veclike_ptr()? as usize)?;
         Some(snapshot.clone())
     })
 }
@@ -1112,7 +1112,7 @@ pub(crate) fn prepare_concurrent_hash_write(
         // The entry guard covers this payload access, barrier enumeration and
         // the caller's subsequent &mut. It either preserves unread storage,
         // defers admission, or waits until the admitted reader has completed.
-        let object = owner.as_veclike_ptr().unwrap() as *mut HashTableObj;
+        let object = owner.gc_veclike_ptr().unwrap() as *mut HashTableObj;
         guard.clone_on_first_write(
             unsafe { &mut (*object).table.data },
             &mut state.retired_hash_buffers,

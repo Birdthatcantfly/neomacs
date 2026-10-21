@@ -421,11 +421,11 @@ impl TaggedHeap {
     fn census_heap_child_count(&self, owner: TaggedValue) -> usize {
         let mut count = 0usize;
         if owner.is_cons() {
-            let ptr = owner.xcons_ptr();
+            let ptr = owner.gc_cons_ptr();
             // SAFETY: a live cons (see the caller).
             let (car, cdr) = unsafe { ((*ptr).load_car(), (*ptr).load_cdr()) };
             count += usize::from(car.is_heap_object()) + usize::from(cdr.is_heap_object());
-        } else if let Some(ptr) = owner.as_veclike_ptr() {
+        } else if let Some(ptr) = owner.gc_veclike_ptr() {
             Self::for_each_veclike_child(
                 self.collector_tables(),
                 ptr as *mut VecLikeHeader,
@@ -433,7 +433,7 @@ impl TaggedHeap {
                     count += usize::from(child.is_heap_object());
                 }),
             );
-        } else if let Some(ptr) = owner.as_string_ptr() {
+        } else if let Some(ptr) = owner.gc_string_ptr() {
             // SAFETY: a live string (see the caller).
             let intervals = unsafe { (*ptr).data.intervals() };
             if !intervals.is_empty() {

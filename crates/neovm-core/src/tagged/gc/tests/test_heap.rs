@@ -116,3 +116,84 @@ fn heapborrow_r7_stress_fixtures_do_not_reintroduce_borrow_installers() {
         );
     }
 }
+
+/// Collection can run while Lisp code is tracking dependencies. Traversing
+/// its roots must preserve their values without registering Lisp reads.
+#[cfg(feature = "jit")]
+#[test]
+fn heapborrow_r8_collector_scans_do_not_observe_lisp_reads() {
+    let mut heap = TestHeap::new();
+    heap.set_generational_enabled(false);
+    heap.install();
+    use crate::tagged::collection_reads::{CompiledJournalMode, force_compiled_journal_for_test};
+    struct RestoreMode;
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            force_compiled_journal_for_test(None);
+        }
+    }
+    let _restore = RestoreMode;
+    force_compiled_journal_for_test(Some(CompiledJournalMode::Observed));
+    let child = heap.alloc_cons(TaggedValue::fixnum(67), TaggedValue::NIL);
+    let root = heap.alloc_cons(child, TaggedValue::NIL);
+    let ((), certificate) = crate::tagged::collection_reads::capture(|| {
+        heap.begin_stw_collection();
+        heap.seed_root(root);
+        // Exercise the mutator's termination drain, not collect_exact's
+        // worker-thread mark (which has no active Lisp-read capture).
+        heap.incremental_drain_all();
+    });
+    assert!(certificate.is_some(), "collection alone is not a Lisp read");
+    assert!(
+        !crate::tagged::collection_reads::is_observed(root.bits()),
+        "the collector must not mark a root as Lisp-observed"
+    );
+    assert!(
+        !crate::tagged::collection_reads::is_observed(child.bits()),
+        "the collector must not mark a child as Lisp-observed"
+    );
+    heap.complete_collection();
+    assert_eq!(root.cons_car().cons_car(), TaggedValue::fixnum(67));
+}
+
+/// Cover vectorlike classification and string projections as well as conses.
+#[cfg(feature = "jit")]
+#[test]
+fn heapborrow_r8_vector_and_string_scans_do_not_observe_lisp_reads() {
+    use crate::tagged::collection_reads::{CompiledJournalMode, force_compiled_journal_for_test};
+    struct RestoreMode;
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            force_compiled_journal_for_test(None);
+        }
+    }
+    let mut heap = TestHeap::new();
+    heap.set_generational_enabled(false);
+    heap.install();
+    let _restore = RestoreMode;
+    force_compiled_journal_for_test(Some(CompiledJournalMode::Observed));
+    let text = heap.alloc_string(crate::heap_types::LispString::from_utf8("gc retained"));
+    let root = heap.alloc_vector(vec![text]);
+    let ((), certificate) = crate::tagged::collection_reads::capture(|| {
+        heap.begin_stw_collection();
+        heap.seed_root(root);
+        heap.incremental_drain_all();
+    });
+    assert!(certificate.is_some());
+    for value in [root, text] {
+        assert!(!crate::tagged::collection_reads::is_observed(value.bits()));
+    }
+    heap.complete_collection();
+    assert_eq!(
+        root.as_vector_data().unwrap()[0].as_str_owned().unwrap(),
+        "gc retained"
+    );
+
+    // Real Lisp projections must still create dependencies after GC.
+    let (_, reads) = crate::tagged::collection_reads::capture(|| {
+        root.as_vector_data().unwrap()[0].as_str_owned().unwrap()
+    });
+    assert!(reads.is_some());
+    assert!(crate::tagged::collection_reads::is_observed(root.bits()));
+    assert!(crate::tagged::collection_reads::is_observed(text.bits()));
+}

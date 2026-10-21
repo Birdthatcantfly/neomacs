@@ -713,7 +713,7 @@ mod keeper_table_scope_tests {
                                 Err(RendezvousError::Busy)
                             ));
                             let table = TaggedValue::from_bits(table_bits);
-                            let ptr = table.as_veclike_ptr().unwrap().cast_mut().cast();
+                            let ptr = table.gc_veclike_ptr().unwrap().cast_mut().cast();
                             let lease = KeeperTableMut::enter(&stopped, table).unwrap();
                             // Simulate a leaked reader while all real owners are
                             // stopped. The installed adapter must mint a keeper

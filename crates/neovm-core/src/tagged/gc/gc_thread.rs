@@ -225,7 +225,7 @@ impl WorkerSymbolMarks for FxHashSet<SymId> {
     const ENABLED: bool = false;
     #[inline]
     fn note(&mut self, value: TaggedValue, symbols: &mut Vec<SymId>) -> bool {
-        let crate::tagged::value::ValueKind::Symbol(id) = value.kind() else {
+        let crate::tagged::value::ValueKind::Symbol(id) = value.gc_kind() else {
             return false;
         };
         if self.insert(id) {
@@ -554,7 +554,7 @@ pub(super) fn concurrent_try_mark_string(
     str_claimed: &AtomicUsize,
 ) -> bool {
     debug_assert!(val.is_string());
-    let Some(ptr) = val.as_string_ptr() else {
+    let Some(ptr) = val.gc_string_ptr() else {
         return false; // malformed value — let the termination's mark_value decide
     };
     if !pages.contains(ChunkClass::String, ptr as usize) {
@@ -590,7 +590,7 @@ fn concurrent_try_mark_string_major<S: WorkerSymbolMarks>(
     logs: &mut WorkerMarkLogs<S>,
 ) -> bool {
     debug_assert!(val.is_string());
-    let Some(ptr) = val.as_string_ptr() else {
+    let Some(ptr) = val.gc_string_ptr() else {
         return false;
     };
     if !job.pages.contains(ChunkClass::String, ptr as usize) {
@@ -771,7 +771,7 @@ fn concurrent_try_mark_owned_with_symbols<
         return true;
     }
     if val.is_veclike() {
-        let Some(ptr) = val.as_veclike_ptr() else {
+        let Some(ptr) = val.gc_veclike_ptr() else {
             return false; // malformed value — let the termination decide
         };
         let addr = ptr as usize;
@@ -1135,7 +1135,7 @@ fn concurrent_trace_mapped_veclike<const MAJOR: bool, const SYMBOLS: bool, E: Cl
                  seen_symbols: &mut FxHashSet<usize>,
                  logs: &mut WorkerMarkLogs<E::Symbols>| {
         if child.is_cons() {
-            let addr = child.xcons_ptr() as usize;
+            let addr = child.gc_cons_ptr() as usize;
             if addr < job.claims.dump_lo || addr >= job.claims.dump_hi {
                 job.gray.push(child);
             }
@@ -1344,7 +1344,7 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
                         // Most children of image conses are image conses;
                         // dropping them here (the drain arm would skip them
                         // anyway) keeps ~2x the image size out of the queue.
-                        let addr = child.xcons_ptr() as usize;
+                        let addr = child.gc_cons_ptr() as usize;
                         if addr < job.claims.dump_lo || addr >= job.claims.dump_hi {
                             job.gray.push(child);
                         }
@@ -1405,7 +1405,7 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
                 continue;
             }
             if val.is_cons() {
-                let ptr = val.xcons_ptr();
+                let ptr = val.gc_cons_ptr();
                 let addr = ptr as usize;
                 if addr >= job.claims.dump_lo && addr < job.claims.dump_hi {
                     continue; // dump cons: permanent black, children via remembered set
@@ -1436,7 +1436,7 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
                             job.gray.push(cdr);
                             break;
                         }
-                        let cptr = cdr.xcons_ptr();
+                        let cptr = cdr.gc_cons_ptr();
                         let caddr = cptr as usize;
                         if caddr >= job.claims.dump_lo && caddr < job.claims.dump_hi {
                             break; // dump cons: permanent black
@@ -2100,7 +2100,10 @@ pub(crate) fn feed_concurrent_roots(values: &[TaggedValue]) {
 #[inline]
 pub(crate) fn note_root_overwrite(pre_image: TaggedValue) {
     if !pre_image.is_heap_object()
-        && !matches!(pre_image.kind(), crate::tagged::value::ValueKind::Symbol(_))
+        && !matches!(
+            pre_image.gc_kind(),
+            crate::tagged::value::ValueKind::Symbol(_)
+        )
     {
         return;
     }
@@ -2116,7 +2119,10 @@ pub(crate) fn note_root_overwrite(pre_image: TaggedValue) {
 #[inline]
 pub(crate) fn note_root_overwrite_while_marking(pre_image: TaggedValue) {
     if !pre_image.is_heap_object()
-        && !matches!(pre_image.kind(), crate::tagged::value::ValueKind::Symbol(_))
+        && !matches!(
+            pre_image.gc_kind(),
+            crate::tagged::value::ValueKind::Symbol(_)
+        )
     {
         return;
     }
@@ -2166,7 +2172,7 @@ pub(crate) fn note_string_interval_preimage(
         let (mutator, handoff) = heap.satb_parts();
         table.for_each_root(|value| {
             if value.is_heap_object()
-                || (major && matches!(value.kind(), crate::tagged::value::ValueKind::Symbol(_)))
+                || (major && matches!(value.gc_kind(), crate::tagged::value::ValueKind::Symbol(_)))
             {
                 mutator.satb.push(MarkWord::of(value), handoff);
             }

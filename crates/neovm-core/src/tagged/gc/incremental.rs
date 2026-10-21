@@ -596,7 +596,7 @@ impl TaggedHeap {
     // about twenty instructions per cell even with generations disabled.
     #[inline(always)]
     pub(super) fn mark_or_push_child(&mut self, val: TaggedValue, origin: &str) {
-        match val.kind() {
+        match val.gc_kind() {
             crate::tagged::value::ValueKind::Symbol(id) => self.mark_symbol(id),
             _ if val.is_heap_object() => self.push_gray(val, origin),
             _ => {}
@@ -611,7 +611,7 @@ impl TaggedHeap {
 
         let (ptr, expected) = if val.is_string() {
             (
-                val.as_string_ptr().unwrap() as *const u8,
+                val.gc_string_ptr().unwrap() as *const u8,
                 HeapObjectKind::String,
             )
         } else if val.is_float() {
@@ -621,7 +621,7 @@ impl TaggedHeap {
             )
         } else if val.is_veclike() {
             (
-                val.as_veclike_ptr().unwrap() as *const u8,
+                val.gc_veclike_ptr().unwrap() as *const u8,
                 HeapObjectKind::VecLike,
             )
         } else {
@@ -651,27 +651,27 @@ impl TaggedHeap {
 
     /// Mark a single tagged value and push its children onto the gray queue.
     pub(super) fn mark_value<const MINOR: bool>(&mut self, val: TaggedValue) {
-        if let crate::tagged::value::ValueKind::Symbol(id) = val.kind() {
+        if let crate::tagged::value::ValueKind::Symbol(id) = val.gc_kind() {
             self.mark_symbol(id);
         } else if val.is_cons() {
             // GNU `mark_object`'s cdr-chasing loop: a list is marked along
             // its spine inline, without a gray-queue push + pop + re-dispatch
             // per cell — for a megacons list that round trip is a second
             // multi-megabyte buffer streamed through the cache.
-            let mut ptr = val.xcons_ptr();
+            let mut ptr = val.gc_cons_ptr();
             while self.mark_cons::<MINOR>(ptr) {
                 let car = unsafe { (*ptr).load_car() };
                 let cdr = unsafe { (*ptr).load_cdr() };
                 self.mark_or_push_child(car, "cons-car");
                 if cdr.is_cons() {
-                    ptr = cdr.xcons_ptr();
+                    ptr = cdr.gc_cons_ptr();
                     continue;
                 }
                 self.mark_or_push_child(cdr, "cons-cdr");
                 break;
             }
         } else if val.is_string() {
-            let ptr = val.as_string_ptr().unwrap() as *mut StringObj;
+            let ptr = val.gc_string_ptr().unwrap() as *mut StringObj;
             // Dump-span test first: a mapped string used to walk the string
             // arena and miss the residual addr-set before classification.
             let addr = ptr as usize;
@@ -734,7 +734,7 @@ impl TaggedHeap {
                 self.note_minor_survivor(ptr.cast());
             };
         } else if val.is_veclike() {
-            let ptr = val.as_veclike_ptr().unwrap() as *mut VecLikeHeader;
+            let ptr = val.gc_veclike_ptr().unwrap() as *mut VecLikeHeader;
             // Dump-span test first: mapped veclikes paid all six arena range
             // checks plus an FxHashSet miss per mark (~10.7M Ir in the
             // first-cycle window of the type sim) before being classified.

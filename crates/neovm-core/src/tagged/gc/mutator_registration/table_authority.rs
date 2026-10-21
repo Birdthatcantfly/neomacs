@@ -127,7 +127,7 @@ pub trait SealedTableAccess: seal::Sealed {
 /// the payload is created: leases reach storage through the pointer under
 /// the word protocol only.
 fn table_object(table: TaggedValue) -> Result<*mut HashTableObj, RegistrationError> {
-    if table.veclike_type() != Some(crate::tagged::header::VecLikeType::HashTable) {
+    if table.gc_veclike_type() != Some(crate::tagged::header::VecLikeType::HashTable) {
         return Err(RegistrationError::Publication);
     }
     let ptr = (table.bits() & !TAG_MASK) as *mut HashTableObj;
