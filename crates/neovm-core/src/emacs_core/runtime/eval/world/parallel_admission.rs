@@ -8,7 +8,7 @@ use crate::emacs_core::eval::green::GreenStartError;
 use crate::emacs_core::value::{HashTableTest, HashTableWeakness, LispHashTable};
 use crate::tagged::gc::{
     ParallelHeapEra, QuiescentCollector, RegistrationError, RendezvousError,
-    clear_tagged_heap_if_installed,
+    clear_tagged_heap_root_if_installed,
 };
 use crate::tagged::value::TaggedValue;
 
@@ -84,7 +84,7 @@ impl Context {
                 return Err(map_rendezvous(error));
             }
         };
-        let heap: *mut crate::tagged::gc::TaggedHeap = &mut *self.tagged_heap;
+        let heap = self.tagged_heap.heap_root().as_ptr();
         // SAFETY: the same suspended serial Context, keeper exclusion and
         // capture-before-exclusive-loan proof as ordinary owned admission.
         let drained = unsafe {
@@ -101,7 +101,7 @@ impl Context {
                 return Err(OwnedParallelError::Start);
             }
         };
-        clear_tagged_heap_if_installed(&self.tagged_heap);
+        clear_tagged_heap_root_if_installed(self.tagged_heap.heap_root());
         let era = match ParallelHeapEra::admit_rooted_with_weak_tables_for_test(
             collector, keeper, frozen, tables,
         ) {
@@ -147,7 +147,7 @@ impl Context {
                 return Err(map_rendezvous(error));
             }
         };
-        let heap: *mut crate::tagged::gc::TaggedHeap = &mut *self.tagged_heap;
+        let heap = self.tagged_heap.heap_root().as_ptr();
         // SAFETY: this thread is the sole serial owner. The keeper excludes
         // concurrent mark and private roots were captured above. The legacy
         // TLS facade stays installed for this drain so its reseed still sees
@@ -167,7 +167,7 @@ impl Context {
                 return Err(OwnedParallelError::Start);
             }
         };
-        clear_tagged_heap_if_installed(&self.tagged_heap);
+        clear_tagged_heap_root_if_installed(self.tagged_heap.heap_root());
         let era = match ParallelHeapEra::admit_rooted(collector, keeper, frozen) {
             Ok(era) => era,
             Err(failure) => {

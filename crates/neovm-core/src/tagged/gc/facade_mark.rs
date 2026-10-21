@@ -579,6 +579,21 @@ impl TaggedHeap {
 mod tests {
     use super::*;
 
+    #[test]
+    fn heapborrow_r5_clear_tls_preserves_collector_loan() {
+        let heap = aliasable::AliasableBox::new(TaggedHeap::new());
+        let root = heap.root();
+        set_tagged_heap_root(root);
+        // SAFETY: sole stopped owner, no live mark or external roots. Clearing
+        // TLS must compare only the root address while this loan is retained.
+        let identity = heap.heap_identity();
+        let collector = unsafe { (*root.as_ptr()).drain_to_quiescent(|_| {}) }.unwrap();
+        clear_tagged_heap_root_if_installed(root);
+        assert!(!tagged_heap_is_installed());
+        assert_eq!(collector.heap_identity(), identity);
+        drop(collector);
+    }
+
     fn quiescent(heap: &mut TaggedHeap) -> QuiescentCollector<'_> {
         // SAFETY: each fixture owns its heap directly without obarray/TLS
         // aliases or callbacks; this helper is used only when it has no

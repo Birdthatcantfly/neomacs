@@ -1604,7 +1604,15 @@ fn sync_heap_tls_mirrors(heap: &mut TaggedHeap) {
 /// drop hook: an owner whose heap was already displaced by a later
 /// `set_tagged_heap` leaves the newer installation alone.
 pub fn clear_tagged_heap_if_installed(heap: &TaggedHeap) {
-    let owned = heap as *const TaggedHeap as *mut TaggedHeap;
+    clear_tagged_heap_root_if_installed(std::ptr::NonNull::from(heap));
+}
+
+/// Uninstall by address alone, without creating a heap reference. Admission
+/// may hold an exclusive collector loan while clearing its root-derived TLS
+/// alias; even a shared reference from that root would invalidate the loan.
+/// This compares pointers and resets TLS mirrors, never dereferencing `root`.
+pub(crate) fn clear_tagged_heap_root_if_installed(root: std::ptr::NonNull<TaggedHeap>) {
+    let owned = root.as_ptr();
     let _ = TAGGED_HEAP.try_with(|h| {
         if h.get() == owned {
             super::super::collection_reads::reset_recent_reads_for_heap_installation();
