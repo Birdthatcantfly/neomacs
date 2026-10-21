@@ -20,6 +20,11 @@ fn p3sym_c3_nil_void_and_first_projected_assignment() {
         PlainSymbolBacking::VoidProjection,
     ] {
         fixture_case(kind, |run, handle, src, dst, id| {
+            run.sym_boundp_into(handle, dst).unwrap();
+            assert_eq!(
+                dst.word_for_test(run),
+                Value::bool_val(kind != PlainSymbolBacking::VoidProjection).bits()
+            );
             run.sym_makunbound_into(handle, dst).unwrap();
             assert_eq!(dst.word_for_test(run), Value::from_sym_id(id).bits());
             let before = dst.word_for_test(run);
@@ -34,9 +39,16 @@ fn p3sym_c3_nil_void_and_first_projected_assignment() {
             );
             run.sym_boundp_into(handle, dst).unwrap();
             assert_eq!(dst.word_for_test(run), Value::NIL.bits());
+            let before_issue = run.owner.local.as_ref().unwrap().hot.bytes_since_gc;
             immediate(run, src, Value::NIL);
             run.sym_set_into(handle, src, dst).unwrap();
             assert_eq!(dst.word_for_test(run), Value::NIL.bits());
+            if kind == PlainSymbolBacking::VoidProjection {
+                assert!(
+                    run.owner.local.as_ref().unwrap().hot.bytes_since_gc > before_issue,
+                    "first VOID assignment charges materialized projection storage"
+                );
+            }
             run.sym_boundp_into(handle, dst).unwrap();
             assert_eq!(dst.word_for_test(run), Value::T.bits());
             run.sym_value_into(handle, dst).unwrap();

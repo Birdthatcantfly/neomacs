@@ -48,9 +48,10 @@ impl Context {
                 if kind == crate::tagged::gc::PlainSymbolBacking::VoidProjection {
                     obarray.seed_value_id(id, TaggedValue::UNBOUND);
                 }
-                obarray
-                    .project_thread_variable_for_test(id, &mut table)
-                    .unwrap();
+                // Use admission's actual plan: projecting an owned UNBOUND
+                // word would issue a private descriptor instead of shared VOID.
+                let plan = obarray.admission_plan(id).unwrap();
+                obarray.project_admitted_cell(id, plan, &mut table);
             });
         }
         let heap = world.tagged_heap.root().as_ptr();
