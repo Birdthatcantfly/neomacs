@@ -8,7 +8,7 @@ use crate::emacs_core::eval::green::GreenStartError;
 use crate::emacs_core::value::{HashTableTest, HashTableWeakness, LispHashTable};
 use crate::tagged::gc::{
     ParallelHeapEra, QuiescentCollector, RegistrationError, RendezvousError,
-    clear_tagged_heap_if_installed, set_tagged_heap,
+    clear_tagged_heap_if_installed,
 };
 use crate::tagged::value::TaggedValue;
 
@@ -210,7 +210,7 @@ impl Context {
     }
 
     fn recover_serial_context(&mut self, retired_dead_windows: bool) {
-        set_tagged_heap(&mut self.tagged_heap);
+        self.tagged_heap.install_tagged_heap();
         if retired_dead_windows {
             self.install_empty_dead_windows_table();
         }
@@ -267,5 +267,25 @@ fn map_start(error: GreenStartError) -> OwnedParallelError {
         GreenStartError::Collector(_) | GreenStartError::Admission(_) => OwnedParallelError::Start,
         GreenStartError::MarkExclusion(_) => OwnedParallelError::Busy,
         _ => OwnedParallelError::Start,
+    }
+}
+
+#[cfg(test)]
+mod heapborrow_tests {
+    use super::*;
+
+    #[test]
+    fn heapborrow_r4_serial_recovery_preserves_tls_root() {
+        let mut context = Context::new_minimal_vm_harness();
+        // Exercise the production installer and the immediate view-derived
+        // allocation that used to invalidate its borrow-derived TLS pointer.
+        context.recover_serial_context(true);
+        let value = TaggedValue::cons(TaggedValue::fixnum(41), TaggedValue::NIL);
+        assert_eq!(value.cons_car(), TaggedValue::fixnum(41));
+        assert!(
+            context
+                .variable_value_by_name("window-dead-windows-table")
+                .is_some()
+        );
     }
 }

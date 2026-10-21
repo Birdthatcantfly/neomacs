@@ -126,6 +126,7 @@ fn explicit_module_path(module: &ItemMod) -> Option<PathBuf> {
 
 /// This is a test-local, single-threaded source walker, with no runtime state.
 struct ProductionWalker {
+    symbol: &'static str,
     source: PathBuf,
     module_directory: PathBuf,
     // #[path] on an out-of-line module is relative to its containing source,
@@ -168,14 +169,14 @@ impl ProductionWalker {
 
 // Macro bodies are token streams, not ordinary syn paths. Scan identifiers
 // recursively, ignoring literal tokens (including raw strings) and comments.
-fn macro_transmutes(mut cursor: syn::buffer::Cursor<'_>) -> usize {
+fn macro_references(mut cursor: syn::buffer::Cursor<'_>, symbol: &str) -> usize {
     let mut count = 0;
     while !cursor.eof() {
         if let Some((ident, next)) = cursor.ident() {
-            count += usize::from(ident.unraw() == "transmute");
+            count += usize::from(ident.unraw() == symbol);
             cursor = next;
         } else if let Some((group, _, _, next)) = cursor.any_group() {
-            count += macro_transmutes(group);
+            count += macro_references(group, symbol);
             cursor = next;
         } else {
             cursor = cursor.token_tree().expect("nonempty token cursor").1;
@@ -247,7 +248,7 @@ impl<'ast> Visit<'ast> for ProductionWalker {
         if path
             .segments
             .last()
-            .is_some_and(|segment| segment.ident.unraw() == "transmute")
+            .is_some_and(|segment| segment.ident.unraw() == self.symbol)
         {
             self.record(1);
         }
@@ -265,7 +266,7 @@ impl<'ast> Visit<'ast> for ProductionWalker {
             return;
         }
         let tokens = syn::buffer::TokenBuffer::new2(invocation.tokens.clone());
-        self.record(macro_transmutes(tokens.begin()));
+        self.record(macro_references(tokens.begin(), self.symbol));
         self.visit_path(&invocation.path);
     }
 
@@ -274,10 +275,20 @@ impl<'ast> Visit<'ast> for ProductionWalker {
         // Keep unsafe conversions explicit and qualified instead.
         match tree {
             syn::UseTree::Name(name) => {
-                assert_ne!(name.ident.unraw(), "transmute", "qualify transmute paths")
+                assert_ne!(
+                    name.ident.unraw(),
+                    self.symbol,
+                    "qualify {} paths",
+                    self.symbol
+                )
             }
             syn::UseTree::Rename(rename) => {
-                assert_ne!(rename.ident.unraw(), "transmute", "do not alias transmute")
+                assert_ne!(
+                    rename.ident.unraw(),
+                    self.symbol,
+                    "do not alias {}",
+                    self.symbol
+                )
             }
             _ => visit::visit_use_tree(self, tree),
         }
@@ -315,7 +326,12 @@ fn include_path(expression: &Expr) -> Option<String> {
 }
 
 fn production_sites(root: &Path) -> BTreeMap<PathBuf, usize> {
+    production_sites_for(root, "transmute")
+}
+
+fn production_sites_for(root: &Path, symbol: &'static str) -> BTreeMap<PathBuf, usize> {
     let mut walker = ProductionWalker {
+        symbol,
         source: PathBuf::new(),
         module_directory: PathBuf::new(),
         path_directory: PathBuf::new(),
@@ -422,4 +438,14 @@ fn transmute_guard_rejects_aliases_that_hide_conversions() {
     )
     .expect("write source fixture");
     production_sites(directory.path());
+}
+
+#[test]
+fn production_heap_installers_use_the_allocation_root() {
+    let root = neomacs_infra::crate_root!().join("src");
+    let sites = production_sites_for(&root, "set_tagged_heap");
+    assert!(
+        sites.is_empty(),
+        "production must install TLS from the allocation root: {sites:?}"
+    );
 }
