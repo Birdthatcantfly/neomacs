@@ -2,6 +2,8 @@
 mod globals;
 pub use globals::GlobalError;
 pub(crate) use globals::{SymbolReadToken, SymbolWriteToken};
+#[cfg(all(test, not(feature = "gc-memory-telemetry")))]
+mod closed_graph;
 mod word;
 use super::*;
 use crate::emacs_core::intern::SymId;

@@ -3,8 +3,8 @@ use super::{GlobalError, OwnerRootSlot, RunAccess, SymbolHandle};
 
 /// Closed executor surface. `symbol` indexes serially admitted real World
 /// handles, not arbitrary symbol values; all other indices name owner roots.
-/// Integrate with restricted_lisp::Op/Flow::Lease, without opening
-/// an executor route to legacy Obarray/Context accessors.
+/// restricted_lisp::Op/Flow::Lease uses these without opening an executor
+/// route to legacy Obarray/Context accessors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum GlobalOp {
     Value { symbol: u16, dst: u16 },

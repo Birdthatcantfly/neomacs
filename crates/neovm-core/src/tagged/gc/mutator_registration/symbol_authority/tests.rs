@@ -236,7 +236,7 @@ fn p3sym_source_receiver_guard() {
     ] {
         assert!(
             !executor.contains(forbidden),
-            "C2 must add no executor operation: {forbidden}"
+            "executor facade must not reach raw symbol authority: {forbidden}"
         );
     }
     let api = include_str!("../symbol_authority.rs");

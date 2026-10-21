@@ -8,11 +8,14 @@
 //! any owner is activated.
 #![cfg(not(feature = "gc-memory-telemetry"))]
 
+use super::symbol_globals::GlobalOp;
 use super::{
     AllStopped, HeapIdentity, Mutator, MutatorPermit, OwnerRootSlot, ParallelHeapEra,
     RegistrationError, Registry, RendezvousError, RunAccess, RunSlice, SealedTableAccess,
     SliceRoot, TableMut, TableRef,
 };
+
+mod globals;
 use crate::emacs_core::builtins::maybe_resize_hash_table_for_insert;
 use crate::emacs_core::eval::Context;
 use crate::emacs_core::value::{HashProbe, HashTableEntry, HashTableTest};
@@ -31,6 +34,8 @@ const CHANNEL_WAIT: Duration = Duration::from_secs(90);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Op {
+    /// C3: an index into a session's admitted, immutable symbol-handle table.
+    Global(GlobalOp),
     ConstNil {
         dst: u16,
     },
@@ -95,8 +100,8 @@ enum Op {
     },
     /// B3 sealed hash-table ops. The table operand is an owner slot planted
     /// with the table word at admission time; results go back into owner
-    /// slots. These are the only ops that mint a lease, so they execute
-    /// between slice regions ([`Flow::Lease`]).
+    /// slots. Like the C3 global ops, their leases execute between slice
+    /// regions ([`Flow::Lease`]).
     HtGet {
         table: u16,
         key: u16,
@@ -138,6 +143,7 @@ enum Op {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Insn {
     Allowed(Op),
+    Global(GlobalOp),
     SymbolValue,
     Obarray,
     Buffer,
@@ -187,6 +193,7 @@ enum ExecError {
     /// A user-test lookup could not settle within [`HT_RETRY_ROUNDS`]
     /// revalidation rounds: the epoch moved under every scan.
     EpochRetry,
+    VoidVariable,
 }
 
 /// Why exec handed control back to the driver. A safepoint pauses for the
@@ -390,6 +397,7 @@ fn lower(insns: &[Insn]) -> Result<Vec<Op>, Reject> {
     for insn in insns {
         ops.push(match *insn {
             Insn::Allowed(op) => op,
+            Insn::Global(op) => Op::Global(op),
             Insn::SymbolValue => return Err(Reject::Excluded("symbol")),
             Insn::Obarray => return Err(Reject::Excluded("obarray")),
             Insn::Buffer => return Err(Reject::Excluded("buffer")),
@@ -446,6 +454,20 @@ fn prevalidate_with(
     step_cap: u32,
     initial: &[(u16, Abs)],
 ) -> Result<(), Reject> {
+    prevalidate_inner(ops, nslots, bound, step_cap, initial, None)
+}
+
+fn prevalidate_inner(
+    ops: &[Op],
+    nslots: usize,
+    bound: u32,
+    step_cap: u32,
+    initial: &[(u16, Abs)],
+    globals: Option<usize>,
+) -> Result<(), Reject> {
+    // Scan the entire tape, including unreachable code. A global session
+    // checks all participating tapes before any participant is registered.
+    globals::check_tape(ops, nslots, globals)?;
     let mut slots = vec![Abs::Nil; nslots];
     for &(index, kind) in initial {
         slots[slot_index(index, nslots)?] = kind;
@@ -460,6 +482,10 @@ fn prevalidate_with(
         }
         let from = u16::try_from(pc).map_err(|_| Reject::Slot)?;
         match ops[pc] {
+            Op::Global(op) => {
+                globals::abstract_step(op, &mut slots)?;
+                pc += 1;
+            }
             Op::ConstNil { dst } => {
                 slots[slot_index(dst, nslots)?] = Abs::Nil;
                 pc += 1;
@@ -531,7 +557,8 @@ fn prevalidate_with(
                 pc += 1;
             }
             Op::Car { dst, cell } | Op::Cdr { dst, cell } => {
-                if slots[slot_index(cell, nslots)?] != Abs::Cons {
+                let kind = slots[slot_index(cell, nslots)?];
+                if kind != Abs::Cons && !(globals.is_some() && kind == Abs::Top) {
                     return Err(Reject::RejectedType);
                 }
                 slots[slot_index(dst, nslots)?] = Abs::Top;
@@ -1096,7 +1123,8 @@ fn exec<'brand>(
             | Op::HtClear { .. }
             | Op::HtMake { .. }
             | Op::HtCopy { .. }
-            | Op::HtCount { .. } => {
+            | Op::HtCount { .. }
+            | Op::Global(_) => {
                 // Leases mint from `&mut RunAccess`, and the open slice
                 // region is borrowing it: leave pc on the op and let the
                 // driver perform it between regions (design §6).
@@ -1164,7 +1192,13 @@ fn field_load<'brand>(
     let cell_i = home_index(cell, homes.len())?;
     let dst_i = home_index(dst, homes.len())?;
     let cell_home = homes[cell_i].clone();
-    if !TaggedValue::from_bits(home_bits(slice, &cell_home)).is_cons() {
+    let value = TaggedValue::from_bits(home_bits(slice, &cell_home));
+    if value.is_nil() {
+        // Global reads may return nil. GNU car/cdr of nil both return nil.
+        slice.store_immediate(&mut homes[dst_i], TaggedValue::NIL.bits())?;
+        return Ok(());
+    }
+    if !value.is_cons() {
         return Err(ExecError::Type);
     }
     if car {
