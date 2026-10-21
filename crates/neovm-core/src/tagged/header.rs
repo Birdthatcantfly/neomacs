@@ -2414,6 +2414,15 @@ pub struct SqliteObj {
 ///
 /// The finalizer function pointer signature follows GNU Emacs:
 /// `void (*fin)(void *ptr)`.
+///
+/// # Safety
+///
+/// A registered callback must accept its paired live native payload and obey
+/// GNU's module finalizer contract: it cannot interact with Emacs, including
+/// through a saved `emacs_env`, Lisp allocation, heap TLS, or evaluator reentry.
+/// It must return normally. This applies to both user-pointer and function
+/// finalizers. See `docs/lispref/internals.texi`, "Module Function Finalizers",
+/// and the module API's prohibition on interaction during garbage collection.
 pub type EmacsFinalizer = Option<unsafe extern "C" fn(*mut std::ffi::c_void)>;
 
 #[repr(C)]

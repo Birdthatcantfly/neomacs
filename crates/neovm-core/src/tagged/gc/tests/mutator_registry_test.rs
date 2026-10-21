@@ -178,8 +178,8 @@ fn satb_inventory_counts_aligned_control_chunks_partials_and_sidecar() {
 
 #[test]
 fn satb_test_owner_switch_restores_hot_cold_state_and_tls_after_panic() {
-    let mut heap = TaggedHeap::new();
-    set_tagged_heap(&mut heap);
+    let mut heap = AliasableBox::new(TaggedHeap::new());
+    set_tagged_heap_root(heap.root());
     heap.current_mutator_gc_mut().bytes_since_gc = 11;
     heap.current_mutator_satb_mut()
         .satb_snapshotted_owners
@@ -188,8 +188,12 @@ fn satb_test_owner_switch_restores_hot_cold_state_and_tls_after_panic() {
     // owner-local Rust state writes, with no Lisp allocation or safepoint.
     let mut world = unsafe { scan_contract::SingleMutatorWorld::from_heap(&mut heap) };
     let id = world.register_mutator_gc_for_test();
+    drop(world);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _: Result<(), _> = world.with_mutator_gc_for_test(id, |heap| {
+        let _: Result<(), _> = heap.with_mutator_gc_for_test(id, |root| {
+            // SAFETY: this callback does not cross any TLS barrier while using
+            // the temporary selected-owner state loan.
+            let heap = unsafe { &mut *root.as_ptr() };
             assert_eq!(heap.current_mutator_gc().bytes_since_gc, 0);
             assert!(
                 heap.current_mutator_satb()
@@ -204,6 +208,8 @@ fn satb_test_owner_switch_restores_hot_cold_state_and_tls_after_panic() {
         });
     }));
     assert!(result.is_err());
+    // SAFETY: the switch restored the owner and its callback loan ended.
+    let mut world = unsafe { scan_contract::SingleMutatorWorld::from_heap(&mut heap) };
     assert_eq!(world.heap().current_mutator_gc().bytes_since_gc, 11);
     assert!(
         world
@@ -223,4 +229,36 @@ fn satb_test_owner_switch_restores_hot_cold_state_and_tls_after_panic() {
     assert_eq!(selected.gc.bytes_since_gc, 31);
     assert!(selected.satb.satb_snapshotted_owners.contains(&47));
     assert!(tagged_heap_is_current(world.heap()));
+}
+
+/// Heap-only reproduction of the artificial-owner helper crossing a real
+/// barrier. The fixture owner and TLS start from the same allocation root.
+#[test]
+fn heapborrow_r6_registered_owner_barrier_keeps_root_provenance() {
+    let mut heap = aliasable::AliasableBox::new(TaggedHeap::new());
+    let root = heap.root();
+    set_tagged_heap_root(root);
+    let old = heap.alloc_cons(TaggedValue::fixnum(19), TaggedValue::NIL);
+    let source = heap.alloc_cons(old, TaggedValue::NIL);
+    let id = {
+        // SAFETY: sole stopped fixture owner, before beginning the mark.
+        let mut world = unsafe { scan_contract::SingleMutatorWorld::from_heap(&mut heap) };
+        world.register_mutator_gc_for_test()
+    };
+    heap.concurrent_begin();
+    set_tagged_heap_root(root);
+    {
+        // SAFETY: all artificial owners are stopped on this fixture thread;
+        // the selected writer changes only preallocated cons cells and logs.
+        heap.with_mutator_gc_for_test(id, |_| {
+            assert!(crate::tagged::mutate::set_cons_car(
+                source,
+                TaggedValue::NIL
+            ));
+        })
+        .unwrap();
+    }
+    assert_eq!(source.cons_car(), TaggedValue::NIL);
+    // SAFETY: complete external roots of this unpublished fixture mark.
+    drop(unsafe { heap.drain_to_quiescent(|heap| heap.seed_root(source)) }.unwrap());
 }

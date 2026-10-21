@@ -197,8 +197,8 @@ fn satb_gc_orphan_string_interval_preimages_survive_10000_writes() {
 
 #[test]
 fn satb_gc_k_registered_mutators_and_midmark_retirement_preserve_10000_preimages() {
-    let mut heap = heap();
-    set_tagged_heap(&mut heap);
+    let mut heap = AliasableBox::new(heap());
+    set_tagged_heap_root(heap.root());
     let payloads = payloads(&mut heap);
     let sources: Vec<_> = payloads
         .iter()
@@ -216,6 +216,7 @@ fn satb_gc_k_registered_mutators_and_midmark_retirement_preserve_10000_preimages
             .collect::<Vec<_>>()
     };
     begin(&mut heap, &black, &payloads);
+    set_tagged_heap_root(heap.root());
     for (i, source) in sources.into_iter().enumerate() {
         if i == WRITES / 2 {
             // Other mutators are parked on this physical thread; the marker
@@ -231,7 +232,7 @@ fn satb_gc_k_registered_mutators_and_midmark_retirement_preserve_10000_preimages
         if i >= WRITES / 2 && owner == 2 {
             owner = 0;
         }
-        let write = |_: &mut TaggedHeap| {
+        let write = |_| {
             // SAFETY: source remains allocated until this joined epoch ends;
             // no allocation, collection, or registry mutation occurs here.
             let x = unsafe { (*source.xcons_ptr()).load_car() };
@@ -239,13 +240,11 @@ fn satb_gc_k_registered_mutators_and_midmark_retirement_preserve_10000_preimages
             assert!(set_cons_car(black[i], x));
         };
         if owner == 0 {
-            write(&mut heap);
+            write(heap.root());
         } else {
             // SAFETY: the owner-switch guard installs both real hot and cold
             // state, clears the TLS SATB filter, and restores them on unwind.
-            let mut world = unsafe { scan_contract::SingleMutatorWorld::from_heap(&mut heap) };
-            world
-                .with_mutator_gc_for_test(ids[owner - 1], write)
+            heap.with_mutator_gc_for_test(ids[owner - 1], write)
                 .unwrap();
         }
     }

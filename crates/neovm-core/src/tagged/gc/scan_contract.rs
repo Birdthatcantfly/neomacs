@@ -478,18 +478,3 @@ impl StoppedMutatorsProof {
         }
     }
 }
-
-#[cfg(test)]
-impl SingleMutatorWorld<'_> {
-    pub(super) fn with_mutator_gc_for_test<R>(
-        &mut self,
-        id: super::mutator_gc::TestMutatorGcId,
-        body: impl FnOnce(&mut TaggedHeap) -> R,
-    ) -> Result<R, super::mutator_gc::TestMutatorSwitchError> {
-        let proof = StoppedMutatorsProof {
-            _owner: PhantomData,
-        };
-        self.heap
-            .with_registered_mutator_gc_for_test(id, &proof, body)
-    }
-}

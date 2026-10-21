@@ -1965,7 +1965,9 @@ impl TaggedHeap {
                             if let Some(fin) = unsafe { (*up).finalizer.take() } {
                                 // SAFETY: module allocation supplied this pointer
                                 // and callback pair; explicit reclamation is its
-                                // ownership-ending invocation.
+                                // ownership-ending invocation. EmacsFinalizer's
+                                // GNU contract excludes heap/TLS/env reentry;
+                                // the collector's protected loan remains live.
                                 unsafe { fin((*up).ptr) };
                             }
                         }
@@ -1983,6 +1985,8 @@ impl TaggedHeap {
                             if let Some(fin) = unsafe { (*mf).finalizer.take() } {
                                 // SAFETY: the module registered the callback for
                                 // this closure data; explicit reclaim ends it.
+                                // Its EmacsFinalizer contract excludes heap/TLS/
+                                // env reentry while this sweep loan is live.
                                 unsafe { fin((*mf).data) };
                             }
                         }

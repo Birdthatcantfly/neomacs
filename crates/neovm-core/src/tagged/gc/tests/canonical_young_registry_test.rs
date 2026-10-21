@@ -122,8 +122,8 @@ fn canonical_young_retire_rejects_loan_before_satb_take_then_drains() {
 
 #[test]
 fn canonical_young_nested_selected_owner_capture_retire_and_panic_restore() {
-    let mut heap = TaggedHeap::new();
-    set_tagged_heap(&mut heap);
+    let mut heap = AliasableBox::new(TaggedHeap::new());
+    set_tagged_heap_root(heap.root());
     let handoff = heap.satb_handoff.clone();
     // SAFETY: all three artificial owners are confined to this one fixture;
     // selections/captures only touch Rust logs, with no Lisp/safepoint/marker.
@@ -138,17 +138,25 @@ fn canonical_young_nested_selected_owner_capture_retire_and_panic_restore() {
         .satb
         .satb
         .push(MarkWord::of(TaggedValue::fixnum(91)), &handoff);
+    drop(world);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        world
-            .with_mutator_gc_for_test(pb, |heap| {
-                // SAFETY: outer selection retains exclusive heap ownership.
-                let mut selected = unsafe { scan_contract::SingleMutatorWorld::from_heap(heap) };
-                assert_eq!(selected.current_young_registration_id(), b);
-                selected
-                    .with_mutator_gc_for_test(pc, |heap| {
+        heap.with_mutator_gc_for_test(pb, |root| {
+            // SAFETY: outer selection retains exclusive heap ownership.
+            let selected =
+                unsafe { scan_contract::SingleMutatorWorld::from_heap(&mut *root.as_ptr()) };
+            assert_eq!(selected.current_young_registration_id(), b);
+            drop(selected);
+            // SAFETY: no outer heap loan crosses the nested root switch.
+            unsafe {
+                TaggedHeap::with_registered_mutator_gc_for_test(
+                    root,
+                    pc,
+                    &scan_contract::StoppedMutatorsProof::for_test(),
+                    |root| {
                         // SAFETY: nested selection retains the same exclusion.
-                        let mut nested =
-                            unsafe { scan_contract::SingleMutatorWorld::from_heap(heap) };
+                        let mut nested = unsafe {
+                            scan_contract::SingleMutatorWorld::from_heap(&mut *root.as_ptr())
+                        };
                         assert_eq!(nested.current_young_registration_id(), c);
                         nested
                             .with_stopped_young_logs(|_, logs, _| {
@@ -163,12 +171,16 @@ fn canonical_young_nested_selected_owner_capture_retire_and_panic_restore() {
                             .unwrap()
                             .acknowledge();
                         panic!("nested selected owner unwind");
-                    })
-                    .unwrap();
-            })
+                    },
+                )
+            }
             .unwrap();
+        })
+        .unwrap();
     }));
     assert!(outcome.is_err());
+    // SAFETY: both selection guards and all nested callback loans ended.
+    let mut world = unsafe { scan_contract::SingleMutatorWorld::from_heap(&mut heap) };
     assert_eq!(world.current_young_registration_id(), a);
     world
         .with_stopped_young_logs(|_, logs, _| {

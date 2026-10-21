@@ -307,3 +307,22 @@ fn a6_owned_admission_refuses_nonempty_weak_table_without_clearing_it() {
             .is_nil()
     );
 }
+
+#[test]
+fn heapborrow_r9_collection_fixture_clears_and_restores_serial_tls() {
+    Context::with_test_collection_era_then(
+        |_| (),
+        |era, ()| {
+            assert!(!crate::tagged::gc::tagged_heap_is_installed());
+            let (collector, keeper) = era.finish().unwrap_or_else(|_| panic!("fixture finish"));
+            (collector, keeper, ())
+        },
+        |context, ()| {
+            assert!(crate::tagged::gc::tagged_heap_is_current(
+                &context.tagged_heap
+            ));
+            let value = TaggedValue::cons(TaggedValue::fixnum(53), TaggedValue::NIL);
+            assert_eq!(value.cons_car(), TaggedValue::fixnum(53));
+        },
+    );
+}

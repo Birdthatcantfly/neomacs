@@ -232,6 +232,9 @@ impl Context {
             })
         }
         .expect("collection fixture drain");
+        // Compare only the root address while the exclusive collector loan
+        // is retained. Synthetic participants cannot use the serial TLS view.
+        crate::tagged::gc::clear_tagged_heap_root_if_installed(context.tagged_heap.heap_root());
         let era = crate::tagged::gc::ParallelHeapEra::admit_rooted(collector, keeper, frozen)
             .unwrap_or_else(|failure| panic!("collection fixture admission: {:?}", failure.reason));
         body(era, input)
@@ -268,6 +271,9 @@ impl Context {
             })
         }
         .expect("collection fixture drain");
+        // Compare only the root address while the exclusive collector loan
+        // is retained. Synthetic participants cannot use the serial TLS view.
+        crate::tagged::gc::clear_tagged_heap_root_if_installed(context.tagged_heap.heap_root());
         let era = crate::tagged::gc::ParallelHeapEra::admit_rooted(collector, keeper, frozen)
             .unwrap_or_else(|failure| panic!("collection fixture admission: {:?}", failure.reason));
         let (collector, keeper, output) = body(era, input);
@@ -280,6 +286,8 @@ impl Context {
         );
         drop(collector);
         drop(keeper);
+        // Both finish capabilities returned; their loans ended above.
+        context.tagged_heap.install_tagged_heap();
         after(&mut context, output);
     }
 }

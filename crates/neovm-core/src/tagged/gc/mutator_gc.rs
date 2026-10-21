@@ -697,17 +697,16 @@ pub(super) enum TestMutatorSwitchError {
 }
 
 #[cfg(test)]
-struct TestMutatorSwitch<'h> {
-    heap: &'h mut TaggedHeap,
+struct TestMutatorSwitch {
+    heap: std::ptr::NonNull<TaggedHeap>,
     id: TestMutatorGcId,
 }
 
 #[cfg(test)]
-impl TestMutatorSwitch<'_> {
+impl TestMutatorSwitch {
     /// Refresh the existing heap's owner mirrors without a fallible TLS access.
     /// Same-heap owner switching changes no compiled barrier-window field.
     fn refresh_tls(heap: &mut TaggedHeap) {
-        let _ = TAGGED_HEAP.try_with(|slot| slot.set(heap as *mut TaggedHeap));
         let _ = TAGGED_HEAP_ID.try_with(|slot| slot.set(Some(heap.identity())));
         let _ =
             TAGGED_HEAP_WRITE_TRACKING_MODE.try_with(|slot| slot.set(heap.write_tracking_mode()));
@@ -737,55 +736,89 @@ impl TestMutatorSwitch<'_> {
 }
 
 #[cfg(test)]
-impl Drop for TestMutatorSwitch<'_> {
+impl Drop for TestMutatorSwitch {
     fn drop(&mut self) {
         // Construction validated the ID; no test API removes registrations.
         // get_mut keeps Drop total even if a future test API violates that
         // assumption. There is no allocation, lock, callback or assertion.
-        let registry = &mut *self.heap._satb_layout_reserve.0;
+        // SAFETY: the fixture's root owner outlives this guard; the body has
+        // returned (or unwound), so no body heap loan remains live.
+        let heap = unsafe { self.heap.as_mut() };
+        let registry = &mut *heap._satb_layout_reserve.0;
         if let Some(entry) = registry.registered.get_mut(self.id.index()) {
-            std::mem::swap(&mut self.heap.mutator_gc, &mut entry.gc);
+            std::mem::swap(&mut heap.mutator_gc, &mut entry.gc);
             registry
                 .young_control
                 .swap_locations(registry.current.young.id(), entry.satb.young.id());
             std::mem::swap(&mut registry.current, &mut entry.satb);
         }
-        Self::refresh_tls(self.heap);
+        Self::refresh_tls(heap);
     }
 }
 
 #[cfg(test)]
 impl TaggedHeap {
-    /// Called only by SingleMutatorWorld's test wrapper. Run actual barriers
-    /// with the selected registration's real hot and SATB state installed.
-    /// The closure must not start/finish a GC, allocate Lisp objects, run Lisp,
-    /// mutate registry membership, or open allocation regions. Preallocate the
-    /// stress graph before using this helper. Rust log-vector growth is fine.
-    pub(super) fn with_registered_mutator_gc_for_test<R>(
-        &mut self,
+    /// Run actual barriers with the selected artificial owner's hot/SATB
+    /// state. Neither this frame nor the body receives a protected heap loan.
+    /// Same-heap switching refreshes mirrors, preserving the TLS root pointer.
+    ///
+    /// # Safety
+    /// `root` is the live allocation's ONE provenance root, installed in TLS.
+    /// The caller owns every artificial mutator, and no heap loan is live.
+    /// The body may only write preallocated objects/logs: no Lisp allocation,
+    /// GC, registry membership changes, allocation regions, or escaping loans.
+    pub(super) unsafe fn with_registered_mutator_gc_for_test<R>(
+        mut root: std::ptr::NonNull<TaggedHeap>,
         id: TestMutatorGcId,
         _: &StoppedMutatorsProof,
-        body: impl FnOnce(&mut TaggedHeap) -> R,
+        body: impl FnOnce(std::ptr::NonNull<TaggedHeap>) -> R,
     ) -> Result<R, TestMutatorSwitchError> {
-        let registry = &mut *self._satb_layout_reserve.0;
-        let entry = registry
-            .registered
-            .get_mut(id.index())
-            .ok_or(TestMutatorSwitchError::Unknown)?;
-        if entry.satb.lifecycle == SatbMutatorLifecycle::Retired {
-            return Err(TestMutatorSwitchError::Retired);
+        assert!(TAGGED_HEAP.with(|slot| slot.get() == root.as_ptr()));
+        {
+            // SAFETY: sole fixture owner; this temporary loan ends before body.
+            let heap = unsafe { root.as_mut() };
+            let registry = &mut *heap._satb_layout_reserve.0;
+            let entry = registry
+                .registered
+                .get_mut(id.index())
+                .ok_or(TestMutatorSwitchError::Unknown)?;
+            if entry.satb.lifecycle == SatbMutatorLifecycle::Retired {
+                return Err(TestMutatorSwitchError::Retired);
+            }
+            std::mem::swap(&mut heap.mutator_gc, &mut entry.gc);
+            registry
+                .young_control
+                .swap_locations(registry.current.young.id(), entry.satb.young.id());
+            std::mem::swap(&mut registry.current, &mut entry.satb);
         }
-        std::mem::swap(&mut self.mutator_gc, &mut entry.gc);
-        registry
-            .young_control
-            .swap_locations(registry.current.young.id(), entry.satb.young.id());
-        std::mem::swap(&mut registry.current, &mut entry.satb);
-        let guard = TestMutatorSwitch { heap: self, id };
-        // Guard exists before any TLS call that could unwind. This also clears
-        // the SATB repeat-owner cache between two mutators writing one owner.
-        set_tagged_heap(guard.heap);
-        let result = body(guard.heap);
+        let guard = TestMutatorSwitch { heap: root, id };
+        // Guard exists before any TLS mirror access that could unwind. No heap
+        // reference or borrow-derived pointer is retained across the callback.
+        TestMutatorSwitch::refresh_tls(unsafe { root.as_mut() });
+        let result = body(root);
         drop(guard);
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+impl AliasableBox<TaggedHeap> {
+    /// Root-owning fixture entry, excluding loans from this owner for the whole
+    /// selection. Raw callback access must obey the switch helper's contract.
+    pub(super) fn with_mutator_gc_for_test<R>(
+        &mut self,
+        id: TestMutatorGcId,
+        body: impl FnOnce(std::ptr::NonNull<TaggedHeap>) -> R,
+    ) -> Result<R, TestMutatorSwitchError> {
+        // SAFETY: exclusive fixture ownership; the test body is responsible for
+        // restricting itself to preallocated object/log writes and short loans.
+        unsafe {
+            TaggedHeap::with_registered_mutator_gc_for_test(
+                self.root(),
+                id,
+                &StoppedMutatorsProof::for_test(),
+                body,
+            )
+        }
     }
 }

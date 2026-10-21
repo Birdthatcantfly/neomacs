@@ -459,8 +459,10 @@ impl TaggedHeap {
     /// heap; it may only seed roots, with no Lisp execution, nested collection
     /// or allocation safepoint. Internal roots are reseeded here. The admission
     /// and heap lifetime remain valid until this returned loan is consumed.
-    /// The existing sweep may invoke native finalizers: the caller must also
-    /// exclude their reentry or mutation of this heap throughout this drain.
+    /// The existing sweep may invoke native finalizers. Their EmacsFinalizer
+    /// contract follows GNU: no interaction with Emacs, including heap/TLS/env
+    /// reentry. Such reentry is outside the module API contract, even when the
+    /// thread has a serial TLS heap installed.
     pub unsafe fn drain_to_quiescent(
         &mut self,
         reseed: impl FnOnce(&mut TaggedHeap),

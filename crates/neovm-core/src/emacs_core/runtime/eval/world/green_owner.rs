@@ -203,6 +203,9 @@ impl Context {
             })
         }
         .expect("fresh fixture collector drains completely");
+        // Compare only the root address while the exclusive collector loan
+        // is retained. Synthetic participants cannot use the serial TLS view.
+        crate::tagged::gc::clear_tagged_heap_root_if_installed(context.tagged_heap.heap_root());
         let era = crate::tagged::gc::ParallelHeapEra::admit(collector, keeper)
             .unwrap_or_else(|_| panic!("fresh fixture World admits its mutator era"));
         f(era)
@@ -240,6 +243,9 @@ impl Context {
             })
         }
         .expect("rooted fixture collector");
+        // Compare only the root address while the exclusive collector loan
+        // is retained. Synthetic participants cannot use the serial TLS view.
+        crate::tagged::gc::clear_tagged_heap_root_if_installed(context.tagged_heap.heap_root());
         let era = crate::tagged::gc::ParallelHeapEra::admit(collector, keeper)
             .unwrap_or_else(|_| panic!("rooted fixture era"));
         f(era, roots)
