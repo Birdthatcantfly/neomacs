@@ -524,7 +524,8 @@ fn terminal_cursor_cell(x: f32, y: f32, char_width: f32, char_height: f32) -> (u
 /// encodes). Defaults are the capabilities of every modern terminal;
 /// synchronized output is additionally safe to over-claim (an unknown DEC
 /// private mode is ignored), while scroll regions are not (a terminal
-/// without DECSTBM would render SU as full-screen scroll), hence the split.
+/// without DECSTBM would delete lines down to the screen bottom), hence the
+/// split.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TermCaps {
     /// How output behaves at the physical right margin.  GNU keeps `am' and
@@ -561,7 +562,7 @@ impl Default for TermCaps {
     fn default() -> Self {
         Self {
             right_margin: RightMarginBehavior::MagicWrap,
-            scroll_region: Some(RegionScrollMethod::SuSd),
+            scroll_region: Some(RegionScrollMethod::DeleteInsertLines),
             insert_delete_char: true,
             blank_tail: BlankTailMethod::EraseToEol {
                 back_color_erase: true,
@@ -671,18 +672,32 @@ enum LogicalTailUpdate {
 }
 
 /// How a region scroll is put on the wire. Chosen at capability-resolution
-/// time from what the terminfo entry actually attests, and carried in the
-/// planned op — the encoder is total over this enum.
+/// time from what the terminfo entry actually attests, in the order GNU
+/// `tty_ins_del_lines` tries its capabilities (src/term.c:1041-1092), and
+/// carried in the planned op — the encoder is total over this enum.
+///
+/// GNU never scrolls with SU/SD (`indn`/`rin`): it deletes or inserts
+/// lines at the cursor row inside the scroll region.  Emitting CSI S/T
+/// instead was not a visible difference on a modern emulator, but it is a
+/// different control repertoire -- the pinned pyte 0.8.2 of the TTY
+/// differential harness implements DL/IL and not SU/SD, so every region
+/// scroll (the `invisible` scene's hidden lines) left the shifted rows
+/// stale in its legacy frames while GNU's deletes replayed exactly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegionScrollMethod {
+    /// DECSTBM + cursor to the region's top row + one parameterized DL/IL
+    /// (`CSI n M` / `CSI n L`): GNU's first choice, termcap `DL`/`AL`
+    /// (`TS_del_multi_lines`/`TS_ins_multi_lines`, src/term.c:4524,4539).
+    DeleteInsertLines,
+    /// DECSTBM + cursor to the region's top row + n single-line DL/IL
+    /// (`CSI M` / `CSI L`): GNU's second choice, termcap `dl`/`al`
+    /// (`TS_del_line`/`TS_ins_line`, src/term.c:4523,4538).
+    DeleteInsertLine,
     /// DECSTBM + cursor to the region edge + n single-line index/reverse
     /// index controls (IND `ESC D` / RI `ESC M`) — GNU term.c's
-    /// `tty_ins_del_lines` fallback, the form every vt100-class entry
-    /// attests via `cs` + `sr`.
+    /// `tty_ins_del_lines` last fallback (`TS_fwd_scroll`/`TS_rev_scroll`),
+    /// the form every vt100-class entry attests via `cs` + `sr`.
     Index,
-    /// DECSTBM + parameterized SU/SD (`CSI n S` / `CSI n T`), attested by
-    /// terminfo `indn`/`rin`. One control regardless of distance.
-    SuSd,
 }
 
 /// Vertical scroll direction and magnitude. Zero is unrepresentable: a
@@ -1963,12 +1978,34 @@ impl TtyRif {
                     // is what establishes.
                     write_face_off(&mut self.output, &mut last_attrs);
                     match (method, dir) {
-                        (RegionScrollMethod::SuSd, ScrollDir::Up(n)) => self
-                            .output
-                            .extend_from_slice(format!("\x1b[{n}S").as_bytes()),
-                        (RegionScrollMethod::SuSd, ScrollDir::Down(n)) => self
-                            .output
-                            .extend_from_slice(format!("\x1b[{n}T").as_bytes()),
+                        // GNU tty_ins_del_lines `multi`: cursor to the row
+                        // the lines leave from (`raw_cursor_to (f, vpos, 0)`),
+                        // then one parameterized delete/insert.  The lines
+                        // below move inside the region DECSTBM bounded, so
+                        // the rows past `bottom` stay where they are.
+                        (RegionScrollMethod::DeleteInsertLines, ScrollDir::Up(n)) => {
+                            write_cursor_goto(&mut self.output, top + 1, 1);
+                            self.output
+                                .extend_from_slice(format!("\x1b[{n}M").as_bytes());
+                        }
+                        (RegionScrollMethod::DeleteInsertLines, ScrollDir::Down(n)) => {
+                            write_cursor_goto(&mut self.output, top + 1, 1);
+                            self.output
+                                .extend_from_slice(format!("\x1b[{n}L").as_bytes());
+                        }
+                        // GNU tty_ins_del_lines `single`: the same, n times.
+                        (RegionScrollMethod::DeleteInsertLine, ScrollDir::Up(n)) => {
+                            write_cursor_goto(&mut self.output, top + 1, 1);
+                            for _ in 0..n.get() {
+                                self.output.extend_from_slice(b"\x1b[M");
+                            }
+                        }
+                        (RegionScrollMethod::DeleteInsertLine, ScrollDir::Down(n)) => {
+                            write_cursor_goto(&mut self.output, top + 1, 1);
+                            for _ in 0..n.get() {
+                                self.output.extend_from_slice(b"\x1b[L");
+                            }
+                        }
                         // GNU tty_ins_del_lines fallback: cursor to the
                         // region edge, then n single-line index controls.
                         // IND/RI are core VT100, attested by the
@@ -1986,7 +2023,13 @@ impl TtyRif {
                             }
                         }
                     }
-                    self.output.extend_from_slice(b"\x1b[r");
+                    // GNU `tty_set_terminal_window (f, 0)` restores the
+                    // region as the explicit whole screen
+                    // (`tty_set_scroll_region (f, 0, FRAME_TOTAL_LINES)`,
+                    // src/term.c:267-275), not DECSTBM's parameterless form.
+                    let rows = self.desired.height.clamp(1, usize::from(u16::MAX));
+                    self.output
+                        .extend_from_slice(format!("\x1b[1;{rows}r").as_bytes());
                     cursor = EncodedCursorState::Unknown;
                 }
                 TermOp::WriteRun { row, start, end } => {

@@ -61,8 +61,8 @@ pub(crate) fn open_terminal_capability_database(
         queries.push(Query::Flag(FlagCapability::Termcap(name)));
     }
     for name in [
-        "so", "us", "md", "mh", "ZH", "me", "ue", "op", "AF", "AB", "Sf", "Sb", "cs", "cm", "SF",
-        "SR", "sf", "sr", "IC", "DC", "ce",
+        "so", "us", "md", "mh", "ZH", "me", "ue", "op", "AF", "AB", "Sf", "Sb", "cs", "cm", "DL",
+        "AL", "dl", "al", "sf", "sr", "IC", "DC", "ce",
     ] {
         queries.push(Query::String(Termcap(name)));
     }
@@ -428,10 +428,10 @@ pub(crate) fn termcap_cap_is(
 /// claimed only when the entry's string IS the byte form the encoder
 /// produces (in either its terminfo or termcap spelling). A terminal whose
 /// `ic` exists but is not `ESC[@` (tvi955) must refuse ICH, and a terminal
-/// whose `cs` attests DECSTBM but that lacks `indn`/`rin` (vt220, the Linux
-/// console) must scroll with IND/RI, never CSI S/T. Synchronized output
-/// (DECSET 2026) has no terminfo name and is spec-safe to over-claim, so it
-/// stays enabled unconditionally.
+/// whose `cs` attests DECSTBM but that lacks `DL`/`AL` and `dl`/`al`
+/// (a bare vt100 shape) must scroll with IND/RI, never DL/IL. Synchronized
+/// output (DECSET 2026) has no terminfo name and is spec-safe to over-claim,
+/// so it stays enabled unconditionally.
 pub(crate) fn resolve_term_caps(
     database: &mut dyn TerminalCapabilityDatabase,
 ) -> neomacs_display_runtime::backend::tty::rif::TermCaps {
@@ -441,8 +441,16 @@ pub(crate) fn resolve_term_caps(
 
     let decstbm = termcap_cap_is(database, "cs", b"\x1b[%i%d;%dr");
     let cursor_address = termcap_cap_is(database, "cm", b"\x1b[%i%d;%dH");
-    let su_sd =
-        termcap_cap_is(database, "SF", b"\x1b[%dS") && termcap_cap_is(database, "SR", b"\x1b[%dT");
+    // GNU `tty_ins_del_lines` (src/term.c:1041-1092) scrolls by deleting or
+    // inserting lines at the cursor row: the parameterized `DL`/`AL` first
+    // (`TS_del_multi_lines`/`TS_ins_multi_lines`, term.c:4524,4539), then
+    // the single-line `dl`/`al` (`TS_del_line`/`TS_ins_line`, term.c:4523,
+    // 4538), and only then the scroll-region index form.  It never emits
+    // `indn`/`rin` (CSI S/T) for this, so neither does the encoder.
+    let delete_insert_lines =
+        termcap_cap_is(database, "DL", b"\x1b[%dM") && termcap_cap_is(database, "AL", b"\x1b[%dL");
+    let delete_insert_line =
+        termcap_cap_is(database, "dl", b"\x1b[M") && termcap_cap_is(database, "al", b"\x1b[L");
     // GNU defaults TS_fwd_scroll to plain cursor-down (LF) when `sf` is
     // absent (term.c:4820), and requires `sr` for the reverse direction
     // (term.c:4912). IND and RI are what the encoder emits; LF at the
@@ -452,9 +460,14 @@ pub(crate) fn resolve_term_caps(
         Some(sf) => matches!(canonical_cap(&sf).as_slice(), b"\n" | b"\x1bD"),
     };
     let rev_index = termcap_cap_is(database, "sr", b"\x1bM");
+    // Every form needs DECSTBM: the planned op scrolls exactly `top..=bottom`,
+    // and GNU bounds its deletes the same way (`tty_set_terminal_window`,
+    // term.c:267-275) wherever `cs` exists.
     let scroll_region = if decstbm && cursor_address {
-        if su_sd {
-            Some(RegionScrollMethod::SuSd)
+        if delete_insert_lines {
+            Some(RegionScrollMethod::DeleteInsertLines)
+        } else if delete_insert_line {
+            Some(RegionScrollMethod::DeleteInsertLine)
         } else if fwd_index && rev_index {
             Some(RegionScrollMethod::Index)
         } else {
