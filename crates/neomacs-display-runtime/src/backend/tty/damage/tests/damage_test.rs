@@ -85,7 +85,10 @@ fn idle_frame_keeps_the_old_framing_when_the_knob_is_off() {
     let out = output_string(&mut rif);
     assert!(out.contains("\x1b[?25l"), "hide: {out:?}");
     assert!(out.contains("\x1b[2;3H"), "goto: {out:?}");
-    assert!(out.contains("\x1b[2 q"), "shape every frame: {out:?}");
+    assert!(
+        !out.contains(" q"),
+        "a box cursor writes no DECSCUSR, like GNU: {out:?}"
+    );
     assert!(out.contains("\x1b[?25h"), "show: {out:?}");
 }
 
@@ -122,10 +125,7 @@ fn a_frame_with_cell_writes_resends_the_shape_only_when_it_changed() {
     repaint(&mut rif, "hellO", Some((1, 2)), TerminalCursorShape::Block);
     let out = output_string(&mut rif);
     assert!(out.contains('O'), "the changed cell is written: {out:?}");
-    assert!(
-        !out.contains("\x1b[2 q"),
-        "unchanged shape not re-sent: {out:?}"
-    );
+    assert!(!out.contains(" q"), "no DECSCUSR for a box cursor: {out:?}");
     assert!(out.contains("\x1b[?25l") && out.contains("\x1b[?25h"));
     repaint(
         &mut rif,
@@ -145,11 +145,47 @@ fn a_forced_redraw_forgets_the_terminal_cursor() {
     let out = output_string(&mut rif);
     assert!(out.contains("hello"), "full repaint: {out:?}");
     assert!(
-        out.contains("\x1b[2 q"),
-        "shape re-sent after a redraw: {out:?}"
+        !out.contains(" q"),
+        "a box cursor that never left the terminal default has nothing to restore: {out:?}"
     );
     repaint(&mut rif, "hello", Some((1, 2)), TerminalCursorShape::Block);
     assert_eq!(output_string(&mut rif), "");
+}
+
+/// GNU term.c writes no DECSCUSR at all: on a text terminal `cursor-type'
+/// does not exist and the cursor is whatever the terminal is configured to
+/// show (the ttykey differential scenes recorded GNU's cursor as the
+/// terminal default at all 115 checkpoints while this port wrote a steady
+/// block at session start and after every redraw).  A bar/underline cursor
+/// is a neomacs addition; going
+/// back to `box' restores the terminal default with DECSCUSR 0, once, and a
+/// redraw remembers that something was set.
+#[test]
+fn box_cursor_leaves_the_terminal_default_alone_and_restores_it_after_a_bar() {
+    let mut rif = painted(true, "hello");
+    repaint(&mut rif, "hello", Some((1, 2)), TerminalCursorShape::Block);
+    assert_eq!(output_string(&mut rif), "", "never set: nothing to write");
+    repaint(&mut rif, "hello", Some((1, 2)), TerminalCursorShape::Bar);
+    assert_eq!(output_string(&mut rif), "\x1b[6 q");
+    repaint(&mut rif, "hello", Some((1, 2)), TerminalCursorShape::Block);
+    assert_eq!(
+        output_string(&mut rif),
+        "\x1b[0 q",
+        "back to the terminal default"
+    );
+    repaint(&mut rif, "hello", Some((1, 2)), TerminalCursorShape::Block);
+    assert_eq!(output_string(&mut rif), "", "restored once");
+    // A redraw repaints the screen, not the cursor shape: after a bar it
+    // re-sends the bar (the terminal may have been reset meanwhile), and a
+    // box after it still restores the default.
+    repaint(&mut rif, "hello", Some((1, 2)), TerminalCursorShape::Bar);
+    assert_eq!(output_string(&mut rif), "\x1b[6 q");
+    rif.force_redraw();
+    repaint(&mut rif, "hello", Some((1, 2)), TerminalCursorShape::Bar);
+    assert!(output_string(&mut rif).contains("\x1b[6 q"));
+    rif.force_redraw();
+    repaint(&mut rif, "hello", Some((1, 2)), TerminalCursorShape::Block);
+    assert!(output_string(&mut rif).contains("\x1b[0 q"));
 }
 
 // ---------------------------------------------------------------------------

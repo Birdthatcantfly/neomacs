@@ -429,13 +429,20 @@ impl<W: Write> TtyPainter for TerminfoPainter<'_, W> {
                 self.width,
                 self.height,
             )?;
+            // GNU writes no cursor shape on a terminal (term.c has no
+            // DECSCUSR), so the default `box' cursor leaves the terminal's
+            // own cursor alone; bar and underline are a neomacs addition.
+            // This painter is stateless per frame, so it does not restore
+            // the default when a shape goes back to `box'.
             if self.caps.ansi {
                 let style = match shape {
-                    TerminalCursorShape::Block => 2,
-                    TerminalCursorShape::Underline => 4,
-                    TerminalCursorShape::Bar => 6,
+                    TerminalCursorShape::Block => None,
+                    TerminalCursorShape::Underline => Some(4),
+                    TerminalCursorShape::Bar => Some(6),
                 };
-                write!(self.bytes, "\x1b[{style} q")?;
+                if let Some(style) = style {
+                    write!(self.bytes, "\x1b[{style} q")?;
+                }
             }
             self.caps.append(&mut self.bytes, "ve");
         }

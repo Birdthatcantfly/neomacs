@@ -5,7 +5,8 @@
 //!   GNU writes 0 bytes on an idle redisplay. A frame where only the cursor
 //!   moved writes only the cursor motion, and the cursor shape is re-sent
 //!   only when it changed (re-sending it resets the blink in several
-//!   terminals).
+//!   terminals); the default `box' cursor is never sent at all, as in GNU
+//!   (`TerminalCursorShapeMemory`).
 //! - **B2, painter keys** (`NEOMACS_TTY_DAMAGE=off|verify|on`). Every grid
 //!   row remembers, as [`PainterKey`]s, what painted it last frame: the face
 //!   fills over it and the window-matrix rows written to it, each by
@@ -406,8 +407,6 @@ pub(super) struct DamageState {
     pub(super) silent: bool,
     /// The cursor the terminal shows after the last frame written (B1).
     pub(super) cursor: EmittedCursor,
-    /// The cursor shape last written, if known (B1).
-    pub(super) shape: Option<TerminalCursorShape>,
     /// B2 mode for this renderer.
     pub(super) mode: TtyDamageMode,
     /// What names a window-matrix row in a painter key.
@@ -455,7 +454,6 @@ impl DamageState {
         Self {
             silent: knob_silent_frames(),
             cursor: EmittedCursor::Unknown,
-            shape: None,
             mode: knob_damage_mode(),
             row_identity: knob_row_identity(),
             full_reason: None,
@@ -482,7 +480,6 @@ impl DamageState {
     /// Forget what the terminal shows: the next frame writes it all.
     pub(super) fn forget_terminal(&mut self) {
         self.cursor = EmittedCursor::Unknown;
-        self.shape = None;
     }
 
     /// Forget what painted the screen model: the next frame is a full one.
@@ -694,9 +691,12 @@ impl TtyRif {
                 if before != now {
                     write_cursor_goto(&mut self.output, row + 1, col + 1);
                 }
-                if self.damage.shape != Some(self.cursor_shape) {
-                    write_cursor_shape(&mut self.output, self.cursor_shape);
-                    self.damage.shape = Some(self.cursor_shape);
+                if let Some(ps) = self
+                    .terminal_cursor_shape
+                    .control_for(self.cursor_shape, false)
+                {
+                    write_cursor_shape_control(&mut self.output, ps);
+                    self.terminal_cursor_shape.note_written(self.cursor_shape);
                 }
                 if !matches!(before, EmittedCursor::Shown { .. }) {
                     write_show_cursor(&mut self.output, self.very_visible_cursor);
@@ -713,18 +713,11 @@ impl TtyRif {
         true
     }
 
-    /// B1 for a frame that writes cells: the cursor shape is re-sent only when
-    /// it changed. With B1 off it is sent every frame, as before.
-    pub(super) fn cursor_shape_due(&self) -> bool {
-        !self.damage.silent || self.damage.shape != Some(self.cursor_shape)
-    }
-
     /// Record the cursor an ordinarily framed frame left on the terminal.
-    pub(super) fn note_framed_cursor(&mut self, shape_written: bool) {
+    /// The cursor shape has its own memory (`terminal_cursor_shape`): it is
+    /// terminal state that no frame or redraw repaints.
+    pub(super) fn note_framed_cursor(&mut self) {
         self.damage.cursor = self.frame_cursor();
-        if shape_written {
-            self.damage.shape = Some(self.cursor_shape);
-        }
     }
 
     // -----------------------------------------------------------------------

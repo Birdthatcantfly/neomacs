@@ -489,6 +489,10 @@ pub struct TtyRif {
     /// the entry's `ve` with its `vs` only when it is non-nil
     /// (src/term.c:362-372).  Its C default is 1.
     very_visible_cursor: bool,
+    /// What this session has told the terminal about its cursor shape
+    /// (DECSCUSR), which is terminal state, not screen state: a redraw or a
+    /// resize does not undo it.
+    terminal_cursor_shape: TerminalCursorShapeMemory,
     /// Face lookup table (face_id -> Face).
     faces: FrameFaceMap,
     /// The default face's realized terminal background.
@@ -870,6 +874,66 @@ pub enum TerminalCursorShape {
     Bar,
 }
 
+/// What the terminal's cursor shape is, as far as this session has set it.
+///
+/// GNU never sets a cursor shape on a text terminal -- term.c emits no
+/// DECSCUSR, and `cursor-type' is a window-system property there -- so the
+/// default `box' cursor must leave the terminal's own configured cursor
+/// alone (the ttykey differential scenes recorded GNU's cursor as the
+/// terminal default at every checkpoint while this port wrote `CSI 2 SP q`,
+/// a steady block, at session start and after every redraw).  A bar or
+/// underline cursor is a neomacs
+/// addition beyond GNU; once one has been set, going back to `box' restores
+/// the terminal's default with DECSCUSR 0 rather than imposing a steady block.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TerminalCursorShapeMemory {
+    /// The shape last set, `None` when unknown (never set, or forgotten by a
+    /// redraw: the terminal may have been reset underneath).
+    last_set: Option<TerminalCursorShape>,
+    /// Whether this session ever set a shape other than the default: only
+    /// then can a `box' cursor have something to restore.
+    touched: bool,
+}
+
+impl TerminalCursorShapeMemory {
+    /// The DECSCUSR parameter a frame must write so the terminal shows
+    /// `wanted`, or `None` when nothing is to be written.  `resend` re-sends
+    /// a non-default shape even when it is already set (the non-silent
+    /// framing, which writes its cursor every frame).
+    pub(crate) fn control_for(self, wanted: TerminalCursorShape, resend: bool) -> Option<u8> {
+        match wanted {
+            TerminalCursorShape::Block => {
+                let set_elsewhere = match self.last_set {
+                    Some(TerminalCursorShape::Block) => false,
+                    Some(_) => true,
+                    None => self.touched,
+                };
+                set_elsewhere.then_some(0)
+            }
+            TerminalCursorShape::Underline => {
+                (resend || self.last_set != Some(wanted)).then_some(4)
+            }
+            TerminalCursorShape::Bar => (resend || self.last_set != Some(wanted)).then_some(6),
+        }
+    }
+
+    /// Record that `wanted` was written (as the control from
+    /// [`Self::control_for`]).
+    pub(crate) fn note_written(&mut self, wanted: TerminalCursorShape) {
+        if wanted != TerminalCursorShape::Block {
+            self.touched = true;
+        }
+        self.last_set = Some(wanted);
+    }
+
+    /// A redraw or resize repaints the screen, not the terminal's cursor
+    /// shape; but another program may have reset it meanwhile, so what is
+    /// set becomes unknown while the knowledge that something was set stays.
+    pub(crate) fn forget_after_redraw(&mut self) {
+        self.last_set = None;
+    }
+}
+
 impl TtyRif {
     /// Create a new TtyRif for a terminal of the given dimensions.
     pub fn new(width: usize, height: usize) -> Self {
@@ -882,6 +946,7 @@ impl TtyRif {
             cursor_visible: false,
             cursor_shape: TerminalCursorShape::Block,
             very_visible_cursor: true,
+            terminal_cursor_shape: TerminalCursorShapeMemory::default(),
             faces: rustc_hash::FxHashMap::default(),
             default_bg: None,
             default_fg: None,
@@ -926,6 +991,7 @@ impl TtyRif {
         self.force_full_render = true;
         self.damage.forget_terminal();
         self.damage.forget_painters();
+        self.terminal_cursor_shape.forget_after_redraw();
     }
 
     /// Force the next [`diff_and_render`](Self::diff_and_render) call to emit
@@ -935,6 +1001,7 @@ impl TtyRif {
     pub fn force_redraw(&mut self) {
         self.force_full_render = true;
         self.damage.forget_terminal();
+        self.terminal_cursor_shape.forget_after_redraw();
     }
 
     /// Set the face table for resolving face_ids.
@@ -1509,17 +1576,23 @@ impl TtyRif {
         // where GNU emits the entry's `me` and `op`, or nothing (ledger 188).
 
         // Position cursor and show it if visible.
-        let shape_written = self.cursor_visible && self.cursor_shape_due();
         if self.cursor_visible {
             write_cursor_goto(&mut self.output, self.cursor_row + 1, self.cursor_col + 1);
-            if shape_written {
-                write_cursor_shape(&mut self.output, self.cursor_shape);
+            // GNU writes no cursor shape on a terminal; see
+            // `TerminalCursorShapeMemory`.  The non-silent framing re-sends a
+            // non-default shape every frame, as it always did.
+            if let Some(ps) = self
+                .terminal_cursor_shape
+                .control_for(self.cursor_shape, !self.damage.silent)
+            {
+                write_cursor_shape_control(&mut self.output, ps);
+                self.terminal_cursor_shape.note_written(self.cursor_shape);
             }
             // GNU `tty_update_end` -> `tty_show_cursor` (src/term.c:258):
             // the entry's `ve`, then `vs` for a very visible cursor.
             write_show_cursor(&mut self.output, self.very_visible_cursor);
         }
-        self.note_framed_cursor(shape_written);
+        self.note_framed_cursor();
 
         if self.caps.synchronized_output {
             // End synchronized update: present the frame atomically.
@@ -3078,14 +3151,12 @@ fn write_show_cursor_with(buf: &mut Vec<u8>, caps: &TtyAttributeCapabilities, ve
     }
 }
 
-fn write_cursor_shape(buf: &mut Vec<u8>, shape: TerminalCursorShape) {
+/// DECSCUSR (`CSI Ps SP q`) with the parameter
+/// [`TerminalCursorShapeMemory::control_for`] chose: 0 restores the
+/// terminal's default cursor, 4 and 6 are the steady underline and bar.
+fn write_cursor_shape_control(buf: &mut Vec<u8>, ps: u8) {
     use std::io::Write;
-    let ps = match shape {
-        TerminalCursorShape::Block => 2,
-        TerminalCursorShape::Underline => 4,
-        TerminalCursorShape::Bar => 6,
-    };
-    let _ = write!(buf, "\x1b[{} q", ps);
+    let _ = write!(buf, "\x1b[{ps} q");
 }
 
 // --- Terminal color depth (issue #154) ------------------------------------
