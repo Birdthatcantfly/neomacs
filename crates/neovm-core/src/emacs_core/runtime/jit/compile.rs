@@ -2333,46 +2333,29 @@ fn finalize_baseline_spec_sites(
 /// Resolve the static target set of the `Op::Switch` at `i`: the byte
 /// compiler always pushes the jump table as a constant immediately before the
 /// switch, so require `ops[i-1]` to be that `Constant`, the constant to be a
-/// hash table, and every table value to be a fixnum address resolving (through
-/// the GNU byte-offset map when present) to an in-range instruction index.
-/// Returns deduplicated `(raw address, instruction index)` pairs; anything
-/// else bails to the interpreter.
+/// hash table, and every table value to be a fixnum address
+/// resolving (through the GNU byte-offset map when present) to an in-range
+/// instruction index. Returns deduplicated `(raw address, instruction index)`
+/// pairs; anything else bails to the interpreter.
+///
+/// The resolver itself is the bytecode module's
+/// [`switch_static_targets`](crate::emacs_core::bytecode::decode::switch_static_targets):
+/// the stack verifier admits `Switch` from the same set, so the interpreter's
+/// verified driver and compiled code agree on what a jump table may hold.
 fn switch_static_targets(
     ops: &[Op],
     constants: &[Value],
     offset_map: Option<&[GnuByteOffsetMapEntry]>,
     i: usize,
 ) -> Result<Vec<(i64, usize)>, CompileError> {
-    let table = match i.checked_sub(1).map(|p| &ops[p]) {
-        Some(Op::Constant(idx)) => constants
-            .get(*idx as usize)
-            .ok_or(CompileError::BadOperand)?,
-        _ => return Err(CompileError::UnsupportedOp("switch-dynamic")),
-    };
-    let Some(ht) = table.as_hash_table() else {
-        return Err(CompileError::UnsupportedOp("switch-dynamic"));
-    };
-    let mut out: Vec<(i64, usize)> = Vec::with_capacity(ht.data.len());
-    for v in ht.data.values() {
-        let ValueKind::Fixnum(raw) = v.kind() else {
-            return Err(CompileError::UnsupportedOp("switch-dynamic"));
-        };
-        let raw_addr = usize::try_from(raw).map_err(|_| CompileError::BadOperand)?;
-        let target = match offset_map {
-            Some(map) => map
-                .binary_search_by_key(&raw_addr, |e| e.byte_offset)
-                .map(|k| map[k].instruction_index)
-                .map_err(|_| CompileError::BadOperand)?,
-            None => raw_addr,
-        };
-        if target >= ops.len() {
-            return Err(CompileError::BadOperand);
-        }
-        if !out.iter().any(|&(r, _)| r == raw) {
-            out.push((raw, target));
-        }
-    }
-    Ok(out)
+    use crate::emacs_core::bytecode::decode::SwitchTargetError as E;
+    crate::emacs_core::bytecode::decode::switch_static_targets(ops, constants, offset_map, i)
+        .map_err(|error| match error {
+            E::NoConstantTable | E::NotHashTable | E::NonFixnumTarget => {
+                CompileError::UnsupportedOp("switch-dynamic")
+            }
+            E::TargetOutOfRange => CompileError::BadOperand,
+        })
 }
 
 /// Basic-block analysis: sorted block leaders, the operand-stack depth at each

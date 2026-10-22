@@ -16,7 +16,7 @@ use std::fmt;
 use super::chunk::GnuByteOffsetMapEntry;
 use super::opcode::Op;
 use crate::emacs_core::intern::intern;
-use crate::emacs_core::value::Value;
+use crate::emacs_core::value::{Value, ValueKind};
 
 /// Errors that can occur during GNU bytecode decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,23 +154,143 @@ fn offset_map_entries(have_switch: bool, offset_map: InstrStarts) -> Vec<GnuByte
         .collect()
 }
 
+/// Why an [`Op::Switch`] has no static target set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SwitchTargetError {
+    /// The instruction before the switch is not the `Constant` that pushes
+    /// the jump table (the byte compiler always emits that pair).
+    NoConstantTable,
+    /// The constant is not a hash table, or its pool index is out of range.
+    NotHashTable,
+    /// A table value that is not a fixnum byte offset / instruction index.
+    NonFixnumTarget,
+    /// A value that is negative, past the end of the stream, or (GNU code)
+    /// not an instruction start in the byte-offset map.
+    TargetOutOfRange,
+}
+
+/// Resolve the static target set of the [`Op::Switch`] at `i`: the byte
+/// compiler always pushes the jump table as a constant immediately before the
+/// switch, so `ops[i-1]` must be that `Constant`, the constant a hash table,
+/// and every table value a fixnum address resolving (through the GNU
+/// byte-offset map when present, which only holds instruction starts) to an
+/// in-range instruction index. Returns deduplicated `(raw address, instruction
+/// index)` pairs in table order.
+///
+/// A weak table is accepted: the collector only removes its entries, and a
+/// removed entry is a miss, i.e. the switch's fall-through edge.
+///
+/// One resolver for the two consumers that need the set before the code
+/// runs: the stack verifier below (which proves the depth at every target)
+/// and the JIT's CFG analysis (`jit::compile::switch_static_targets`), so
+/// what they admit cannot drift apart.
+pub(crate) fn switch_static_targets(
+    ops: &[Op],
+    constants: &[Value],
+    offset_map: Option<&[GnuByteOffsetMapEntry]>,
+    i: usize,
+) -> Result<Vec<(i64, usize)>, SwitchTargetError> {
+    let table = match i.checked_sub(1).map(|p| &ops[p]) {
+        Some(Op::Constant(idx)) => constants
+            .get(*idx as usize)
+            .ok_or(SwitchTargetError::NotHashTable)?,
+        _ => return Err(SwitchTargetError::NoConstantTable),
+    };
+    let Some(ht) = table.as_hash_table() else {
+        return Err(SwitchTargetError::NotHashTable);
+    };
+    let mut out: Vec<(i64, usize)> = Vec::with_capacity(ht.data.len());
+    for v in ht.data.values() {
+        let ValueKind::Fixnum(raw) = v.kind() else {
+            return Err(SwitchTargetError::NonFixnumTarget);
+        };
+        let raw_addr = usize::try_from(raw).map_err(|_| SwitchTargetError::TargetOutOfRange)?;
+        let target = match offset_map {
+            Some(map) => map
+                .binary_search_by_key(&raw_addr, |e| e.byte_offset)
+                .map(|k| map[k].instruction_index)
+                .map_err(|_| SwitchTargetError::TargetOutOfRange)?,
+            None => raw_addr,
+        };
+        if target >= ops.len() {
+            return Err(SwitchTargetError::TargetOutOfRange);
+        }
+        if !out.iter().any(|&(r, _)| r == raw) {
+            out.push((raw, target));
+        }
+    }
+    Ok(out)
+}
+
+/// What the verifier needs to admit [`Op::Switch`]: the function's constant
+/// pool (the jump tables live there) and, for GNU-decoded code, its byte-offset
+/// map (natively indexed chunks pass `None` and their table values are
+/// instruction indices).
+#[derive(Clone, Copy)]
+pub(crate) struct SwitchTables<'a> {
+    pub(crate) constants: &'a [Value],
+    pub(crate) offset_map: Option<&'a [GnuByteOffsetMapEntry]>,
+}
+
+/// A successful operand-stack proof.
+///
+/// `depths` is kept only when the stream has a `Switch` (the only instruction
+/// whose targets can change after the proof, because a jump table is a live
+/// Lisp object): the proven operand depth at every instruction,
+/// [`StackProof::UNREACHABLE`] where none exists. The VERIFIED driver takes a
+/// switch hit exactly when the resolved instruction's proven depth equals the
+/// fixed switch depth: all reachable switches must have the same post-pop
+/// depth. The proof is per instruction, so entering any instruction at
+/// its proven depth keeps every invariant the unchecked driver relies on
+/// downstream, whatever a `puthash` after sealing did to the table (GNU
+/// follows such a table blindly).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct StackProof {
+    pub(crate) switch_depth: Option<usize>,
+    pub(crate) depths: Vec<u32>,
+}
+
+impl StackProof {
+    pub(crate) const UNREACHABLE: u32 = u32::MAX;
+
+    /// Whether instruction `pc` is proven at operand depth `depth`.
+    #[inline]
+    pub(crate) fn proves_depth(&self, pc: usize, depth: usize) -> bool {
+        self.depths
+            .get(pc)
+            .is_some_and(|&proven| proven != Self::UNREACHABLE && proven as usize == depth)
+    }
+}
+
 /// Statically prove a sealed instruction stream's operand-stack behavior.
 ///
 /// GNU trusts the compiler's declared `max_stack` blindly (`PUSH` is an
 /// unchecked store); the memory-safe equivalent is this one-time forward
-/// dataflow over the decoded instructions. It returns `true` iff, starting
-/// from `entry_depth`, every reachable instruction has a single consistent
-/// stack depth (the byte compiler's output is depth-deterministic), no depth
-/// exceeds `max_stack`, and every instruction's minimum operand requirement
-/// is met. `Vm::run_loop`'s verified instantiation relies on this proof to
-/// drop its per-push capacity guard.
+/// dataflow over the decoded instructions. It succeeds iff, starting from
+/// `entry_depth`, every reachable instruction has a single consistent stack
+/// depth (the byte compiler's output is depth-deterministic), no depth exceeds
+/// `max_stack`, and every instruction's minimum operand requirement is met.
+/// `Vm::run_loop`'s verified instantiation relies on this proof to drop its
+/// per-push capacity guard. The wrapper form [`verify_stack_effects`] answers
+/// a plain bool and refuses every `Switch`; the `_with_tables` form, given
+/// the function's jump tables, admits them and returns the [`StackProof`].
 ///
-/// Deliberately conservative refusals (the function then simply runs in the
-/// checked driver, with today's exact behavior):
-/// - any [`Op::Switch`]: its targets live in runtime hash-table constants,
-///   which the deferred decode path cannot read;
-/// - any depth inconsistency at a join, or an effect the table below cannot
-///   bound.
+/// `Switch` requirements (any failure refuses the whole function, which then
+/// runs in the checked driver with today's exact behavior):
+/// - the table is the `Constant` pushed by the instruction just before the
+///   switch, is a hash table, and every one of its values is a fixnum
+///   resolving to an instruction START inside the stream
+///   ([`switch_static_targets`]);
+/// - the switch has two operands (table, dispatch value) and every target,
+///   like the fall-through (no match), is entered at `depth - 2`;
+/// - all reachable switches share one post-pop depth, so target validation
+///   needs no live stack depth from the dispatch arm;
+/// - the per-instruction depths are recorded ([`StackProof`]), so a table
+///   mutated after sealing cannot steer the unchecked driver to an
+///   instruction at an unproven depth.
+///
+/// Other deliberately conservative refusals: a depth inconsistency at a join,
+/// or an effect the table below cannot bound.
 ///
 /// Per-edge effects that differ from the fall-through are handled explicitly:
 /// the `*ElsePop` gotos keep TOS on the taken edge and pop on fall-through,
@@ -178,9 +298,21 @@ fn offset_map_entries(have_switch: bool, offset_map: InstrStarts) -> Vec<GnuByte
 /// depth at push, after any operand pops, plus one for the delivered value)
 /// into the handler target.
 pub(crate) fn verify_stack_effects(ops: &[Op], entry_depth: usize, max_stack: usize) -> bool {
+    verify_stack_effects_with_tables(ops, entry_depth, max_stack, None).is_some()
+}
+
+/// [`verify_stack_effects`] with the jump tables needed to admit `Switch`;
+/// see there for the proof and the `Switch` requirements.
+pub(crate) fn verify_stack_effects_with_tables(
+    ops: &[Op],
+    entry_depth: usize,
+    max_stack: usize,
+    tables: Option<SwitchTables<'_>>,
+) -> Option<StackProof> {
     if entry_depth > max_stack || ops.is_empty() {
-        return false;
+        return None;
     }
+    let mut switch_depth = None;
     let mut depths: Vec<Option<usize>> = vec![None; ops.len()];
     depths[0] = Some(entry_depth);
     let mut worklist: Vec<(usize, usize)> = vec![(0, entry_depth)];
@@ -244,13 +376,13 @@ pub(crate) fn verify_stack_effects(ops: &[Op], entry_depth: usize, max_stack: us
                     depth,
                     max_stack,
                 ) {
-                    return false;
+                    return None;
                 }
                 continue;
             }
             Op::GotoIfNil(target) | Op::GotoIfNotNil(target) => {
                 if depth < 1 {
-                    return false;
+                    return None;
                 }
                 if !flow(
                     &mut depths,
@@ -259,13 +391,13 @@ pub(crate) fn verify_stack_effects(ops: &[Op], entry_depth: usize, max_stack: us
                     depth - 1,
                     max_stack,
                 ) {
-                    return false;
+                    return None;
                 }
                 (1, -1)
             }
             Op::GotoIfNilElsePop(target) | Op::GotoIfNotNilElsePop(target) => {
                 if depth < 1 {
-                    return false;
+                    return None;
                 }
                 // Taken edge keeps TOS; fall-through pops it.
                 if !flow(
@@ -275,11 +407,30 @@ pub(crate) fn verify_stack_effects(ops: &[Op], entry_depth: usize, max_stack: us
                     depth,
                     max_stack,
                 ) {
-                    return false;
+                    return None;
                 }
                 (1, -1)
             }
-            Op::Switch => return false,
+            Op::Switch => {
+                let Some(tables) = tables else {
+                    return None;
+                };
+                if depth < 2 {
+                    return None;
+                }
+                let targets =
+                    switch_static_targets(ops, tables.constants, tables.offset_map, pc).ok()?;
+                for &(_, target) in &targets {
+                    if !flow(&mut depths, &mut worklist, target, depth - 2, max_stack) {
+                        return None;
+                    }
+                }
+                if switch_depth.is_some_and(|proven| proven != depth - 2) {
+                    return None;
+                }
+                switch_depth = Some(depth - 2);
+                (2, -2)
+            }
             Op::Return | Op::Throw | Op::TrapOutOfRangeConstant(_) => continue,
             // In-place unary rewrites.
             Op::Add1
@@ -339,7 +490,7 @@ pub(crate) fn verify_stack_effects(ops: &[Op], entry_depth: usize, max_stack: us
             Op::SaveCurrentBuffer | Op::SaveExcursion | Op::SaveRestriction => (0, 0),
             Op::PushCatch(target) | Op::PushConditionCaseRaw(target) => {
                 if depth < 1 {
-                    return false;
+                    return None;
                 }
                 // The recorded resume depth is the post-pop depth; delivery
                 // pushes the thrown/signaled value on top of it.
@@ -350,7 +501,7 @@ pub(crate) fn verify_stack_effects(ops: &[Op], entry_depth: usize, max_stack: us
                     depth,
                     max_stack,
                 ) {
-                    return false;
+                    return None;
                 }
                 (1, -1)
             }
@@ -366,17 +517,17 @@ pub(crate) fn verify_stack_effects(ops: &[Op], entry_depth: usize, max_stack: us
                         max_stack,
                     )
                 {
-                    return false;
+                    return None;
                 }
                 (0, 0)
             }
         };
         if depth < min {
-            return false;
+            return None;
         }
         let next_depth = depth as isize + net;
         if next_depth < 0 {
-            return false;
+            return None;
         }
         if !flow(
             &mut depths,
@@ -385,10 +536,21 @@ pub(crate) fn verify_stack_effects(ops: &[Op], entry_depth: usize, max_stack: us
             next_depth as usize,
             max_stack,
         ) {
-            return false;
+            return None;
         }
     }
-    true
+    let depths = if switch_depth.is_some() {
+        depths
+            .iter()
+            .map(|depth| depth.map_or(StackProof::UNREACHABLE, |depth| depth as u32))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Some(StackProof {
+        switch_depth,
+        depths,
+    })
 }
 
 /// Seal decoded instructions so the dispatch loop needs no per-fetch bound
@@ -1162,3 +1324,7 @@ pub fn parse_arglist_value(
 #[cfg(test)]
 #[path = "tests/decode_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/verify_switch_test.rs"]
+mod verify_switch_tests;

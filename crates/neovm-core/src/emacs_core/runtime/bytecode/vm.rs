@@ -9876,6 +9876,12 @@ fn vm_switch_target(ht: &LispHashTable, dispatch: Value, swp: bool) -> Option<Va
 
 #[inline(never)]
 fn resolve_switch_target(func: &ByteCodeFunction, raw_addr: i64) -> Result<usize, Flow> {
+    // Keep proof handling behind this existing two-argument boundary: a
+    // live depth argument in the Switch arm spills the ops base in fat LTO.
+    if let Some(target) = func.verified_switch_pc(raw_addr) {
+        return target.ok_or_else(invalid_bytecode_flow);
+    }
+
     let raw_addr = usize::try_from(raw_addr).map_err(|_| {
         signal(
             "error",

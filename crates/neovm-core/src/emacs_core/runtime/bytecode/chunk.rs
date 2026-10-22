@@ -40,8 +40,15 @@ struct DecodedGnuCode {
 /// Keeping the cell behind a box costs one pointer in every bytecode object
 /// and allocates the synchronization state only for GNU-backed functions.
 #[derive(Debug)]
+#[repr(C)]
 pub(crate) struct LazyGnuCode {
+    // Keep this first, with DecodedGnuCode's original payload unchanged:
+    // run_loop inlines its projections, and their layout affects regalloc.
     decoded: OnceLock<DecodedGnuCode>,
+    /// Immutable proof shared by closure clones and concurrent readers.
+    /// Initialized inside `decoded.get_or_init`, before publishing decoded;
+    /// every reader acquires decoded before consulting this sibling cell.
+    proof: OnceLock<super::decode::StackProof>,
 }
 
 #[cfg(test)]
@@ -57,16 +64,17 @@ impl LazyGnuCode {
     fn new() -> Self {
         Self {
             decoded: OnceLock::new(),
+            proof: OnceLock::new(),
         }
     }
 
     #[cold]
     #[inline(never)]
-    fn decode(
+    fn decode<'a>(
         &self,
         raw_bytes: &[u8],
         published_constants_len: usize,
-        entry_depth: impl FnOnce() -> Option<usize>,
+        verifier_inputs: impl FnOnce() -> (Option<usize>, &'a [Value]),
         max_stack: usize,
     ) -> &DecodedGnuCode {
         self.decoded.get_or_init(|| {
@@ -80,8 +88,27 @@ impl LazyGnuCode {
                 published_constants_len,
             )
             .expect("validated GNU bytecode failed deferred decoding");
-            let stack_verified = entry_depth()
-                .is_some_and(|depth| super::decode::verify_stack_effects(&ops, depth, max_stack));
+            // The published pool is read (never lent mutably) only to admit
+            // `Switch`: its jump tables are hash-table constants, and the
+            // byte-offset map (retained exactly when the stream has a switch)
+            // turns their byte offsets into instruction indices.
+            // Reuse the existing function-reference closure capture to read
+            // the pool on this cold boundary. Passing a slice from inlined
+            // executable_ops would add a live pointer in run_loop.
+            let (entry_depth, published_constants) = verifier_inputs();
+            let proof = entry_depth.and_then(|depth| {
+                super::decode::verify_stack_effects_with_tables(
+                    &ops,
+                    depth,
+                    max_stack,
+                    Some(super::decode::SwitchTables {
+                        constants: published_constants,
+                        offset_map: (!byte_offset_map.is_empty()).then_some(&byte_offset_map[..]),
+                    }),
+                )
+            });
+            let stack_verified = proof.is_some();
+            let _ = self.proof.set(proof.unwrap_or_default());
             DecodedGnuCode {
                 ops,
                 byte_offset_map,
@@ -194,7 +221,7 @@ pub struct ByteCodeFunction {
     /// Whether `verify_stack_effects` proved these eager instructions'
     /// operand-stack behavior against `max_stack` and the entry depth. Not
     /// serialized: recomputed wherever eager instructions are installed. The
-    /// lazy path stores its proof inside the decoded cell instead.
+    /// lazy path stores its proof beside the decoded instructions instead.
     pub(crate) stack_verified: bool,
     /// Constant pool: values referenced by Constant/VarRef/VarSet/etc.
     /// `LispValueVec` so a pdump load can alias the pool directly in the
@@ -497,13 +524,39 @@ impl ByteCodeFunction {
                 lazy.decode(
                     raw_bytes,
                     self.constants.len(),
-                    || self.verifier_entry_depth(),
+                    || (self.verifier_entry_depth(), self.constants.as_slice()),
                     self.max_stack.get(),
                 )
                 .stack_verified
             }
             None => self.stack_verified,
         }
+    }
+
+    /// Resolve a switch hit through the standing proof, if this function has
+    /// one. All its reachable switches share the post-pop depth recorded at
+    /// verification, so this needs no live depth from the dispatch arm.
+    /// A mutated table may name any instruction proven at that fixed depth.
+    ///
+    /// The outer `None` leaves unverified/eager functions with the checked
+    /// resolver's existing behavior. `Some(None)` rejects an unsafe target.
+    #[inline(never)]
+    pub(crate) fn verified_switch_pc(&self, raw: i64) -> Option<Option<usize>> {
+        let lazy = self.lazy_gnu_code.as_ref()?;
+        let decoded = lazy.decoded.get()?;
+        if !decoded.stack_verified {
+            return None;
+        }
+        Some(lazy.proof.get().and_then(|proof| {
+            let raw = usize::try_from(raw).ok()?;
+            let target = decoded
+                .byte_offset_map
+                .binary_search_by_key(&raw, |entry| entry.byte_offset)
+                .ok()
+                .map(|index| decoded.byte_offset_map[index].instruction_index)?;
+            let depth = proof.switch_depth?;
+            proof.proves_depth(target, depth).then_some(target)
+        }))
     }
 
     /// Recompute the operand-stack proof for eager instructions. Call at
@@ -588,7 +641,7 @@ impl ByteCodeFunction {
                         lazy.decode(
                             raw_bytes,
                             self.constants.len(),
-                            || self.verifier_entry_depth(),
+                            || (self.verifier_entry_depth(), self.constants.as_slice()),
                             self.max_stack.get(),
                         )
                     }
@@ -614,7 +667,7 @@ impl ByteCodeFunction {
                         lazy.decode(
                             raw_bytes,
                             self.constants.len(),
-                            || self.verifier_entry_depth(),
+                            || (self.verifier_entry_depth(), self.constants.as_slice()),
                             self.max_stack.get(),
                         )
                     }

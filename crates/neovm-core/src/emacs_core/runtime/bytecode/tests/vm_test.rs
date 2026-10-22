@@ -12601,3 +12601,90 @@ mod fillarray_identity;
 #[cfg(test)]
 #[path = "frame_bindings.rs"]
 mod frame_bindings;
+
+/// `(lambda (x) (switch x TABLE) ...)` as GNU bytes through the deferred
+/// decode, so the proof admits the switch and the function runs in the
+/// VERIFIED driver: `dup; constant table; switch; constant 10; return;
+/// constant 20; return; constant 30; return` -- a miss answers 10, byte
+/// offset 5 answers 20, byte offset 7 answers 30.
+fn deferred_switch_on_arg(table: Value) -> ByteCodeFunction {
+    let mut func = ByteCodeFunction::new(LambdaParams::simple(vec![intern("vm-vsw-x")]));
+    func.lexical = true;
+    func.constants = vec![
+        table,
+        Value::fixnum(10),
+        Value::fixnum(20),
+        Value::fixnum(30),
+    ]
+    .into();
+    func.max_stack = crate::emacs_core::bytecode::StackDepth::for_test(3);
+    func.gnu_bytecode_bytes = Some(crate::tagged::header::LispByteVec::owned(vec![
+        137, 192, 183, 193, 135, 194, 135, 195, 135,
+    ]));
+    func.defer_gnu_decode();
+    func
+}
+
+#[test]
+fn vm_verified_switch_dispatches_through_its_proof() {
+    crate::test_utils::init_test_tracing();
+    let mut eval = Context::new_minimal_vm_harness();
+    let (a, b, c) = (
+        Value::symbol("vm-vsw-a"),
+        Value::symbol("vm-vsw-b"),
+        Value::symbol("vm-vsw-c"),
+    );
+    let func = deferred_switch_on_arg(switch_table(HashTableTest::Eq, &[(a, 5), (b, 7)]));
+    assert!(
+        func.executes_verified_ops(),
+        "a switch whose table values are instruction starts at the switch depth is admitted"
+    );
+    // Several rounds: unplanned, plan-building, then planned dispatch.
+    for _ in 0..4 {
+        assert_eq!(run_switch(&mut eval, &func, a), 20);
+        assert_eq!(run_switch(&mut eval, &func, b), 30);
+        assert_eq!(run_switch(&mut eval, &func, c), 10);
+    }
+}
+
+/// The verified driver follows a jump table mutated after sealing exactly
+/// as far as the proof allows: onto an admitted target, onto any other
+/// instruction proven at the switch's depth (GNU follows it too), and never
+/// onto an instruction at another depth (GNU would corrupt its stack there;
+/// here it is invalid bytecode).
+#[test]
+fn vm_verified_switch_follows_a_mutation_only_onto_a_proven_depth() {
+    crate::test_utils::init_test_tracing();
+    let mut eval = Context::new_minimal_vm_harness();
+    let (a, b, c) = (
+        Value::symbol("vm-vsw-mut-a"),
+        Value::symbol("vm-vsw-mut-b"),
+        Value::symbol("vm-vsw-mut-c"),
+    );
+    let table = switch_table(HashTableTest::Eq, &[(a, 5), (b, 7)]);
+    let func = deferred_switch_on_arg(table);
+    assert!(func.executes_verified_ops());
+    assert_eq!(run_switch(&mut eval, &func, a), 20);
+
+    let remap = |key: Value, offset: i64| {
+        let _ = table.with_hash_table_mut(|ht| {
+            ht.insert(key.to_hash_key(&ht.test), key, Value::fixnum(offset));
+        });
+    };
+    // Onto the other admitted target.
+    remap(a, 7);
+    assert_eq!(run_switch(&mut eval, &func, a), 30);
+    // Onto byte 3 (`constant 10`, the fall-through), proven at the switch's
+    // depth though never a table value at sealing: followed.
+    remap(c, 3);
+    assert_eq!(run_switch(&mut eval, &func, c), 10);
+    // Onto byte 4 (`return`), proven one deeper: refused as invalid bytecode,
+    // not executed with an unproven stack.
+    remap(c, 4);
+    assert!(
+        new_vm(&mut eval).execute(&func, vec![c]).is_err(),
+        "a target at another depth must not run in the verified driver"
+    );
+    // The function itself stays usable afterwards.
+    assert_eq!(run_switch(&mut eval, &func, b), 30);
+}
