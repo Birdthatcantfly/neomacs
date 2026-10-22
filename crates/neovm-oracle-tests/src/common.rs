@@ -1323,6 +1323,56 @@ pub(crate) fn assert_oracle_parity_with_env_expect(
     assert_oracle_parity_expect_with_sandbox(form, expected, &sandbox, EvalProgram::Normalized);
 }
 
+/// Parity of a form together with what the engine wrote to a terminal while
+/// evaluating it.  Each engine run gets its own terminal from `open`, which
+/// also names the env the form finds it under; `observe` reduces that run's
+/// byte stream to the fact under test, which follows the Lisp result in the
+/// expectation.  The byte stream is a redisplay observation like any other
+/// (GNU's term.c decides it), so it is refreshed from GNU and never written
+/// by hand.
+pub(crate) fn assert_oracle_parity_with_terminal_output_expect<T>(
+    form: &str,
+    open: impl Fn() -> (T, Vec<(String, String)>),
+    observe: impl Fn(T) -> String,
+    expected: expect_test::Expect,
+) {
+    ensure_nonempty_form(form).expect("form should not be empty");
+    let eval_program = EvalProgram::Normalized;
+    let run = |engine: &dyn Fn(&OracleSandbox) -> Result<CapturedEvaluation, String>| {
+        let (terminal, env) = open();
+        let env: Vec<(&str, &str)> = env
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let sandbox = oracle_sandbox(form, &[], &project_lisp_dir()).with_extra_env(&env);
+        let evaluation = engine(&sandbox).expect("engine eval should run");
+        format!(
+            "{} {}",
+            inline_expect_payload(&evaluation),
+            observe(terminal)
+        )
+    };
+    let gnu = |sandbox: &OracleSandbox| run_oracle_eval_with_sandbox(sandbox, eval_program);
+    let neo = |sandbox: &OracleSandbox| run_neomacs_binary_eval_with_sandbox(sandbox, eval_program);
+    let assert_parity = |neovm: &str, oracle: &str| {
+        assert_eq!(
+            neovm, oracle,
+            "oracle parity mismatch (result and terminal output) for form: {form}"
+        );
+    };
+    match OracleMode::from_env() {
+        OracleMode::Snapshot => expected.assert_eq(&run(&neo)),
+        OracleMode::Verify => {
+            let oracle = run(&gnu);
+            let neovm = run(&neo);
+            expected.assert_eq(&oracle);
+            assert_parity(&neovm, &oracle);
+        }
+        OracleMode::Refresh => expected.assert_eq(&run(&gnu)),
+        OracleMode::Live => assert_parity(&run(&neo), &run(&gnu)),
+    }
+}
+
 /// Like [`assert_oracle_parity_expect`], but runs both engines under a frozen
 /// wall clock ([`ORACLE_FROZEN_TIME`]) via libfaketime. Use this for forms
 /// whose output embeds the run-time date/time (org-agenda "today", `%t`/`%U`
