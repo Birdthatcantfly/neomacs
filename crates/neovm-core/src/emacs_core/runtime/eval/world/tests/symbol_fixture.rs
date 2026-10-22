@@ -101,3 +101,34 @@ impl Context {
         // ready owns the same World until after the body and keeper teardown.
     }
 }
+
+impl Baton {
+    /// Assertion-only root ledger. Requires the real stop-all authority and
+    /// returns opaque words, never cells or descriptors. The normal collector
+    /// still enumerates the complete World through its production root path.
+    pub(crate) fn symbol_root_ledger_for_test(
+        &self,
+        stopped: &crate::tagged::gc::AllStopped<'_>,
+    ) -> Result<(Vec<usize>, Vec<usize>), crate::tagged::gc::RendezvousError> {
+        use crate::gc_trace::GcTrace;
+        use crate::tagged::gc::{RegistrationError, RendezvousError};
+
+        if !self.held_here() {
+            return Err(RegistrationError::WrongThread.into());
+        }
+        stopped.check_world_roots(self.parallel_heap_identity())?;
+        let table = self
+            .world
+            .thread_projections
+            .try_borrow()
+            .map_err(|_| RendezvousError::Busy)?;
+        let mut projections = Vec::new();
+        table.trace_roots(&mut |value| projections.push(value.bits()));
+        let mut symbols = Vec::new();
+        // SAFETY: original retained World root, matching AllStopped, zero
+        // symbol authority, and no overlapping Context/owner/collector view.
+        unsafe { &*self.world.obarray.get() }
+            .trace_roots_with(&mut |value| symbols.push(value.bits()));
+        Ok((symbols, projections))
+    }
+}

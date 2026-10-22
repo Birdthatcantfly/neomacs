@@ -248,5 +248,6 @@ enum Step {
     Retry,
 }
 
+mod gc;
 mod tests;
 mod void;
