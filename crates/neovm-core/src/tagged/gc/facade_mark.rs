@@ -354,6 +354,12 @@ impl ConcurrentMarkCapture<'_> {
     }
 }
 
+impl Drop for QuiescentCollector<'_> {
+    fn drop(&mut self) {
+        self.heap.restore_store_after_quiescent_loan();
+    }
+}
+
 impl QuiescentCollector<'_> {
     /// Cold registration admission keeps this exclusive heap loan in its era.
     #[cold]
@@ -570,6 +576,9 @@ impl TaggedHeap {
         if self.first_cycle_concurrent {
             return Err(CollectorQuiescenceError::PendingPartition);
         }
+        // Detach while this legitimate heap loan still owns the scalar
+        // fields. Later root-only TLS retirement must remain address-only.
+        self.detach_store_protocol();
         Ok(QuiescentCollector {
             heap: self,
             _owner: PhantomData,

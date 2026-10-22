@@ -1532,18 +1532,20 @@ fn run_concurrent_mark_impl<const MAJOR: bool, const SYMBOLS: bool, E: ClaimExte
 ///
 /// All production installers use this form. Root-owning test fixtures use it
 /// too; the legacy borrow installer is restricted to test builds.
-pub(crate) fn set_tagged_heap_root(mut root: std::ptr::NonNull<TaggedHeap>) {
+pub(crate) fn set_tagged_heap_root(root: std::ptr::NonNull<TaggedHeap>) {
     // SAFETY: the caller supplies the live allocation's root pointer.
     if !tagged_heap_is_current(unsafe { root.as_ref() }) {
         super::super::collection_reads::reset_recent_reads_for_heap_installation();
     }
+    // Attach before deriving the temporary heap loan used by mirror refresh.
+    unsafe { attach_store_protocol(root) };
     TAGGED_HEAP.with(|h| h.set(root.as_ptr()));
     // The mirrors below need a `&mut`. Deriving it from the root (rather than
     // from a caller's borrow) is what leaves the stored root tag intact: a
     // sibling reborrow pops only its predecessor, never the root itself.
     // SAFETY: the root is live and the caller has exclusive access to the
     // heap at installation time; no TLS-derived access is live here.
-    sync_heap_tls_mirrors(unsafe { root.as_mut() });
+    unsafe { sync_heap_tls_mirrors(root.as_ptr()) };
 }
 
 /// Legacy borrow installer for test fixtures awaiting TestHeap migration.
@@ -1558,47 +1560,49 @@ pub fn set_tagged_heap(heap: &mut TaggedHeap) {
     if !tagged_heap_is_current(heap) {
         super::super::collection_reads::reset_recent_reads_for_heap_installation();
     }
+    // Legacy tests retain their existing borrow-derived heap contract.
+    unsafe { attach_store_protocol(std::ptr::NonNull::from(&mut *heap)) };
     TAGGED_HEAP.with(|h| h.set(heap as *mut TaggedHeap));
-    sync_heap_tls_mirrors(heap);
+    unsafe { sync_heap_tls_mirrors(heap as *mut TaggedHeap) };
 }
 
 /// Refresh the per-heap TLS mirrors after the allocation slot was stored.
-fn sync_heap_tls_mirrors(heap: &mut TaggedHeap) {
-    // Install the World's stable observation owner before any envelope query.
-    // Green carries this same handle before creating or resuming a Context.
-    heap._satb_layout_reserve
-        .observations()
-        .install(heap.collection_dump_window());
-    super::super::collection_reads::with_store(|store| {
-        // Copy the installed provenance root, never this temporary heap loan.
-        store.heap.set(TAGGED_HEAP.with(Cell::get));
-    });
-    TAGGED_HEAP_ID.with(|identity| identity.set(Some(heap.identity())));
-    TAGGED_HEAP_WRITE_TRACKING_MODE.with(|mode| mode.set(heap.write_tracking_mode()));
-    TAGGED_HEAP_PARTITION_ACTIVE.with(|p| p.set(heap.partition_dump));
-    TAGGED_HEAP_CONCURRENT_ACTIVE.with(|c| c.set(heap.concurrent_mark_running));
-    TAGGED_HEAP_CONCURRENT_HASH_ACTIVE.with(|active| {
-        active.set(
-            heap.concurrent_mark_running
-                && heap.concurrent_claims()
-                && heap.concurrent_hash_snapshot().is_some(),
-        );
-    });
-    TAGGED_HEAP_DUMP_SPAN.with(|s| s.set((heap.dump_addr_lo, heap.dump_addr_hi)));
-    // The barrier window is re-derived, not restored: this is its
-    // panic-recovery point, as for the concurrent flag above.
-    let window = heap.barrier_window();
-    let observed =
-        super::super::collection_reads::compiled_observation_gate(heap.collection_dump_window());
-    heap.set_compiled_barrier_window(window, observed);
-    TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.set(window));
-    TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.set(heap.cons_barrier_window(window)));
-    super::super::collection_reads::with_store(|store| {
-        store.publish_windows(heap.cons_barrier_window(window), window);
-    });
-    // The remembered cache belongs to this heap's mutator. Reinstallation
-    // invalidates repeat-owner rejects, just as the former TLS cache did.
-    heap.current_mutator_gc_mut().remembered_cache.fill(0);
+unsafe fn sync_heap_tls_mirrors(root: *mut TaggedHeap) {
+    // End each heap loan before an observation-owner access can resolve its
+    // inline home through the saved allocation root. Never reuse a sibling
+    // &mut heap loan across those accesses.
+    let (owner, dump) = {
+        let heap = unsafe { &*root };
+        (
+            heap._satb_layout_reserve.observations().clone(),
+            heap.collection_dump_window(),
+        )
+    };
+    owner.install(dump);
+    let observed = super::super::collection_reads::compiled_observation_gate(dump);
+    {
+        let heap = unsafe { &mut *root };
+        TAGGED_HEAP_ID.with(|identity| identity.set(Some(heap.identity())));
+        TAGGED_HEAP_WRITE_TRACKING_MODE.with(|mode| mode.set(heap.write_tracking_mode()));
+        TAGGED_HEAP_PARTITION_ACTIVE.with(|p| p.set(heap.partition_dump));
+        TAGGED_HEAP_CONCURRENT_ACTIVE.with(|c| c.set(heap.concurrent_mark_running));
+        TAGGED_HEAP_CONCURRENT_HASH_ACTIVE.with(|active| {
+            active.set(
+                heap.concurrent_mark_running
+                    && heap.concurrent_claims()
+                    && heap.concurrent_hash_snapshot().is_some(),
+            );
+        });
+        TAGGED_HEAP_DUMP_SPAN.with(|s| s.set((heap.dump_addr_lo, heap.dump_addr_hi)));
+        let window = heap.barrier_window();
+        heap.set_compiled_barrier_window(window, observed);
+        TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.set(window));
+        TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.set(heap.cons_barrier_window(window)));
+        // This is the legitimate current loan, not the retained sibling root.
+        unsafe { heap.store.assume_init_ref() }
+            .publish_windows(heap.cons_barrier_window(window), window);
+        heap.current_mutator_gc_mut().remembered_cache.fill(0);
+    }
     clear_barrier_cache(&TAGGED_HEAP_SATB_CACHE);
 }
 
@@ -1617,6 +1621,7 @@ fn sync_heap_tls_mirrors(heap: &mut TaggedHeap) {
 /// drop hook: an owner whose heap was already displaced by a later
 /// `set_tagged_heap` leaves the newer installation alone.
 pub fn clear_tagged_heap_if_installed(heap: &TaggedHeap) {
+    heap.detach_store_protocol();
     clear_tagged_heap_root_if_installed(std::ptr::NonNull::from(heap));
 }
 
@@ -1649,7 +1654,55 @@ pub(crate) fn clear_tagged_heap_root_if_installed(root: std::ptr::NonNull<Tagged
     });
 }
 
+// SAFETY: caller supplies the allocation's stable provenance root, with no
+// temporary heap reference retained across the protocol transfer.
+unsafe fn attach_store_protocol(root: std::ptr::NonNull<TaggedHeap>) {
+    let owner = unsafe { root.as_ref() }
+        ._satb_layout_reserve
+        .observations()
+        .clone();
+    let destination = unsafe { std::ptr::addr_of_mut!((*root.as_ptr()).store).cast() };
+    unsafe { owner.attach(root, std::ptr::NonNull::new_unchecked(destination)) };
+}
+
 impl TaggedHeap {
+    /// Called through a legitimate loan before collector admission or Drop.
+    /// Displaced heaps also retire their inline home before storage is freed.
+    pub(super) fn detach_store_protocol(&self) {
+        let Some(owner) = self._satb_layout_reserve.existing_observations() else {
+            return;
+        };
+        // SAFETY: this loan addresses the current (possibly moved) heap.
+        // An unattached heap does not read its uninitialized tail.
+        unsafe { owner.detach(self.store.as_ptr()) };
+    }
+
+    /// Pair a temporary quiescent loan with restoration only when its serial
+    /// allocation slot is still installed. Era admission clears that slot and
+    /// deliberately stays detached until ordinary owner activation resumes.
+    pub(super) fn restore_store_after_quiescent_loan(&mut self) {
+        let root = TAGGED_HEAP.with(Cell::get);
+        if !std::ptr::eq(root, self) {
+            return;
+        }
+        let Some(owner) = self._satb_layout_reserve.existing_observations().cloned() else {
+            return;
+        };
+        let window = self.barrier_window();
+        let cons = self.cons_barrier_window(window);
+        // SAFETY: root is the installed allocation provenance root; writing
+        // uses this legitimate exclusive loan. The saved root is not read.
+        unsafe {
+            let destination = std::ptr::addr_of_mut!((*root).store).cast();
+            owner.attach_via(
+                std::ptr::NonNull::new_unchecked(root),
+                self.store.as_mut_ptr(),
+                std::ptr::NonNull::new_unchecked(destination),
+            );
+            self.store.assume_init_ref().publish_windows(cons, window);
+        }
+    }
+
     /// Stable World-owned store protocol, retained by this heap's registry.
     /// Obtained on construction/activation, never selected from another World.
     pub(crate) fn store_state_root(
@@ -1757,6 +1810,35 @@ pub fn with_tagged_heap<R>(f: impl FnOnce(&mut TaggedHeap) -> R) -> R {
     })
 }
 
+/// The shared store entry: one const-initialized heap TLS load, then inline
+/// scalar fields at fixed offsets. A null installation is supported by native
+/// symbol stores and admission tests; its outlined path never installs a heap.
+#[inline(always)]
+pub(crate) fn with_store_state<R>(
+    f: impl FnOnce(&super::super::collection_reads::StoreState) -> R,
+) -> R {
+    let heap = TAGGED_HEAP.with(Cell::get);
+    if heap.is_null() {
+        return store_without_heap(f);
+    }
+    // SAFETY: installation initializes the inline protocol before publishing
+    // TLS. No callback or safepoint changes installation during a slot store.
+    f(unsafe { &*std::ptr::addr_of!((*heap).store).cast() })
+}
+
+#[cold]
+#[inline(never)]
+fn store_without_heap<R>(f: impl FnOnce(&super::super::collection_reads::StoreState) -> R) -> R {
+    super::super::collection_reads::with_store(|store| {
+        // An uninstalled heap has no GC barrier. Cold publication to a parked
+        // heap can refresh its saved windows; the null entry still must not
+        // infer a live GEN1 heap from such a cons-window mirror.
+        store.heap.set(std::ptr::null_mut());
+        store.publish_windows(BarrierWindow::NONE, BarrierWindow::NONE);
+        f(store)
+    })
+}
+
 /// Central mutation hook for bulk writes to the tagged heap.
 ///
 /// `#[inline(always)]`, like the whole inline half of the barrier: this is
@@ -1784,6 +1866,17 @@ pub fn note_heap_slot_write(
     slot: usize,
     value: TaggedValue,
 ) {
+    with_store_state(|store| note_heap_slot_write_in_store(store, owner, kind, slot, value));
+}
+
+#[inline(always)]
+pub(crate) fn note_heap_slot_write_in_store(
+    store: &super::super::collection_reads::StoreState,
+    owner: TaggedValue,
+    kind: HeapWriteKind,
+    slot: usize,
+    value: TaggedValue,
+) {
     if owner.is_cons() {
         let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
         // The precomputed mirror comes first: in GEN0 it equals the real
@@ -1791,14 +1884,14 @@ pub fn note_heap_slot_write(
         // path pays one address test. In GEN1 the mirror is ALL, so every
         // cons store enters the filter below — where main called the cons
         // slow path unconditionally.
-        if !TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get().covers(addr)) {
+        if !store.windows.cons_window.get().covers(addr) {
             return;
         }
         // A real-window hit takes the full barrier in both generations: an
         // immediate overwrite still needs its preimage during SATB. GEN0's
         // mirror equals the real window, so a GEN0 owner admitted above
         // always hits here; only GEN1 can miss.
-        if TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr)) {
+        if store.windows.window.get().covers(addr) {
             note_heap_write_slow(owner, kind, Some(slot), Some(value));
             return;
         }
@@ -1816,8 +1909,7 @@ pub fn note_heap_slot_write(
         // barrier instead (b122: specbind_cached +133 instructions, setcdr
         // call sites inlined away). Young-block stores — the hot
         // generational case — still return without any call.
-        let ptr = TAGGED_HEAP.with(Cell::get);
-        debug_assert!(!ptr.is_null());
+        let ptr = store.heap.get();
         // SAFETY: the protocol proof above establishes a live installed
         // heap, borrowed only for non-allocating atomic metadata accesses.
         let heap = unsafe { &*ptr };
@@ -1826,7 +1918,18 @@ pub fn note_heap_slot_write(
         }
         return;
     }
-    if barrier_gate(owner) {
+    if owner.is_heap_object()
+        && (store
+            .windows
+            .window
+            .get()
+            .covers(owner.bits() & !crate::tagged::value::TAG_MASK)
+            || unsafe {
+                GcHeader::needs_remembering(
+                    (owner.bits() & !crate::tagged::value::TAG_MASK) as *const GcHeader,
+                )
+            })
+    {
         let addr = owner.bits() & !crate::tagged::value::TAG_MASK;
         // Preserve GEN0's persistent owner bookkeeping. GEN0's mirror equals
         // the real window, so its length is never ALL: one length test and
@@ -1834,8 +1937,8 @@ pub fn note_heap_slot_write(
         // An ALL mirror proves GEN1 installed, where an immediate outside
         // the real window creates no old-to-young edge and needs no
         // bookkeeping; real-window writes retain it.
-        if TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.get().len()) == usize::MAX {
-            if value.is_fixnum() && !TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.get().covers(addr)) {
+        if store.windows.cons_window.get().len() == usize::MAX {
+            if value.is_fixnum() && !store.windows.window.get().covers(addr) {
                 return;
             }
         }

@@ -85,9 +85,9 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
            which is required by `BufferManager: Send`
            `*mut MarkerObj: Send`
            which is required by `BufferManager: Send`
-           `Cell<usize>: Sync`
-           which is required by `BufferManager: Send`
            `std::sync::mpsc::Receiver<gc::gc_thread::ConcurrentMarkResult>: Sync`
+           which is required by `BufferManager: Send`
+           `Cell<usize>: Sync`
            which is required by `BufferManager: Send`
            `*mut u8: Send`
            which is required by `BufferManager: Send`
@@ -108,6 +108,8 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
            `Rc<RefCell<shared::SharedUndoStateInner>>: Send`
            which is required by `BufferManager: Send`
            `Rc<Cell<*const ()>>: Send`
+           which is required by `BufferManager: Send`
+           `*mut TaggedHeap: Send`
            which is required by `BufferManager: Send`
            `*const (): Sync`
            which is required by `BufferManager: Send`
@@ -135,6 +137,8 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
            which is required by `BufferManager: Send`
            `*mut BignumObj: Send`
            which is required by `BufferManager: Send`
+           `NonNull<[Cell<usize>; 8192]>: Send`
+           which is required by `BufferManager: Send`
            `NonNull<LispBufferLocalValue>: Send`
            which is required by `BufferManager: Send`
            `NonNull<LispFwd>: Send`
@@ -150,6 +154,10 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
            `*mut VecLikeHeader: Sync`
            which is required by `BufferManager: Send`
            `*mut StringObj: Sync`
+           which is required by `BufferManager: Send`
+           `OnceCell<collection_reads::store_state::ObservationWorld>: Sync`
+           which is required by `BufferManager: Send`
+           `Cell<*mut TaggedHeap>: Sync`
            which is required by `BufferManager: Send`
            `Rc<()>: Send`
            which is required by `BufferManager: Send`
@@ -177,6 +185,18 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
            which is required by `BufferManager: Send`
            `Rc<Cell<*const ()>>: Sync`
            which is required by `BufferManager: Send`
+           `Cell<u64>: Sync`
+           which is required by `BufferManager: Send`
+           `Cell<NonNull<[Cell<usize>; 8192]>>: Sync`
+           which is required by `BufferManager: Send`
+           `Cell<collection_reads::JournalPolicy>: Sync`
+           which is required by `BufferManager: Send`
+           `Cell<bool>: Sync`
+           which is required by `BufferManager: Send`
+           `Cell<gc::barrier_window::BarrierWindow>: Sync`
+           which is required by `BufferManager: Send`
+           `Rc<collection_reads::store_state::WorldObservations>: Send`
+           which is required by `BufferManager: Send`
            `*mut VectorObj: Sync`
            which is required by `BufferManager: Send`
            `*mut ByteCodeObj: Sync`
@@ -203,13 +223,13 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
            which is required by `BufferManager: Send`
            `(dyn std::any::Any + 'static): Send`
            which is required by `BufferManager: Send`
+           `UnsafeCell<TaggedValue>: Sync`
+           which is required by `BufferManager: Send`
            `*const AtomicTaggedValue: Sync`
            which is required by `BufferManager: Send`
            `*const TaggedValue: Sync`
            which is required by `BufferManager: Send`
            `*const CharTableObj: Sync`
-           which is required by `BufferManager: Send`
-           `UnsafeCell<TaggedValue>: Sync`
            which is required by `BufferManager: Send`
            `(dyn for<'a> Fn(&'a LispString) -> Vec<LispString> + 'static): Send`
            which is required by `BufferManager: Send`

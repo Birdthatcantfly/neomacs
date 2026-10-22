@@ -422,10 +422,16 @@ impl TaggedHeap {
         TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.set(self.cons_barrier_window(window)));
         // Same publication edge as the cold TLS mirrors. Only the executing
         // World or a collector holding its stopped handshake may write Cells.
-        let store = self.store_state_root();
-        // SAFETY: the cold registry retains the shared allocation; only its
-        // interior-mutable window fields are changed by this protocol owner.
-        unsafe { store.as_ref() }.publish_windows(self.cons_barrier_window(window), window);
+        let owner = self._satb_layout_reserve.observations();
+        if owner.is_detached() {
+            // The detached home is outside this heap loan.
+            unsafe { owner.root().as_ref() }
+                .publish_windows(self.cons_barrier_window(window), window);
+        } else {
+            // Read the initialized tail through this legitimate heap loan.
+            unsafe { self.store.assume_init_ref() }
+                .publish_windows(self.cons_barrier_window(window), window);
+        }
     }
 
     /// Test hook: arm or disarm the concurrent SATB barrier exactly as

@@ -345,34 +345,10 @@ impl CanonicalEmptyStrings {
 }
 
 /// The tagged pointer heap. Owns all heap-allocated Lisp objects.
+// Freeze the existing physical field order before appending the store ABI.
+// The shipping offsets are pinned against the pre-storefast DWARF table.
+#[repr(C)]
 pub struct TaggedHeap {
-    /// Collector-owned generation state; mutator logs live in MutatorGcState.
-    generational: generational::GenState,
-    /// State compiled code reads and writes in place (`jit_state.rs`): the
-    /// allocation region cursors and the barrier window. Reached as
-    /// `vmctx -> Context.tagged_heap -> jit`.
-    jit: JitHeapState,
-    /// Where the open allocation regions came from and their color
-    /// (`alloc_region.rs`); Rust-only bookkeeping.
-    region_book: RegionBook,
-    /// Region refill statistics since the last finished collection.
-    region_stats: RegionStats,
-    /// Process-unique heap identity used by side tables that carry GC-managed
-    /// Lisp values.  It deliberately does not use this heap's address: boxed
-    /// heaps are routinely dropped and recreated by snapshot-based tests, and
-    /// the allocator may reuse an address for a different heap lifetime.
-    identity: HeapIdentity,
-
-    /// The O(1) page directory (`chunk_map.rs`) when `NEOVM_GC_CHUNK_MAP`
-    /// is on (read once, at construction): every cons block and arena page
-    /// has an entry, and the ownership oracles and the GC thread classify
-    /// through it instead of the per-class registries. Shared with the
-    /// arenas (their page writers) and each concurrent mark's job.
-    chunk_map: Option<HeapChunkMap>,
-    /// Cons cell block allocator.
-    cons_blocks: Vec<ConsBlock>,
-    /// Base-address lookup for O(1) cons block ownership and marking.
-    cons_block_index_by_base: FxHashMap<usize, usize>,
     /// Last ordinary cons block used by the mark phase.
     ///
     /// GNU's cons marker derives the block directly from the pointer and has a
@@ -381,82 +357,28 @@ pub struct TaggedHeap {
     /// walking cells from the same block.
     mark_cons_block_cache: Option<ConsBlockCacheEntry>,
 
-    /// Intrusive linked list of YOUNG non-cons heap objects (the nursery).
-    /// Points to the GcHeader of the first object; follow `next` to traverse.
-    /// Every cycle clears+sweeps only this list, so its length bounds the
-    /// per-GC clear/sweep cost. FLOATS ARE ABSENT: they live in the float
-    /// arena pages (also young, swept by the page sweep) and must never be
-    /// linked here — the list sweeps free with `Box::from_raw`.
-    all_objects: *mut GcHeader,
-    /// Intrusive linked list of TENURED non-cons heap objects (the old
-    /// generation). Filled at first-cycle promotion (`promote_and_blacken`);
-    /// these are permanently black and are NEVER cleared or swept, so the
-    /// minor-GC walk skips them entirely. Freed only at heap teardown.
-    tenured_objects: *mut GcHeader,
-    /// Exact address set for ordinary non-cons object headers.
-    ///
-    /// GNU's GC reaches ordinary heap ownership through allocator metadata and
-    /// dumped-object ownership through `pdumper_object_p` range metadata. Keep
-    /// the same fast-path split here: mark-time checks must not scan
-    /// `all_objects`.
-    non_cons_object_addrs: FxHashSet<usize>,
-    /// Task #7 stage 2a (Fix A) INCREMENTAL VECTOR REGISTRY: the exact
-    /// `VecLikeType::Vector` subset of `non_cons_object_addrs`, maintained
-    /// incrementally at the link chokepoint (`link_veclike`) and the sweep
-    /// free sites (`unregister_vector_object`), so `launch_concurrent_mark`
-    /// builds the Tier-B `VectorScanSnapshot` by iterating only the live
-    /// vectors instead of filtering the whole non-cons set (~94K entries)
-    /// inside the world-stopped start handshake. INVARIANT (asserted at every
-    /// launch under `cfg(test)` / `NEOVM_GC_VERIFY_PARTITION=1`): equals the
-    /// set of live owned Vector objects at every handshake.
-    vector_object_addrs: FxHashSet<usize>,
-
     /// The single mutator's allocation accounting and barrier buffers.
     mutator_gc: MutatorGcState,
-
-    /// GC threshold in approximate Lisp heap bytes.
-    gc_threshold: usize,
-    /// When true, `gc_threshold` was explicitly overridden by tests or host
-    /// code and should not be recomputed from Lisp-visible GC variables.
-    gc_threshold_overridden: bool,
-    /// Approximate bytes retained by the live heap after the last sweep.
-    live_bytes: usize,
-
-    /// Mark-start pacing state — INSTRUMENTATION ONLY. The reactive
-    /// `must_finish` cap (`bytes_since_gc > gc_threshold*4`, checked by the
-    /// evaluator while a concurrent mark runs) force-terminates a mark
-    /// synchronously — a full STW residual drain. Each terminated mark
-    /// measures its window's allocation rate and wall duration into EWMAs;
-    /// `pace_lead_bytes` (rate x duration) projects the next window's
-    /// allocation, i.e. how close the workload runs to that cap. A trigger
-    /// that started marks early at `cap - lead` was built and then REVERTED
-    /// after measurement: on the replay-storm recipes the lead never
-    /// exceeded ~2% of threshold in debug and ~10.2% in release (313
-    /// concurrent starts probed, 0 activations, 0 must_finish — release
-    /// marking outruns allocation 40-50x, structural ceiling ~4-10% of the
-    /// 300% activation bar). Reintroducing it is a two-line swap in
-    /// `gc_safe_point_exact_should_collect` (see the ladder task-3/5
-    /// reports); the go-criterion is a real workload whose traced
-    /// `mark_window` lead approaches `3x threshold` or any nonzero
-    /// `must_finish_count` from this always-on field detector.
-    /// Lifetime count of forced (cap-hit) mark terminations.
-    must_finish_count: u64,
-    /// Set by `note_must_finish` when the in-flight mark is being cap-forced;
-    /// consumed by `incremental_finish` (skip the biased EWMA sample, escalate
-    /// the lead instead).
-    forced_termination_pending: bool,
-    /// Wall-clock start of the in-flight concurrent mark (stamped at
-    /// `launch_concurrent_mark`, consumed at `incremental_finish`).
-    pace_mark_start: Option<std::time::Instant>,
-    /// `bytes_since_gc` at the in-flight mark's start handshake.
-    pace_mark_start_bytes: usize,
-    /// EWMA (alpha 1/2) of bytes/sec allocated during recent mark windows.
-    pace_alloc_rate_bps: u64,
-    /// EWMA (alpha 1/2) of recent concurrent-mark wall durations, in µs.
-    pace_mark_dur_us: u64,
-    /// Projected allocation during the next mark window (rate x duration),
-    /// recomputed at each clean termination; doubled on a forced one.
-    pace_lead_bytes: usize,
+    /// Stage 1b: the obarray slot count captured at the start handshake, retained
+    /// across the cycle (the snapshot itself is moved into the GC job). At the STW
+    /// termination, the residual re-seed covers new symbols in slots `>= this`
+    /// (interned mid-cycle, never scanned by the GC thread). `None` outside a
+    /// concurrent mark.
+    concurrent_obarray_start_slots: Option<usize>,
+    /// Where the open allocation regions came from and their color
+    /// (`alloc_region.rs`); Rust-only bookkeeping.
+    region_book: RegionBook,
+    /// GNU `empty_unibyte_string` / `empty_multibyte_string`, modeled per heap.
+    /// These handles are permanent runtime roots and mapped dump objects replace
+    /// temporary pre-restore owned values.
+    canonical_empty_strings: CanonicalEmptyStrings,
+    /// Receives when the GC thread has exited its mark loop (so the mutator's
+    /// termination can safely take over the gray queue). Set at start.
+    gc_exited: Option<std::sync::mpsc::Receiver<ConcurrentMarkResult>>,
+    /// Collector-owned generation state; mutator logs live in MutatorGcState.
+    generational: generational::GenState,
+    /// Cons cell block allocator.
+    cons_blocks: Vec<ConsBlock>,
 
     /// Gray worklist for mark phase.
     gray_queue: Vec<TaggedValue>,
@@ -472,10 +394,6 @@ pub struct TaggedHeap {
     /// `mark_and_sweep_weak_table_contents`). Holds raw object pointers, valid
     /// only within a single collection; cleared each cycle.
     weak_hash_tables: Vec<*mut HashTableObj>,
-    /// Membership shadow for `weak_hash_tables`: registration used to dedup
-    /// with a linear contains per table, O(T^2) across a cycle. The vector
-    /// stays authoritative for deterministic sweep order.
-    weak_hash_tables_set: rustc_hash::FxHashSet<*mut HashTableObj>,
     /// Weak hash tables that have become PERMANENT (tenured old generation or
     /// mapped pdump image). The main mark never re-runs `trace_veclike` on a
     /// permanent-black object, so such a table would otherwise never re-register
@@ -486,8 +404,6 @@ pub struct TaggedHeap {
     /// weak_tables` so permanent weak tables are swept against the CURRENT cycle's
     /// marks exactly like young ones. Permanent, so its pointers never dangle.
     permanent_weak_hash_tables: Vec<*mut HashTableObj>,
-    /// Membership shadow for `permanent_weak_hash_tables` (same pattern).
-    permanent_weak_hash_tables_set: rustc_hash::FxHashSet<*mut HashTableObj>,
     /// Every live finalizer object, registered at allocation — the Rust-side
     /// equivalent of GNU's intrusive `finalizers` list (alloc.c). Scanned at
     /// mark termination by `mark_and_queue_doomed_finalizers`: unmarked
@@ -515,12 +431,6 @@ pub struct TaggedHeap {
     /// Stable video ids of `VideoObj` handles reclaimed by the sweep. The
     /// evaluator drains these after collection through `DisplayHost`.
     pending_video_destroys: Vec<neomacs_display_protocol::VideoId>,
-
-    /// One intrusive free list per block. Before sticky thread admission,
-    /// metadata is mutator-exclusive; afterward one mutex serializes every
-    /// head/count and available-block access. Refill is cold.
-    /// Boxed to preserve the inline heap's JIT-visible layout.
-    cons_allocator: ConsAllocatorOwner,
     /// SIZE-CLASS OBJECT ARENAS (non-cons allocator modernization stage 3 +
     /// task 03/3a): every heap float/string/vector/bytecode lives in a
     /// 64KB-aligned `ObjectPage`
@@ -533,10 +443,6 @@ pub struct TaggedHeap {
     /// vectors' drops (`ObjectPage: Drop` — drops live payloads in place).
     float_arena: ObjectArena<FloatObj>,
     string_arena: ObjectArena<StringObj>,
-    /// GNU `empty_unibyte_string` / `empty_multibyte_string`, modeled per heap.
-    /// These handles are permanent runtime roots and mapped dump objects replace
-    /// temporary pre-restore owned values.
-    canonical_empty_strings: CanonicalEmptyStrings,
     vector_arena: ObjectArena<VectorObj>,
     bytecode_arena: ObjectArena<ByteCodeObj>,
     /// Interpreted closures (task 03/3b): 128B class, own arena. Page
@@ -571,13 +477,9 @@ pub struct TaggedHeap {
     /// Vectorlike objects loaded directly from a mapped pdump image.  Their
     /// object headers are in the mapped image, but mark state remains external.
     mapped_veclike_objects: Vec<MappedVecLikeObject>,
-    mapped_veclike_index_by_addr: FxHashMap<usize, usize>,
     /// String objects loaded directly from a mapped pdump image.  Their text
     /// properties can contain Lisp roots, so mark state must be external too.
     mapped_string_objects: Vec<MappedStringObject>,
-    mapped_string_index_by_addr: FxHashMap<usize, usize>,
-    /// Number of live cons cells currently included in `allocated_count`.
-    cons_live_count: usize,
 
     /// Raw pointers to the `markers_head` slot of every live buffer's
     /// `BufferText`. Populated by the caller immediately before
@@ -597,10 +499,194 @@ pub struct TaggedHeap {
     /// indices): `Value::make_buffer` runs ~9K times per org font-lock op
     /// and paid a hash probe per call.
     buffer_registry: Vec<Option<TaggedValue>>,
+    dirty_owners: Vec<TaggedValue>,
+    dirty_writes: Vec<HeapWriteRecord>,
+    /// Stage 2 Tier B CONCURRENT VECTOR SCAN: retired vector backings — the ORIGINAL
+    /// `Vec` of each OWNED vector whose backing was clone-on-write replaced during
+    /// this concurrent mark (`with_vector_data_mut`). The GC thread's snapshot still
+    /// points at these immutable buffers, so they must stay alive until the GC thread
+    /// joins. Drained + dropped in `join_concurrent_mark` (the GC thread has provably
+    /// exited — the only safe free point). Empty unless a clone-on-write fired.
+    retired_vector_buffers: Vec<Vec<super::header::AtomicTaggedValue>>,
+    /// Handshake-pause decomposition (per phase, per root group, size probes).
+    /// Heap-side phases are written where they run; the evaluator fills the
+    /// context-root breakdowns + context-side probes via `handshake_stats_mut`.
+    handshake: HandshakeStats,
+    /// Mapped cons ranges staged by `begin_collection` for the concurrent
+    /// first cycle; `launch_concurrent_mark` moves them into the job.
+    staged_mapped_cons_scan: Option<Vec<(usize, usize)>>,
+    /// Stopped-start mapped veclike backing descriptors (see the job field).
+    staged_mapped_veclikes: Option<MappedVeclikeScanSnapshot>,
+    /// Stage 1b CONCURRENT OBARRAY SCAN: a start-captured obarray chunk snapshot
+    /// staged by the start handshake (`start_concurrent_mark`) just before
+    /// `launch_concurrent_mark`, which moves it into the `ConcurrentMarkJob`. The
+    /// heap cannot reach the Context-side obarray itself, so the snapshot is built
+    /// Context-side and parked here for the launch to consume. `None` except
+    /// between a start handshake and the launch consuming it.
+    pending_obarray_scan: Option<crate::emacs_core::symbol::ObarrayScanSnapshot>,
+    /// Wall-clock start of the in-flight concurrent mark (stamped at
+    /// `launch_concurrent_mark`, consumed at `incremental_finish`).
+    pace_mark_start: Option<std::time::Instant>,
+    /// Base-address lookup for O(1) cons block ownership and marking.
+    cons_block_index_by_base: FxHashMap<usize, usize>,
+    /// Exact address set for ordinary non-cons object headers.
+    ///
+    /// GNU's GC reaches ordinary heap ownership through allocator metadata and
+    /// dumped-object ownership through `pdumper_object_p` range metadata. Keep
+    /// the same fast-path split here: mark-time checks must not scan
+    /// `all_objects`.
+    non_cons_object_addrs: FxHashSet<usize>,
+    /// Task #7 stage 2a (Fix A) INCREMENTAL VECTOR REGISTRY: the exact
+    /// `VecLikeType::Vector` subset of `non_cons_object_addrs`, maintained
+    /// incrementally at the link chokepoint (`link_veclike`) and the sweep
+    /// free sites (`unregister_vector_object`), so `launch_concurrent_mark`
+    /// builds the Tier-B `VectorScanSnapshot` by iterating only the live
+    /// vectors instead of filtering the whole non-cons set (~94K entries)
+    /// inside the world-stopped start handshake. INVARIANT (asserted at every
+    /// launch under `cfg(test)` / `NEOVM_GC_VERIFY_PARTITION=1`): equals the
+    /// set of live owned Vector objects at every handshake.
+    vector_object_addrs: FxHashSet<usize>,
+    /// Membership shadow for `weak_hash_tables`: registration used to dedup
+    /// with a linear contains per table, O(T^2) across a cycle. The vector
+    /// stays authoritative for deterministic sweep order.
+    weak_hash_tables_set: rustc_hash::FxHashSet<*mut HashTableObj>,
+    /// Membership shadow for `permanent_weak_hash_tables` (same pattern).
+    permanent_weak_hash_tables_set: rustc_hash::FxHashSet<*mut HashTableObj>,
+    mapped_veclike_index_by_addr: FxHashMap<usize, usize>,
+    mapped_string_index_by_addr: FxHashMap<usize, usize>,
     window_registry: FxHashMap<u64, TaggedValue>,
     frame_registry: FxHashMap<u64, TaggedValue>,
     timer_registry: FxHashMap<u64, TaggedValue>,
     process_registry: FxHashMap<crate::emacs_core::process::ProcessId, TaggedValue>,
+    dirty_owner_bits: FxHashSet<usize>,
+    /// Persistent remembered set: bits of dumped objects that have been
+    /// mutated and may now hold heap children. Seeded as roots every cycle so
+    /// those heap children stay live. Fed by the write barrier
+    /// (`record_heap_write`). Tiny in practice (few dumped objects are ever
+    /// mutated). Never cleared (conservative retention).
+    mapped_remembered: FxHashSet<usize>,
+    /// Completed owner-local SATB chunks; the marker polls without locking
+    /// when empty. The owning mutator's partial stays in its cold extension.
+    satb_handoff: std::sync::Arc<SatbHandoff>,
+    /// Inert physical reserve for the former heap-wide owner-dedup set.
+    /// Semantic state belongs to each paired SatbMutatorState. Keeping the
+    /// exact field type and position protects GEN0/JIT-visible heap offsets.
+    _satb_owner_layout_reserve: FxHashSet<usize>,
+    /// Owner-confined SATB cold extension reuses the old pointer-sized slot.
+    /// Its Box retains the original NonNull size/alignment/niche; allocation
+    /// and inactive barriers never follow this pointer.
+    _satb_layout_reserve: mutator_gc::MutatorSatbSlot,
+    /// GC thread sets this (Release) when gray + SATB are drained; the mutator
+    /// polls it (Acquire) at safe points to decide when to terminate.
+    gc_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// CONCURRENT STRING MARKING: shared claim counter for the in-flight cycle
+    /// (see `ConcurrentClaimJob::str_claimed`). Reset at `launch_concurrent_mark`,
+    /// folded into `last_concurrent_str_claimed` at `join_concurrent_mark`.
+    concurrent_str_claimed: std::sync::Arc<AtomicUsize>,
+    /// CONCURRENT FLOAT CLAIMS (task 01): shared claim counter for the
+    /// in-flight cycle (see `ConcurrentClaimJob::float_claimed`) + its
+    /// last-completed-cycle fold. Same reset/fold seams as the string pair.
+    concurrent_float_claimed: std::sync::Arc<AtomicUsize>,
+    /// SUBR RECOGNIZE-AND-DROP (task 01): shared drop counter for the
+    /// in-flight cycle (see `ConcurrentClaimJob::subr_dropped`) + its fold.
+    concurrent_subr_dropped: std::sync::Arc<AtomicUsize>,
+    /// CONCURRENT VECTOR-HEADER CLAIMS (task 01): shared claim counter for
+    /// the in-flight cycle (see `ConcurrentClaimJob::vec_claimed`) + fold.
+    concurrent_vec_claimed: std::sync::Arc<AtomicUsize>,
+    /// CONCURRENT BYTECODE CLAIMS (task 01): shared claim counter for the
+    /// in-flight cycle (see `ConcurrentClaimJob::bc_claimed`) + fold.
+    concurrent_bc_claimed: std::sync::Arc<AtomicUsize>,
+    /// Inert physical reserve for former heap-wide string preimage dedup.
+    /// Owner-local sets live in SatbMutatorState; this set stays empty.
+    _satb_string_layout_reserve: FxHashSet<usize>,
+    /// Mutator sets this (Release) to ask the GC thread to finish and exit.
+    gc_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Task #7 stage 2a (Fix B): wakeup latch for the GC thread's idle nap.
+    /// `join_concurrent_mark` notifies it AFTER setting `gc_stop`, so a stop
+    /// request interrupts the nap immediately instead of burning the
+    /// remainder of a fixed 100us sleep (the measured bulk of the
+    /// stop-signal -> thread-exit latency in the termination handshake).
+    gc_wake: std::sync::Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
+    /// Stage 2 Tier B CONCURRENT VECTOR SCAN: per-cycle clone-on-write dedup set,
+    /// keyed on each vector owner's `TaggedValue` bits. On an owner's FIRST bulk
+    /// mutation this cycle we clone+retire its OWNED backing once; later mutations of
+    /// the same owner skip the clone (they touch the already-cloned live backing the
+    /// GC's snapshot does NOT point at). Cleared at every mark start
+    /// (`concurrent_begin`/`begin_collection`). Empty unless a clone-on-write fired.
+    concurrent_cloned_vectors: FxHashSet<usize>,
+    /// State compiled code reads and writes in place (`jit_state.rs`): the
+    /// allocation region cursors and the barrier window. Reached as
+    /// `vmctx -> Context.tagged_heap -> jit`.
+    jit: JitHeapState,
+    /// Region refill statistics since the last finished collection.
+    region_stats: RegionStats,
+    /// Process-unique heap identity used by side tables that carry GC-managed
+    /// Lisp values.  It deliberately does not use this heap's address: boxed
+    /// heaps are routinely dropped and recreated by snapshot-based tests, and
+    /// the allocator may reuse an address for a different heap lifetime.
+    identity: HeapIdentity,
+
+    /// The O(1) page directory (`chunk_map.rs`) when `NEOVM_GC_CHUNK_MAP`
+    /// is on (read once, at construction): every cons block and arena page
+    /// has an entry, and the ownership oracles and the GC thread classify
+    /// through it instead of the per-class registries. Shared with the
+    /// arenas (their page writers) and each concurrent mark's job.
+    chunk_map: Option<HeapChunkMap>,
+
+    /// Intrusive linked list of YOUNG non-cons heap objects (the nursery).
+    /// Points to the GcHeader of the first object; follow `next` to traverse.
+    /// Every cycle clears+sweeps only this list, so its length bounds the
+    /// per-GC clear/sweep cost. FLOATS ARE ABSENT: they live in the float
+    /// arena pages (also young, swept by the page sweep) and must never be
+    /// linked here — the list sweeps free with `Box::from_raw`.
+    all_objects: *mut GcHeader,
+    /// Intrusive linked list of TENURED non-cons heap objects (the old
+    /// generation). Filled at first-cycle promotion (`promote_and_blacken`);
+    /// these are permanently black and are NEVER cleared or swept, so the
+    /// minor-GC walk skips them entirely. Freed only at heap teardown.
+    tenured_objects: *mut GcHeader,
+
+    /// GC threshold in approximate Lisp heap bytes.
+    gc_threshold: usize,
+    /// Approximate bytes retained by the live heap after the last sweep.
+    live_bytes: usize,
+
+    /// Mark-start pacing state — INSTRUMENTATION ONLY. The reactive
+    /// `must_finish` cap (`bytes_since_gc > gc_threshold*4`, checked by the
+    /// evaluator while a concurrent mark runs) force-terminates a mark
+    /// synchronously — a full STW residual drain. Each terminated mark
+    /// measures its window's allocation rate and wall duration into EWMAs;
+    /// `pace_lead_bytes` (rate x duration) projects the next window's
+    /// allocation, i.e. how close the workload runs to that cap. A trigger
+    /// that started marks early at `cap - lead` was built and then REVERTED
+    /// after measurement: on the replay-storm recipes the lead never
+    /// exceeded ~2% of threshold in debug and ~10.2% in release (313
+    /// concurrent starts probed, 0 activations, 0 must_finish — release
+    /// marking outruns allocation 40-50x, structural ceiling ~4-10% of the
+    /// 300% activation bar). Reintroducing it is a two-line swap in
+    /// `gc_safe_point_exact_should_collect` (see the ladder task-3/5
+    /// reports); the go-criterion is a real workload whose traced
+    /// `mark_window` lead approaches `3x threshold` or any nonzero
+    /// `must_finish_count` from this always-on field detector.
+    /// Lifetime count of forced (cap-hit) mark terminations.
+    must_finish_count: u64,
+    /// `bytes_since_gc` at the in-flight mark's start handshake.
+    pace_mark_start_bytes: usize,
+    /// EWMA (alpha 1/2) of bytes/sec allocated during recent mark windows.
+    pace_alloc_rate_bps: u64,
+    /// EWMA (alpha 1/2) of recent concurrent-mark wall durations, in µs.
+    pace_mark_dur_us: u64,
+    /// Projected allocation during the next mark window (rate x duration),
+    /// recomputed at each clean termination; doubled on a forced one.
+    pace_lead_bytes: usize,
+
+    /// One intrusive free list per block. Before sticky thread admission,
+    /// metadata is mutator-exclusive; afterward one mutex serializes every
+    /// head/count and available-block access. Refill is cold.
+    /// Boxed to preserve the inline heap's JIT-visible layout.
+    cons_allocator: ConsAllocatorOwner,
+    /// Number of live cons cells currently included in `allocated_count`.
+    cons_live_count: usize,
 
     /// Cumulative GC statistics.
     gc_collections: usize,
@@ -620,187 +706,20 @@ pub struct TaggedHeap {
     last_clear_cons_us: u64,
     last_clear_noncons_us: u64,
     last_clear_mapped_us: u64,
-
-    /// Owners mutated since the last full collection.
-    ///
-    /// Optional write-observation metadata for tests and introspection.
-    /// Generational remembered sets and concurrent SATB logs are maintained
-    /// separately, independently of this tracking mode.
-    write_tracking_mode: WriteTrackingMode,
-    dirty_owners: Vec<TaggedValue>,
-    /// FIRST-CYCLE-CONCURRENT: armed by the driver (`arm_first_cycle_concurrent`)
-    /// before the first partition cycle's `concurrent_begin`; makes
-    /// `begin_collection` stage the mapped cons ranges instead of enumerating
-    /// them in the handshake and makes the claim job DROP span-inside children.
-    /// Cleared when the cycle completes (`finish_first_partition_cycle`), or by
-    /// a stop-the-world cycle that disarms it (`begin_stw_collection`) and then
-    /// finishes the bootstrap itself in `complete_collection`.
-    first_cycle_concurrent: bool,
-    /// Mapped cons ranges staged by `begin_collection` for the concurrent
-    /// first cycle; `launch_concurrent_mark` moves them into the job.
-    staged_mapped_cons_scan: Option<Vec<(usize, usize)>>,
-    /// Stopped-start mapped veclike backing descriptors (see the job field).
-    staged_mapped_veclikes: Option<MappedVeclikeScanSnapshot>,
-    /// Set while a stop-the-world FIRST partition cycle runs with the image
-    /// pre-marked (`premark_mapped_image`): every mapped object is marked in
-    /// the side tables and the flat seed pushes all their heap children, so
-    /// a root inside the image needs no push. Cleared when the cycle ends.
-    image_premarked: bool,
-    /// TEST-ONLY: mapped veclike traces this heap ran (the first-cycle seed
-    /// and the mark's mapped arm).
-    #[cfg(test)]
-    mapped_veclike_traces: usize,
-    dirty_owner_bits: FxHashSet<usize>,
-    dirty_writes: Vec<HeapWriteRecord>,
-
-    // --- Dump-partition state (treat the immutable pdump image as a permanent
-    // black/tenured region: never clear, re-trace, or sweep it). Gated by
-    // `partition_dump`; default off => identical to the full-trace collector.
-    /// When true, mapped (pdump) objects are born black and never re-traced;
-    /// only mutated dumped objects (`mapped_remembered`) are re-scanned.
-    partition_dump: bool,
-    /// One-time flag: the mapped image has been blackened (all marks set).
-    dump_blackened: bool,
-    /// Persistent remembered set: bits of dumped objects that have been
-    /// mutated and may now hold heap children. Seeded as roots every cycle so
-    /// those heap children stay live. Fed by the write barrier
-    /// (`record_heap_write`). Tiny in practice (few dumped objects are ever
-    /// mutated). Never cleared (conservative retention).
-    mapped_remembered: FxHashSet<usize>,
     /// Address span `[lo, hi)` covering every mapped object, for an O(1) "is
     /// this owner a dumped object?" test in the write-barrier hot path.
     dump_addr_lo: usize,
     dump_addr_hi: usize,
-    /// One-time flag: this heap has completed a full stop-the-world collection
-    /// (its bootstrap cycle). A dump-less heap runs the concurrent collector
-    /// from its second cycle on — the same one-STW-bootstrap-then-concurrent
-    /// shape as the dump path; see `should_run_concurrent`.
-    bootstrap_collected: bool,
-
-    // --- Young non-cons PARITY MARKS (task #7 stage 2b; tri-state since
-    // P3.1 C2.2). "Marked this cycle" for a YOUNG non-cons `GcHeader` ≡
-    // (mark byte == `mark_parity`), the parity alternating `One ↔ Two`.
-    // `begin_collection` flips the parity instead of pointer-chasing
-    // `all_objects` to clear marks (the walk measured ~98% of the clear
-    // phase). A byte of 0 is unmarked at rest under either parity (new,
-    // mapped and static headers). Cons block bitmaps keep their memset
-    // clear (their `fetch_or` marking is set-only and `count_marked`
-    // popcounts 1-bits, so parity is structurally impossible there); mapped
-    // (pdump) side-table mark state is untouched; tenured objects freeze
-    // their byte at promotion, and every reader that can see one asks
-    // `GcHeader::black_by_generation` BEFORE interpreting the byte
-    // (mark_value owned arms, is_value_marked, unchain_dead_markers,
-    // doomed-finalizer scan, the sweep). Mapped (image) objects never read
-    // their header mark at all: their mark is the side table's, and
-    // `unchain_dead_markers`, which walks header marks, tests the dump span
-    // first.
-    /// Current cycle's mark parity. INIT `Two` so the FIRST
-    /// `begin_collection` flip yields `One`: objects born before any
-    /// collection (at `Two`) and headers at rest (0) both read unmarked in
-    /// the bootstrap cycle, which must trace everything.
-    mark_parity: MarkParity,
-
-    // --- Incremental marking state (step 7). Active on every partitioned cycle
-    // (after the first-cycle promotion); the first cycle and no-dump heaps stay
-    // stop-the-world. Marking is sliced across evaluator safe points using an
-    // incremental-update (Steele) write barrier: dirty owners (written during
-    // marking) are re-traced so no black->white edge survives, and the COMPLETE
-    // root set is re-snapshotted at mark termination.
-    /// True between the start of an incremental mark and its termination/sweep.
-    /// While set, every safe point advances marking by one bounded slice.
-    mark_in_progress: bool,
     /// Accumulated marking time (slices + final drain) for the in-flight
     /// incremental cycle, reported as `mark_us` at termination. Reset at start.
     incremental_mark_us: u64,
-    /// True between a concurrent mark's start and termination handshakes — the
-    /// mutator runs while the GC thread marks.
-    concurrent_mark_running: bool,
-    /// Completed owner-local SATB chunks; the marker polls without locking
-    /// when empty. The owning mutator's partial stays in its cold extension.
-    satb_handoff: std::sync::Arc<SatbHandoff>,
-    /// Inert physical reserve for the former heap-wide owner-dedup set.
-    /// Semantic state belongs to each paired SatbMutatorState. Keeping the
-    /// exact field type and position protects GEN0/JIT-visible heap offsets.
-    _satb_owner_layout_reserve: FxHashSet<usize>,
-    /// Owner-confined SATB cold extension reuses the old pointer-sized slot.
-    /// Its Box retains the original NonNull size/alignment/niche; allocation
-    /// and inactive barriers never follow this pointer.
-    _satb_layout_reserve: mutator_gc::MutatorSatbSlot,
-    /// GC thread sets this (Release) when gray + SATB are drained; the mutator
-    /// polls it (Acquire) at safe points to decide when to terminate.
-    gc_done: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// CONCURRENT STRING MARKING: shared claim counter for the in-flight cycle
-    /// (see `ConcurrentClaimJob::str_claimed`). Reset at `launch_concurrent_mark`,
-    /// folded into `last_concurrent_str_claimed` at `join_concurrent_mark`.
-    concurrent_str_claimed: std::sync::Arc<AtomicUsize>,
     /// Strings the GC thread claimed concurrently in the last completed cycle
     /// (diagnostics; the concurrent counterpart of `last_termination_kinds.string`).
     last_concurrent_str_claimed: usize,
-    /// CONCURRENT FLOAT CLAIMS (task 01): shared claim counter for the
-    /// in-flight cycle (see `ConcurrentClaimJob::float_claimed`) + its
-    /// last-completed-cycle fold. Same reset/fold seams as the string pair.
-    concurrent_float_claimed: std::sync::Arc<AtomicUsize>,
     last_concurrent_float_claimed: usize,
-    /// SUBR RECOGNIZE-AND-DROP (task 01): shared drop counter for the
-    /// in-flight cycle (see `ConcurrentClaimJob::subr_dropped`) + its fold.
-    concurrent_subr_dropped: std::sync::Arc<AtomicUsize>,
     last_concurrent_subr_dropped: usize,
-    /// CONCURRENT VECTOR-HEADER CLAIMS (task 01): shared claim counter for
-    /// the in-flight cycle (see `ConcurrentClaimJob::vec_claimed`) + fold.
-    concurrent_vec_claimed: std::sync::Arc<AtomicUsize>,
     last_concurrent_vec_claimed: usize,
-    /// CONCURRENT BYTECODE CLAIMS (task 01): shared claim counter for the
-    /// in-flight cycle (see `ConcurrentClaimJob::bc_claimed`) + fold.
-    concurrent_bc_claimed: std::sync::Arc<AtomicUsize>,
     last_concurrent_bc_claimed: usize,
-    /// Inert physical reserve for former heap-wide string preimage dedup.
-    /// Owner-local sets live in SatbMutatorState; this set stays empty.
-    _satb_string_layout_reserve: FxHashSet<usize>,
-    /// Mutator sets this (Release) to ask the GC thread to finish and exit.
-    gc_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Task #7 stage 2a (Fix B): wakeup latch for the GC thread's idle nap.
-    /// `join_concurrent_mark` notifies it AFTER setting `gc_stop`, so a stop
-    /// request interrupts the nap immediately instead of burning the
-    /// remainder of a fixed 100us sleep (the measured bulk of the
-    /// stop-signal -> thread-exit latency in the termination handshake).
-    gc_wake: std::sync::Arc<(std::sync::Mutex<()>, std::sync::Condvar)>,
-    /// Receives when the GC thread has exited its mark loop (so the mutator's
-    /// termination can safely take over the gray queue). Set at start.
-    gc_exited: Option<std::sync::mpsc::Receiver<ConcurrentMarkResult>>,
-    /// Stage 1b CONCURRENT OBARRAY SCAN: a start-captured obarray chunk snapshot
-    /// staged by the start handshake (`start_concurrent_mark`) just before
-    /// `launch_concurrent_mark`, which moves it into the `ConcurrentMarkJob`. The
-    /// heap cannot reach the Context-side obarray itself, so the snapshot is built
-    /// Context-side and parked here for the launch to consume. `None` except
-    /// between a start handshake and the launch consuming it.
-    pending_obarray_scan: Option<crate::emacs_core::symbol::ObarrayScanSnapshot>,
-    /// Stage 1b: the obarray slot count captured at the start handshake, retained
-    /// across the cycle (the snapshot itself is moved into the GC job). At the STW
-    /// termination, the residual re-seed covers new symbols in slots `>= this`
-    /// (interned mid-cycle, never scanned by the GC thread). `None` outside a
-    /// concurrent mark.
-    concurrent_obarray_start_slots: Option<usize>,
-    /// Stage 2 Tier B CONCURRENT VECTOR SCAN: retired vector backings — the ORIGINAL
-    /// `Vec` of each OWNED vector whose backing was clone-on-write replaced during
-    /// this concurrent mark (`with_vector_data_mut`). The GC thread's snapshot still
-    /// points at these immutable buffers, so they must stay alive until the GC thread
-    /// joins. Drained + dropped in `join_concurrent_mark` (the GC thread has provably
-    /// exited — the only safe free point). Empty unless a clone-on-write fired.
-    retired_vector_buffers: Vec<Vec<super::header::AtomicTaggedValue>>,
-    /// Stage 2 Tier B CONCURRENT VECTOR SCAN: per-cycle clone-on-write dedup set,
-    /// keyed on each vector owner's `TaggedValue` bits. On an owner's FIRST bulk
-    /// mutation this cycle we clone+retire its OWNED backing once; later mutations of
-    /// the same owner skip the clone (they touch the already-cloned live backing the
-    /// GC's snapshot does NOT point at). Cleared at every mark start
-    /// (`concurrent_begin`/`begin_collection`). Empty unless a clone-on-write fired.
-    concurrent_cloned_vectors: FxHashSet<usize>,
-
-    // --- Incremental sweep state (step 8). After a mark terminates, the sweep
-    // is deferred and drained in bounded slices at later safe points, so the
-    // reclaim is no longer part of the stop-the-world pause. The next mark and
-    // any forced GC finish the sweep first (marks must stay intact until then).
-    /// True while the deferred sweep is draining.
-    sweep_in_progress: bool,
     /// Next heap cons-block index the deferred sweep will reclaim.
     sweep_cons_cursor: usize,
     /// Next float/string/vector arena page the deferred sweep will visit
@@ -866,10 +785,6 @@ pub struct TaggedHeap {
     max_termination_kinds: DrainKinds,
     last_termination_fold_us: u64,
     termination_count: usize,
-    /// Handshake-pause decomposition (per phase, per root group, size probes).
-    /// Heap-side phases are written where they run; the evaluator fills the
-    /// context-root breakdowns + context-side probes via `handshake_stats_mut`.
-    handshake: HandshakeStats,
     /// Scratch: last `seed_internal_runtime_roots` cost/volume. Written every
     /// call; routed to the start or termination slot by `concurrent_begin` /
     /// `reseed_runtime_and_remembered_roots` (which know which handshake ran).
@@ -878,14 +793,102 @@ pub struct TaggedHeap {
     /// Scratch: last `seed_mapped_remembered` cost/volume (owners re-scanned).
     last_remembered_seed_us: u64,
     last_remembered_seed_roots: usize,
-    /// How the concurrent marker handles page vectors (`NEOVM_GC_VEC_SCAN`,
-    /// read once, here at construction): the Tier-B snapshot (the default),
-    /// or, for the F-G measurement only, deferral to the termination.
-    vec_scan: knobs::VecScanMode,
     /// The original census pointer also carries optional U35 cold state.
     /// A claims-only carrier has disabled measurement; the two facilities
     /// retain independent history, snapshot and per-mutator log lifetimes.
     census: Option<Box<GenCensus>>,
+    /// TEST-ONLY: mapped veclike traces this heap ran (the first-cycle seed
+    /// and the mark's mapped arm).
+    #[cfg(test)]
+    mapped_veclike_traces: usize,
+    /// When true, `gc_threshold` was explicitly overridden by tests or host
+    /// code and should not be recomputed from Lisp-visible GC variables.
+    gc_threshold_overridden: bool,
+    /// Set by `note_must_finish` when the in-flight mark is being cap-forced;
+    /// consumed by `incremental_finish` (skip the biased EWMA sample, escalate
+    /// the lead instead).
+    forced_termination_pending: bool,
+
+    /// Owners mutated since the last full collection.
+    ///
+    /// Optional write-observation metadata for tests and introspection.
+    /// Generational remembered sets and concurrent SATB logs are maintained
+    /// separately, independently of this tracking mode.
+    write_tracking_mode: WriteTrackingMode,
+    /// FIRST-CYCLE-CONCURRENT: armed by the driver (`arm_first_cycle_concurrent`)
+    /// before the first partition cycle's `concurrent_begin`; makes
+    /// `begin_collection` stage the mapped cons ranges instead of enumerating
+    /// them in the handshake and makes the claim job DROP span-inside children.
+    /// Cleared when the cycle completes (`finish_first_partition_cycle`), or by
+    /// a stop-the-world cycle that disarms it (`begin_stw_collection`) and then
+    /// finishes the bootstrap itself in `complete_collection`.
+    first_cycle_concurrent: bool,
+    /// Set while a stop-the-world FIRST partition cycle runs with the image
+    /// pre-marked (`premark_mapped_image`): every mapped object is marked in
+    /// the side tables and the flat seed pushes all their heap children, so
+    /// a root inside the image needs no push. Cleared when the cycle ends.
+    image_premarked: bool,
+
+    // --- Dump-partition state (treat the immutable pdump image as a permanent
+    // black/tenured region: never clear, re-trace, or sweep it). Gated by
+    // `partition_dump`; default off => identical to the full-trace collector.
+    /// When true, mapped (pdump) objects are born black and never re-traced;
+    /// only mutated dumped objects (`mapped_remembered`) are re-scanned.
+    partition_dump: bool,
+    /// One-time flag: the mapped image has been blackened (all marks set).
+    dump_blackened: bool,
+    /// One-time flag: this heap has completed a full stop-the-world collection
+    /// (its bootstrap cycle). A dump-less heap runs the concurrent collector
+    /// from its second cycle on — the same one-STW-bootstrap-then-concurrent
+    /// shape as the dump path; see `should_run_concurrent`.
+    bootstrap_collected: bool,
+
+    // --- Young non-cons PARITY MARKS (task #7 stage 2b; tri-state since
+    // P3.1 C2.2). "Marked this cycle" for a YOUNG non-cons `GcHeader` ≡
+    // (mark byte == `mark_parity`), the parity alternating `One ↔ Two`.
+    // `begin_collection` flips the parity instead of pointer-chasing
+    // `all_objects` to clear marks (the walk measured ~98% of the clear
+    // phase). A byte of 0 is unmarked at rest under either parity (new,
+    // mapped and static headers). Cons block bitmaps keep their memset
+    // clear (their `fetch_or` marking is set-only and `count_marked`
+    // popcounts 1-bits, so parity is structurally impossible there); mapped
+    // (pdump) side-table mark state is untouched; tenured objects freeze
+    // their byte at promotion, and every reader that can see one asks
+    // `GcHeader::black_by_generation` BEFORE interpreting the byte
+    // (mark_value owned arms, is_value_marked, unchain_dead_markers,
+    // doomed-finalizer scan, the sweep). Mapped (image) objects never read
+    // their header mark at all: their mark is the side table's, and
+    // `unchain_dead_markers`, which walks header marks, tests the dump span
+    // first.
+    /// Current cycle's mark parity. INIT `Two` so the FIRST
+    /// `begin_collection` flip yields `One`: objects born before any
+    /// collection (at `Two`) and headers at rest (0) both read unmarked in
+    /// the bootstrap cycle, which must trace everything.
+    mark_parity: MarkParity,
+
+    // --- Incremental marking state (step 7). Active on every partitioned cycle
+    // (after the first-cycle promotion); the first cycle and no-dump heaps stay
+    // stop-the-world. Marking is sliced across evaluator safe points using an
+    // incremental-update (Steele) write barrier: dirty owners (written during
+    // marking) are re-traced so no black->white edge survives, and the COMPLETE
+    // root set is re-snapshotted at mark termination.
+    /// True between the start of an incremental mark and its termination/sweep.
+    /// While set, every safe point advances marking by one bounded slice.
+    mark_in_progress: bool,
+    /// True between a concurrent mark's start and termination handshakes — the
+    /// mutator runs while the GC thread marks.
+    concurrent_mark_running: bool,
+
+    // --- Incremental sweep state (step 8). After a mark terminates, the sweep
+    // is deferred and drained in bounded slices at later safe points, so the
+    // reclaim is no longer part of the stop-the-world pause. The next mark and
+    // any forced GC finish the sweep first (marks must stay intact until then).
+    /// True while the deferred sweep is draining.
+    sweep_in_progress: bool,
+    /// How the concurrent marker handles page vectors (`NEOVM_GC_VEC_SCAN`,
+    /// read once, here at construction): the Tier-B snapshot (the default),
+    /// or, for the F-G measurement only, deferral to the termination.
+    vec_scan: knobs::VecScanMode,
     /// Native GEN0's exclusion, exact-cons admission and vector/record window
     /// words, encoded in separate
     /// one-byte Cells. A single size-16 field sorts ahead of the old byte tail
@@ -946,6 +949,9 @@ pub struct TaggedHeap {
     card_table_base_5: Cell<u8>,
     card_table_base_6: Cell<u8>,
     card_table_base_7: Cell<u8>,
+    /// Executing mutator's protocol followed by this heap's stopped-handshake
+    /// window mirrors. The journal allocation stays with ObservationWorld.
+    store: std::mem::MaybeUninit<super::collection_reads::StoreState>,
 }
 
 impl Default for TaggedHeap {
@@ -994,6 +1000,7 @@ impl TaggedHeap {
         // registry and allocator work indexes; no second identity is issued.
         let identity = HeapIdentity::issue();
         let mut heap = Self {
+            store: std::mem::MaybeUninit::uninit(),
             generational: generational::GenState::new(
                 std::env::var("NEOVM_GC_GENERATIONAL").as_deref() != Ok("0"),
             ),
@@ -2784,6 +2791,7 @@ pub(crate) use barrier_window::{
 };
 
 mod jit_state;
+mod store_layout;
 
 mod mutator_gc;
 use mutator_gc::MutatorGcState;

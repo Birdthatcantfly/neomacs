@@ -845,6 +845,9 @@ impl TaggedHeap {
     /// On marker error or retained facade obligations, Drop abandons the
     /// backing allocations instead of reclaiming them.
     pub fn shutdown(mut self) -> Result<(), MarkFinishError> {
+        // The by-value receiver may have moved; resolve the inline bytes
+        // through this legitimate loan before observing or retiring the heap.
+        self.detach_store_protocol();
         // SAFETY: shutdown consumes this heap, and its only remaining access
         // is automatic destruction after the explicit resource teardown.
         unsafe { self.shutdown_owned_resources() }

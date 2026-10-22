@@ -83,9 +83,9 @@ error[E0599]: the associated function or constant `share` exists for struct `Thr
            which is required by `BufferManager: Sync`
            `Cell<CanonicalArm>: Sync`
            which is required by `BufferManager: Sync`
-           `Cell<usize>: Sync`
-           which is required by `BufferManager: Sync`
            `std::sync::mpsc::Receiver<gc::gc_thread::ConcurrentMarkResult>: Sync`
+           which is required by `BufferManager: Sync`
+           `Cell<usize>: Sync`
            which is required by `BufferManager: Sync`
            `*mut u8: Send`
            which is required by `BufferManager: Sync`
@@ -100,6 +100,8 @@ error[E0599]: the associated function or constant `share` exists for struct `Thr
            `*const u8: Send`
            which is required by `BufferManager: Sync`
            `Rc<Cell<*const ()>>: Send`
+           which is required by `BufferManager: Sync`
+           `*mut TaggedHeap: Send`
            which is required by `BufferManager: Sync`
            `*const (): Sync`
            which is required by `BufferManager: Sync`
@@ -129,6 +131,8 @@ error[E0599]: the associated function or constant `share` exists for struct `Thr
            which is required by `BufferManager: Sync`
            `*mut BignumObj: Send`
            which is required by `BufferManager: Sync`
+           `NonNull<[Cell<usize>; 8192]>: Send`
+           which is required by `BufferManager: Sync`
            `NonNull<LispBufferLocalValue>: Send`
            which is required by `BufferManager: Sync`
            `NonNull<LispFwd>: Send`
@@ -142,6 +146,10 @@ error[E0599]: the associated function or constant `share` exists for struct `Thr
            `*mut VecLikeHeader: Sync`
            which is required by `BufferManager: Sync`
            `*mut StringObj: Sync`
+           which is required by `BufferManager: Sync`
+           `OnceCell<collection_reads::store_state::ObservationWorld>: Sync`
+           which is required by `BufferManager: Sync`
+           `Cell<*mut TaggedHeap>: Sync`
            which is required by `BufferManager: Sync`
            `Rc<()>: Send`
            which is required by `BufferManager: Sync`
@@ -166,6 +174,18 @@ error[E0599]: the associated function or constant `share` exists for struct `Thr
            `RefCell<Vec<Option<dynamic_module::GlobalRefEntry>>>: Sync`
            which is required by `BufferManager: Sync`
            `Rc<Cell<*const ()>>: Sync`
+           which is required by `BufferManager: Sync`
+           `Cell<u64>: Sync`
+           which is required by `BufferManager: Sync`
+           `Cell<NonNull<[Cell<usize>; 8192]>>: Sync`
+           which is required by `BufferManager: Sync`
+           `Cell<collection_reads::JournalPolicy>: Sync`
+           which is required by `BufferManager: Sync`
+           `Cell<bool>: Sync`
+           which is required by `BufferManager: Sync`
+           `Cell<gc::barrier_window::BarrierWindow>: Sync`
+           which is required by `BufferManager: Sync`
+           `Rc<collection_reads::store_state::WorldObservations>: Send`
            which is required by `BufferManager: Sync`
            `Rc<RefCell<neovm_core::buffer::buffer_text::BufferTextStorage>>: Send`
            which is required by `BufferManager: Sync`
@@ -201,13 +221,13 @@ error[E0599]: the associated function or constant `share` exists for struct `Thr
            which is required by `BufferManager: Sync`
            `(dyn std::any::Any + 'static): Send`
            which is required by `BufferManager: Sync`
+           `UnsafeCell<TaggedValue>: Sync`
+           which is required by `BufferManager: Sync`
            `*const AtomicTaggedValue: Sync`
            which is required by `BufferManager: Sync`
            `*const TaggedValue: Sync`
            which is required by `BufferManager: Sync`
            `*const CharTableObj: Sync`
-           which is required by `BufferManager: Sync`
-           `UnsafeCell<TaggedValue>: Sync`
            which is required by `BufferManager: Sync`
            `Rc<OverlayList>: Send`
            which is required by `BufferManager: Sync`

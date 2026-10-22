@@ -21,9 +21,9 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
           which is required by `RootBatchReader<'static>: Send`
           `Cell<u8>: Sync`
           which is required by `RootBatchReader<'static>: Send`
-          `Cell<usize>: Sync`
-          which is required by `RootBatchReader<'static>: Send`
           `std::sync::mpsc::Receiver<gc::gc_thread::ConcurrentMarkResult>: Sync`
+          which is required by `RootBatchReader<'static>: Send`
+          `Cell<usize>: Sync`
           which is required by `RootBatchReader<'static>: Send`
           `*mut HashTableObj: Sync`
           which is required by `RootBatchReader<'static>: Send`
@@ -33,9 +33,9 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
           which is required by `RootBatchReader<'static>: Send`
           `Cell<()>: Sync`
           which is required by `RootBatchReader<'static>: Send`
-          `*mut u8: Sync`
-          which is required by `RootBatchReader<'static>: Send`
           `*const (): Sync`
+          which is required by `RootBatchReader<'static>: Send`
+          `*mut u8: Sync`
           which is required by `RootBatchReader<'static>: Send`
           `*mut ConsCell: Sync`
           which is required by `RootBatchReader<'static>: Send`
@@ -45,7 +45,21 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
           which is required by `RootBatchReader<'static>: Send`
           `*mut StringObj: Sync`
           which is required by `RootBatchReader<'static>: Send`
+          `OnceCell<collection_reads::store_state::ObservationWorld>: Sync`
+          which is required by `RootBatchReader<'static>: Send`
+          `Cell<*mut TaggedHeap>: Sync`
+          which is required by `RootBatchReader<'static>: Send`
           `Rc<Cell<*const ()>>: Sync`
+          which is required by `RootBatchReader<'static>: Send`
+          `Cell<u64>: Sync`
+          which is required by `RootBatchReader<'static>: Send`
+          `Cell<NonNull<[Cell<usize>; 8192]>>: Sync`
+          which is required by `RootBatchReader<'static>: Send`
+          `Cell<collection_reads::JournalPolicy>: Sync`
+          which is required by `RootBatchReader<'static>: Send`
+          `Cell<bool>: Sync`
+          which is required by `RootBatchReader<'static>: Send`
+          `Cell<gc::barrier_window::BarrierWindow>: Sync`
           which is required by `RootBatchReader<'static>: Send`
           `*mut VectorObj: Sync`
           which is required by `RootBatchReader<'static>: Send`
@@ -71,13 +85,13 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
           which is required by `RootBatchReader<'static>: Send`
           `Rc<()>: Sync`
           which is required by `RootBatchReader<'static>: Send`
+          `UnsafeCell<TaggedValue>: Sync`
+          which is required by `RootBatchReader<'static>: Send`
           `*const AtomicTaggedValue: Sync`
           which is required by `RootBatchReader<'static>: Send`
           `*const TaggedValue: Sync`
           which is required by `RootBatchReader<'static>: Send`
           `*const CharTableObj: Sync`
-          which is required by `RootBatchReader<'static>: Send`
-          `UnsafeCell<TaggedValue>: Sync`
           which is required by `RootBatchReader<'static>: Send`
           `*const (): Send`
           which is required by `RootBatchReader<'static>: Send`

@@ -249,13 +249,12 @@ fn drain_rejects_current_and_registered_young_loans_before_roots_or_buffers_chan
                 // SAFETY: no worker is running and this is the exclusive
                 // stopped owner. A missing young loan must cause typed refusal
                 // before the callback or any phase/transport mutation.
-                let result = unsafe {
+                let error = match unsafe {
                     heap.drain_to_quiescent(|heap| {
                         callbacks.set(callbacks.get() + 1);
                         heap.seed_root(root);
                     })
-                };
-                let error = match result {
+                } {
                     Err(error) => error,
                     Ok(quiescent) => {
                         drop(quiescent);
@@ -327,14 +326,14 @@ fn drain_young_loan_refusal_precedes_marker_completion_take_or_stop_request() {
             let callbacks = Cell::new(0);
             // SAFETY: this is the sole stopped owner and there is NO actual
             // worker; only the deterministic receiver sentinel is installed.
-            let result = unsafe { heap.drain_to_quiescent(|_| callbacks.set(callbacks.get() + 1)) };
-            let error = match result {
-                Err(error) => error,
-                Ok(quiescent) => {
-                    drop(quiescent);
-                    panic!("a young loan must exclude marker finish");
-                }
-            };
+            let error =
+                match unsafe { heap.drain_to_quiescent(|_| callbacks.set(callbacks.get() + 1)) } {
+                    Err(error) => error,
+                    Ok(quiescent) => {
+                        drop(quiescent);
+                        panic!("a young loan must exclude marker finish");
+                    }
+                };
             assert!(matches!(
                 error,
                 CollectorQuiescenceError::Marker(

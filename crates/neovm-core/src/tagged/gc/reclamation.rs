@@ -67,6 +67,9 @@ impl TaggedHeap {
 
 impl Drop for TaggedHeap {
     fn drop(&mut self) {
+        // Retire the current (possibly moved) inline scalar home before any
+        // abandonment or field destruction can change its backing lifetime.
+        self.detach_store_protocol();
         // Explicit finish is the only blocking completion handoff. Drop
         // cannot establish exclusive ownership while a marker or facade
         // reader obligation remains, so its fallback retains the backing

@@ -15,9 +15,12 @@ impl<'heap> QuiescentCollector<'heap> {
     #[cold]
     #[inline(never)]
     pub(in crate::tagged::gc) fn suspend_cons_storage(self) -> SuspendedConsCollector<'heap> {
-        let identity = self.heap.heap_identity();
+        // The suspended capability retains the original loan. Its Drop
+        // must not restore serial metadata while an era owns the catalog.
+        let mut this = std::mem::ManuallyDrop::new(self);
+        let identity = this.heap.heap_identity();
         SuspendedConsCollector {
-            heap: NonNull::from(self.heap),
+            heap: NonNull::from(&mut *this.heap),
             identity,
             _loan: PhantomData,
             _owner: PhantomData,

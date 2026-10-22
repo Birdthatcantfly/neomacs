@@ -15,7 +15,216 @@ fn record_slot(owner: Value, item: Value) -> bool {
 }
 
 fn journal_policy() -> JournalPolicy {
-    with_store(|store| store.policy.get())
+    with_store(|store| store.mutator.policy.get())
+}
+
+#[test]
+fn storefast_vm_and_tls_stores_do_not_borrow_the_inactive_capture_recorder() {
+    use crate::emacs_core::{builtins, eval::Context};
+
+    let mut context = Context::new_minimal_vm_harness();
+    let cons = Value::cons(Value::NIL, Value::NIL);
+    let vector = Value::vector(vec![Value::NIL]);
+    let record = Value::make_record(vec![Value::NIL]);
+    // Also upgrade the lazy-prefix configuration before exercising the idle
+    // journal-only path; this test makes no assumption about process knobs.
+    let (_, empty) = capture(|| ());
+    assert!(empty.unwrap().unchanged());
+    let before = LispCollectionRevision::current();
+    with_state(|cold| {
+        let _borrow = cold.borrow_mut();
+        assert_eq!(
+            builtins::builtin_setcar_2(&mut context, cons, Value::T).unwrap(),
+            Value::T
+        );
+        assert_eq!(
+            builtins::builtin_setcdr_2(&mut context, cons, Value::T).unwrap(),
+            Value::T
+        );
+        assert_eq!(
+            builtins::builtin_aset_args_in_context(
+                &context,
+                &[vector, Value::fixnum(0), Value::T],
+            )
+            .unwrap(),
+            Value::T
+        );
+        assert_eq!(
+            builtins::builtin_aset_args_in_context(
+                &context,
+                &[record, Value::fixnum(0), Value::T],
+            )
+            .unwrap(),
+            Value::T
+        );
+        cons.set_car(Value::NIL);
+        assert!(vector.set_vector_slot(0, Value::NIL));
+    });
+    assert_eq!(
+        LispCollectionRevision::current().steps_since_for_test(before),
+        6,
+        "both entry points retain every store in the same journal"
+    );
+    assert!(cons.cons_car().is_nil());
+    assert!(cons.cons_cdr().is_t());
+    assert!(vector.as_vector_data().unwrap()[0].is_nil());
+    assert!(record.as_record_data().unwrap()[0].is_t());
+}
+
+#[test]
+fn storefast_null_heap_stores_keep_journal_and_captures_without_installing_a_heap() {
+    use crate::tagged::gc::{
+        TestHeap, clear_tagged_heap_if_installed, current_tagged_heap_identity,
+        tagged_heap_is_installed,
+    };
+    let heap = TestHeap::new();
+    let cons = Value::cons(Value::NIL, Value::NIL);
+    let vector = Value::vector(vec![Value::NIL]);
+    let record = Value::make_record(vec![Value::NIL]);
+    let (_, certificate) = capture(|| {
+        cons.cons_car();
+        vector.as_vector_data();
+        record.as_record_data();
+    });
+    let certificate = certificate.unwrap();
+    assert!(certificate.unchanged());
+    clear_tagged_heap_if_installed(&heap);
+    let before = LispCollectionRevision::current();
+    with_state(|cold| {
+        let _borrow = cold.borrow_mut();
+        cons.set_car(Value::T);
+        assert!(vector.set_vector_slot(0, Value::T));
+        assert!(record.set_record_slot(0, Value::T));
+    });
+    assert_eq!(
+        LispCollectionRevision::current().steps_since_for_test(before),
+        3
+    );
+    assert!(!certificate.unchanged());
+    assert!(!tagged_heap_is_installed());
+    assert_eq!(current_tagged_heap_identity(), None);
+    heap.install();
+    assert_eq!(
+        LispCollectionRevision::current().steps_since_for_test(before),
+        3
+    );
+    assert_eq!(cons.cons_car(), Value::T);
+    assert_eq!(vector.as_vector_data().unwrap()[0], Value::T);
+    assert_eq!(record.as_record_data().unwrap()[0], Value::T);
+
+    let (_, unfinished) = capture(|| {
+        cons.cons_cdr();
+        clear_tagged_heap_if_installed(&heap);
+        cons.set_cdr(Value::T);
+    });
+    assert!(unfinished.is_none());
+    assert!(!tagged_heap_is_installed());
+    heap.install();
+    assert_eq!(cons.cons_cdr(), Value::T);
+}
+
+#[test]
+fn storefast_temporary_collector_loan_restores_one_inline_journal_before_stores_resume() {
+    let heap = crate::tagged::gc::TestHeap::new();
+    let source = Value::cons(Value::NIL, Value::NIL);
+    let (_, certificate) = capture(|| source.cons_car());
+    let certificate = certificate.unwrap();
+    let before = LispCollectionRevision::current();
+    // SAFETY: this fixture is the sole stopped owner, with no active cycle.
+    // The returned collector is dropped before Lisp stores resume.
+    let collector = unsafe { (*heap.root().as_ptr()).drain_to_quiescent(|_| {}) }.unwrap();
+    assert!(certificate.unchanged());
+    drop(collector);
+    source.set_car(Value::T);
+    assert_eq!(
+        LispCollectionRevision::current().steps_since_for_test(before),
+        1
+    );
+    assert!(!certificate.unchanged());
+    assert_eq!(source.cons_car(), Value::T);
+}
+
+/// Small SB/TB fixture: both store entries cross the full tracking barrier
+/// while capture is active, and the same journal validates all certificates.
+#[test]
+fn storefast_shared_stores_with_active_capture_and_full_barrier() {
+    use crate::tagged::gc::{TestHeap, WriteTrackingMode, with_store_state};
+    use crate::tagged::mutate::{
+        set_cons_car_in_store, set_record_slot_in_store, set_string_byte_same_char_count_in_store,
+        set_vector_slot_in_store,
+    };
+    let mut heap = TestHeap::new();
+    let cons = Value::cons(Value::NIL, Value::NIL);
+    let vector = Value::vector(vec![Value::NIL]);
+    let record = Value::make_record(vec![Value::NIL]);
+    let string = Value::string("ab");
+    heap.set_write_tracking_mode(WriteTrackingMode::OwnersAndRecords);
+    let (_, certificate) = capture(|| {
+        cons.cons_car();
+        vector.as_vector_data();
+        record.as_record_data();
+        string.as_lisp_string();
+    });
+    let certificate = certificate.unwrap();
+    assert!(certificate.unchanged());
+    let before = LispCollectionRevision::current();
+    let (_, interrupted) = capture(|| {
+        cons.cons_car();
+        vector.as_vector_data();
+        record.as_record_data();
+        string.as_lisp_string();
+        with_store_state(|store| {
+            assert!(set_cons_car_in_store(store, cons, Value::T));
+            assert!(set_vector_slot_in_store(store, vector, 0, Value::T));
+            assert!(set_record_slot_in_store(store, record, 0, Value::T));
+            assert!(set_string_byte_same_char_count_in_store(
+                store, string, 0, b'x'
+            ));
+        });
+        cons.set_cdr(Value::T);
+        assert!(vector.set_vector_slot(0, Value::NIL));
+        assert!(record.set_record_slot(0, Value::NIL));
+        assert!(string.set_string_byte_same_char_count(1, b'y'));
+    });
+    assert!(interrupted.is_none());
+    assert!(!certificate.unchanged());
+    let after = LispCollectionRevision::current();
+    assert_eq!(after.steps_since_for_test(before), 8);
+    let owners = [cons, vector, record, string, cons, vector, record, string];
+    with_store(|store| {
+        for (offset, owner) in owners.into_iter().enumerate() {
+            let sequence = before.sequence().wrapping_add(offset as u64 + 1);
+            assert_eq!(
+                store.journal()[sequence as usize % JOURNAL_SIZE].get(),
+                owner.bits()
+            );
+        }
+    });
+    assert_eq!(cons.cons_car(), Value::T);
+    assert_eq!(cons.cons_cdr(), Value::T);
+    assert_eq!(vector.as_vector_data().unwrap()[0], Value::NIL);
+    assert_eq!(record.as_record_data().unwrap()[0], Value::NIL);
+    assert_eq!(string.as_lisp_string().unwrap().as_bytes(), b"xy");
+}
+
+#[test]
+fn storefast_string_journal_precedes_projection_and_invalid_calls_are_total() {
+    let _heap = crate::tagged::gc::TestHeap::new();
+    let string = Value::string("ab");
+    let (_, certificate) = capture(|| {
+        assert!(string.set_string_byte_same_char_count(0, b'x'));
+    });
+    let certificate = certificate.unwrap();
+    assert!(certificate.unchanged());
+    assert!(string.set_string_byte_same_char_count(1, b'y'));
+    assert!(!certificate.unchanged());
+    assert!(!string.set_string_byte_same_char_count(usize::MAX, b'z'));
+    assert!(!Value::NIL.set_string_byte_same_char_count(0, b'z'));
+    let (_, interrupted) = capture(|| {
+        string.as_lisp_string();
+        assert!(string.set_string_byte_same_char_count(0, b'z'));
+    });
+    assert!(interrupted.is_none());
 }
 
 #[test]
@@ -303,7 +512,7 @@ fn lazy_prefix_observes_another_mutators_monotonic_history_transition() {
         );
         with_store(|store| {
             let slot = LispCollectionRevision::current().sequence() as usize % JOURNAL_SIZE;
-            assert_eq!(store.writes[slot].get(), source.bits());
+            assert_eq!(store.journal()[slot].get(), source.bits());
         });
         assert_eq!(journal_policy(), JournalPolicy::JournalOnly);
         leaving.wait();

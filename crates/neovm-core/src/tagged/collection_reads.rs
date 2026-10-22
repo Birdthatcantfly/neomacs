@@ -261,7 +261,7 @@ fn unchanged_since(
     }
     (1..=count).all(|offset| {
         let slot = revision.sequence().wrapping_add(offset) as usize % JOURNAL_SIZE;
-        !reads.contains(&store.writes[slot].get())
+        !reads.contains(&store.journal()[slot].get())
     })
 }
 
@@ -285,8 +285,8 @@ impl CollectionReadScope {
         let admitted = with_state(|state| {
             let mut state = state.borrow_mut();
             with_store(|store| {
-                store.policy.set(JournalPolicy::JournalAndObserve);
-                store.observe.set(true);
+                store.mutator.policy.set(JournalPolicy::JournalAndObserve);
+                store.mutator.observe.set(true);
             });
             let overflow = state.captures.len() >= MAX_DEPTH;
             if overflow {
@@ -340,7 +340,7 @@ impl CollectionReadScope {
                 let slot = capture.started.sequence().wrapping_add(offset) as usize % JOURNAL_SIZE;
                 capture
                     .reads
-                    .get(&store.writes[slot].get())
+                    .get(&store.journal()[slot].get())
                     .is_none_or(|read_at| {
                         offset <= read_at.sequence().wrapping_sub(capture.started.sequence())
                     })
@@ -365,12 +365,12 @@ impl CollectionReadScope {
             let capture = state.captures.pop().expect("collection read scope");
             let active = !state.captures.is_empty();
             let store = self.owner.store();
-            store.policy.set(if active {
+            store.mutator.policy.set(if active {
                 JournalPolicy::JournalAndObserve
             } else {
                 JournalPolicy::JournalOnly
             });
-            store.observe.set(active);
+            store.mutator.observe.set(active);
             if self.owner.is_current() {
                 clear_recent_reads();
                 ACTIVE.with(|membership| membership.set(active));
@@ -580,11 +580,39 @@ pub(super) fn record_write(value: TaggedValue, revision: u64) {
     with_store(|store| store.record(value.bits(), revision));
 }
 
+/// A string byte store retains its original journal-before-read order.
+/// Observation is a separate projection after this shared history step.
+#[inline(always)]
+pub(super) fn record_unprojected_write_in_store(store: &StoreState, value: TaggedValue) {
+    if store.mutator.policy.get() == JournalPolicy::BeforeFirstCapture {
+        if !history_required() {
+            return;
+        }
+        store.mutator.policy.set(JournalPolicy::JournalOnly);
+    }
+    let revision = store.advance();
+    store.record(value.bits(), revision);
+}
+
+/// Preserve ordinary projection policy without an idle ACTIVE TLS read.
+#[inline(always)]
+pub(crate) fn observe_store_projection_in_store(store: &StoreState, value: TaggedValue) {
+    if store.mutator.observe.get() {
+        observe_store_projection_active(value);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn observe_store_projection_active(value: TaggedValue) {
+    observe(value);
+}
+
 /// The exact pointer projection performed by the four fused setters. A failed
 /// Cons tag check observes nothing; veclike setters observe every veclike header
 /// before rejecting a subtype. This is deliberately narrower than heap objects.
 #[derive(Clone, Copy)]
-pub(super) enum WriteProjection {
+pub(crate) enum WriteProjection {
     Cons,
     VecLike,
 }
@@ -600,36 +628,55 @@ pub(super) enum WriteProjection {
 /// a header, GC barrier, backing ownership, slot bounds, or the actual store.
 #[inline(always)]
 pub(super) fn record_projected_write(value: TaggedValue, projection: WriteProjection) -> bool {
+    super::gc::with_store_state(|store| record_projected_write_in_store(store, value, projection))
+}
+
+#[inline(always)]
+pub(crate) fn record_projected_write_in_store(
+    store: &StoreState,
+    value: TaggedValue,
+    projection: WriteProjection,
+) -> bool {
     let projected = match projection {
         WriteProjection::Cons => value.is_cons(),
         WriteProjection::VecLike => value.is_veclike(),
     };
+    match store.mutator.policy.get() {
+        JournalPolicy::JournalAndObserve => {
+            record_projected_write_observed(store, value, projected);
+            return projected;
+        }
+        JournalPolicy::BeforeFirstCapture => {
+            if !history_required() {
+                return projected;
+            }
+            store.mutator.policy.set(JournalPolicy::JournalOnly);
+        }
+        JournalPolicy::JournalOnly => {}
+    }
+    let revision = store.advance();
+    store.record(value.bits(), revision);
+    projected
+}
+
+// Capture/recent/envelope TLS and the RefCell are confined to this active
+// path. Owner publication still precedes the write; its first read records
+// the new revision, so a setter-only capture rejects its own mutation.
+#[cold]
+#[inline(never)]
+fn record_projected_write_observed(store: &StoreState, value: TaggedValue, projected: bool) {
+    let recent = projected && recently_observed(value.bits());
+    if projected {
+        store_state::reject_foreign_capture_reads();
+    }
     with_state(|state| {
         let mut state = state.borrow_mut();
-        let observe = match with_store(|store| store.policy.get()) {
-            JournalPolicy::JournalOnly => false,
-            JournalPolicy::JournalAndObserve => true,
-            JournalPolicy::BeforeFirstCapture => {
-                if !history_required() {
-                    return;
-                }
-                with_store(|store| store.policy.set(JournalPolicy::JournalOnly));
-                false
-            }
-        };
-        // Keep capture eligibility ahead of the common journal block. In
-        // JournalOnly, this branches directly to the revision/write pair;
-        // no observation booleans remain live across that block.
-        let recent = observe && projected && recently_observed(value.bits());
-        if observe && projected {
-            store_state::reject_foreign_capture_reads();
-        }
-        if observe && projected && !recent {
+        if projected && !recent {
             publish_observed_owner_in_state(&mut state, value.bits());
         }
-        let revision = LispCollectionRevision::advance();
-        with_store(|store| store.record(value.bits(), revision.sequence()));
-        if observe && projected && !recent {
+        let revision = LispCollectionRevision::from_sequence(store.advance());
+        store.record(value.bits(), revision.sequence());
+        if projected && !recent {
             record_observation(
                 &mut state,
                 value.bits(),
@@ -638,7 +685,6 @@ pub(super) fn record_projected_write(value: TaggedValue, projection: WriteProjec
             );
         }
     });
-    projected
 }
 
 mod store_state;

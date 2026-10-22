@@ -25,9 +25,9 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
           which is required by `ConcurrentMarkCapture<'static>: Send`
           `*mut *mut MarkerObj: Send`
           which is required by `ConcurrentMarkCapture<'static>: Send`
-          `*mut u8: Send`
-          which is required by `ConcurrentMarkCapture<'static>: Send`
           `*const (): Send`
+          which is required by `ConcurrentMarkCapture<'static>: Send`
+          `*mut u8: Send`
           which is required by `ConcurrentMarkCapture<'static>: Send`
           `*mut ConsCell: Send`
           which is required by `ConcurrentMarkCapture<'static>: Send`
@@ -38,6 +38,8 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
           `*mut StringObj: Send`
           which is required by `ConcurrentMarkCapture<'static>: Send`
           `Rc<Cell<*const ()>>: Send`
+          which is required by `ConcurrentMarkCapture<'static>: Send`
+          `*mut TaggedHeap: Send`
           which is required by `ConcurrentMarkCapture<'static>: Send`
           `*mut VectorObj: Send`
           which is required by `ConcurrentMarkCapture<'static>: Send`
@@ -54,4 +56,8 @@ error[E0599]: the associated function or constant `transfer` exists for struct `
           `*mut MarkerObj: Send`
           which is required by `ConcurrentMarkCapture<'static>: Send`
           `*mut BignumObj: Send`
+          which is required by `ConcurrentMarkCapture<'static>: Send`
+          `NonNull<[Cell<usize>; 8192]>: Send`
+          which is required by `ConcurrentMarkCapture<'static>: Send`
+          `Rc<collection_reads::store_state::WorldObservations>: Send`
           which is required by `ConcurrentMarkCapture<'static>: Send`

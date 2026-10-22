@@ -617,30 +617,21 @@ fn compiled_cons_store(cell: Value, value: Value, cdr: bool) -> bool {
     } else {
         false
     };
-    if observed {
-        crate::tagged::gc::TaggedHeap::record_compiled_collection_write(cell.bits());
-    } else {
-        // Complete the first refused store here, then publish its proven
-        // empty gap for later native stores. Ordinary dump, tracking and
-        // concurrent-GC requirements remain authoritative in this helper.
+    if !observed {
+        // Refine the native gap before entering the shared mutation body.
         crate::tagged::gc::neovm_jit_unobserved_collection_owner(cell.bits() as i64);
     }
-    let kind = if cdr {
-        crate::tagged::gc::HeapWriteKind::ConsCdr
-    } else {
-        crate::tagged::gc::HeapWriteKind::ConsCar
-    };
-    crate::tagged::gc::note_heap_slot_write(cell, kind, usize::from(cdr), value);
-    let owner = address as *mut crate::tagged::header::ConsCell;
-    // SAFETY: the Cons tag names a live cell, and the GC barrier completed.
-    unsafe {
-        if cdr {
-            (*owner).set_cdr(value);
-        } else {
-            (*owner).set_car(value);
+    crate::tagged::gc::with_store_state(|store| {
+        if observed {
+            crate::tagged::collection_reads::record_projected_write_in_store(
+                store,
+                cell,
+                crate::tagged::collection_reads::WriteProjection::Cons,
+            );
         }
-    }
-    true
+        // SAFETY: the preceding Cons tag check validated the live owner.
+        unsafe { crate::tagged::mutate::finish_cons_store_in_store(store, cell, value, cdr) }
+    })
 }
 
 #[cold]
@@ -693,24 +684,27 @@ fn aset_fast(array: Value, index: Value, value: Value) -> bool {
         // One pass over what `set_vector_slot` would check again: owned
         // storage (a mapped pdump vector copies itself on the slow path),
         // bounds, a plain vector, the barrier, the store.
-        let obj = array.as_veclike_ptr().unwrap() as *mut crate::tagged::header::VectorObj;
-        // SAFETY: a live vector owner; nothing below runs Lisp or collects.
-        let data = unsafe { &mut (*obj).data };
-        if !data.is_owned() {
+        // veclike_type already performed the original projection read.
+        let obj = (array.bits() & !TAG_MASK) as *mut crate::tagged::header::VectorObj;
+        let data = unsafe { std::ptr::addr_of_mut!((*obj).data) };
+        // End the preparation loan before any journal/barrier/preimage work.
+        if !unsafe { &*data }.is_owned() || idx >= unsafe { &*data }.len() {
             return false;
         }
-        let items = data.as_slice();
-        if idx >= items.len() {
-            return false;
-        }
-        crate::tagged::gc::note_heap_slot_write(
-            array,
-            crate::tagged::gc::HeapWriteKind::VectorSlot,
-            idx,
-            value,
-        );
-        data.store_atomic(idx, value);
-        return true;
+        return crate::tagged::gc::with_store_state(|store| {
+            // SAFETY: owned backing and bounds were validated without a
+            // callback or safe point. Off retains its unjournaled policy.
+            unsafe {
+                crate::tagged::mutate::finish_slot_store_in_store(
+                    store,
+                    array,
+                    crate::tagged::gc::HeapWriteKind::VectorSlot,
+                    idx,
+                    value,
+                    data,
+                )
+            }
+        });
     }
     if array.is_veclike() {
         let (items, record) = match array.veclike_type() {
@@ -774,30 +768,41 @@ fn aset_journaled_vector(
     // no callback or GC safe point between the guards and this mutation.
     let (data, kind) = match unsafe { (*header).type_tag } {
         crate::tagged::header::VecLikeType::Vector => (
-            unsafe { &mut (*(header as *mut crate::tagged::header::VectorObj)).data },
+            unsafe {
+                std::ptr::addr_of_mut!((*(header as *mut crate::tagged::header::VectorObj)).data)
+            },
             crate::tagged::gc::HeapWriteKind::VectorSlot,
         ),
         crate::tagged::header::VecLikeType::Record => (
-            unsafe { &mut (*(header as *mut crate::tagged::header::RecordObj)).data },
+            unsafe {
+                std::ptr::addr_of_mut!((*(header as *mut crate::tagged::header::RecordObj)).data)
+            },
             crate::tagged::gc::HeapWriteKind::RecordSlot,
         ),
         _ => return None,
     };
-    if !data.is_owned() || idx >= data.as_slice().len() {
+    if !unsafe { &*data }.is_owned() || idx >= unsafe { &*data }.len() {
         return Some(false);
     }
     // GEN0 and GEN1 share the observed-owner decision. The remembered-set
     // barrier is note_heap_slot_write below and never depends on history.
-    if journal == crate::tagged::collection_reads::CompiledJournalMode::Eager
+    let record = journal == crate::tagged::collection_reads::CompiledJournalMode::Eager
         || crate::tagged::gc::current_write_tracking_enabled()
-        // The subtype guard above already established this live header.
-        || unsafe { (*header).gc.collection_observed() }
-    {
-        crate::tagged::gc::TaggedHeap::record_compiled_collection_write(array.bits());
-    }
-    crate::tagged::gc::note_heap_slot_write(array, kind, idx, value);
-    data.store_atomic(idx, value);
-    Some(true)
+        || unsafe { (*header).gc.collection_observed() };
+    Some(crate::tagged::gc::with_store_state(|store| {
+        if record {
+            crate::tagged::collection_reads::record_projected_write_in_store(
+                store,
+                array,
+                crate::tagged::collection_reads::WriteProjection::VecLike,
+            );
+        }
+        // SAFETY: subtype, owned backing and bounds were validated above;
+        // no payload loan spans recording or the barrier's preimage reads.
+        unsafe {
+            crate::tagged::mutate::finish_slot_store_in_store(store, array, kind, idx, value, data)
+        }
+    }))
 }
 
 /// `Op::Aset` (GNU `Baset`) from compiled code: VALUE's bits, or

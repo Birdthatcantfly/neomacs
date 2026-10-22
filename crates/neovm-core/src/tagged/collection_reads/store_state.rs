@@ -10,66 +10,96 @@ use std::mem::{MaybeUninit, align_of, offset_of, size_of};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-/// Single home of the store protocol, retained by the World's cold registry
-/// and its carried observation handle. All mutation uses interior mutability;
-/// no `&mut StoreState` or unique Box reborrow can invalidate a Context root.
+/// Mutator-owned fields stay together so registration can own this block
+/// when several mutators eventually share one heap. Only the Baton holder
+/// writes them today. The retained World owns the out-of-line ring allocation.
 #[repr(C)]
-pub(crate) struct StoreState {
+pub(crate) struct MutatorStoreState {
     pub(super) revision: Cell<u64>,
+    pub(super) writes: Cell<std::ptr::NonNull<[Cell<usize>; JOURNAL_SIZE]>>,
     pub(super) policy: Cell<JournalPolicy>,
     pub(super) observe: Cell<bool>,
+    // Fill the ABI padding with Cells as well: a shared store-protocol
+    // reference may remain live across the barrier's whole-heap loan.
+    _padding: [Cell<u8>; size_of::<usize>() - 2],
+}
+
+/// Heap-owned publication, separate from the executing mutator's journal.
+#[repr(C)]
+pub(crate) struct StoreWindows {
     pub(crate) cons_window: Cell<BarrierWindow>,
     pub(crate) window: Cell<BarrierWindow>,
+}
+
+/// The authoritative store protocol lives inline at the heap tail while
+/// installed, and in detached storage before installation/after retirement.
+/// Migration is cold, with no Lisp callback or outstanding store reference.
+#[repr(C)]
+pub(crate) struct StoreState {
+    pub(crate) mutator: MutatorStoreState,
+    pub(crate) windows: StoreWindows,
     pub(crate) heap: Cell<*mut TaggedHeap>,
-    pub(super) writes: [Cell<usize>; JOURNAL_SIZE],
 }
 
 impl StoreState {
-    fn new() -> Self {
+    fn new(writes: NonNull<[Cell<usize>; JOURNAL_SIZE]>) -> Self {
         initialize();
         Self {
-            revision: Cell::new(0),
-            policy: Cell::new(if history_required() {
-                JournalPolicy::JournalOnly
-            } else {
-                JournalPolicy::BeforeFirstCapture
-            }),
-            observe: Cell::new(false),
-            cons_window: Cell::new(BarrierWindow::NONE),
-            window: Cell::new(BarrierWindow::NONE),
+            mutator: MutatorStoreState {
+                revision: Cell::new(0),
+                writes: Cell::new(writes),
+                policy: Cell::new(if history_required() {
+                    JournalPolicy::JournalOnly
+                } else {
+                    JournalPolicy::BeforeFirstCapture
+                }),
+                observe: Cell::new(false),
+                _padding: [const { Cell::new(0) }; size_of::<usize>() - 2],
+            },
+            windows: StoreWindows {
+                cons_window: Cell::new(BarrierWindow::NONE),
+                window: Cell::new(BarrierWindow::NONE),
+            },
             heap: Cell::new(std::ptr::null_mut()),
-            writes: [const { Cell::new(0) }; JOURNAL_SIZE],
         }
     }
 
     #[inline(always)]
     pub(crate) fn sequence(&self) -> u64 {
-        self.revision.get()
+        self.mutator.revision.get()
     }
 
     #[inline(always)]
     pub(crate) fn advance(&self) -> u64 {
-        let next = self.revision.get().wrapping_add(1);
-        self.revision.set(next);
+        let next = self.mutator.revision.get().wrapping_add(1);
+        self.mutator.revision.set(next);
         next
     }
 
     #[inline(always)]
+    pub(super) fn journal(&self) -> &[Cell<usize>; JOURNAL_SIZE] {
+        // SAFETY: ObservationWorld retains this one ring allocation across
+        // inline/detached protocol moves. Every element is interior mutable.
+        unsafe { self.mutator.writes.get().as_ref() }
+    }
+
+    #[inline(always)]
     pub(super) fn record(&self, owner: usize, revision: u64) {
-        self.writes[revision as usize & (JOURNAL_SIZE - 1)].set(owner);
+        self.journal()[revision as usize & (JOURNAL_SIZE - 1)].set(owner);
     }
 
     pub(crate) fn publish_windows(&self, cons: BarrierWindow, ordinary: BarrierWindow) {
-        self.cons_window.set(cons);
-        self.window.set(ordinary);
+        self.windows.cons_window.set(cons);
+        self.windows.window.set(ordinary);
     }
 }
 
 struct WorldObservations {
-    store: StoreState,
+    // The ring outlives either scalar location, including retained certificates.
+    _writes: crate::tagged::gc::AliasableBox<[Cell<usize>; JOURNAL_SIZE]>,
+    detached: std::cell::UnsafeCell<MaybeUninit<StoreState>>,
+    inline: Cell<Option<NonNull<StoreState>>>,
     dump: Cell<BarrierWindow>,
-    // Keep the cold capture/envelope allocation lazy. Installing an empty
-    // heap must not initialize collection-read metadata.
     cold: OnceCell<RefCell<State>>,
     bound: Cell<bool>,
 }
@@ -83,8 +113,12 @@ static_assertions::assert_not_impl_any!(ObservationWorld: Send, Sync);
 
 impl Default for ObservationWorld {
     fn default() -> Self {
+        let writes = crate::tagged::gc::AliasableBox::new([const { Cell::new(0) }; JOURNAL_SIZE]);
+        let store = StoreState::new(writes.root());
         Self(Rc::new(WorldObservations {
-            store: StoreState::new(),
+            _writes: writes,
+            detached: std::cell::UnsafeCell::new(MaybeUninit::new(store)),
+            inline: Cell::new(None),
             dump: Cell::new(BarrierWindow::NONE),
             cold: OnceCell::new(),
             bound: Cell::new(false),
@@ -110,7 +144,9 @@ impl ObservationWorld {
     }
 
     pub(super) fn store(&self) -> &StoreState {
-        &self.0.store
+        // SAFETY: the location descriptor selects the only initialized scalar
+        // home. Heap retirement detaches before its storage can disappear.
+        unsafe { self.root().as_ref() }
     }
 
     pub(super) fn with_state<R>(&self, f: impl FnOnce(&RefCell<State>) -> R) -> R {
@@ -125,11 +161,14 @@ impl ObservationWorld {
     }
 
     fn observe_scopes(&self, active: bool) {
-        self.0.store.observe.set(active);
+        self.store().mutator.observe.set(active);
         if active {
-            self.0.store.policy.set(JournalPolicy::JournalAndObserve);
-        } else if self.0.store.policy.get() == JournalPolicy::JournalAndObserve {
-            self.0.store.policy.set(JournalPolicy::JournalOnly);
+            self.store()
+                .mutator
+                .policy
+                .set(JournalPolicy::JournalAndObserve);
+        } else if self.store().mutator.policy.get() == JournalPolicy::JournalAndObserve {
+            self.store().mutator.policy.set(JournalPolicy::JournalOnly);
         }
     }
 
@@ -148,9 +187,86 @@ impl ObservationWorld {
     }
 
     pub(crate) fn root(&self) -> NonNull<StoreState> {
-        // Rc never exposes a unique borrow of this allocation. Shared access
-        // retains provenance for every Cell, including later root copies.
-        NonNull::from(&self.0.store)
+        self.0.inline.get().unwrap_or_else(|| {
+            // SAFETY: Rc retains detached storage. It is initialized exactly
+            // when inline is None; the pointer is never derived from &mut.
+            unsafe { NonNull::new_unchecked(self.0.detached.get().cast::<StoreState>()) }
+        })
+    }
+
+    fn refresh_location_tls(&self) {
+        let _ = STATE.try_with(|slot| {
+            if Rc::ptr_eq(&slot.owner.borrow().0, &self.0) {
+                slot.store.set(self.root());
+            }
+        });
+    }
+
+    /// Install only from the heap allocation's provenance root, before any
+    /// temporary heap loan. Neither home is accessible during this transfer.
+    pub(crate) unsafe fn attach(
+        &self,
+        heap: NonNull<TaggedHeap>,
+        destination: NonNull<StoreState>,
+    ) {
+        // Installation has no competing heap loan: its provenance root can
+        // supply both the legitimate write pointer and retained location.
+        unsafe { self.attach_via(heap, destination.as_ptr(), destination) };
+    }
+
+    /// The write pointer comes from a legitimate current heap loan; the saved
+    /// descriptor comes independently from the allocation's provenance root.
+    /// Publishing that descriptor does not dereference it during the loan.
+    pub(crate) unsafe fn attach_via(
+        &self,
+        heap: NonNull<TaggedHeap>,
+        write_pointer: *mut StoreState,
+        destination: NonNull<StoreState>,
+    ) {
+        if self.0.inline.get() == Some(destination) {
+            return;
+        }
+        if self.0.inline.get().is_none() {
+            // SAFETY: detached is the initialized home. Destination belongs
+            // to this owner and is unused while the metadata is detached.
+            let moved = unsafe { self.root().as_ptr().read() };
+            moved.heap.set(heap.as_ptr());
+            unsafe { write_pointer.write(moved) };
+        } else {
+            // A legacy by-value fixture may move an attached heap before
+            // reinstalling it. Its inline bytes moved with it; never read
+            // through the obsolete location descriptor.
+            unsafe { &*write_pointer }.heap.set(heap.as_ptr());
+        }
+        self.0.inline.set(Some(destination));
+        self.refresh_location_tls();
+    }
+
+    /// Retire via the legitimate heap loan, including a by-value shutdown or
+    /// Drop move. The stale location is compared, never dereferenced: `source`
+    /// addresses the current heap's moved scalar bytes.
+    pub(crate) unsafe fn detach(&self, source: *const StoreState) {
+        if self.0.inline.get().is_none() {
+            return;
+        }
+        // SAFETY: the caller's current heap loan owns its initialized tail.
+        // Moving it leaves that tail uninitialized until the next attach.
+        unsafe {
+            self.0
+                .detached
+                .get()
+                .cast::<StoreState>()
+                .write(source.read())
+        };
+        self.0.inline.set(None);
+        self.store().heap.set(std::ptr::null_mut());
+        self.store()
+            .publish_windows(BarrierWindow::NONE, BarrierWindow::NONE);
+        self.refresh_location_tls();
+    }
+
+    pub(crate) fn is_detached(&self) -> bool {
+        self.0.inline.get().is_none()
     }
 
     pub(crate) fn publish_dump_window(&self, dump: BarrierWindow) {
@@ -281,7 +397,7 @@ pub(super) fn swap_carried(slot: &mut dyn std::any::Any) {
 
 /// Restore the existing private membership mirror after local activation,
 /// scope exit, or a carried transfer. Open scopes from other local Worlds
-/// enter only cold observation paths; an ordinary idle store reads no TLS.
+/// enter only cold observation paths; an ordinary idle store reads only the installed heap TLS slot.
 pub(super) fn refresh_membership() {
     STATE.with(|slot| {
         let current = slot.owner.borrow();
@@ -310,14 +426,13 @@ pub(super) fn reject_foreign_capture_reads() {
     });
 }
 
-pub(crate) fn clear_installed_store_heap(heap: *mut TaggedHeap) {
-    // Teardown must not resurrect already-destroyed observation TLS.
+pub(crate) fn clear_installed_store_heap(_heap: *mut TaggedHeap) {
+    // No heap access is permitted here: the caller may already retain an
+    // exclusive QuiescentCollector. Its preparation detached the protocol.
     let _ = STATE.try_with(|slot| {
-        // SAFETY: the slot's owning handle still retains this allocation.
-        let store = unsafe { slot.store.get().as_ref() };
-        if store.heap.get() == heap {
-            store.heap.set(std::ptr::null_mut());
-            store.publish_windows(BarrierWindow::NONE, BarrierWindow::NONE);
-        }
+        debug_assert!(
+            slot.owner.borrow().is_detached(),
+            "detach before an exclusive collector loan"
+        );
     });
 }

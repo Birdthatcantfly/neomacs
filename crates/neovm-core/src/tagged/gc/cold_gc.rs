@@ -260,7 +260,9 @@ impl TaggedHeap {
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64", not(test)))]
 const _: () = {
     use std::mem::{align_of, offset_of, size_of};
-    assert!(size_of::<TaggedHeap>() == 4576);
+    assert!(
+        size_of::<TaggedHeap>() == 4576 + size_of::<super::super::collection_reads::StoreState>()
+    );
     assert!(align_of::<TaggedHeap>() == 8);
     assert!(offset_of!(TaggedHeap, mutator_gc) == 24);
     assert!(offset_of!(TaggedHeap, region_book) == 840);

@@ -89,9 +89,9 @@ error[E0599]: the associated function or constant `check` exists for struct `Thr
           which is required by `ParallelHeapEra<'static>: Sync`
           `Cell<CanonicalArm>: Sync`
           which is required by `ParallelHeapEra<'static>: Sync`
-          `Cell<usize>: Sync`
-          which is required by `ParallelHeapEra<'static>: Sync`
           `std::sync::mpsc::Receiver<gc::gc_thread::ConcurrentMarkResult>: Sync`
+          which is required by `ParallelHeapEra<'static>: Sync`
+          `Cell<usize>: Sync`
           which is required by `ParallelHeapEra<'static>: Sync`
           `*mut u8: Send`
           which is required by `ParallelHeapEra<'static>: Sync`
@@ -106,6 +106,8 @@ error[E0599]: the associated function or constant `check` exists for struct `Thr
           `*const u8: Send`
           which is required by `ParallelHeapEra<'static>: Sync`
           `Rc<Cell<*const ()>>: Send`
+          which is required by `ParallelHeapEra<'static>: Sync`
+          `*mut TaggedHeap: Send`
           which is required by `ParallelHeapEra<'static>: Sync`
           `*mut HashTableObj: Sync`
           which is required by `ParallelHeapEra<'static>: Sync`
@@ -133,6 +135,8 @@ error[E0599]: the associated function or constant `check` exists for struct `Thr
           which is required by `ParallelHeapEra<'static>: Sync`
           `*mut BignumObj: Send`
           which is required by `ParallelHeapEra<'static>: Sync`
+          `NonNull<[Cell<usize>; 8192]>: Send`
+          which is required by `ParallelHeapEra<'static>: Sync`
           `NonNull<LispBufferLocalValue>: Send`
           which is required by `ParallelHeapEra<'static>: Sync`
           `NonNull<LispFwd>: Send`
@@ -146,6 +150,10 @@ error[E0599]: the associated function or constant `check` exists for struct `Thr
           `*mut VecLikeHeader: Sync`
           which is required by `ParallelHeapEra<'static>: Sync`
           `*mut StringObj: Sync`
+          which is required by `ParallelHeapEra<'static>: Sync`
+          `OnceCell<collection_reads::store_state::ObservationWorld>: Sync`
+          which is required by `ParallelHeapEra<'static>: Sync`
+          `Cell<*mut TaggedHeap>: Sync`
           which is required by `ParallelHeapEra<'static>: Sync`
           `Rc<()>: Send`
           which is required by `ParallelHeapEra<'static>: Sync`
@@ -170,6 +178,18 @@ error[E0599]: the associated function or constant `check` exists for struct `Thr
           `RefCell<Vec<Option<dynamic_module::GlobalRefEntry>>>: Sync`
           which is required by `ParallelHeapEra<'static>: Sync`
           `Rc<Cell<*const ()>>: Sync`
+          which is required by `ParallelHeapEra<'static>: Sync`
+          `Cell<u64>: Sync`
+          which is required by `ParallelHeapEra<'static>: Sync`
+          `Cell<NonNull<[Cell<usize>; 8192]>>: Sync`
+          which is required by `ParallelHeapEra<'static>: Sync`
+          `Cell<collection_reads::JournalPolicy>: Sync`
+          which is required by `ParallelHeapEra<'static>: Sync`
+          `Cell<bool>: Sync`
+          which is required by `ParallelHeapEra<'static>: Sync`
+          `Cell<gc::barrier_window::BarrierWindow>: Sync`
+          which is required by `ParallelHeapEra<'static>: Sync`
+          `Rc<collection_reads::store_state::WorldObservations>: Send`
           which is required by `ParallelHeapEra<'static>: Sync`
           `Rc<RefCell<neovm_core::buffer::buffer_text::BufferTextStorage>>: Send`
           which is required by `ParallelHeapEra<'static>: Sync`
@@ -203,13 +223,13 @@ error[E0599]: the associated function or constant `check` exists for struct `Thr
           which is required by `ParallelHeapEra<'static>: Sync`
           `(dyn std::any::Any + 'static): Send`
           which is required by `ParallelHeapEra<'static>: Sync`
+          `UnsafeCell<TaggedValue>: Sync`
+          which is required by `ParallelHeapEra<'static>: Sync`
           `*const AtomicTaggedValue: Sync`
           which is required by `ParallelHeapEra<'static>: Sync`
           `*const TaggedValue: Sync`
           which is required by `ParallelHeapEra<'static>: Sync`
           `*const CharTableObj: Sync`
-          which is required by `ParallelHeapEra<'static>: Sync`
-          `UnsafeCell<TaggedValue>: Sync`
           which is required by `ParallelHeapEra<'static>: Sync`
           `Rc<OverlayList>: Send`
           which is required by `ParallelHeapEra<'static>: Sync`
