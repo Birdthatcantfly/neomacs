@@ -145,6 +145,60 @@ impl TestTerminal {
         std::mem::take(&mut *self.output.lock().expect("test PTY output lock"))
     }
 
+    /// Which of `tokens` the editor drew, in order of first appearance: the
+    /// text of `output` with its control sequences removed (CSI, OSC, other
+    /// ESC sequences, C0 controls).  A token drawn as one run of glyphs is
+    /// found whatever cursor motions surround it; one the encoder split
+    /// inside is not, so tokens must be words the editor writes whole.
+    pub(crate) fn drawn_tokens<'a>(output: &[u8], tokens: &[&'a str]) -> Vec<&'a str> {
+        let mut text = Vec::with_capacity(output.len());
+        let mut rest = output;
+        while let Some((&byte, after)) = rest.split_first() {
+            rest = after;
+            if byte != 0x1b {
+                if byte >= 0x20 && byte != 0x7f {
+                    text.push(byte);
+                }
+                continue;
+            }
+            match rest.first() {
+                Some(b'[') => {
+                    // CSI: parameters and intermediates, then one final byte.
+                    let end = rest[1..]
+                        .iter()
+                        .position(|b| (0x40..=0x7e).contains(b))
+                        .map_or(rest.len(), |at| at + 2);
+                    rest = &rest[end.min(rest.len())..];
+                }
+                Some(b']') => {
+                    // OSC: up to BEL or ESC backslash.
+                    let mut at = 1;
+                    while at < rest.len() {
+                        if rest[at] == 0x07 {
+                            at += 1;
+                            break;
+                        }
+                        if rest[at] == 0x1b && rest.get(at + 1) == Some(&b'\\') {
+                            at += 2;
+                            break;
+                        }
+                        at += 1;
+                    }
+                    rest = &rest[at.min(rest.len())..];
+                }
+                Some(_) => rest = &rest[1..],
+                None => {}
+            }
+        }
+        let text = String::from_utf8_lossy(&text);
+        let mut found: Vec<(usize, &'a str)> = tokens
+            .iter()
+            .filter_map(|&token| text.find(token).map(|at| (at, token)))
+            .collect();
+        found.sort_unstable();
+        found.into_iter().map(|(_, token)| token).collect()
+    }
+
     /// The DECSCUSR (`CSI Ps SP q`, cursor style) parameters in `output`, in
     /// order.  GNU's term.c never writes one: on a text terminal the cursor
     /// is whatever the terminal is configured to show.
