@@ -210,10 +210,33 @@ struct Capture {
 #[derive(Debug)]
 pub struct CollectionReads {
     reads: FxHashSet<usize>,
-    revision: LispCollectionRevision,
-    owner: ObservationWorld,
+    origin: Box<CertificateOrigin>,
     _not_send: std::marker::PhantomData<*const ()>,
 }
+
+// Completed certificates sit inside redisplay's TLS caches. Keep their
+// original footprint: adding a World handle inline would move unrelated TLS
+// offsets, including the interpreter's. Only cold certificate validation pays
+// this allocation/indirection; ordinary slot stores never touch it.
+#[derive(Debug)]
+struct CertificateOrigin {
+    revision: LispCollectionRevision,
+    owner: ObservationWorld,
+}
+
+const _: () = {
+    type LegacyCertificate = (FxHashSet<usize>, LispCollectionRevision);
+    assert!(std::mem::size_of::<CollectionReads>() == std::mem::size_of::<LegacyCertificate>());
+    assert!(std::mem::align_of::<CollectionReads>() == std::mem::align_of::<LegacyCertificate>());
+    assert!(
+        std::mem::size_of::<Option<CollectionReads>>()
+            == std::mem::size_of::<Option<LegacyCertificate>>()
+    );
+    assert!(
+        std::mem::align_of::<Option<CollectionReads>>()
+            == std::mem::align_of::<Option<LegacyCertificate>>()
+    );
+};
 
 static_assertions::assert_not_impl_any!(CollectionReads: Send, Sync);
 
@@ -224,7 +247,7 @@ impl CollectionReads {
     }
 
     pub fn unchanged(&self) -> bool {
-        unchanged_since(&self.reads, self.revision, self.owner.store())
+        unchanged_since(&self.reads, self.origin.revision, self.origin.owner.store())
     }
 
     /// A nested cache hit reads its original dependencies transitively.
@@ -232,7 +255,7 @@ impl CollectionReads {
         if !self.unchanged() {
             return false;
         }
-        if !self.owner.is_current() {
+        if !self.origin.owner.is_current() {
             return false;
         }
         if ACTIVE.with(Cell::get) {
@@ -352,8 +375,10 @@ impl CollectionReadScope {
         }
         Some(CollectionReads {
             reads: capture.reads.into_keys().collect(),
-            revision: now,
-            owner: self.owner.clone(),
+            origin: Box::new(CertificateOrigin {
+                revision: now,
+                owner: self.owner.clone(),
+            }),
             _not_send: std::marker::PhantomData,
         })
     }
