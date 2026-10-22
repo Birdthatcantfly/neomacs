@@ -75,6 +75,35 @@ fn pause<'era>(
     }
 }
 
+fn native_transition<T>(
+    mut transition: impl FnMut() -> Result<T, RendezvousError>,
+) -> Result<T, RendezvousError> {
+    // Simultaneous restores can refuse before taking an image. Busy leaves
+    // ownership with this worker; retry outside every run/entry/image loan.
+    // Keep the fixture finite without a wall-clock condition under Miri.
+    for _ in 0..STEP_CAP {
+        match transition() {
+            Err(RendezvousError::Busy) => thread::yield_now(),
+            outcome => return outcome,
+        }
+    }
+    Err(RendezvousError::Busy)
+}
+
+fn retire_owner(mut owner: Mutator<'_>) -> Result<(), String> {
+    for _ in 0..STEP_CAP {
+        match owner.retire_rooted(&[]) {
+            Ok(()) => return Ok(()),
+            Err(failure) if failure.reason == RendezvousError::Busy => {
+                owner = failure.into_owner();
+                thread::yield_now();
+            }
+            Err(failure) => return Err(format!("retire: {:?}", failure.reason)),
+        }
+    }
+    Err("retire: Busy retry budget exhausted".to_owned())
+}
+
 pub(super) fn run<'era>(
     session: &GlobalSession,
     nil: &SharedRoot,
@@ -86,6 +115,7 @@ pub(super) fn run<'era>(
 ) {
     let mut owner = activate_owner(permit, heap, 3000 + index as u64);
     let mut frame = None;
+    let mut native = false;
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> Result<Snapshot, ExecError> {
             frame = Some(session.seed(&mut owner, index, nil)?);
@@ -95,12 +125,14 @@ pub(super) fn run<'era>(
                 assert_eq!(receive(&commands), Command::Advance);
                 pause(session, &mut owner, frame)?;
                 let before = snapshot(&mut owner, frame)?;
-                owner.enter_native(&[])?;
+                native_transition(|| owner.enter_native(&[]))?;
+                native = true;
                 events
                     .send(Event::Paused(before))
                     .expect("keeper alive at pause");
                 assert_eq!(receive(&commands), Command::Resume);
-                owner.leave_native()?;
+                native_transition(|| owner.leave_native())?;
+                native = false;
                 events
                     .send(Event::Resumed(snapshot(&mut owner, frame)?))
                     .expect("keeper alive at resume");
@@ -123,9 +155,10 @@ pub(super) fn run<'era>(
     };
     drop(frame);
     let cleanup = (|| -> Result<(), String> {
-        if owner.local.is_none() {
-            owner
-                .leave_native()
+        // A native owner still has a local shell, so local.is_none() cannot
+        // distinguish a published image from restored running state.
+        if native {
+            native_transition(|| owner.leave_native())
                 .map_err(|e| format!("restore for cleanup: {e:?}"))?;
         }
         with_run(&mut owner, |run| {
@@ -133,9 +166,7 @@ pub(super) fn run<'era>(
             Ok(())
         })
         .map_err(|e| format!("clear census: {e:?}"))?;
-        owner
-            .retire_rooted(&[])
-            .map_err(|e| format!("retire: {e:?}"))
+        retire_owner(owner)
     })();
     let _ = events.send(Event::Finished { result, cleanup });
 }
