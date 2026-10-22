@@ -118,7 +118,12 @@ pub(crate) fn debug_assert_no_heap_mut_closure() {
 // arm grows: a rejected store must not gain a setter call under either mode.
 #[inline(always)]
 pub fn set_cons_car(cell: TaggedValue, value: TaggedValue) -> bool {
-    with_store_state(|store| set_cons_car_in_store(store, cell, value))
+    with_store_state(|store| {
+        let _ = set_cons_car_in_store(store, cell, value);
+    });
+    // The tag is the only failure condition. Keep it visible to callers
+    // even when the outlined null-heap entry performs the shared store.
+    cell.is_cons()
 }
 
 #[inline(always)]
@@ -136,7 +141,10 @@ pub(crate) fn set_cons_car_in_store(
 
 #[inline(always)]
 pub fn set_cons_cdr(cell: TaggedValue, value: TaggedValue) -> bool {
-    with_store_state(|store| set_cons_cdr_in_store(store, cell, value))
+    with_store_state(|store| {
+        let _ = set_cons_cdr_in_store(store, cell, value);
+    });
+    cell.is_cons()
 }
 
 #[inline(always)]

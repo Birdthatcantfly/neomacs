@@ -630,13 +630,21 @@ pub(super) fn record_write(value: TaggedValue, revision: u64) {
 #[inline(always)]
 pub(super) fn record_unprojected_write_in_store(store: &StoreState, value: TaggedValue) {
     if store.mutator.policy.get() == JournalPolicy::BeforeFirstCapture {
-        if !history_required() {
-            return;
-        }
-        store.mutator.policy.set(JournalPolicy::JournalOnly);
+        record_unprojected_write_before_first_capture(store, value);
+        return;
     }
     let revision = store.advance();
     store.record(value.bits(), revision);
+}
+
+#[cold]
+#[inline(never)]
+fn record_unprojected_write_before_first_capture(store: &StoreState, value: TaggedValue) {
+    if history_required() {
+        store.mutator.policy.set(JournalPolicy::JournalOnly);
+        let revision = store.advance();
+        store.record(value.bits(), revision);
+    }
 }
 
 /// Preserve ordinary projection policy without an idle ACTIVE TLS read.
@@ -686,14 +694,29 @@ pub(crate) fn record_projected_write_in_store(
         WriteProjection::Cons => value.is_cons(),
         WriteProjection::VecLike => value.is_veclike(),
     };
+    if store.mutator.policy.get() != JournalPolicy::JournalOnly {
+        record_projected_write_cold_policy(store, value, projected);
+        return projected;
+    }
+    let revision = store.advance();
+    store.record(value.bits(), revision);
+    projected
+}
+
+// Every inline store carries only the policy-byte test and this cold edge.
+// Prefix-policy transitions and active captures must not duplicate their
+// bookkeeping at each native caller's store site.
+#[cold]
+#[inline(never)]
+fn record_projected_write_cold_policy(store: &StoreState, value: TaggedValue, projected: bool) {
     match store.mutator.policy.get() {
         JournalPolicy::JournalAndObserve => {
             record_projected_write_observed(store, value, projected);
-            return projected;
+            return;
         }
         JournalPolicy::BeforeFirstCapture => {
             if !history_required() {
-                return projected;
+                return;
             }
             store.mutator.policy.set(JournalPolicy::JournalOnly);
         }
@@ -701,7 +724,6 @@ pub(crate) fn record_projected_write_in_store(
     }
     let revision = store.advance();
     store.record(value.bits(), revision);
-    projected
 }
 
 // Capture/recent/envelope TLS and the RefCell are confined to this active
