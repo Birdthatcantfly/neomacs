@@ -23,6 +23,83 @@ fn green() -> Context {
     Context::new_with_threading(ThreadingMode::Green)
 }
 
+thread_local! {
+    static STOREFAST_CERTIFICATE_THREAD: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+fn storefast_check_worker_thread(_context: &mut Context) -> crate::emacs_core::error::EvalResult {
+    assert!(
+        !STOREFAST_CERTIFICATE_THREAD.with(std::cell::Cell::get),
+        "the mutating Green owner must run on a different OS thread"
+    );
+    Ok(Value::T)
+}
+
+#[test]
+fn storefast_world_certificate_follows_green_stores_on_another_os_thread() {
+    use crate::emacs_core::subr::SubrSpec;
+    use crate::tagged::collection_reads::capture;
+
+    STOREFAST_CERTIFICATE_THREAD.with(|main| main.set(true));
+    let mut ev = green();
+    ev.register_subr(SubrSpec::fixed0(
+        "storefast-check-worker-thread",
+        storefast_check_worker_thread,
+    ));
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(progn
+               (setq storefast-source (cons nil nil)
+                     storefast-stable (cons nil nil))
+               (thread-join (make-thread (lambda () nil))))"
+        ),
+        "nil"
+    );
+    let source = ev.eval_str("storefast-source").unwrap();
+    let stable = ev.eval_str("storefast-stable").unwrap();
+    let (_, source_certificate) = capture(|| source.cons_car());
+    let source_certificate = source_certificate.unwrap();
+    let (_, stable_certificate) = capture(|| stable.cons_car());
+    let stable_certificate = stable_certificate.unwrap();
+    assert_eq!(
+        eval(
+            &mut ev,
+            "(thread-join
+               (make-thread
+                 (lambda ()
+                   (storefast-check-worker-thread)
+                   (setcar storefast-source t))))"
+        ),
+        "t"
+    );
+    assert!(!source_certificate.unchanged());
+    assert!(stable_certificate.unchanged());
+    assert!(source.cons_car().is_t());
+
+    // A capture which is still open must also see the worker's mutation;
+    // moving only completed-certificate history would miss this case.
+    let (_, incoherent) = capture(|| {
+        source.cons_cdr();
+        assert_eq!(
+            eval(
+                &mut ev,
+                "(thread-join
+                   (make-thread
+                     (lambda ()
+                       (storefast-check-worker-thread)
+                       (setcdr storefast-source t))))"
+            ),
+            "t"
+        );
+    });
+    assert!(incoherent.is_none());
+    ev.green_teardown();
+    STOREFAST_CERTIFICATE_THREAD.with(|main| main.set(false));
+}
+
 #[test]
 fn a_local_rebound_during_backtrace_exchange_reattaches_its_restore() {
     let mut ev = green();
