@@ -1,7 +1,7 @@
 use super::*;
 use crate::tagged::gc::PlainSymbolBacking;
 
-fn source(ops: Vec<Op>, nslots: usize) -> Source {
+pub(super) fn source(ops: Vec<Op>, nslots: usize) -> Source {
     Source {
         insns: ops
             .into_iter()
@@ -15,7 +15,7 @@ fn source(ops: Vec<Op>, nslots: usize) -> Source {
     }
 }
 
-fn drive<'era>(
+pub(super) fn drive<'era>(
     session: &GlobalSession,
     owner: &mut Mutator<'era>,
     frame: &mut Frame<'era>,
@@ -43,8 +43,25 @@ fn case(
         SymId,
     ),
 ) {
-    Context::with_test_symbol_backing_era(kind, |era, id| {
-        let session = GlobalSession::admit(&era, &[id], &[source(ops, nslots)]).unwrap();
+    case_many(&[kind], ops, nslots, |era, session, owner, frame, ids| {
+        body(era, session, owner, frame, ids[0]);
+    });
+}
+
+pub(super) fn case_many(
+    kinds: &[PlainSymbolBacking],
+    ops: Vec<Op>,
+    nslots: usize,
+    body: impl for<'era> FnOnce(
+        &ParallelHeapEra<'_>,
+        &GlobalSession,
+        &mut Mutator<'era>,
+        &mut Frame<'era>,
+        &[SymId],
+    ),
+) {
+    Context::with_test_symbol_backings_era(kinds, |era, ids| {
+        let session = GlobalSession::admit(&era, &ids, &[source(ops, nslots)]).unwrap();
         let mut stopped = era.stop().unwrap();
         let nil = era
             .with_stopped_heap_for_test(&stopped, |heap| unsafe {
@@ -62,7 +79,7 @@ fn case(
             .unwrap();
         let mut frame = session.seed(&mut owner, 0, &nil).unwrap();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            body(&era, &session, &mut owner, &mut frame, id);
+            body(&era, &session, &mut owner, &mut frame, &ids);
         }));
         let allocated = frame.machine.cons_count != 0;
         drop(frame);
@@ -85,14 +102,14 @@ fn case(
         let (collector, keeper) = era.finish().unwrap();
         drop(collector);
         drop(keeper);
-        eprintln!("P3SYM_C3_EXECUTOR_TEARDOWN_OK {kind:?}");
+        eprintln!("P3SYM_C3_EXECUTOR_TEARDOWN_OK {kinds:?}");
         if let Err(panic) = outcome {
             std::panic::resume_unwind(panic);
         }
     });
 }
 
-fn words<'era>(owner: &mut Mutator<'era>, frame: &Frame<'era>) -> Vec<usize> {
+pub(super) fn words<'era>(owner: &mut Mutator<'era>, frame: &Frame<'era>) -> Vec<usize> {
     must(with_run(owner, |run| {
         Ok(frame
             .slots

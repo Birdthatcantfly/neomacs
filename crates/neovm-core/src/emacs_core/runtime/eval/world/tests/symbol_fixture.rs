@@ -1,5 +1,4 @@
-//! A real retained World with one scalar global and no Context/bootstrap/GC.
-//! This fixture tests C2 authority handoff, not collection or evaluator setup.
+//! A minimal retained World without Context/bootstrap or setup collection.
 use super::*;
 
 impl Context {
@@ -15,14 +14,32 @@ impl Context {
         kind: crate::tagged::gc::PlainSymbolBacking,
         body: impl for<'heap> FnOnce(crate::tagged::gc::ParallelHeapEra<'heap>, SymId) -> R,
     ) -> R {
+        Self::with_test_symbol_backings_era(&[kind], |era, ids| body(era, ids[0]))
+    }
+
+    /// All names, spine slots and projection plans are created serially before
+    /// the era exists. Running tests can only access these existing symbols.
+    pub(crate) fn with_test_symbol_backings_era<R>(
+        kinds: &[crate::tagged::gc::PlainSymbolBacking],
+        body: impl for<'heap> FnOnce(crate::tagged::gc::ParallelHeapEra<'heap>, Vec<SymId>) -> R,
+    ) -> R {
         use crate::tagged::gc::{AliasableBox, ParallelHeapEra, TaggedHeap};
 
         let heap = AliasableBox::new(TaggedHeap::new());
         // Manager construction can allocate; install only the owning root.
         crate::tagged::gc::set_tagged_heap_root(heap.root());
         let mut obarray = Obarray::new();
-        let id = crate::emacs_core::intern::intern("p3sym-c2-global");
-        obarray.seed_value_id(id, TaggedValue::fixnum(73));
+        let ids: Vec<_> = (0..kinds.len())
+            .map(|index| {
+                let id = if index == 0 {
+                    crate::emacs_core::intern::intern("p3sym-c2-global")
+                } else {
+                    crate::emacs_core::intern::intern(&format!("p3sym-c3-global-{index}"))
+                };
+                obarray.seed_value_id(id, TaggedValue::fixnum(73));
+                id
+            })
+            .collect();
         let mut ready = WorldStorageBuilder {
             owned_roots: Default::default(),
             tagged_heap: heap,
@@ -42,7 +59,10 @@ impl Context {
         }
         .build();
         let world = Arc::clone(&ready.obarray.lease.0);
-        if kind != crate::tagged::gc::PlainSymbolBacking::Unprojected {
+        for (&id, &kind) in ids.iter().zip(kinds) {
+            if kind == crate::tagged::gc::PlainSymbolBacking::Unprojected {
+                continue;
+            }
             let mut table = world.thread_projections.borrow_mut();
             ready.obarray.with_dispatch_write(|obarray| {
                 if kind == crate::tagged::gc::PlainSymbolBacking::VoidProjection {
@@ -77,7 +97,7 @@ impl Context {
         };
         let era = ParallelHeapEra::admit_rooted(collector, keeper, frozen)
             .unwrap_or_else(|e| panic!("minimal symbol fixture admission: {:?}", e.reason));
-        body(era, id)
+        body(era, ids)
         // ready owns the same World until after the body and keeper teardown.
     }
 }

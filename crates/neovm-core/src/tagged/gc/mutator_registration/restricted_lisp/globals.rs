@@ -249,3 +249,4 @@ enum Step {
 }
 
 mod tests;
+mod void;
