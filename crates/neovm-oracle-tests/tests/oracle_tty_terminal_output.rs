@@ -117,6 +117,8 @@ fn tty_one_when_spec_on_two_spans_is_evaluated_at_each_with_its_own_bindings() {
                 )
             )
         },
-        expect_test::expect![[r#""OK (((t 1 1) (t 36 36)) (0 . 0))" drawn ["line 0", "REPLACED"]"#]],
+        expect_test::expect![[
+            r#""OK (((t 1 1) (t 36 36)) (0 . 0))" drawn ["line 0", "REPLACED"]"#
+        ]],
     );
 }
