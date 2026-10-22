@@ -6,7 +6,7 @@ use crate::display_spec::{
     DisplayFringeLayout, DisplayImageSliceSpec, DisplaySpaceKey, parse_display_fringe_layout,
     parse_display_image_slice, parse_display_surface_layout, parse_display_xwidget_layout,
 };
-use crate::display_when::DisplayWhenConditions;
+use crate::display_when::{DisplayWhenConditions, DisplayWhenLookup};
 use neovm_core::emacs_core::Value;
 use neovm_core::emacs_core::display_spec::{
     DisplayMarginLocation, DisplayMediaSpecKind, DisplayPropertySpecs, DisplaySpecKind,
@@ -283,16 +283,18 @@ pub(crate) enum DisplayPropertyObject {
 /// String objects stop at their first replacing element. Buffer lists continue
 /// processing later elements without transferring replacement ownership, like
 /// GNU's `display_replaced` guard (xdisp.c:6517).
-pub(crate) fn classify_display_property(
+pub(crate) fn classify_display_property_at(
     value: Value,
     conditions: &DisplayWhenConditions,
     object: DisplayPropertyObject,
     target: DisplayPropertyTarget,
+    at: DisplayWhenLookup,
 ) -> DisplayPropertyClassification {
     let mut result = DisplayPropertyClassification::default();
     let specs = DisplayPropertySpecs::of(value);
     specs.for_each(|spec| {
-        let element = classify_single_display_spec(spec, conditions, specs.eval_enabled, target);
+        let element =
+            classify_single_display_spec(spec, conditions, specs.eval_enabled, target, at);
         if result.replacement.is_none() && element.replacement.is_some() {
             result.replacement = element.replacement;
             result.replacement_spec = element.replacement_spec;
@@ -314,19 +316,39 @@ pub(crate) fn classify_display_property(
     result
 }
 
+/// [`classify_display_property_at`] for a spec shape with no walk behind it:
+/// a `when` FORM is answered by any evaluated occurrence.
+#[cfg(test)]
+pub(crate) fn classify_display_property(
+    value: Value,
+    conditions: &DisplayWhenConditions,
+    object: DisplayPropertyObject,
+    target: DisplayPropertyTarget,
+) -> DisplayPropertyClassification {
+    classify_display_property_at(
+        value,
+        conditions,
+        object,
+        target,
+        DisplayWhenLookup::AnyOccurrence,
+    )
+}
+
 /// GNU ignores replacing display specs inside strings that themselves came from
 /// a display property, while still honoring non-replacing modifiers.
 pub(crate) fn classify_display_property_modifiers_only(
     value: Value,
     conditions: &DisplayWhenConditions,
     target: DisplayPropertyTarget,
+    at: DisplayWhenLookup,
 ) -> DisplayTextPropertyModifiers {
     let mut modifiers = DisplayTextPropertyModifiers::default();
     let specs = DisplayPropertySpecs::of(value);
     specs.for_each(|spec| {
         merge_modifiers(
             &mut modifiers,
-            classify_single_display_spec(spec, conditions, specs.eval_enabled, target).modifiers,
+            classify_single_display_spec(spec, conditions, specs.eval_enabled, target, at)
+                .modifiers,
         );
         ControlFlow::Continue(())
     });
@@ -343,13 +365,15 @@ pub(crate) fn classify_single_display_spec(
     conditions: &DisplayWhenConditions,
     eval_enabled: bool,
     target: DisplayPropertyTarget,
+    at: DisplayWhenLookup,
 ) -> DisplayPropertyClassification {
     // GNU unwraps WHEN exactly once (xdisp.c:6130-6164), then proceeds
     // to the ordinary spec arms. A nested WHEN is not another clause.
     let value = if matches!(display_spec_kind(value), DisplaySpecKind::When) {
         match display_spec_when_parts(value) {
             Some((form, spec))
-                if (eval_enabled || form.is_bare_symbol_named("t")) && conditions.holds(form) =>
+                if (eval_enabled || form.is_bare_symbol_named("t"))
+                    && conditions.holds(form, at) =>
             {
                 spec
             }

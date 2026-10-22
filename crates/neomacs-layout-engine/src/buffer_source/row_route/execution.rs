@@ -634,11 +634,14 @@ impl<'rows, 'emit, 'surface, FS: crate::neovm_bridge::FaceServices>
                     let replacement_item =
                         crate::display_item::BufferDisplayPropertyReplacementItem::new(
                             replacement.value,
-                            crate::display_property::classify_display_property(
+                            crate::display_property::classify_display_property_at(
                                 replacement.value,
                                 &buffer.layout_display_when_conditions(),
                                 crate::display_property::DisplayPropertyObject::Buffer,
                                 buffer.layout_display_target(),
+                                crate::display_when::DisplayWhenLookup::buffer_at_char_pos(
+                                    segment.start.get() as i64,
+                                ),
                             ),
                             crate::display_item::BufferDisplayReplacementSource::spanning(
                                 loop_context.buffer_id(),

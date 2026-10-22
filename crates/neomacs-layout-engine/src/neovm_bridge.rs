@@ -2966,11 +2966,12 @@ impl<'a, B: LayoutBufferView + ?Sized> RustTextPropAccess<'a, B> {
                     .layout_text_prop_at_emacs_byte_pos(bytepos, Value::symbol("display"))
             })
             .is_some_and(|value| {
-                crate::display_property::classify_display_property(
+                crate::display_property::classify_display_property_at(
                     value,
                     &self.buffer.layout_display_when_conditions(),
                     crate::display_property::DisplayPropertyObject::Buffer,
                     self.buffer.layout_display_target(),
+                    crate::display_when::DisplayWhenLookup::buffer_at_char_pos(charpos),
                 )
                 .replacement()
                 .is_some()

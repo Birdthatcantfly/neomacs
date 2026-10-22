@@ -1218,11 +1218,12 @@ impl<'a, B: LayoutBufferView + ?Sized> BufferTextSourceCursor<'a, B> {
 
             if let Some(display_source) = self.display_prop_source_at(start) {
                 let display_prop = display_source.value;
-                let display_property = DisplayPropertySourcePlan::new(
+                let display_property = DisplayPropertySourcePlan::new_at(
                     display_prop,
                     &self.display_when,
                     crate::display_property::DisplayPropertyObject::Buffer,
                     context.display_target(),
+                    crate::display_when::DisplayWhenLookup::buffer_at_char_pos(start.get() as i64),
                 );
                 if replacement_mode.consumes_typed_replacements()
                     && display_property.replacement().is_some()

@@ -38,7 +38,8 @@ fn native_preparation_passes_complete_inputs_while_control_recaptures() {
     let before = eval
         .window_layout_attempt_freshness(frame, window, buffer)
         .unwrap();
-    let conditions = crate::display_when::DisplayWhenConditions::evaluated(Default::default());
+    let conditions =
+        crate::display_when::DisplayWhenConditions::evaluated_forms(Default::default());
     let admission = preparation_admission(
         neovm_core::emacs_core::xdisp::RedisplayFontificationOutcome::Unchanged,
         &conditions,

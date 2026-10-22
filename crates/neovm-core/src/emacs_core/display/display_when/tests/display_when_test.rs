@@ -91,8 +91,8 @@ fn with_display_buffer_current_selects_the_buffer_and_restores_the_callers() {
 }
 
 #[test]
-fn sites_are_evaluated_once_per_form_with_the_buffer_current_and_survive_gc() {
-    use crate::emacs_core::display_when::DisplayWhenSite;
+fn sites_are_evaluated_once_per_site_with_the_buffer_current_and_survive_gc() {
+    use crate::emacs_core::display_when::{DisplayWhenSite, DisplayWhenSiteKey};
     let mut eval = Context::new();
     let original = eval.buffers.current_buffer_id().expect("buffer");
     let other = eval.buffers.create_buffer("other");
@@ -126,10 +126,80 @@ fn sites_are_evaluated_once_per_form_with_the_buffer_current_and_survive_gc() {
     let results = eval
         .evaluate_display_when_sites(other, None, &sites, |spec| spec.is_string())
         .expect("no flow");
-    assert_eq!(results.get(&collecting), Some(&true));
-    assert_eq!(results.get(&named), Some(&true), "first occurrence decides");
+    assert_eq!(
+        results.get(&DisplayWhenSiteKey::at(collecting, &sites[0])),
+        Some(&true)
+    );
+    assert_eq!(
+        results.get(&DisplayWhenSiteKey::at(named, &sites[1])),
+        Some(&true)
+    );
+    assert_eq!(
+        results.get(&DisplayWhenSiteKey::at(named, &sites[2])),
+        None,
+        "a disable-eval site has no answer"
+    );
     assert_eq!(results.len(), 2);
     assert_eq!(eval.buffers.current_buffer_id(), Some(original));
+}
+
+/// GNU binds `object`, `position` and `buffer-position` at every site it
+/// meets (src/xdisp.c:6152-6154): one FORM object on two spans is evaluated
+/// twice, each time with that span's bindings, and the two answers are kept
+/// apart.  (The port used to evaluate once per `equal` FORM with the first
+/// occurrence's bindings, so `(when (> buffer-position 30) . "LATE")` on two
+/// spans answered for both what it answered for the first.)
+#[test]
+fn one_form_on_two_sites_is_evaluated_at_each_with_its_own_bindings() {
+    use crate::emacs_core::display_when::{DisplayWhenSite, DisplayWhenSiteKey};
+    let mut eval = Context::new();
+    let buf_id = eval.buffers.current_buffer_id().expect("buffer");
+    let buffer = Value::make_buffer(buf_id);
+    eval.eval_str("(setq dw-seen nil)").expect("reset");
+    let form = eval
+        // A bare `Context` has no `push' macro: subrs only.
+        .eval_str(
+            "'(progn (setq dw-seen (cons (list position buffer-position) dw-seen)) (> buffer-position 30))",
+        )
+        .expect("read");
+    let property = Value::cons(
+        Value::symbol("when"),
+        Value::cons(form, Value::string("LATE")),
+    );
+    let sites = [
+        DisplayWhenSite {
+            property,
+            object: buffer,
+            position: 1,
+            buffer_position: 1,
+        },
+        DisplayWhenSite {
+            property,
+            object: buffer,
+            position: 36,
+            buffer_position: 36,
+        },
+    ];
+    let results = eval
+        .evaluate_display_when_sites(buf_id, None, &sites, |spec| spec.is_string())
+        .expect("no flow");
+    assert_eq!(results.len(), 2);
+    assert_eq!(
+        results.get(&DisplayWhenSiteKey::at(form, &sites[0])),
+        Some(&false)
+    );
+    assert_eq!(
+        results.get(&DisplayWhenSiteKey::at(form, &sites[1])),
+        Some(&true)
+    );
+    let seen = eval.eval_str("(reverse dw-seen)").expect("seen");
+    let expected = eval.eval_str("'((1 1) (36 36))").expect("read");
+    assert!(
+        eval.eval_str("(equal (reverse dw-seen) '((1 1) (36 36)))")
+            .expect("compare")
+            .is_truthy(),
+        "each site evaluated once with its own bindings: {seen:?} vs {expected:?}"
+    );
 }
 
 #[test]

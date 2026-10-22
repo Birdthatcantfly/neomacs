@@ -10,7 +10,7 @@ use crate::display_item::{
 use crate::display_origin::{DisplayOrigin, DisplayPropertySource, OverlayStringKind};
 use crate::display_property::{
     DisplayMarginContent, DisplayMarginSide, DisplayPropertyClassification, DisplayPropertyObject,
-    DisplayReplacementProperty, classify_display_property,
+    DisplayReplacementProperty, classify_display_property_at,
     classify_display_property_modifiers_only,
 };
 use crate::display_row::append_context::DisplayRowAppendKind;
@@ -3087,6 +3087,8 @@ struct LispStringSourceFrame {
     /// The walk's evaluated `(when FORM . SPEC)` results for this string's
     /// own `display` properties.
     display_when: DisplayWhenConditions,
+    /// The string object itself: GNU `object` of its `display` sites.
+    object: Value,
 }
 
 /// Select once per string object, then retain only owned character ranges.
@@ -3185,12 +3187,21 @@ impl LispStringSourceFrame {
             pointer_occurrence,
             box_boundaries,
             display_when: DisplayWhenConditions::structural(),
+            object: value,
         })
     }
 
     fn with_display_when(mut self, display_when: DisplayWhenConditions) -> Self {
         self.display_when = display_when;
         self
+    }
+
+    /// The site of this string's `display` property at character `index`.
+    fn display_when_lookup(&self, index: usize) -> crate::display_when::DisplayWhenLookup {
+        crate::display_when::DisplayWhenLookup::String {
+            string: self.object,
+            index: index as i64,
+        }
     }
 
     fn next_action(
@@ -3253,13 +3264,15 @@ impl LispStringSourceFrame {
                     display_prop,
                     &self.display_when,
                     context.display_target(),
+                    self.display_when_lookup(start),
                 );
             } else {
-                let display_property = DisplayPropertySourcePlan::new(
+                let display_property = DisplayPropertySourcePlan::new_at(
                     display_prop,
                     &self.display_when,
                     DisplayPropertyObject::LispString,
                     context.display_target(),
+                    self.display_when_lookup(start),
                 );
                 let display_end = if display_property.replacement().is_some() {
                     self.display_value_extent(display_prop, property_end)
@@ -3749,16 +3762,34 @@ impl DisplayPropertySourceFaces {
 }
 
 impl DisplayPropertySourcePlan {
+    pub(crate) fn new_at(
+        value: Value,
+        conditions: &DisplayWhenConditions,
+        object: DisplayPropertyObject,
+        target: crate::display_property::DisplayPropertyTarget,
+        at: crate::display_when::DisplayWhenLookup,
+    ) -> Self {
+        Self {
+            value,
+            classification: classify_display_property_at(value, conditions, object, target, at),
+        }
+    }
+
+    /// [`Self::new_at`] for a spec shape with no walk behind it.
+    #[cfg(test)]
     pub(crate) fn new(
         value: Value,
         conditions: &DisplayWhenConditions,
         object: DisplayPropertyObject,
         target: crate::display_property::DisplayPropertyTarget,
     ) -> Self {
-        Self {
+        Self::new_at(
             value,
-            classification: classify_display_property(value, conditions, object, target),
-        }
+            conditions,
+            object,
+            target,
+            crate::display_when::DisplayWhenLookup::AnyOccurrence,
+        )
     }
 
     pub(crate) fn replacement(&self) -> Option<&DisplayReplacementProperty> {

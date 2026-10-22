@@ -10,18 +10,162 @@ fn holds_takes_nil_and_t_literally_and_falls_back_to_structural() {
     let mut eval = Context::new();
     let call = read(&mut eval, "(some-call)");
     let structural = DisplayWhenConditions::structural();
-    assert!(!structural.holds(Value::NIL));
-    assert!(structural.holds(Value::symbol("t")));
+    let any = DisplayWhenLookup::AnyOccurrence;
+    assert!(!structural.holds(Value::NIL, any));
+    assert!(structural.holds(Value::symbol("t"), any));
     assert!(
-        structural.holds(call),
+        structural.holds(call, any),
         "no evaluation behind it: non-nil holds"
     );
 
     let mut results = FxHashMap::default();
     results.insert(call, false);
-    let evaluated = DisplayWhenConditions::evaluated(results);
-    assert!(!evaluated.holds(call));
-    assert!(evaluated.holds(read(&mut eval, "(unseen-call)")));
+    let evaluated = DisplayWhenConditions::evaluated_forms(results);
+    assert!(!evaluated.holds(call, any));
+    assert!(evaluated.holds(read(&mut eval, "(unseen-call)"), any));
+}
+
+/// GNU binds `object`, `position` and `buffer-position` at every site it
+/// meets (src/xdisp.c:6152-6154): one FORM on two spans is two evaluations
+/// with two answers.  The walk asks for the site it classifies; a read
+/// inside a run (a face boundary splits the run into segments) gets the
+/// run's answer; a position no site covers is unseen.
+#[test]
+fn one_form_on_two_spans_answers_per_span_and_a_run_serves_its_interior() {
+    let mut eval = Context::new();
+    let buf_id = eval.buffers.current_buffer_id().expect("buffer");
+    eval.eval_str("(setq dw-seen nil)").expect("reset");
+    // One property object on both spans, as a mode applying one spec to
+    // many regions does; the FORM reads its GNU binding.
+    let spec = eval
+        .eval_str(
+            "(setq dw-spec '(when (progn (setq dw-seen (cons buffer-position dw-seen)) (> buffer-position 30)) . \"LATE\"))",
+        )
+        .expect("spec");
+    {
+        let buffer = eval.buffers.get_mut(buf_id).expect("buffer");
+        buffer.insert("line 0\nline 1\nline 2\nline 3\nline 4\nORIGINAL text here\nline 6\n");
+        for (from, to) in [(0, 6), (35, 43)] {
+            let start = buffer.char_pos_to_emacs_byte_pos_clamped(CharPos0::new(from));
+            let end = buffer.char_pos_to_emacs_byte_pos_clamped(CharPos0::new(to));
+            buffer.text_props_put_property_in_emacs_byte_range(
+                EmacsByteRange::new(start, end),
+                Value::symbol("display"),
+                spec,
+            );
+        }
+        // A face boundary inside the second span: the walk re-reads the
+        // display property at char 39 (GNU position 40).
+        let start = buffer.char_pos_to_emacs_byte_pos_clamped(CharPos0::new(39));
+        let end = buffer.char_pos_to_emacs_byte_pos_clamped(CharPos0::new(43));
+        buffer.text_props_put_property_in_emacs_byte_range(
+            EmacsByteRange::new(start, end),
+            Value::symbol("face"),
+            Value::symbol("bold"),
+        );
+    }
+    let conditions = evaluate_window_display_when_forms(
+        &mut eval,
+        buf_id,
+        None,
+        CharPos0::new(0),
+        CharPos0::new(60),
+        crate::display_property::DisplayPropertyTarget::Graphical,
+    );
+    let form = when_form(spec, 0);
+    assert_eq!(
+        conditions.verdict(form, DisplayWhenLookup::buffer_at_char_pos(0)),
+        DisplayWhenVerdict::Fails,
+        "first span: buffer-position 1"
+    );
+    assert_eq!(
+        conditions.verdict(form, DisplayWhenLookup::buffer_at_char_pos(35)),
+        DisplayWhenVerdict::Holds,
+        "second span: buffer-position 36"
+    );
+    assert_eq!(
+        conditions.verdict(form, DisplayWhenLookup::buffer_at_char_pos(39)),
+        DisplayWhenVerdict::Holds,
+        "a read inside the second run gets the run's answer"
+    );
+    assert_eq!(
+        conditions.verdict(form, DisplayWhenLookup::buffer_at_char_pos(50)),
+        DisplayWhenVerdict::Unseen,
+        "no site covers char 50"
+    );
+    assert!(
+        eval.eval_str("(equal (reverse dw-seen) '(1 36))")
+            .expect("seen")
+            .is_truthy(),
+        "each site evaluated once with its own buffer-position"
+    );
+    assert!(!conditions.allows_body_reuse());
+}
+
+/// A prefix string's `display` sites are keyed by the string and the index
+/// in it; the frame that walks the string asks with those.
+#[test]
+fn a_string_site_answers_by_string_and_index() {
+    let mut eval = Context::new();
+    let buf_id = eval.buffers.current_buffer_id().expect("buffer");
+    let prefix = eval
+        .eval_str(
+            "(concat (propertize \"ab\" 'display '(when (= position 0) space :align-to 4))
+                     (propertize \"cd\" 'display '(when (= position 0) space :align-to 8)))",
+        )
+        .expect("prefix");
+    {
+        let buffer = eval.buffers.get_mut(buf_id).expect("buffer");
+        buffer.insert("hello\n");
+        let start = buffer.char_pos_to_emacs_byte_pos_clamped(CharPos0::new(0));
+        let end = buffer.char_pos_to_emacs_byte_pos_clamped(CharPos0::new(5));
+        buffer.text_props_put_property_in_emacs_byte_range(
+            EmacsByteRange::new(start, end),
+            Value::symbol("line-prefix"),
+            prefix,
+        );
+    }
+    let conditions = evaluate_window_display_when_forms(
+        &mut eval,
+        buf_id,
+        None,
+        CharPos0::new(0),
+        CharPos0::new(6),
+        crate::display_property::DisplayPropertyTarget::Graphical,
+    );
+    let props = get_string_text_properties_table_for_value(prefix).expect("string props");
+    let form_at = |index: usize| {
+        when_form(
+            props
+                .get_property_at_char_pos(CharPos0::new(index), Value::symbol("display"))
+                .expect("display"),
+            0,
+        )
+    };
+    let at = |index: i64| DisplayWhenLookup::String {
+        string: prefix,
+        index,
+    };
+    assert_eq!(
+        conditions.verdict(form_at(0), at(0)),
+        DisplayWhenVerdict::Holds,
+        "first run: position 0"
+    );
+    assert_eq!(
+        conditions.verdict(form_at(2), at(2)),
+        DisplayWhenVerdict::Fails,
+        "second run: position 2"
+    );
+    assert_eq!(
+        conditions.verdict(form_at(2), at(3)),
+        DisplayWhenVerdict::Fails,
+        "inside the second run"
+    );
+    assert_eq!(
+        conditions.verdict(form_at(2), at(4)),
+        DisplayWhenVerdict::Unseen,
+        "past the string"
+    );
 }
 
 /// The FORM of the first (or `index`th) `when` spec of a display value.
@@ -200,7 +344,7 @@ fn window_span_forms_are_evaluated_from_text_props_overlays_and_prefix_vars() {
         CharPos0::new(12),
         crate::display_property::DisplayPropertyTarget::Graphical,
     );
-    let holds = |form: Value| match conditions.verdict(form) {
+    let holds = |form: Value| match conditions.verdict_any(form) {
         DisplayWhenVerdict::Holds => Some(true),
         DisplayWhenVerdict::Fails => Some(false),
         DisplayWhenVerdict::Unseen => None,
@@ -222,8 +366,8 @@ fn window_span_forms_are_evaluated_from_text_props_overlays_and_prefix_vars() {
         Some(false),
         "an erroring form is nil (dsafe_eval); buffer-local wrap-prefix is scanned"
     );
-    assert!(conditions.holds(when_form(text_display, 0)));
-    assert!(!conditions.holds(when_form(text_display, 1)));
+    assert!(conditions.holds(when_form(text_display, 0), DisplayWhenLookup::AnyOccurrence));
+    assert!(!conditions.holds(when_form(text_display, 1), DisplayWhenLookup::AnyOccurrence));
 }
 
 #[test]
@@ -254,7 +398,7 @@ fn a_disable_eval_wrapper_makes_its_when_forms_fail_like_gnu() {
         crate::display_property::DisplayPropertyTarget::Graphical,
     );
     let form = when_form(disabled, 0);
-    assert_eq!(conditions.verdict(form), DisplayWhenVerdict::Unseen);
+    assert_eq!(conditions.verdict_any(form), DisplayWhenVerdict::Unseen);
     assert!(
         crate::display_property::classify_display_property(
             disabled,
@@ -299,7 +443,7 @@ fn forms_are_evaluated_with_the_window_buffer_current() {
         crate::display_property::DisplayPropertyTarget::Graphical,
     );
     assert_eq!(
-        conditions.verdict(when_form(spec, 0)),
+        conditions.verdict_any(when_form(spec, 0)),
         DisplayWhenVerdict::Holds
     );
     assert_eq!(
@@ -341,11 +485,11 @@ fn an_after_string_binds_buffer_position_to_the_overlay_end() {
         crate::display_property::DisplayPropertyTarget::Graphical,
     );
     assert_eq!(
-        conditions.verdict(prefix_when_form(after_string)),
+        conditions.verdict_any(prefix_when_form(after_string)),
         DisplayWhenVerdict::Holds
     );
     assert_eq!(
-        conditions.verdict(prefix_when_form(before_string)),
+        conditions.verdict_any(prefix_when_form(before_string)),
         DisplayWhenVerdict::Holds
     );
 }
@@ -381,7 +525,7 @@ fn an_overlay_scoped_to_another_window_is_not_scanned() {
         crate::display_property::DisplayPropertyTarget::Graphical,
     );
     assert_eq!(
-        conditions.verdict(when_form(display, 0)),
+        conditions.verdict_any(when_form(display, 0)),
         DisplayWhenVerdict::Unseen
     );
     // …while the overlay's own window sees it evaluated.
@@ -399,7 +543,7 @@ fn an_overlay_scoped_to_another_window_is_not_scanned() {
         crate::display_property::DisplayPropertyTarget::Graphical,
     );
     assert_eq!(
-        conditions.verdict(when_form(display, 0)),
+        conditions.verdict_any(when_form(display, 0)),
         DisplayWhenVerdict::Holds
     );
 }
@@ -434,7 +578,7 @@ fn a_hidden_overlay_shows_its_after_string_at_the_start_the_walk_reaches() {
         crate::display_property::DisplayPropertyTarget::Graphical,
     );
     assert_eq!(
-        conditions.verdict(prefix_when_form(after)),
+        conditions.verdict_any(prefix_when_form(after)),
         DisplayWhenVerdict::Holds
     );
 }
@@ -476,12 +620,12 @@ fn an_after_string_ending_at_the_window_start_is_scanned_and_one_beyond_the_span
         crate::display_property::DisplayPropertyTarget::Graphical,
     );
     assert_eq!(
-        conditions.verdict(prefix_when_form(at_start)),
+        conditions.verdict_any(prefix_when_form(at_start)),
         DisplayWhenVerdict::Fails,
         "the after-string at the window start is evaluated (its form is nil)"
     );
     assert_eq!(
-        conditions.verdict(prefix_when_form(beyond)),
+        conditions.verdict_any(prefix_when_form(beyond)),
         DisplayWhenVerdict::Unseen,
         "an after-string displayed past the span is not reached"
     );
@@ -525,12 +669,12 @@ fn overlay_strings_anchored_at_point_max_are_evaluated_when_the_span_reaches_it(
         crate::display_property::DisplayPropertyTarget::Graphical,
     );
     assert_eq!(
-        conditions.verdict(prefix_when_form(empty_before)),
+        conditions.verdict_any(prefix_when_form(empty_before)),
         DisplayWhenVerdict::Fails,
         "the empty overlay's before-string at point-max is evaluated"
     );
     assert_eq!(
-        conditions.verdict(prefix_when_form(ending_after)),
+        conditions.verdict_any(prefix_when_form(ending_after)),
         DisplayWhenVerdict::Holds,
         "the after-string of an overlay ending at point-max is bound there"
     );
@@ -563,7 +707,7 @@ fn an_empty_overlay_supplies_no_display_property() {
         crate::display_property::DisplayPropertyTarget::Graphical,
     );
     assert_eq!(
-        conditions.verdict(when_form(display, 0)),
+        conditions.verdict_any(when_form(display, 0)),
         DisplayWhenVerdict::Unseen
     );
 }

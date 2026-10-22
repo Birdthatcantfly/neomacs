@@ -35,6 +35,35 @@ pub struct DisplayWhenSite {
     pub buffer_position: i64,
 }
 
+/// One evaluated occurrence of a FORM: the FORM and the bindings GNU gives
+/// it there (src/xdisp.c:6152-6154).  Two occurrences of one FORM -- the
+/// same `display` value on two spans, or one list value with the same form
+/// in two clauses at different positions -- are different keys, as they are
+/// different evaluations in GNU; the same FORM twice at one site is one
+/// key (the bindings are identical, so GNU's two evaluations can differ
+/// only through side effects, declared).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DisplayWhenSiteKey {
+    pub form: Value,
+    /// The buffer or string carrying the property (GNU `object`).
+    pub object: Value,
+    /// GNU `position`.
+    pub position: i64,
+    /// GNU `buffer-position`.
+    pub buffer_position: i64,
+}
+
+impl DisplayWhenSiteKey {
+    pub fn at(form: Value, site: &DisplayWhenSite) -> Self {
+        Self {
+            form,
+            object: site.object,
+            position: site.position,
+            buffer_position: site.buffer_position,
+        }
+    }
+}
+
 impl Context {
     /// Run `f` with `buf_id` current, the way GNU's display iterator runs
     /// with the window's buffer selected ("Really select the buffer, for the
@@ -59,14 +88,14 @@ impl Context {
         Ok(result)
     }
 
-    /// Evaluate reachable, enabled FORMs with the bindings of their first
-    /// occurrence. The caller supplies its single-spec replacement classifier
-    /// so string evaluation and rendering stop on the same winning clause.
+    /// Evaluate every reachable, enabled FORM occurrence with its own
+    /// bindings, as GNU does at each site it meets. The caller supplies its
+    /// single-spec replacement classifier so string evaluation and rendering
+    /// stop on the same winning clause.
     ///
     /// Snapshot and root every property's elements before running Lisp. A
     /// FORM can mutate the list/vector or remove a later site's property and
     /// collect; neither may invalidate our iteration or its saved elements.
-    /// Once-per-`equal`-FORM evaluation remains a declared difference from GNU.
     /// `Err` carries non-signal flows, which GNU lets unwind through redisplay.
     pub fn evaluate_display_when_sites(
         &mut self,
@@ -74,7 +103,7 @@ impl Context {
         window_id: Option<WindowId>,
         sites: &[DisplayWhenSite],
         mut replaces_text: impl FnMut(Value) -> bool,
-    ) -> Result<FxHashMap<Value, bool>, Flow> {
+    ) -> Result<FxHashMap<DisplayWhenSiteKey, bool>, Flow> {
         let symbol_mode = self.symbol_mode();
         let root_scope = self.save_specpdl_roots();
         let mut properties = Vec::with_capacity(sites.len());
@@ -96,7 +125,7 @@ impl Context {
             properties.push((property.eval_enabled, specs));
         }
         let evaluated = self.with_display_buffer_current(buf_id, |ctx| {
-            let mut results: FxHashMap<Value, bool> = FxHashMap::default();
+            let mut results: FxHashMap<DisplayWhenSiteKey, bool> = FxHashMap::default();
             // GNU saves a numeric character position, not an edit-tracking
             // marker (xdisp.c:21585-21611). Recompute its byte position after
             // Lisp has run, including when Lisp exits through a nonlocal flow.
@@ -146,7 +175,8 @@ impl Context {
                                 if !eval_enabled {
                                     continue;
                                 }
-                                let holds = if let Some(holds) = results.get(&form) {
+                                let key = DisplayWhenSiteKey::at(form, site);
+                                let holds = if let Some(holds) = results.get(&key) {
                                     *holds
                                 } else {
                                     let holds = ctx.display_when_form_holds(
@@ -155,7 +185,7 @@ impl Context {
                                         site.position,
                                         site.buffer_position,
                                     )?;
-                                    results.insert(form, holds);
+                                    results.insert(key, holds);
                                     holds
                                 };
                                 if !holds {

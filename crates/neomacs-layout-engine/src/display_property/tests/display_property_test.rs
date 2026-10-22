@@ -840,7 +840,7 @@ fn an_evaluated_when_form_that_did_not_hold_disables_its_spec() {
     );
     let mut results = rustc_hash::FxHashMap::default();
     results.insert(call, false);
-    let held_false = crate::display_when::DisplayWhenConditions::evaluated(results);
+    let held_false = crate::display_when::DisplayWhenConditions::evaluated_forms(results);
     assert!(
         classify_display_property(
             spec,
@@ -853,7 +853,7 @@ fn an_evaluated_when_form_that_did_not_hold_disables_its_spec() {
     );
     let mut results = rustc_hash::FxHashMap::default();
     results.insert(call, true);
-    let held_true = crate::display_when::DisplayWhenConditions::evaluated(results);
+    let held_true = crate::display_when::DisplayWhenConditions::evaluated_forms(results);
     assert_eq!(
         classify_display_property(
             spec,

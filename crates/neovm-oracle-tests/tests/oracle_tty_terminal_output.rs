@@ -70,3 +70,53 @@ fn tty_default_box_cursor_writes_no_cursor_style_control() {
         expect_test::expect![[r#""OK (329 (7 . 16))" cursor-style []"#]],
     );
 }
+
+/// GNU evaluates a `(when FORM . SPEC)` display spec at every site it
+/// meets, with `object`, `position` and `buffer-position` bound there
+/// (src/xdisp.c:6152-6154): one spec object on two spans whose FORM reads
+/// `buffer-position` is evaluated at each span and replaces only the span
+/// whose position satisfies it.  The observation is the set of bindings
+/// the FORM saw and what the terminal was drawn: `line 0` stays (position 1
+/// is not past 30) and `ORIGINAL` becomes `REPLACED` (position 36 is).
+#[test]
+fn tty_one_when_spec_on_two_spans_is_evaluated_at_each_with_its_own_bindings() {
+    return_if_neovm_enable_oracle_proptest_not_set!();
+    let form = format!(
+        r##"(progn {TERMINAL_SUPPORT}
+  (defvar to-seen nil)
+  (defvar object) (defvar position) (defvar buffer-position)
+  (defun to-late-p ()
+    (push (list (bufferp object) position buffer-position) to-seen)
+    (> buffer-position 30))
+  (setq to-spec '(when (to-late-p) . "REPLACED"))
+  (erase-buffer)
+  (dotimes (i 5) (insert (format "line %d\n" i)))
+  (insert "ORIGINAL text here\n")
+  (dotimes (i 5) (insert (format "line %d\n" (+ 6 i))))
+  (put-text-property 1 7 'display to-spec)
+  (put-text-property 36 44 'display to-spec)
+  (goto-char (point-min))
+  (redisplay t)
+  (list (sort (delete-dups (copy-sequence to-seen))
+              (lambda (a b) (< (nth 2 a) (nth 2 b))))
+        (posn-x-y (posn-at-point))))"##
+    );
+    common::assert_oracle_parity_with_terminal_output_expect(
+        &form,
+        || {
+            let terminal = TestTerminal::with_size(40, 120);
+            let env = vec![("TERMINAL_OUTPUT_TEST_TTY".to_owned(), terminal.name.clone())];
+            (terminal, env)
+        },
+        |terminal| {
+            format!(
+                "drawn {:?}",
+                TestTerminal::drawn_tokens(
+                    &terminal.finish_with_output(),
+                    &["line 0", "ORIGINAL", "REPLACED"],
+                )
+            )
+        },
+        expect_test::expect![[r#""OK (((t 1 1) (t 36 36)) (0 . 0))" drawn ["line 0", "REPLACED"]"#]],
+    );
+}
