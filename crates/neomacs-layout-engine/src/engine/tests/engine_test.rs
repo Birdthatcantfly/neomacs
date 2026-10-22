@@ -36676,6 +36676,13 @@ fn assert_display_when_point_after_edit(outcome: &str) {
     assert_eq!(eval.eval_str("(point)").expect("point"), Value::fixnum(5));
 }
 
+/// A `when` FORM whose answer changes with nothing else changing is honoured
+/// where GNU honours it: by any walk of the window (a fresh engine here, or
+/// a redisplay GNU does not shortcut, such as after `force-mode-line-update`),
+/// never by a redisplay GNU answers with `try_cursor_movement`, which keeps the
+/// rows it has without evaluating their FORMs (src/xdisp.c:19838-19876).  The
+/// retained rows were built from evaluated answers, so reusing them is GNU's
+/// staleness, not glyphs replayed from an unknown answer.
 #[test]
 fn display_when_change_invalidates_retained_body() {
     let (mut eval, frame_id, _, _) = incr_editing_frame("X\n", 640, 200);
@@ -36695,14 +36702,22 @@ fn display_when_change_invalidates_retained_body() {
         frame_id,
     ));
     assert_eq!(before[0], "REPLACED");
+    assert_eq!(
+        incremental[0], "REPLACED",
+        "reused like GNU's current matrix"
+    );
     assert_eq!(fresh[0], "X");
     assert_eq!(
         eval.eval_str("pr354-calls").expect("evaluation count"),
-        Value::fixnum(3)
+        Value::fixnum(2),
+        "the reuse evaluated nothing; the fresh walk evaluated once"
     );
+    eval.eval_str("(force-mode-line-update t)").expect("force");
+    engine.layout_frame_rust(&mut eval, frame_id);
+    let forced = trace_text_rows(&selected_window_layout_trace(&eval, &engine, frame_id));
     assert_eq!(
-        incremental, fresh,
-        "a newly false condition must discard old replacement glyphs"
+        forced, fresh,
+        "a redisplay GNU walks discards the old replacement glyphs"
     );
 }
 
@@ -37405,4 +37420,172 @@ fn display_when_a_second_disagreement_after_the_replay_keeps_the_replay_rows() {
         rows.iter().any(|row| row.starts_with("BBBB")),
         "B stays drawn by the structural rule (declared fallback): {rows:?}"
     );
+}
+
+/// GNU `try_cursor_movement`: a redisplay that only moves the cursor reuses
+/// the window's rows and never evaluates a reused row's `when` FORM again,
+/// so a FORM whose answer turned nil leaves its replacement on the screen
+/// (src/xdisp.c:19838-19876).  What GNU refuses that reuse for re-walks and
+/// re-evaluates: `force-mode-line-update` (`update_mode_lines` and
+/// `prevent_redisplay_optimizations_p`) and any change of the window's text.
+#[test]
+fn display_when_cursor_motion_reuses_rows_without_evaluating_like_gnu() {
+    let text = "line 0\nline 1\nline 2\nline 3\nline 4\nORIGINAL text here\nline 6\nline 7\n";
+    let (mut eval, frame_id, buf_id, _) = incr_editing_frame(text, 640, 300);
+    realize_test_gui_frame(&mut eval, frame_id);
+    eval.eval_str(
+        r#"(progn (setq dw-n 0 dw-flag t)
+             (put-text-property 36 44 'display
+               '(when (progn (setq dw-n (1+ dw-n)) dw-flag) . "REPLACED")))"#,
+    )
+    .expect("setup");
+    let mut engine = LayoutEngine::new();
+    let mut count = |eval: &mut Context| {
+        eval.eval_str("dw-n")
+            .expect("counter")
+            .as_fixnum()
+            .expect("fixnum")
+    };
+    let rows = |eval: &Context, engine: &LayoutEngine| {
+        trace_text_rows(&selected_window_layout_trace(eval, engine, frame_id))
+    };
+    engine.layout_frame_rust(&mut eval, frame_id);
+    assert!(rows(&eval, &engine)[5].starts_with("REPLACED"));
+    let evaluated = count(&mut eval);
+    assert!(evaluated >= 1);
+
+    // The answer turns nil; only the cursor moves.
+    eval.eval_str("(setq dw-flag nil)").expect("flag");
+    let goto = |eval: &mut Context, charpos: usize| {
+        let buffer = eval.buffer_manager_mut().get_mut(buf_id).expect("buffer");
+        buffer.goto_emacs_byte_pos(neovm_core::buffer::EmacsBytePos::new(charpos));
+    };
+    goto(&mut eval, 14);
+    engine.layout_frame_rust(&mut eval, frame_id);
+    assert!(
+        engine
+            .cursor_only_window_ids
+            .contains(&DisplayWindowId::new(
+                eval.frame_manager()
+                    .get(frame_id)
+                    .unwrap()
+                    .selected_window
+                    .0 as i64
+            )),
+        "the window took the cursor-only replay"
+    );
+    assert_eq!(
+        count(&mut eval),
+        evaluated,
+        "a reused row's FORM is not evaluated"
+    );
+    assert!(
+        rows(&eval, &engine)[5].starts_with("REPLACED"),
+        "the reused row keeps the replacement, as GNU's does"
+    );
+    goto(&mut eval, 55);
+    engine.layout_frame_rust(&mut eval, frame_id);
+    assert_eq!(count(&mut eval), evaluated, "past the row: still reused");
+    assert!(rows(&eval, &engine)[5].starts_with("REPLACED"));
+
+    // `force-mode-line-update' refuses GNU's reuse: the window is re-walked.
+    eval.eval_str("(force-mode-line-update t)").expect("force");
+    engine.layout_frame_rust(&mut eval, frame_id);
+    assert!(
+        count(&mut eval) > evaluated,
+        "re-evaluated after force-mode-line-update"
+    );
+    assert!(
+        rows(&eval, &engine)[5].starts_with("ORIGINAL"),
+        "{:?}",
+        rows(&eval, &engine)
+    );
+}
+
+/// Rows whose `when` answers stay unverified (the replay bound's fallback)
+/// are never reused: the next cursor-only redisplay walks and evaluates.
+#[test]
+fn display_when_unverified_rows_are_not_reused_on_cursor_motion() {
+    let (mut eval, frame_id, buf_id, _) = incr_editing_frame("a\n", 640, 200);
+    realize_test_gui_frame(&mut eval, frame_id);
+    eval.eval_str(
+        r#"(progn
+             (setq dw-b 0)
+             (goto-char (point-max))
+             (insert (propertize (make-string 6000 ?x) 'invisible t))
+             (let ((start (point)))
+               (insert "ORIG\n")
+               (put-text-property start (+ start 4) 'display
+                 '(when (null t) . "A1\nA2\nA3\nA4\nA5\nA6\nA7\nA8\nA9\nA10\nA11\nA12")))
+             (let ((start (point)))
+               (insert "BTXT\n")
+               (put-text-property start (+ start 4) 'display
+                 '(when (progn (setq dw-b (1+ dw-b)) nil) . "BBBB")))
+             (goto-char (point-min)))"#,
+    )
+    .expect("setup");
+    let mut engine = LayoutEngine::new();
+    engine.layout_frame_rust(&mut eval, frame_id);
+    let window = eval.frame_manager().get(frame_id).unwrap().selected_window;
+    let retained = engine
+        .retained_window_matrices
+        .get(&DisplayWindowId::new(window.0 as i64))
+        .expect("retained matrix");
+    assert_eq!(
+        retained.display_when.record,
+        crate::display_when::DisplayWhenRecord::Unknown
+    );
+    let before = eval.eval_str("dw-b").unwrap().as_fixnum().unwrap();
+    {
+        let buffer = eval.buffer_manager_mut().get_mut(buf_id).expect("buffer");
+        buffer.goto_emacs_byte_pos(neovm_core::buffer::EmacsBytePos::new(1));
+    }
+    engine.layout_frame_rust(&mut eval, frame_id);
+    assert!(
+        eval.eval_str("dw-b").unwrap().as_fixnum().unwrap() > before,
+        "unverified rows are walked again, and their unscanned FORM evaluated"
+    );
+}
+
+/// The reuse does not depend on the window having chrome (the R6 scenes
+/// and many tools set `mode-line-format' to nil), and it honours GNU's
+/// `window_end_valid' term: `set-window-start' -- even to the start the
+/// window already has -- makes GNU redisplay the window, and the port walks
+/// and evaluates again.
+#[test]
+fn display_when_reuse_needs_a_valid_window_end_not_a_mode_line() {
+    let text = "line 0\nline 1\nline 2\nline 3\nline 4\nORIGINAL text here\nline 6\nline 7\n";
+    let (mut eval, frame_id, buf_id, _) = incr_editing_frame(text, 640, 300);
+    realize_test_gui_frame(&mut eval, frame_id);
+    eval.eval_str(
+        r#"(progn (setq dw-n 0 dw-flag t)
+             (set (make-local-variable 'mode-line-format) nil)
+             (put-text-property 36 44 'display
+               '(when (progn (setq dw-n (1+ dw-n)) dw-flag) . "REPLACED")))"#,
+    )
+    .expect("setup");
+    let mut engine = LayoutEngine::new();
+    let count = |eval: &mut Context| eval.eval_str("dw-n").unwrap().as_fixnum().unwrap();
+    let row5 = |eval: &Context, engine: &LayoutEngine| {
+        trace_text_rows(&selected_window_layout_trace(eval, engine, frame_id))[5].clone()
+    };
+    engine.layout_frame_rust(&mut eval, frame_id);
+    let evaluated = count(&mut eval);
+    eval.eval_str("(setq dw-flag nil)").expect("flag");
+    {
+        let buffer = eval.buffer_manager_mut().get_mut(buf_id).expect("buffer");
+        buffer.goto_emacs_byte_pos(neovm_core::buffer::EmacsBytePos::new(14));
+    }
+    engine.layout_frame_rust(&mut eval, frame_id);
+    assert_eq!(count(&mut eval), evaluated, "reused without a mode line");
+    assert!(row5(&eval, &engine).starts_with("REPLACED"));
+
+    eval.eval_str("(set-window-start nil (window-start))")
+        .expect("same start");
+    engine.layout_frame_rust(&mut eval, frame_id);
+    assert!(
+        count(&mut eval) > evaluated,
+        "an invalidated window end makes GNU, and the port, walk again"
+    );
+    assert!(row5(&eval, &engine).starts_with("ORIGINAL"));
 }

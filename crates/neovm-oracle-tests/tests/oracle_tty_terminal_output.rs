@@ -223,7 +223,7 @@ fn tty_cursor_motion_reuses_rows_without_evaluating_their_when_forms() {
   (redisplay t)
   (list to-n (point)))"##
     );
-    common::assert_oracle_divergence_with_terminal_output_expect(
+    common::assert_oracle_parity_with_terminal_output_expect(
         &form,
         when_terminal,
         |terminal| {

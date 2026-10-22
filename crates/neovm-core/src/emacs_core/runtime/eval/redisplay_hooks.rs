@@ -555,6 +555,17 @@ impl Context {
         gnu_redisplay_hooks_enabled()
     }
 
+    /// GNU `try_cursor_movement` refuses while `windows_or_buffers_changed`
+    /// or `update_mode_lines` is set (src/xdisp.c:19866-19876).  Under the
+    /// GNU hook policy those are the pending window and mode-line scopes of
+    /// the redisplay in progress; the legacy policy keeps no such flags and
+    /// answers false (callers combine this with the chrome-dirty generation).
+    pub fn gnu_redisplay_refuses_cursor_movement(&self) -> bool {
+        gnu_redisplay_hooks_enabled()
+            && (self.gnu_redisplay_hooks.windows != PendingScope::None
+                || self.gnu_redisplay_hooks.mode_lines != PendingScope::None)
+    }
+
     /// True only while the complete GNU transaction owns mini preparation.
     /// A standalone committed-start callback also prevents recursive redisplay,
     /// but it does not own sizing for a later renderer-facing layout attempt.

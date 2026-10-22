@@ -73,6 +73,18 @@ impl ChromeDirty {
         self.windows.insert(window);
     }
 
+    /// The current `update_mode_lines` generation.  A consumer that recorded
+    /// it when it produced something can tell whether GNU's global flag was
+    /// raised since (`try_cursor_movement` refuses while it is set).
+    pub fn all_generation(&self) -> u64 {
+        self.all_generation
+    }
+
+    /// Whether WINDOW carries its own mark (GNU `w->update_mode_line`).
+    pub fn is_window_marked(&self, window: WindowId) -> bool {
+        self.windows.contains(&window)
+    }
+
     /// Whether WINDOW must re-generate its chrome this redisplay.
     pub fn is_dirty(&self, window: WindowId) -> bool {
         self.windows.contains(&window)

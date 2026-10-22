@@ -523,6 +523,9 @@ pub struct RetainedWindowMatrix {
     /// rendered from; `None` with the knob off or when no row could be
     /// fingerprinted.
     pub(crate) chrome_fingerprints: Option<std::sync::Arc<[chrome_memo::ChromeRowFingerprint]>>,
+    /// The `when` answers these rows were built from (see
+    /// [`crate::display_when::DisplayWhenRetention`]).
+    pub(crate) display_when: crate::display_when::DisplayWhenRetention,
 }
 
 /// Why a window could not take the cursor-only fast path.

@@ -262,6 +262,13 @@ impl DisplayWhenConditions {
         self
     }
 
+    /// The conditions of a walk that reuses retained rows without evaluating
+    /// anything (GNU `try_cursor_movement`): no answers.  A clause asked
+    /// anyway is recorded and evaluated after the walk like any other.
+    pub(crate) fn reused_without_evaluation(buffer: Value) -> Self {
+        Self::evaluated(buffer, &[], FxHashMap::default())
+    }
+
     /// Answers by FORM alone, at no site: every lookup finds them as "any
     /// occurrence".
     #[cfg(test)]
@@ -428,6 +435,17 @@ pub(crate) enum DisplayWhenRecord {
     /// site could not be evaluated, or it disagreed again after the one
     /// replay.  Rows produced from it must not be reused.
     Unknown,
+}
+
+/// What a retained matrix remembers about the `when` answers its rows were
+/// built from, for GNU's cursor-motion reuse: the record, and the chrome-dirty
+/// generation (GNU `update_mode_lines`, folding in
+/// `prevent_redisplay_optimizations_p` from `force-mode-line-update`) at the
+/// redisplay that produced them.  Numeric: no Lisp object outlives the frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DisplayWhenRetention {
+    pub(crate) record: DisplayWhenRecord,
+    pub(crate) mode_line_generation: u64,
 }
 
 /// The outcome of evaluating the clauses a walk took by the structural rule.
