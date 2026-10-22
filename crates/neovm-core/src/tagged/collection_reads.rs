@@ -576,6 +576,26 @@ fn record_observation(
     }
 }
 
+/// Ordered protocol evidence for native/interpreter parity tests. Identities
+/// remain words; taking this snapshot does not observe or dereference owners.
+#[cfg(test)]
+pub(crate) fn journal_since_for_test(start: LispCollectionRevision) -> Option<Vec<usize>> {
+    with_store(|store| {
+        let count = store.sequence().wrapping_sub(start.sequence());
+        if count > JOURNAL_SIZE as u64 {
+            return None;
+        }
+        Some(
+            (1..=count)
+                .map(|offset| {
+                    let sequence = start.sequence().wrapping_add(offset);
+                    store.journal()[sequence as usize % JOURNAL_SIZE].get()
+                })
+                .collect(),
+        )
+    })
+}
+
 pub(super) fn record_write(value: TaggedValue, revision: u64) {
     with_store(|store| store.record(value.bits(), revision));
 }

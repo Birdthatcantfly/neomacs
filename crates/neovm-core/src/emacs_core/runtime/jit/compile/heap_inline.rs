@@ -238,7 +238,9 @@ fn gen1_journals_every_store() -> bool {
     !jit_gen0_collection_journal_on() || jit_gen0_collection_journal_eager()
 }
 
-/// Record an accepted Cons or VecLike store with the existing GEN1 helper.
+/// Record an accepted Cons or VecLike store through the shared store helper.
+/// It loads TAGGED_HEAP once and journals in that heap's inline World protocol;
+/// no observation-TLS journal or independent generated revision is maintained.
 /// This has no Lisp allocation, callback or safe point; it runs the same
 /// projected recorder as the interpreter's setter before the actual store.
 /// GEN0 calls it only under the collection-journal knob. Knob-off GEN1

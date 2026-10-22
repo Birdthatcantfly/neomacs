@@ -1330,3 +1330,6 @@ fn inline_aref_and_aset_have_no_slot0_test() {
     assert_eq!(aref_shim_calls(), reads + 1);
     super::force_aref_slot0_for_test(None);
 }
+
+#[path = "inline_heap_store_state_consistency_test.rs"]
+mod store_state_consistency_tests;
