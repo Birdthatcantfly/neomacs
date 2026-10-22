@@ -244,14 +244,31 @@ pub(crate) struct SwitchTables<'a> {
 /// its proven depth keeps every invariant the unchecked driver relies on
 /// downstream, whatever a `puthash` after sealing did to the table (GNU
 /// follows such a table blindly).
+///
+/// `switch_targets` pre-resolves every jump-table value the proof admitted:
+/// `(raw value, instruction index)`, sorted by raw value and deduplicated
+/// across the function's switches (a GNU byte offset names one instruction
+/// whichever switch holds it). It only replaces the byte-offset search; the
+/// depth check above still decides every hit. All admitted switches share
+/// that fixed depth, including when a mutated table reuses another target.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct StackProof {
     pub(crate) switch_depth: Option<usize>,
+    pub(crate) switch_targets: Box<[(i64, u32)]>,
     pub(crate) depths: Vec<u32>,
 }
 
 impl StackProof {
     pub(crate) const UNREACHABLE: u32 = u32::MAX;
+
+    /// The pre-resolved instruction index of an admitted jump-table value.
+    #[inline]
+    pub(crate) fn switch_target(&self, raw: i64) -> Option<usize> {
+        self.switch_targets
+            .binary_search_by_key(&raw, |entry| entry.0)
+            .ok()
+            .map(|k| self.switch_targets[k].1 as usize)
+    }
 
     /// Whether instruction `pc` is proven at operand depth `depth`.
     #[inline]
@@ -313,6 +330,7 @@ pub(crate) fn verify_stack_effects_with_tables(
         return None;
     }
     let mut switch_depth = None;
+    let mut switch_targets: Vec<(i64, u32)> = Vec::new();
     let mut depths: Vec<Option<usize>> = vec![None; ops.len()];
     depths[0] = Some(entry_depth);
     let mut worklist: Vec<(usize, usize)> = vec![(0, entry_depth)];
@@ -420,10 +438,11 @@ pub(crate) fn verify_stack_effects_with_tables(
                 }
                 let targets =
                     switch_static_targets(ops, tables.constants, tables.offset_map, pc).ok()?;
-                for &(_, target) in &targets {
+                for &(raw, target) in &targets {
                     if !flow(&mut depths, &mut worklist, target, depth - 2, max_stack) {
                         return None;
                     }
+                    switch_targets.push((raw, target as u32));
                 }
                 if switch_depth.is_some_and(|proven| proven != depth - 2) {
                     return None;
@@ -547,8 +566,11 @@ pub(crate) fn verify_stack_effects_with_tables(
     } else {
         Vec::new()
     };
+    switch_targets.sort_unstable();
+    switch_targets.dedup_by_key(|entry| entry.0);
     Some(StackProof {
         switch_depth,
+        switch_targets: switch_targets.into_boxed_slice(),
         depths,
     })
 }

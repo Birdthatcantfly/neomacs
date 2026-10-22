@@ -259,3 +259,52 @@ fn switches_at_different_depths_keep_the_checked_driver() {
     assert!(!func.executes_verified_ops());
     assert_eq!(func.verified_switch_pc(7), None, "use the checked resolver");
 }
+
+#[test]
+fn admitted_targets_are_pre_resolved_sorted_and_deduplicated() {
+    crate::test_utils::init_test_tracing();
+    let constants = pool(jump_table(&[
+        ("vsw-foo", Value::fixnum(8)),
+        ("vsw-bar", Value::fixnum(6)),
+        ("vsw-baz", Value::fixnum(8)),
+    ]));
+    let proof = verify(&SWITCH_BYTES, &constants, 2).expect("admitted");
+    assert_eq!(&*proof.switch_targets, &[(6, 4), (8, 6)]);
+    assert_eq!(proof.switch_target(6), Some(4));
+    assert_eq!(proof.switch_target(8), Some(6));
+    assert_eq!(proof.switch_target(7), None, "not a table value");
+    // A stream without a switch pre-resolves nothing.
+    let (plain_ops, _) =
+        decode_gnu_bytecode_with_offset_map(&[192, 135], &mut vec![Value::NIL]).unwrap();
+    let plain = verify_stack_effects_with_tables(&plain_ops, 0, 1, None).expect("proof");
+    assert!(plain.switch_targets.is_empty());
+}
+
+#[test]
+fn switches_sharing_targets_share_one_pre_resolved_entry() {
+    crate::test_utils::init_test_tracing();
+    // constant key; constant table; switch; constant key; constant table;
+    // switch; constant 10; return. Both switches name byte 6 (instruction
+    // 6), entered at depth 0 from both.
+    let bytes = [193, 192, 183, 193, 192, 183, 194, 135];
+    let constants = pool(jump_table(&[("vsw-foo", Value::fixnum(6))]));
+    let proof = verify(&bytes, &constants, 2).expect("admitted");
+    assert_eq!(&*proof.switch_targets, &[(6, 6)]);
+}
+
+#[test]
+fn pre_resolved_switch_hit_uses_the_fixed_proof_depth() {
+    crate::test_utils::init_test_tracing();
+    let mut func = ByteCodeFunction::new(LambdaParams::simple(vec![]));
+    func.constants = pool(jump_table(&[("vsw-foo", Value::fixnum(8))])).into();
+    func.max_stack = crate::emacs_core::bytecode::StackDepth::for_test(2);
+    func.gnu_bytecode_bytes = Some(crate::tagged::header::LispByteVec::owned(
+        SWITCH_BYTES.to_vec(),
+    ));
+    func.defer_gnu_decode();
+    assert!(func.executes_verified_ops());
+    // Byte 8 is pre-resolved at the fixed switch depth. Byte 9 is proven
+    // one deeper, and cannot be entered by this switch after a mutation.
+    assert_eq!(func.verified_switch_pc(8), Some(Some(6)));
+    assert_eq!(func.verified_switch_pc(9), Some(None));
+}

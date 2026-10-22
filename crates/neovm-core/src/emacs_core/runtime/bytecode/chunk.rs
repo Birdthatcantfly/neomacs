@@ -60,6 +60,25 @@ pub(crate) fn lazy_gnu_decode_count_for_test() -> usize {
     LAZY_GNU_DECODE_COUNT.load(Ordering::Relaxed)
 }
 
+impl DecodedGnuCode {
+    /// The instruction a jump-table value outside the proof's admitted set
+    /// names: a GNU byte offset resolved through the byte-offset map exactly
+    /// as the checked driver resolves every hit, or (natively indexed code)
+    /// the value itself. Only a table mutated after sealing gets here.
+    #[cold]
+    #[inline(never)]
+    fn unadmitted_switch_target(&self, raw: i64) -> Option<usize> {
+        let raw_addr = usize::try_from(raw).ok()?;
+        let map = &self.byte_offset_map;
+        if map.is_empty() {
+            return Some(raw_addr);
+        }
+        map.binary_search_by_key(&raw_addr, |entry| entry.byte_offset)
+            .ok()
+            .map(|index| map[index].instruction_index)
+    }
+}
+
 impl LazyGnuCode {
     fn new() -> Self {
         Self {
@@ -537,6 +556,8 @@ impl ByteCodeFunction {
     /// one. All its reachable switches share the post-pop depth recorded at
     /// verification, so this needs no live depth from the dispatch arm.
     /// A mutated table may name any instruction proven at that fixed depth.
+    /// Admitted values use the pre-resolved table; only new values search
+    /// the byte-offset map on the cold path.
     ///
     /// The outer `None` leaves unverified/eager functions with the checked
     /// resolver's existing behavior. `Some(None)` rejects an unsafe target.
@@ -548,12 +569,10 @@ impl ByteCodeFunction {
             return None;
         }
         Some(lazy.proof.get().and_then(|proof| {
-            let raw = usize::try_from(raw).ok()?;
-            let target = decoded
-                .byte_offset_map
-                .binary_search_by_key(&raw, |entry| entry.byte_offset)
-                .ok()
-                .map(|index| decoded.byte_offset_map[index].instruction_index)?;
+            let target = match proof.switch_target(raw) {
+                Some(target) => target,
+                None => decoded.unadmitted_switch_target(raw)?,
+            };
             let depth = proof.switch_depth?;
             proof.proves_depth(target, depth).then_some(target)
         }))
