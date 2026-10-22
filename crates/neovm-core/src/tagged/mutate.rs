@@ -298,7 +298,10 @@ pub fn replace_vector_data(value: TaggedValue, items: Vec<TaggedValue>) -> bool 
 
 #[inline]
 pub fn set_vector_slot(value: TaggedValue, index: usize, item: TaggedValue) -> bool {
-    with_store_state(|store| set_vector_slot_in_store(store, value, index, item))
+    with_store_state(
+        #[inline(always)]
+        |store| set_vector_slot_in_store(store, value, index, item),
+    )
 }
 
 #[inline(always)]
@@ -358,7 +361,10 @@ pub fn replace_record_data(value: TaggedValue, items: Vec<TaggedValue>) -> bool 
 
 #[inline]
 pub fn set_record_slot(value: TaggedValue, index: usize, item: TaggedValue) -> bool {
-    with_store_state(|store| set_record_slot_in_store(store, value, index, item))
+    with_store_state(
+        #[inline(always)]
+        |store| set_record_slot_in_store(store, value, index, item),
+    )
 }
 
 #[inline(always)]
@@ -497,7 +503,10 @@ pub fn with_lisp_string_mut<R>(
 /// full barrier -- 43 instructions per character on dhrystone.
 #[inline]
 pub fn set_string_byte_same_char_count(value: TaggedValue, byte_pos: usize, byte: u8) -> bool {
-    with_store_state(|store| set_string_byte_same_char_count_in_store(store, value, byte_pos, byte))
+    with_store_state(
+        #[inline(always)]
+        |store| set_string_byte_same_char_count_in_store(store, value, byte_pos, byte),
+    )
 }
 
 #[inline(always)]
