@@ -281,6 +281,8 @@ struct MutatorSatbRegistry {
     /// Scoped pointer to the actual AllStopped guard; never a manufactured proof.
     /// Access and lifetime erasure are confined to collector_tables.
     collector_tables: Option<std::rc::Rc<Cell<*const ()>>>,
+    /// The World's carried collection protocol, outside the pinned hot heap.
+    observations: std::cell::OnceCell<super::super::collection_reads::ObservationWorld>,
 }
 
 #[repr(transparent)]
@@ -343,7 +345,14 @@ impl MutatorSatbSlot {
             #[cfg(test)]
             registered: Vec::new(),
             collector_tables: None,
+            observations: std::cell::OnceCell::new(),
         }))
+    }
+
+    pub(super) fn observations(&self) -> &super::super::collection_reads::ObservationWorld {
+        self.0
+            .observations
+            .get_or_init(super::super::collection_reads::ObservationWorld::for_heap)
     }
 
     /// Include this Box, the cfg(test) descriptor/location index allocations,
@@ -726,6 +735,10 @@ impl TestMutatorSwitch {
         let _ = TAGGED_HEAP_BARRIER_WINDOW.try_with(|slot| slot.set(window));
         let _ = TAGGED_HEAP_CONS_BARRIER_WINDOW
             .try_with(|slot| slot.set(heap.cons_barrier_window(window)));
+        // Synthetic switching stays on this fixture's executing OS thread.
+        let store = heap.store_state_root();
+        // SAFETY: the fixture retains the heap and its stable observation owner.
+        unsafe { store.as_ref() }.publish_windows(heap.cons_barrier_window(window), window);
         let _ = TAGGED_HEAP_SATB_CACHE.try_with(|slots| {
             for slot in slots {
                 slot.set(0);

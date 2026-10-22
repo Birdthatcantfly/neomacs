@@ -35,6 +35,11 @@ thread_local! {
 pub struct LispCollectionRevision(u64);
 
 impl LispCollectionRevision {
+    #[inline]
+    pub(super) fn from_sequence(sequence: u64) -> Self {
+        Self(sequence)
+    }
+
     /// Exact mutation count for regression tests, including sequence wrap.
     #[cfg(test)]
     pub(crate) fn steps_since_for_test(self, earlier: Self) -> u64 {
@@ -42,7 +47,9 @@ impl LispCollectionRevision {
     }
 
     pub fn current() -> Self {
-        Self(COLLECTION_REVISION.with(std::cell::Cell::get))
+        Self(super::collection_reads::with_store(|store| {
+            store.sequence()
+        }))
     }
 
     #[inline]
@@ -52,11 +59,7 @@ impl LispCollectionRevision {
 
     #[inline]
     pub(super) fn advance() -> Self {
-        COLLECTION_REVISION.with(|revision| {
-            let next = revision.get().wrapping_add(1);
-            revision.set(next);
-            Self(next)
-        })
+        Self(super::collection_reads::with_store(|store| store.advance()))
     }
 
     #[inline]
@@ -64,9 +67,8 @@ impl LispCollectionRevision {
         if !super::collection_reads::history_required() {
             return;
         }
-        COLLECTION_REVISION.with(|revision| {
-            let next = revision.get().wrapping_add(1);
-            revision.set(next);
+        super::collection_reads::with_store(|store| {
+            let next = store.advance();
             super::collection_reads::record_write(value, next);
         });
     }

@@ -2091,7 +2091,9 @@ impl Context {
     /// A Context over the World views READY, with SEED's execution state
     /// and every owner-private manager fresh.
     pub(super) fn assemble(world: world::ReadyWorld, seed: ExecutionSeed) -> Self {
+        let store_state = world.tagged_heap.store_state_root();
         Self {
+            store_state,
             integer_width_context: Default::default(),
             owned_roots: world.owned_roots,
             tagged_heap: world.tagged_heap,

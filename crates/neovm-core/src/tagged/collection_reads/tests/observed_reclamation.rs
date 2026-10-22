@@ -4,7 +4,7 @@
 //! its owner remains allocated in the live heap while only the other heap is
 //! collected. The counter is test-only metadata inside the existing State.
 
-use super::super::{CompiledJournalMode, STATE, capture, force_compiled_journal_for_test};
+use super::super::{CompiledJournalMode, capture, force_compiled_journal_for_test, with_state};
 use crate::tagged::gc::{
     TaggedHeap, collection_observation_epoch, collection_observed_metadata,
     mark_collection_observed, set_tagged_heap,
@@ -20,7 +20,7 @@ impl Drop for ObservedMode {
 }
 
 fn geometry_rebuilds() -> usize {
-    STATE.with(|state| state.borrow().observed.geometry_rebuilds_for_test())
+    with_state(|state| state.borrow().observed.geometry_rebuilds_for_test())
 }
 
 #[test]
@@ -34,7 +34,7 @@ fn unrelated_heap_reclamation_preserves_live_envelope_geometry() {
     let (_, reads) = capture(|| owner.cons_car());
     let reads = reads.expect("the retained owner supplies a real certificate");
     assert!(collection_observed_metadata(owner.bits()));
-    let bounds = STATE.with(|state| state.borrow().observed.full_bounds());
+    let bounds = with_state(|state| state.borrow().observed.full_bounds());
     let window = live_heap.jit_barrier_window_for_test();
     let rebuilds = geometry_rebuilds();
 
@@ -57,7 +57,7 @@ fn unrelated_heap_reclamation_preserves_live_envelope_geometry() {
         "an unrelated real mark clear must not reconstruct the live address tree"
     );
     assert_eq!(
-        STATE.with(|state| state.borrow().observed.full_bounds()),
+        with_state(|state| state.borrow().observed.full_bounds()),
         bounds
     );
     assert_eq!(live_heap.jit_barrier_window_for_test(), window);

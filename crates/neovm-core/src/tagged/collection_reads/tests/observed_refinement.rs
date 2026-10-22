@@ -5,7 +5,8 @@
 //! caller snapshots a newly observed owner's collection revision.
 
 use super::super::{
-    CompiledJournalMode, STATE, capture, compiled_observation_gate, force_compiled_journal_for_test,
+    CompiledJournalMode, capture, compiled_observation_gate, force_compiled_journal_for_test,
+    with_state,
 };
 use crate::buffer::BufferId;
 use crate::heap_types::LispString;
@@ -55,7 +56,7 @@ fn observed_small_cons_exemption_survives_large_gap_and_closes_before_publicatio
     assert!(!collection_observed_metadata(cells[1].bits()));
     assert!(!collection_observed_metadata(cells[5].bits()));
 
-    assert!(STATE.with(|state| {
+    assert!(with_state(|state| {
         state
             .borrow_mut()
             .observed
@@ -67,7 +68,7 @@ fn observed_small_cons_exemption_survives_large_gap_and_closes_before_publicatio
         address(cells[1]),
         "a two-cell interval needs a retained exact cons exemption",
     );
-    assert!(STATE.with(|state| {
+    assert!(with_state(|state| {
         state
             .borrow_mut()
             .observed
@@ -88,7 +89,7 @@ fn observed_small_cons_exemption_survives_large_gap_and_closes_before_publicatio
 
     let (_, singleton) = capture(|| {
         let value = cells[1].cons_car();
-        let published = STATE.with(|state| state.borrow().observed.gate());
+        let published = with_state(|state| state.borrow().observed.gate());
         assert_eq!(
             published.single_cons, 0,
             "the newly observed exact owner closes its exemption"
@@ -146,7 +147,10 @@ fn observed_slot_geometry_only_includes_vector_and_record_owners() {
     );
     for owner in [cons, string, reference, vector, record] {
         assert!(collection_observed_metadata(owner.bits()));
-        assert!(STATE.with(|state| state.borrow().observed.already_published(owner.bits())));
+        assert!(with_state(|state| state
+            .borrow()
+            .observed
+            .already_published(owner.bits())));
     }
     assert!(reads.unchanged());
     assert!(crate::tagged::mutate::set_vector_slot(

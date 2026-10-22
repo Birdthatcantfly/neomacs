@@ -15,7 +15,7 @@ fn record_slot(owner: Value, item: Value) -> bool {
 }
 
 fn journal_policy() -> JournalPolicy {
-    STATE.with(|state| state.borrow().journal_policy)
+    with_store(|store| store.policy.get())
 }
 
 #[test]
@@ -301,9 +301,9 @@ fn lazy_prefix_observes_another_mutators_monotonic_history_transition() {
             LispCollectionRevision::current().sequence(),
             before.wrapping_add(u64::from(!lazy) + 1)
         );
-        STATE.with(|state| {
+        with_store(|store| {
             let slot = LispCollectionRevision::current().sequence() as usize % JOURNAL_SIZE;
-            assert_eq!(state.borrow().writes[slot], source.bits());
+            assert_eq!(store.writes[slot].get(), source.bits());
         });
         assert_eq!(journal_policy(), JournalPolicy::JournalOnly);
         leaving.wait();

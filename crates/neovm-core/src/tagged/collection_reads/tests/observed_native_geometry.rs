@@ -6,7 +6,8 @@
 //! The isolated nextest process owns its mutator-local forced journal mode.
 
 use super::super::{
-    CompiledJournalMode, STATE, capture, compiled_observation_gate, force_compiled_journal_for_test,
+    CompiledJournalMode, capture, compiled_observation_gate, force_compiled_journal_for_test,
+    with_state,
 };
 use crate::buffer::BufferId;
 use crate::heap_types::LispString;
@@ -59,10 +60,13 @@ fn observed_reference_headers_retain_publication_without_native_geometry() {
     let reads = reads.expect("real immutable-header dependencies are coherent");
     for owner in owners {
         assert!(collection_observed_metadata(owner.bits()));
-        assert!(STATE.with(|state| state.borrow().observed.already_published(owner.bits())));
+        assert!(with_state(|state| state
+            .borrow()
+            .observed
+            .already_published(owner.bits())));
     }
     assert_eq!(
-        STATE.with(|state| state.borrow().observed.full_bounds()),
+        with_state(|state| state.borrow().observed.full_bounds()),
         (usize::MAX, 0),
         "reference-only pseudovectors must not widen native collection-store geometry",
     );
@@ -75,7 +79,7 @@ fn observed_reference_headers_retain_publication_without_native_geometry() {
     assert!(reads.unchanged());
     let (_, replay) = capture(|| {
         assert!(reads.unchanged_and_observe());
-        STATE.with(|state| {
+        with_state(|state| {
             assert!(
                 state
                     .borrow()
@@ -121,7 +125,7 @@ fn observed_gc_rebuild_keeps_non_native_ledger_and_only_native_geometry() {
     assert!(!collection_observed_metadata(discarded.bits()));
     let gate = compiled_observation_gate(BarrierWindow::NONE);
     assert_eq!(
-        STATE.with(|state| state.borrow().observed.full_bounds()),
+        with_state(|state| state.borrow().observed.full_bounds()),
         (address(retained), address(retained) + 1),
         "rebuild must reuse cached geometry eligibility without reading old headers",
     );
@@ -135,12 +139,15 @@ fn observed_gc_rebuild_keeps_non_native_ledger_and_only_native_geometry() {
             .iter()
             .all(|range| !range.covers(address(reference)))
     );
-    assert!(STATE.with(|state| state.borrow().observed.already_published(reference.bits())));
+    assert!(with_state(|state| state
+        .borrow()
+        .observed
+        .already_published(reference.bits())));
     assert!(collection_observed_metadata(reference.bits()));
     assert!(reads.unchanged());
     let (_, replay) = capture(|| {
         assert!(reads.unchanged_and_observe());
-        STATE.with(|state| {
+        with_state(|state| {
             assert!(
                 state
                     .borrow()
@@ -178,7 +185,10 @@ fn observed_window_geometry_includes_cons_vector_and_record_owners() {
     let gate = compiled_observation_gate(BarrierWindow::NONE);
     for owner in owners {
         assert!(collection_observed_metadata(owner.bits()));
-        assert!(STATE.with(|state| state.borrow().observed.already_published(owner.bits())));
+        assert!(with_state(|state| state
+            .borrow()
+            .observed
+            .already_published(owner.bits())));
         assert!(
             gate.observed
                 .iter()
@@ -204,9 +214,12 @@ fn observed_string_keeps_exact_mark_and_compiled_invalidation_without_window_geo
     let (_, reads) = capture(|| assert_eq!(owner.as_str_owned().unwrap(), "abc"));
     let reads = reads.expect("the retained string supplies a real certificate");
     assert!(collection_observed_metadata(owner.bits()));
-    assert!(STATE.with(|state| state.borrow().observed.already_published(owner.bits())));
+    assert!(with_state(|state| state
+        .borrow()
+        .observed
+        .already_published(owner.bits())));
     assert_eq!(
-        STATE.with(|state| state.borrow().observed.full_bounds()),
+        with_state(|state| state.borrow().observed.full_bounds()),
         (usize::MAX, 0),
         "string native stores use the exact header mark and must not widen common geometry",
     );
@@ -218,7 +231,7 @@ fn observed_string_keeps_exact_mark_and_compiled_invalidation_without_window_geo
     );
     let (_, replay) = capture(|| {
         assert!(reads.unchanged_and_observe());
-        STATE.with(|state| {
+        with_state(|state| {
             assert!(
                 state
                     .borrow()

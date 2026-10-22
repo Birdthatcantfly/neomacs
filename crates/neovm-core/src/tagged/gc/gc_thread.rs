@@ -1564,6 +1564,15 @@ pub fn set_tagged_heap(heap: &mut TaggedHeap) {
 
 /// Refresh the per-heap TLS mirrors after the allocation slot was stored.
 fn sync_heap_tls_mirrors(heap: &mut TaggedHeap) {
+    // Install the World's stable observation owner before any envelope query.
+    // Green carries this same handle before creating or resuming a Context.
+    heap._satb_layout_reserve
+        .observations()
+        .install(heap.collection_dump_window());
+    super::super::collection_reads::with_store(|store| {
+        // Copy the installed provenance root, never this temporary heap loan.
+        store.heap.set(TAGGED_HEAP.with(Cell::get));
+    });
     TAGGED_HEAP_ID.with(|identity| identity.set(Some(heap.identity())));
     TAGGED_HEAP_WRITE_TRACKING_MODE.with(|mode| mode.set(heap.write_tracking_mode()));
     TAGGED_HEAP_PARTITION_ACTIVE.with(|p| p.set(heap.partition_dump));
@@ -1584,6 +1593,9 @@ fn sync_heap_tls_mirrors(heap: &mut TaggedHeap) {
     heap.set_compiled_barrier_window(window, observed);
     TAGGED_HEAP_BARRIER_WINDOW.with(|w| w.set(window));
     TAGGED_HEAP_CONS_BARRIER_WINDOW.with(|w| w.set(heap.cons_barrier_window(window)));
+    super::super::collection_reads::with_store(|store| {
+        store.publish_windows(heap.cons_barrier_window(window), window);
+    });
     // The remembered cache belongs to this heap's mutator. Reinstallation
     // invalidates repeat-owner rejects, just as the former TLS cache did.
     heap.current_mutator_gc_mut().remembered_cache.fill(0);
@@ -1616,6 +1628,7 @@ pub(crate) fn clear_tagged_heap_root_if_installed(root: std::ptr::NonNull<Tagged
     let owned = root.as_ptr();
     let _ = TAGGED_HEAP.try_with(|h| {
         if h.get() == owned {
+            super::super::collection_reads::clear_installed_store_heap(owned);
             super::super::collection_reads::reset_recent_reads_for_heap_installation();
             h.set(std::ptr::null_mut());
             let _ = TAGGED_HEAP_ID.try_with(|identity| identity.set(None));
@@ -1634,6 +1647,16 @@ pub(crate) fn clear_tagged_heap_root_if_installed(root: std::ptr::NonNull<Tagged
             });
         }
     });
+}
+
+impl TaggedHeap {
+    /// Stable World-owned store protocol, retained by this heap's registry.
+    /// Obtained on construction/activation, never selected from another World.
+    pub(crate) fn store_state_root(
+        &self,
+    ) -> std::ptr::NonNull<super::super::collection_reads::StoreState> {
+        self._satb_layout_reserve.observations().root()
+    }
 }
 
 /// True when this thread has a tagged heap installed for allocation.

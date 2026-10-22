@@ -51,6 +51,15 @@ pub(super) struct ObservedEnvelope {
 }
 
 impl ObservedEnvelope {
+    /// Heap reinstallation can change the native dump/owner protocol between
+    /// uses of a learned negative proof. Forget only those optional rejects;
+    /// the World's positive ledger and capture dependencies remain intact.
+    pub(super) fn discard_exclusions(&mut self) {
+        self.excluded = None;
+        self.excluded_cons = 0;
+        self.single_cons = 0;
+    }
+
     pub(super) fn new() -> Self {
         Self {
             owners: FxHashSet::default(),

@@ -752,6 +752,12 @@ impl Context {
         // Root-based install (see `AliasableBox`): the slot must survive
         // every later `&mut` reborrow this Context takes through its view.
         self.tagged_heap.install_tagged_heap();
+        self.store_state = self.tagged_heap.store_state_root();
+        debug_assert_eq!(
+            self.store_state,
+            crate::tagged::collection_reads::current_store_root(),
+            "owner activation installed another World's store protocol"
+        );
         super::super::ccl::install_ccl_registry_handle(&self.ccl_registry);
         super::super::charset::install_charset_registry_handle(&self.charset_registry);
         super::super::xfaces::install_font_registry_handle(&self.font_registry);

@@ -104,7 +104,7 @@ fn normalization_retains_dependencies_without_rebasing_outer_reads() {
 fn nested_scope_budget_is_bounded_and_recovers() {
     fn nested(depth: usize) {
         let (_, reads) = capture(|| {
-            assert!(STATE.with(|s| s.borrow().captures.len()) <= MAX_DEPTH);
+            assert!(with_state(|s| s.borrow().captures.len()) <= MAX_DEPTH);
             if depth > 0 {
                 nested(depth - 1);
             }
