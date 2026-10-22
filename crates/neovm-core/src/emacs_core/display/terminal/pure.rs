@@ -1040,12 +1040,17 @@ fn terminal_name_for_id(id: u64) -> Option<String> {
     with_terminal_manager(|slot| slot.borrow().get(id).map(|terminal| terminal.name.clone()))
 }
 
-fn terminal_runtime_for_id(id: u64) -> TerminalRuntime {
+/// Read one terminal runtime synchronously under its existing manager borrow.
+/// The result cannot borrow the runtime. Callers project native fields and
+/// release the borrow before callbacks or Lisp allocation; each thread reads
+/// its own installed manager without cloning capability strings.
+fn with_terminal_runtime<R>(id: u64, read: impl FnOnce(&TerminalRuntime) -> R) -> R {
     with_terminal_manager(|slot| {
-        slot.borrow()
-            .get(id)
-            .map(|terminal| terminal.runtime.clone())
-            .unwrap_or_else(TerminalRuntime::inactive)
+        let manager = slot.borrow();
+        match manager.get(id) {
+            Some(terminal) => read(&terminal.runtime),
+            None => read(&TerminalRuntime::inactive()),
+        }
     })
 }
 
@@ -1094,7 +1099,7 @@ pub(crate) fn write_bytes_to_terminal(terminal_id: u64, bytes: &[u8]) -> Result<
         Some(TerminalOutputMethod::Termcap) => {
             // GNU: `!tty->output' means the terminal is suspended
             // (src/dispnew.c:6833-6835).
-            if terminal_runtime_for_id(terminal_id).suspended {
+            if with_terminal_runtime(terminal_id, |runtime| runtime.suspended) {
                 return Err(signal(
                     "error",
                     vec![Value::string("Terminal is currently suspended")],
@@ -1128,8 +1133,9 @@ pub(crate) fn mark_selected_terminal_usable_for_test(eval: &crate::emacs_core::e
 pub(crate) fn selected_terminal_is_usable_tty(eval: &crate::emacs_core::eval::Context) -> bool {
     decode_terminal_id_eval(eval, &Value::NIL)
         .map(|id| {
-            let runtime = terminal_runtime_for_id(id);
-            runtime.controlling_tty || runtime.tty_type.is_some()
+            with_terminal_runtime(id, |runtime| {
+                runtime.controlling_tty || runtime.tty_type.is_some()
+            })
         })
         .unwrap_or(false)
 }
@@ -1348,7 +1354,9 @@ pub(crate) fn builtin_terminal_live_p(
     let Some(terminal_id) = decode_terminal_id_eval(eval, &args[0]) else {
         return Ok(Value::NIL);
     };
-    let runtime = terminal_runtime_for_id(terminal_id);
+    let usable_tty = with_terminal_runtime(terminal_id, |runtime| {
+        runtime.controlling_tty || runtime.tty_type.is_some()
+    });
     let mut terminal_has_frame = false;
     let window_system = eval
         .frames
@@ -1363,7 +1371,7 @@ pub(crate) fn builtin_terminal_live_p(
     // Return the window system type so framep-on-display works correctly.
     if let Some(window_system) = window_system {
         Ok(window_system)
-    } else if terminal_has_frame || runtime.controlling_tty || runtime.tty_type.is_some() {
+    } else if terminal_has_frame || usable_tty {
         Ok(Value::T)
     } else if crate::emacs_core::display::x_window_system_active(eval) {
         Ok(Value::symbol(
@@ -1452,10 +1460,11 @@ pub(crate) fn builtin_tty_type(
             vec![Value::symbol("terminal-live-p"), designator],
         ));
     };
-    Ok(terminal_runtime_for_id(terminal_id)
-        .tty_type
-        .map(Value::string)
-        .unwrap_or(Value::NIL))
+    Ok(
+        with_terminal_runtime(terminal_id, |runtime| runtime.tty_type.clone())
+            .map(Value::string)
+            .unwrap_or(Value::NIL),
+    )
 }
 
 /// (tty-top-frame &optional TERMINAL) -> nil
@@ -1471,8 +1480,8 @@ pub(crate) fn builtin_tty_top_frame(
             vec![Value::symbol("terminal-live-p"), designator],
         ));
     };
-    let runtime = terminal_runtime_for_id(terminal_id);
-    if !runtime.active {
+    let active = with_terminal_runtime(terminal_id, |runtime| runtime.active);
+    if !active {
         return Ok(Value::NIL);
     }
     let top = eval
@@ -1496,9 +1505,10 @@ pub(crate) fn builtin_tty_display_color_p(
             vec![Value::symbol("terminal-live-p"), designator],
         ));
     };
-    Ok(Value::bool_val(
-        terminal_runtime_for_id(terminal_id).supports_color(),
-    ))
+    Ok(Value::bool_val(with_terminal_runtime(
+        terminal_id,
+        TerminalRuntime::supports_color,
+    )))
 }
 
 /// (tty-display-color-cells &optional TERMINAL) -> 0
@@ -1514,9 +1524,10 @@ pub(crate) fn builtin_tty_display_color_cells(
             vec![Value::symbol("terminal-live-p"), designator],
         ));
     };
-    Ok(Value::fixnum(
-        terminal_runtime_for_id(terminal_id).color_cells,
-    ))
+    Ok(Value::fixnum(with_terminal_runtime(
+        terminal_id,
+        |runtime| runtime.color_cells,
+    )))
 }
 
 /// (tty-no-underline &optional TERMINAL) -> nil
@@ -1549,9 +1560,10 @@ pub(crate) fn builtin_controlling_tty_p(
             vec![Value::symbol("terminal-live-p"), designator],
         ));
     };
-    Ok(Value::bool_val(
-        terminal_runtime_for_id(terminal_id).controlling_tty,
-    ))
+    Ok(Value::bool_val(with_terminal_runtime(
+        terminal_id,
+        |runtime| runtime.controlling_tty,
+    )))
 }
 
 /// (suspend-tty &optional TTY) -> error in GUI/non-text terminal context.
@@ -1567,8 +1579,9 @@ pub(crate) fn builtin_suspend_tty(
             vec![Value::symbol("terminal-live-p"), designator],
         ));
     };
-    let runtime = terminal_runtime_for_id(terminal_id);
-    if !runtime.active {
+    let (active, suspended) =
+        with_terminal_runtime(terminal_id, |runtime| (runtime.active, runtime.suspended));
+    if !active {
         return Err(signal(
             "error",
             vec![Value::string(
@@ -1577,7 +1590,7 @@ pub(crate) fn builtin_suspend_tty(
         ));
     }
 
-    if runtime.suspended {
+    if suspended {
         return Ok(Value::NIL);
     }
 
@@ -1608,8 +1621,9 @@ pub(crate) fn builtin_resume_tty(
             vec![Value::symbol("terminal-live-p"), designator],
         ));
     };
-    let runtime = terminal_runtime_for_id(terminal_id);
-    if !runtime.active {
+    let (active, suspended) =
+        with_terminal_runtime(terminal_id, |runtime| (runtime.active, runtime.suspended));
+    if !active {
         return Err(signal(
             "error",
             vec![Value::string(
@@ -1618,7 +1632,7 @@ pub(crate) fn builtin_resume_tty(
         ));
     }
 
-    if !runtime.suspended {
+    if !suspended {
         return Ok(Value::NIL);
     }
 
