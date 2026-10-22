@@ -478,6 +478,11 @@ impl BufferDisplayReplacementSource {
         self.buffer_id
     }
 
+    /// The buffer position the replacement is displayed at (0-based).
+    pub(crate) const fn anchor_charpos(self) -> CharPos0 {
+        self.char_pos
+    }
+
     pub(crate) const fn pointer_occurrence(self) -> DisplayPointerOccurrence {
         DisplayPointerOccurrence::BufferDisplayReplacement {
             buffer_id: self.buffer_id,

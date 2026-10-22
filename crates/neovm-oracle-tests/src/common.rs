@@ -1373,6 +1373,58 @@ pub(crate) fn assert_oracle_parity_with_terminal_output_expect<T>(
     }
 }
 
+/// [`assert_oracle_divergence_expect`] for an observation that includes the
+/// terminal output, as in [`assert_oracle_parity_with_terminal_output_expect`]:
+/// `expected` is GNU's answer (refreshed, never written by hand) and the pin
+/// passes while Neomacs still answers something else.  Once Neomacs agrees,
+/// the pin fails on purpose; the commit that closes the divergence flips it
+/// to the parity assertion with the same expectation.
+pub(crate) fn assert_oracle_divergence_with_terminal_output_expect<T>(
+    form: &str,
+    open: impl Fn() -> (T, Vec<(String, String)>),
+    observe: impl Fn(T) -> String,
+    expected: expect_test::Expect,
+) {
+    ensure_nonempty_form(form).expect("form should not be empty");
+    let eval_program = EvalProgram::Normalized;
+    let run = |engine: &dyn Fn(&OracleSandbox) -> Result<CapturedEvaluation, String>| {
+        let (terminal, env) = open();
+        let env: Vec<(&str, &str)> = env
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        let sandbox = oracle_sandbox(form, &[], &project_lisp_dir()).with_extra_env(&env);
+        let evaluation = engine(&sandbox).expect("engine eval should run");
+        format!(
+            "{} {}",
+            inline_expect_payload(&evaluation),
+            observe(terminal)
+        )
+    };
+    let gnu = |sandbox: &OracleSandbox| run_oracle_eval_with_sandbox(sandbox, eval_program);
+    let neo = |sandbox: &OracleSandbox| run_neomacs_binary_eval_with_sandbox(sandbox, eval_program);
+    let assert_still_diverges = |neovm: &str, gnu: &str| {
+        assert_ne!(
+            neovm, gnu,
+            "the pinned divergence is FIXED: Neomacs now answers like GNU for {form}; \
+             flip this pin to assert_oracle_parity_with_terminal_output_expect"
+        );
+        tracing::info!(neovm = %neovm, gnu = %gnu, "pinned divergence holds");
+    };
+    match OracleMode::from_env() {
+        OracleMode::Snapshot => assert_still_diverges(&run(&neo), expected.data().trim()),
+        OracleMode::Verify | OracleMode::Live => {
+            let oracle = run(&gnu);
+            let neovm = run(&neo);
+            if OracleMode::from_env() == OracleMode::Verify {
+                expected.assert_eq(&oracle);
+            }
+            assert_still_diverges(&neovm, &oracle);
+        }
+        OracleMode::Refresh => expected.assert_eq(&run(&gnu)),
+    }
+}
+
 /// Like [`assert_oracle_parity_expect`], but runs both engines under a frozen
 /// wall clock ([`ORACLE_FROZEN_TIME`]) via libfaketime. Use this for forms
 /// whose output embeds the run-time date/time (org-agenda "today", `%t`/`%U`

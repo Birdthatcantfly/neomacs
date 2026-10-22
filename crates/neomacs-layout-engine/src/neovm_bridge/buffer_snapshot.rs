@@ -136,6 +136,11 @@ impl LayoutBufferSnapshot {
     }
 
     /// Attach the `(when FORM . SPEC)` results evaluated for this walk.
+    /// The walk's `when` conditions, borrowed (the trait accessor clones).
+    pub(crate) fn display_when_conditions(&self) -> &crate::display_when::DisplayWhenConditions {
+        &self.display_when
+    }
+
     pub fn with_display_when(
         mut self,
         display_when: crate::display_when::DisplayWhenConditions,

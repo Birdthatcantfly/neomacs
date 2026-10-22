@@ -37312,3 +37312,97 @@ mod live_viewport_source_bound_tests;
 #[cfg(test)]
 #[path = "freshness_spans_engine_test.rs"]
 mod freshness_spans_engine_test;
+
+/// Lay out a buffer whose `when` sites lie past the span the scan covers
+/// (behind 6000 invisible characters) and report the text rows, how many
+/// times the walk's scan ran (a scanned site on the first character counts
+/// it) and how many times each unscanned FORM was evaluated.
+///
+/// `a_holds`/`b_holds` choose what the two unscanned FORMs answer.  Site A
+/// replaces `ORIG` with twelve rows when it holds, which pushes site B (on
+/// the line after it) out of the window.
+fn display_when_past_the_scan(
+    a_holds: bool,
+    b_holds: bool,
+    with_b: bool,
+) -> (Vec<String>, i64, i64, i64) {
+    let (mut eval, frame_id, _, _) = incr_editing_frame("a\n", 640, 200);
+    realize_test_gui_frame(&mut eval, frame_id);
+    let lisp_bool = |holds: bool| if holds { "t" } else { "nil" };
+    eval.eval_str(&format!(
+        r#"(progn
+             (setq dw-walks 0 dw-a 0 dw-b 0)
+             (put-text-property 1 2 'display
+               '(when (progn (setq dw-walks (1+ dw-walks)) t) . "a"))
+             (goto-char (point-max))
+             (insert (propertize (make-string 6000 ?x) 'invisible t))
+             (let ((start (point)))
+               (insert "ORIG\n")
+               (put-text-property start (+ start 4) 'display
+                 '(when (progn (setq dw-a (1+ dw-a)) {a})
+                    . "A1\nA2\nA3\nA4\nA5\nA6\nA7\nA8\nA9\nA10\nA11\nA12")))
+             (if {with_b}
+               (let ((start (point)))
+                 (insert "BTXT\n")
+                 (put-text-property start (+ start 4) 'display
+                   '(when (progn (setq dw-b (1+ dw-b)) {b}) . "BBBB"))))
+             (goto-char (point-min)))"#,
+        a = lisp_bool(a_holds),
+        b = lisp_bool(b_holds),
+        with_b = lisp_bool(with_b),
+    ))
+    .expect("setup");
+    let mut engine = LayoutEngine::new();
+    engine.layout_frame_rust(&mut eval, frame_id);
+    let rows = trace_text_rows(&selected_window_layout_trace(&eval, &engine, frame_id));
+    let mut count = |name: &str| {
+        eval.eval_str(name)
+            .expect("counter")
+            .as_fixnum()
+            .expect("fixnum")
+    };
+    (rows, count("dw-walks"), count("dw-a"), count("dw-b"))
+}
+
+/// A `when` clause past the span the scan covers is drawn by the structural
+/// rule, evaluated after the walk with its own bindings, and -- when the
+/// answer disagrees -- the frame is replayed exactly once with the answer:
+/// the rows show what GNU shows, and the FORM ran once.
+#[test]
+fn display_when_a_clause_past_the_scan_is_evaluated_after_the_walk_and_replayed_once() {
+    let (agree_rows, agree_walks, agree_a, _) = display_when_past_the_scan(true, true, false);
+    assert!(
+        agree_rows.iter().any(|row| row.starts_with("A1")),
+        "a holding clause draws its replacement: {agree_rows:?}"
+    );
+    assert!(agree_a >= 1);
+    let (rows, walks, a, _) = display_when_past_the_scan(false, true, false);
+    assert!(
+        rows.iter().any(|row| row.starts_with("ORIG")),
+        "the replay draws the evaluated answer: {rows:?}"
+    );
+    assert!(!rows.iter().any(|row| row.starts_with("A1")), "{rows:?}");
+    assert_eq!(a, 1, "evaluated once, after the first walk");
+    assert_eq!(walks, agree_walks + 1, "exactly one replay walk");
+}
+
+/// The bound: one replay per window and redisplay.  When the replay meets
+/// another unscanned clause that disagrees too (site B, which the first
+/// walk never reached because A's replacement filled the window), the replay's
+/// rows are kept -- B drawn by the structural rule -- and no further walk runs.
+#[test]
+fn display_when_a_second_disagreement_after_the_replay_keeps_the_replay_rows() {
+    let (_, agree_walks, _, _) = display_when_past_the_scan(true, true, true);
+    let (rows, walks, a, b) = display_when_past_the_scan(false, false, true);
+    assert_eq!(walks, agree_walks + 1, "no second replay: {rows:?}");
+    assert_eq!(a, 1, "A evaluated after the first walk only");
+    assert_eq!(b, 1, "B evaluated after the replay, which keeps its rows");
+    assert!(
+        rows.iter().any(|row| row.starts_with("ORIG")),
+        "A's evaluated answer is drawn: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|row| row.starts_with("BBBB")),
+        "B stays drawn by the structural rule (declared fallback): {rows:?}"
+    );
+}

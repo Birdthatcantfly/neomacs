@@ -294,7 +294,7 @@ pub(crate) fn classify_display_property_at(
     let specs = DisplayPropertySpecs::of(value);
     specs.for_each(|spec| {
         let element =
-            classify_single_display_spec(spec, conditions, specs.eval_enabled, target, at);
+            classify_single_display_spec(spec, value, conditions, specs.eval_enabled, target, at);
         if result.replacement.is_none() && element.replacement.is_some() {
             result.replacement = element.replacement;
             result.replacement_spec = element.replacement_spec;
@@ -347,7 +347,7 @@ pub(crate) fn classify_display_property_modifiers_only(
     specs.for_each(|spec| {
         merge_modifiers(
             &mut modifiers,
-            classify_single_display_spec(spec, conditions, specs.eval_enabled, target, at)
+            classify_single_display_spec(spec, value, conditions, specs.eval_enabled, target, at)
                 .modifiers,
         );
         ControlFlow::Continue(())
@@ -360,8 +360,13 @@ pub(crate) fn classify_display_property_modifiers_only(
 /// The head taxonomy is `neovm_core`'s [`display_spec_kind`], so the arms are
 /// exhaustive: a spec kind this crate forgets to render is a compile error rather
 /// than a display property that silently does nothing.
+///
+/// `property` is the whole `display` value VALUE belongs to: a clause the
+/// walk takes by the structural rule is recorded with it, so the site can be
+/// evaluated after the walk with every earlier clause in view.
 pub(crate) fn classify_single_display_spec(
     value: Value,
+    property: Value,
     conditions: &DisplayWhenConditions,
     eval_enabled: bool,
     target: DisplayPropertyTarget,
@@ -373,7 +378,7 @@ pub(crate) fn classify_single_display_spec(
         match display_spec_when_parts(value) {
             Some((form, spec))
                 if (eval_enabled || form.is_bare_symbol_named("t"))
-                    && conditions.holds(form, at) =>
+                    && conditions.holds(form, at, property) =>
             {
                 spec
             }

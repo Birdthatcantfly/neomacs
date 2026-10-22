@@ -199,6 +199,23 @@ impl TestTerminal {
         found.into_iter().map(|(_, token)| token).collect()
     }
 
+    /// [`Self::drawn_tokens`] for what the editor drew after the last
+    /// occurrence of `marker` (a string the form writes to the terminal with
+    /// `send-string-to-terminal` between two redisplays); everything before
+    /// it when the marker never appears.
+    pub(crate) fn drawn_tokens_after<'a>(
+        output: &[u8],
+        marker: &str,
+        tokens: &[&'a str],
+    ) -> Vec<&'a str> {
+        let marker = marker.as_bytes();
+        let after = output
+            .windows(marker.len())
+            .rposition(|window| window == marker)
+            .map_or(output, |at| &output[at + marker.len()..]);
+        Self::drawn_tokens(after, tokens)
+    }
+
     /// The DECSCUSR (`CSI Ps SP q`, cursor style) parameters in `output`, in
     /// order.  GNU's term.c never writes one: on a text terminal the cursor
     /// is whatever the terminal is configured to show.

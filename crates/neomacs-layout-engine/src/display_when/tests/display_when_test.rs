@@ -11,18 +11,18 @@ fn holds_takes_nil_and_t_literally_and_falls_back_to_structural() {
     let call = read(&mut eval, "(some-call)");
     let structural = DisplayWhenConditions::structural();
     let any = DisplayWhenLookup::AnyOccurrence;
-    assert!(!structural.holds(Value::NIL, any));
-    assert!(structural.holds(Value::symbol("t"), any));
+    assert!(!structural.holds(Value::NIL, any, Value::NIL));
+    assert!(structural.holds(Value::symbol("t"), any, Value::NIL));
     assert!(
-        structural.holds(call, any),
+        structural.holds(call, any, Value::NIL),
         "no evaluation behind it: non-nil holds"
     );
 
     let mut results = FxHashMap::default();
     results.insert(call, false);
     let evaluated = DisplayWhenConditions::evaluated_forms(results);
-    assert!(!evaluated.holds(call, any));
-    assert!(evaluated.holds(read(&mut eval, "(unseen-call)"), any));
+    assert!(!evaluated.holds(call, any, Value::NIL));
+    assert!(evaluated.holds(read(&mut eval, "(unseen-call)"), any, Value::NIL));
 }
 
 /// GNU binds `object`, `position` and `buffer-position` at every site it
@@ -145,6 +145,7 @@ fn a_string_site_answers_by_string_and_index() {
     let at = |index: i64| DisplayWhenLookup::String {
         string: prefix,
         index,
+        anchor: None,
     };
     assert_eq!(
         conditions.verdict(form_at(0), at(0)),
@@ -366,8 +367,16 @@ fn window_span_forms_are_evaluated_from_text_props_overlays_and_prefix_vars() {
         Some(false),
         "an erroring form is nil (dsafe_eval); buffer-local wrap-prefix is scanned"
     );
-    assert!(conditions.holds(when_form(text_display, 0), DisplayWhenLookup::AnyOccurrence));
-    assert!(!conditions.holds(when_form(text_display, 1), DisplayWhenLookup::AnyOccurrence));
+    assert!(conditions.holds(
+        when_form(text_display, 0),
+        DisplayWhenLookup::AnyOccurrence,
+        text_display
+    ));
+    assert!(!conditions.holds(
+        when_form(text_display, 1),
+        DisplayWhenLookup::AnyOccurrence,
+        text_display
+    ));
 }
 
 #[test]
@@ -710,4 +719,258 @@ fn an_empty_overlay_supplies_no_display_property() {
         conditions.verdict_any(when_form(display, 0)),
         DisplayWhenVerdict::Unseen
     );
+}
+
+/// A buffer whose only `when` site lies past the span the scan covers:
+/// `line 0` then the site on `ORIGINAL` at GNU position 36 (char 35).
+fn buffer_with_a_site_past_the_scan(eval: &mut Context, form: &str) -> (BufferId, Value) {
+    let buf_id = eval.buffers.current_buffer_id().expect("buffer");
+    let property = read(eval, &format!("(when {form} . \"LATE\")"));
+    let buffer = eval.buffers.get_mut(buf_id).expect("buffer");
+    buffer.insert("line 0\nline 1\nline 2\nline 3\nline 4\nORIGINAL text here\n");
+    let start = buffer.char_pos_to_emacs_byte_pos_clamped(CharPos0::new(35));
+    let end = buffer.char_pos_to_emacs_byte_pos_clamped(CharPos0::new(43));
+    buffer.text_props_put_property_in_emacs_byte_range(
+        EmacsByteRange::new(start, end),
+        Value::symbol("display"),
+        property,
+    );
+    (buf_id, property)
+}
+
+/// The conditions of a walk whose scan stopped at char 6, recording.
+fn conditions_scanning_the_first_line(
+    eval: &mut Context,
+    buf_id: BufferId,
+) -> DisplayWhenConditions {
+    evaluate_window_display_when_forms(
+        eval,
+        buf_id,
+        None,
+        CharPos0::new(0),
+        CharPos0::new(6),
+        crate::display_property::DisplayPropertyTarget::Graphical,
+    )
+    .with_visit_recording()
+}
+
+fn settle(
+    eval: &mut Context,
+    buf_id: BufferId,
+    conditions: &DisplayWhenConditions,
+    ledger: &mut DisplayWhenReplayLedger,
+) -> DisplayWhenSettlement {
+    settle_display_when_visits(
+        eval,
+        buf_id,
+        neovm_core::window::WindowId(1),
+        conditions,
+        crate::display_property::DisplayPropertyTarget::Graphical,
+        ledger,
+    )
+}
+
+/// A clause the walk takes by the structural rule is recorded with GNU's
+/// bindings, evaluated after the walk, and -- when it disagrees -- carried to
+/// the one replay, which then finds it where the first walk asked.
+#[test]
+fn a_clause_past_the_scan_is_evaluated_after_the_walk_and_carried_to_one_replay() {
+    let mut eval = Context::new();
+    let saved_roots = neovm_core::emacs_core::eval::save_scratch_gc_roots();
+    eval.eval_str("(setq dw-seen nil)").expect("reset");
+    let (buf_id, property) = buffer_with_a_site_past_the_scan(
+        &mut eval,
+        "(progn (setq dw-seen (cons buffer-position dw-seen)) nil)",
+    );
+    let form = when_form(property, 0);
+    let at = DisplayWhenLookup::buffer_at_char_pos(35);
+    let mut ledger = DisplayWhenReplayLedger::default();
+
+    let first_walk = conditions_scanning_the_first_line(&mut eval, buf_id);
+    assert_eq!(first_walk.verdict(form, at), DisplayWhenVerdict::Unseen);
+    assert!(
+        first_walk.holds(form, at, property),
+        "the walk draws an unscanned clause by the structural rule"
+    );
+    assert!(first_walk.has_recorded_visits());
+    assert_eq!(
+        settle(&mut eval, buf_id, &first_walk, &mut ledger),
+        DisplayWhenSettlement::Replay,
+        "the evaluated nil disagrees with what the walk drew"
+    );
+    assert!(
+        eval.eval_str("(equal dw-seen '(36))")
+            .expect("seen")
+            .is_truthy(),
+        "evaluated once, with the site's buffer-position"
+    );
+    assert_eq!(ledger.replays(), 1);
+
+    let replay = conditions_scanning_the_first_line(&mut eval, buf_id)
+        .with_carried_answers(ledger.carried(neovm_core::window::WindowId(1)));
+    assert_eq!(replay.verdict(form, at), DisplayWhenVerdict::Fails);
+    assert!(!replay.holds(form, at, property));
+    assert!(
+        !replay.has_recorded_visits(),
+        "a carried answer is not a visit"
+    );
+    assert_eq!(
+        settle(&mut eval, buf_id, &replay, &mut ledger),
+        DisplayWhenSettlement::Settled(DisplayWhenRecord::Known)
+    );
+    assert!(
+        eval.eval_str("(equal dw-seen '(36))")
+            .expect("seen")
+            .is_truthy(),
+        "the replay does not evaluate the carried site again"
+    );
+    neovm_core::emacs_core::eval::restore_scratch_gc_roots(saved_roots);
+}
+
+/// The bound: a window replays once per redisplay.  A clause that disagrees
+/// again after the replay keeps the replay's rows and makes them unknown.
+#[test]
+fn a_second_disagreement_after_the_replay_settles_unknown() {
+    let mut eval = Context::new();
+    let saved_roots = neovm_core::emacs_core::eval::save_scratch_gc_roots();
+    let (buf_id, property) = buffer_with_a_site_past_the_scan(&mut eval, "(null t)");
+    let form = when_form(property, 0);
+    let at = DisplayWhenLookup::buffer_at_char_pos(35);
+    let mut ledger = DisplayWhenReplayLedger::default();
+    let first_walk = conditions_scanning_the_first_line(&mut eval, buf_id);
+    assert!(first_walk.holds(form, at, property));
+    assert_eq!(
+        settle(&mut eval, buf_id, &first_walk, &mut ledger),
+        DisplayWhenSettlement::Replay
+    );
+    // The replay meets an unscanned site the carry does not name (here the
+    // same property asked at another position of its run).
+    let replay = conditions_scanning_the_first_line(&mut eval, buf_id)
+        .with_carried_answers(ledger.carried(neovm_core::window::WindowId(1)));
+    let elsewhere = DisplayWhenLookup::buffer_at_char_pos(39);
+    assert!(replay.holds(form, elsewhere, property));
+    assert_eq!(
+        settle(&mut eval, buf_id, &replay, &mut ledger),
+        DisplayWhenSettlement::Settled(DisplayWhenRecord::Unknown),
+        "no second replay"
+    );
+    assert_eq!(ledger.replays(), 1);
+    neovm_core::emacs_core::eval::restore_scratch_gc_roots(saved_roots);
+}
+
+/// Agreement needs no replay; a walk with no sites and none recorded leaves
+/// nothing to verify; a string clause whose anchor the walk does not know
+/// cannot be evaluated after the walk and stays unverified, as does a walk
+/// whose span could not be evaluated at all.
+#[test]
+fn agreement_unanchored_strings_and_empty_spans_settle_without_replay() {
+    let mut eval = Context::new();
+    let saved_roots = neovm_core::emacs_core::eval::save_scratch_gc_roots();
+    let (buf_id, property) = buffer_with_a_site_past_the_scan(&mut eval, "(eq 1 1)");
+    let form = when_form(property, 0);
+    let mut ledger = DisplayWhenReplayLedger::default();
+
+    let empty = conditions_scanning_the_first_line(&mut eval, buf_id);
+    assert_eq!(
+        settle(&mut eval, buf_id, &empty, &mut ledger),
+        DisplayWhenSettlement::Settled(DisplayWhenRecord::NoSites)
+    );
+
+    let agreeing = conditions_scanning_the_first_line(&mut eval, buf_id);
+    assert!(agreeing.holds(form, DisplayWhenLookup::buffer_at_char_pos(35), property));
+    assert_eq!(
+        settle(&mut eval, buf_id, &agreeing, &mut ledger),
+        DisplayWhenSettlement::Settled(DisplayWhenRecord::Known)
+    );
+
+    let unanchored = conditions_scanning_the_first_line(&mut eval, buf_id);
+    assert!(unanchored.holds(
+        form,
+        DisplayWhenLookup::String {
+            string: Value::string("s"),
+            index: 0,
+            anchor: None,
+        },
+        property,
+    ));
+    assert!(!unanchored.has_recorded_visits());
+    assert_eq!(
+        settle(&mut eval, buf_id, &unanchored, &mut ledger),
+        DisplayWhenSettlement::Settled(DisplayWhenRecord::Unknown)
+    );
+    assert_eq!(ledger.replays(), 0);
+    assert_eq!(
+        settle(
+            &mut eval,
+            buf_id,
+            &DisplayWhenConditions::structural(),
+            &mut ledger
+        ),
+        DisplayWhenSettlement::Settled(DisplayWhenRecord::Unknown),
+        "a failed span evaluation leaves the walk's rows unverified"
+    );
+    neovm_core::emacs_core::eval::restore_scratch_gc_roots(saved_roots);
+}
+
+/// GC stress between the walk and the evaluation after it: window chrome
+/// Lisp runs in between and may drop the last reference to a site the walk
+/// recorded, then collect.  The site's property and object were pushed onto
+/// the scratch GC root stack when recorded, so the FORM evaluated after the
+/// collection is still the one the walk met.  (Without that rooting the
+/// property and the string are reclaimed by the collection and their slots
+/// reused by the allocations that follow; the evaluation then reads another
+/// object.)
+#[test]
+fn a_recorded_site_survives_a_collection_between_the_walk_and_its_evaluation() {
+    let mut eval = Context::new();
+    let saved_roots = neovm_core::emacs_core::eval::save_scratch_gc_roots();
+    let (buf_id, _) = buffer_with_a_site_past_the_scan(&mut eval, "(eq 1 1)");
+    eval.eval_str("(setq dw-gc-site nil)").expect("reset");
+    // A string reached through a buffer `display' property: its own `when'
+    // clause is not scanned, and the walk knows its anchor.  Nothing but
+    // this Rust frame refers to the string.
+    let string = eval
+        .eval_str(
+            "(propertize \"s\" 'display
+               (list (list 'when
+                           (list 'progn (list 'setq 'dw-gc-site (list 'quote 'evaluated)) t)
+                           'height 2)))",
+        )
+        .expect("string");
+    let property = get_string_text_properties_table_for_value(string)
+        .expect("props")
+        .get_property_at_char_pos(CharPos0::new(0), Value::symbol("display"))
+        .expect("display");
+    let conditions = conditions_scanning_the_first_line(&mut eval, buf_id);
+    let _ = crate::display_property::classify_display_property_modifiers_only(
+        property,
+        &conditions,
+        crate::display_property::DisplayPropertyTarget::Graphical,
+        DisplayWhenLookup::String {
+            string,
+            index: 0,
+            anchor: Some(36),
+        },
+    );
+    assert!(conditions.has_recorded_visits());
+    // What chrome Lisp could do: collect, then allocate over the freed slots.
+    eval.eval_str(
+        "(progn (garbage-collect)
+                (let ((i 0) l)
+                  (while (< i 50000)
+                    (setq l (cons (list i (number-to-string i)) l) i (1+ i)))
+                  (length l)))",
+    )
+    .expect("churn");
+    let mut ledger = DisplayWhenReplayLedger::default();
+    assert_eq!(
+        settle(&mut eval, buf_id, &conditions, &mut ledger),
+        DisplayWhenSettlement::Settled(DisplayWhenRecord::Known)
+    );
+    assert_eq!(
+        eval.eval_str("dw-gc-site").expect("flag"),
+        Value::symbol("evaluated"),
+        "the FORM evaluated after the collection is the recorded one"
+    );
+    neovm_core::emacs_core::eval::restore_scratch_gc_roots(saved_roots);
 }

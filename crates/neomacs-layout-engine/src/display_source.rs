@@ -3197,10 +3197,15 @@ impl LispStringSourceFrame {
     }
 
     /// The site of this string's `display` property at character `index`.
+    /// A string reached through a buffer `display` property knows the buffer
+    /// position it is displayed at: GNU's `buffer-position` there.
     fn display_when_lookup(&self, index: usize) -> crate::display_when::DisplayWhenLookup {
         crate::display_when::DisplayWhenLookup::String {
             string: self.object,
             index: index as i64,
+            anchor: self
+                .replacement_source
+                .map(|source| source.anchor_charpos().get() as i64 + 1),
         }
     }
 

@@ -1143,6 +1143,10 @@ enum LeafLayoutAttempt {
     /// numeric budget is spent.
     Retry(Box<WindowLayoutRetry>),
     LogicalInputsChanged,
+    /// A `when` clause the walk took by the structural rule evaluated nil
+    /// after the walk: relayout the frame once with the evaluated answers,
+    /// which the ledger carries (`display_when::settle_display_when_visits`).
+    DisplayWhenReplay,
 }
 
 /// Iterative continuation of `layout_window_rust` for one visibility retry.
@@ -1206,6 +1210,8 @@ struct RedisplayLispLedger {
     acknowledged_scroll_hooks: rustc_hash::FxHashSet<WindowScrollHookSite>,
     exact_hook_resumes: rustc_hash::FxHashMap<neovm_core::window::WindowId, ResolvedWindowStart>,
     mini_eob_scroll: mini_eob_scroll::MiniEobScrollLedger,
+    /// `when` answers evaluated after a walk, carried to its one replay.
+    display_when: crate::display_when::DisplayWhenReplayLedger,
 }
 
 impl RedisplayLispLedger {
@@ -2065,6 +2071,12 @@ impl LayoutEngine {
         // speculative output; only an iteration that requests no relayout can
         // reach presentation sealing below.
         let mut layout_coordinator = FrameLayoutCoordinator::new(MAX_FRAME_LAYOUT_RETRIES);
+        // The Lisp objects of the `when` sites a walk records and of the
+        // answers carried to a replay stay rooted for the whole logical frame
+        // attempt: window chrome and the replay's preparation run Lisp (and
+        // may collect) between a walk and the evaluation or reuse of them.
+        // Every leaf attempt that records runs inside this function.
+        let _display_when_gc_roots = ScratchGcRootScope::new();
         let mut lisp_ledger = RedisplayLispLedger {
             rows_fontification: rows_fontification::RowsFontificationDemand::for_purpose(
                 evaluator, frame_id, purpose,
@@ -2963,6 +2975,26 @@ impl LayoutEngine {
                                 return None;
                             }
                             let request = FrameRelayoutRequest::LogicalInputsChanged {
+                                window_id: DisplayWindowId::new(live_inputs.window.window_id),
+                            };
+                            if !Self::accept_frame_relayout_request(
+                                &mut layout_coordinator,
+                                evaluator,
+                                &mut frame_window_end_attempts,
+                                presentation_id,
+                                request,
+                            ) {
+                                return None;
+                            }
+                            continue 'frame_layout;
+                        }
+                        LeafLayoutAttempt::DisplayWhenReplay => {
+                            if evaluator.has_mode_line_display_flow() {
+                                frame_window_end_attempts.reject_all(evaluator);
+                                evaluator.retire_interaction_presentation(presentation_id);
+                                return None;
+                            }
+                            let request = FrameRelayoutRequest::DisplayWhenAnswerChanged {
                                 window_id: DisplayWindowId::new(live_inputs.window.window_id),
                             };
                             if !Self::accept_frame_relayout_request(
@@ -5220,6 +5252,12 @@ impl LayoutEngine {
                 display_target,
             )
         };
+        // The walk records the clauses it has to take by the structural rule
+        // (sites the scan did not reach); a replay of this window finds the
+        // answers evaluated after the first walk carried in the ledger.
+        let display_when = display_when
+            .with_visit_recording()
+            .with_carried_answers(lisp_ledger.display_when.carried(window_id));
         // The retained key tracks buffer/face changes, not arbitrary Lisp
         // dependencies. A newly evaluated condition can change glyphs without
         // moving any of those ticks. This applies to cursor, scroll, and edit
@@ -5487,6 +5525,49 @@ impl LayoutEngine {
                         }
                         return LeafLayoutAttempt::LogicalInputsChanged;
                     }
+                }
+            }
+        }
+
+        // The `when` clauses the walk took by the structural rule: evaluate
+        // them now with GNU's bindings, and replay the frame once if an
+        // answer disagrees with the rule the rows were drawn by.
+        if matches!(
+            &render_outcome,
+            BufferSourceRenderAttemptOutcome::Finished { .. }
+        ) {
+            let conditions = layout_buffer.display_when_conditions();
+            let evaluates_lisp = conditions.has_recorded_visits();
+            let settlement = crate::display_when::settle_display_when_visits(
+                evaluator,
+                buf_id,
+                window_id,
+                conditions,
+                display_target,
+                &mut lisp_ledger.display_when,
+            );
+            if evaluates_lisp
+                && (evaluator.frame_manager().window_topology_generation() != topology_generation
+                    || evaluator
+                        .window_layout_attempt_freshness(frame_id, window_id, buf_id)
+                        .as_ref()
+                        != freshness_after_leaf.as_deref())
+            {
+                if let Some(attempt) = window_end_attempt.take() {
+                    evaluator.reject_redisplay_window_end_attempt(attempt);
+                }
+                return LeafLayoutAttempt::LogicalInputsChanged;
+            }
+            match settlement {
+                crate::display_when::DisplayWhenSettlement::Replay => {
+                    if let Some(attempt) = window_end_attempt.take() {
+                        evaluator.reject_redisplay_window_end_attempt(attempt);
+                    }
+                    return LeafLayoutAttempt::DisplayWhenReplay;
+                }
+                crate::display_when::DisplayWhenSettlement::Settled(record) => {
+                    tracing::trace!(target: "neomacs_layout_engine::display_when",
+                        window = window_id.0, ?record, "walk's `when' record settled");
                 }
             }
         }

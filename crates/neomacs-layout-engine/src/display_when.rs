@@ -14,7 +14,18 @@
 //! frame; and one FORM on two spans gets each span's own answer, which is
 //! what made `(when (> buffer-position 30) …)` answer for both spans what it
 //! answered for the first.
+//!
+//! The scan cannot reach every site the walk meets (a string reached through
+//! a replacing `display` property, a site past the scan's span).  The walk
+//! records the clauses it had to take by the structural rule
+//! ([`DisplayWhenVisitLog`]); after the walk they are evaluated with GNU's
+//! bindings in visit order ([`settle_display_when_visits`]), and an answer
+//! that disagrees with the rule replays the frame once with the evaluated
+//! answers carried in [`DisplayWhenReplayLedger`].  A second disagreement in
+//! the same redisplay keeps the replay's rows and marks them
+//! [`DisplayWhenRecord::Unknown`]: nothing produced from them is reused.
 
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use neovm_core::buffer::text_props::PropertyNamePresence;
@@ -54,6 +65,76 @@ pub struct DisplayWhenAnswers {
     /// stop's `position`, which gets the run's answer here -- declared) and
     /// for string sites, whose frames do not know their anchor.
     runs: Vec<DisplayWhenRun>,
+    /// The clauses the walk took by the structural rule.
+    visits: DisplayWhenVisitLog,
+}
+
+/// The walk's record of the `when` clauses it took by the structural rule:
+/// sites the scan did not reach, which the walk met anyway.
+///
+/// The walk reads the conditions through a shared snapshot, hence the
+/// interior mutability; the log is touched only on that structural path, so
+/// a walk that meets no such clause pays nothing and allocates nothing.
+/// Recording is enabled only for the conditions of a redisplay leaf attempt
+/// ([`DisplayWhenConditions::with_visit_recording`]), whose frame function
+/// owns a scratch GC root scope: each recorded site's Lisp objects are pushed
+/// onto the scratch root stack as they are recorded, so window chrome Lisp
+/// that runs after the body walk (and may collect) cannot free a site
+/// before [`settle_display_when_visits`] evaluates it.
+#[derive(Debug, Default)]
+struct DisplayWhenVisitLog {
+    recording: bool,
+    /// Evaluable sites in visit order, with GNU's bindings.
+    sites: RefCell<Vec<DisplayWhenSite>>,
+    /// A clause was taken by the structural rule at a site whose bindings
+    /// the walk does not know (a string whose buffer anchor is unknown):
+    /// it cannot be evaluated after the walk, so its rows stay unverified.
+    unevaluable: Cell<bool>,
+}
+
+impl DisplayWhenVisitLog {
+    fn note(&self, buffer: Value, at: DisplayWhenLookup, property: Value) {
+        if !self.recording {
+            return;
+        }
+        let site = match at {
+            DisplayWhenLookup::Buffer { position } => DisplayWhenSite {
+                property,
+                object: buffer,
+                position,
+                buffer_position: position,
+            },
+            DisplayWhenLookup::String {
+                string,
+                index,
+                anchor: Some(anchor),
+            } => DisplayWhenSite {
+                property,
+                object: string,
+                position: index,
+                buffer_position: anchor,
+            },
+            DisplayWhenLookup::String { anchor: None, .. } => {
+                self.unevaluable.set(true);
+                return;
+            }
+            #[cfg(test)]
+            DisplayWhenLookup::AnyOccurrence => return,
+        };
+        let mut sites = self.sites.borrow_mut();
+        // One property is asked once per `when' clause, and a row can ask
+        // again at the same site; evaluate each site once.
+        if sites.iter().any(|seen| {
+            seen.property == site.property
+                && seen.object == site.object
+                && seen.position == site.position
+                && seen.buffer_position == site.buffer_position
+        }) {
+            return;
+        }
+        neovm_core::emacs_core::eval::push_scratch_gc_roots(&[site.property, site.object]);
+        sites.push(site);
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -80,11 +161,16 @@ pub(crate) enum DisplayWhenLookup {
     /// A `display` property of the walked buffer at GNU position `position`
     /// (`buffer-position` is the same position there).
     Buffer { position: i64 },
-    /// A `display` property inside `string` at character `index`; the string
-    /// frame does not know the buffer position it is anchored at, so the
-    /// first evaluated anchor of that site answers (declared: GNU evaluates
-    /// one string shown at two anchors twice).
-    String { string: Value, index: i64 },
+    /// A `display` property inside `string` at character `index`.  `anchor`
+    /// is GNU's `buffer-position` when the frame knows it (a string reached
+    /// through a buffer `display` property); otherwise the first evaluated
+    /// anchor of that site answers (declared: GNU evaluates one string shown
+    /// at two anchors twice).
+    String {
+        string: Value,
+        index: i64,
+        anchor: Option<i64>,
+    },
     /// Any evaluated occurrence of the FORM: the pre-keying behaviour, for
     /// tests that classify a spec shape with no walk behind it.
     #[cfg(test)]
@@ -141,7 +227,39 @@ impl DisplayWhenConditions {
             buffer,
             exact: answers,
             runs,
+            visits: DisplayWhenVisitLog::default(),
         }))
+    }
+
+    /// Record the clauses the walk takes by the structural rule (see
+    /// [`DisplayWhenVisitLog`]).  Only a redisplay leaf attempt enables this,
+    /// under its frame function's scratch GC root scope.
+    pub(crate) fn with_visit_recording(mut self) -> Self {
+        if let Self::Evaluated(answers) = &mut self
+            && let Some(answers) = Rc::get_mut(answers)
+        {
+            answers.visits.recording = true;
+        }
+        self
+    }
+
+    /// Add the answers evaluated after an earlier walk of this window in the
+    /// same redisplay (the replay's evidence; see
+    /// [`DisplayWhenReplayLedger`]).  Their keys are exact sites, so the
+    /// replay finds them where the first walk asked.
+    pub(crate) fn with_carried_answers(
+        mut self,
+        carried: Option<&FxHashMap<DisplayWhenSiteKey, bool>>,
+    ) -> Self {
+        if let Some(carried) = carried
+            && let Self::Evaluated(answers) = &mut self
+            && let Some(answers) = Rc::get_mut(answers)
+        {
+            for (key, holds) in carried {
+                answers.exact.entry(*key).or_insert(*holds);
+            }
+        }
+        self
     }
 
     /// Answers by FORM alone, at no site: every lookup finds them as "any
@@ -179,7 +297,14 @@ impl DisplayWhenConditions {
             buffer: Value::NIL,
             exact,
             runs,
+            visits: DisplayWhenVisitLog::default(),
         }))
+    }
+
+    /// Whether the walk recorded clauses to evaluate after it (Lisp will run).
+    #[inline]
+    pub(crate) fn has_recorded_visits(&self) -> bool {
+        matches!(self, Self::Evaluated(answers) if !answers.visits.sites.borrow().is_empty())
     }
 
     /// Retained rows have no dependency record for arbitrary Lisp FORM
@@ -224,16 +349,34 @@ impl DisplayWhenConditions {
                         .map(|run| run.holds)
                 })
             }
-            DisplayWhenLookup::String { string, index } => answers
-                .runs
-                .iter()
-                .find(|run| {
-                    run.key.form == form
-                        && run.key.object == string
-                        && run.key.position <= index
-                        && index < run.end
+            DisplayWhenLookup::String {
+                string,
+                index,
+                anchor,
+            } => anchor
+                .and_then(|anchor| {
+                    answers
+                        .exact
+                        .get(&DisplayWhenSiteKey {
+                            form,
+                            object: string,
+                            position: index,
+                            buffer_position: anchor,
+                        })
+                        .copied()
                 })
-                .map(|run| run.holds),
+                .or_else(|| {
+                    answers
+                        .runs
+                        .iter()
+                        .find(|run| {
+                            run.key.form == form
+                                && run.key.object == string
+                                && run.key.position <= index
+                                && index < run.end
+                        })
+                        .map(|run| run.holds)
+                }),
             #[cfg(test)]
             DisplayWhenLookup::AnyOccurrence => answers
                 .runs
@@ -254,11 +397,167 @@ impl DisplayWhenConditions {
         self.verdict(form, DisplayWhenLookup::AnyOccurrence)
     }
 
-    /// Whether a `(when FORM . SPEC)` spec applies at `at`; an unseen FORM
-    /// holds (the structural rule).
-    pub(crate) fn holds(&self, form: Value, at: DisplayWhenLookup) -> bool {
-        !matches!(self.verdict(form, at), DisplayWhenVerdict::Fails)
+    /// Whether a `(when FORM . SPEC)` spec of `property` applies at `at`; an
+    /// unseen FORM holds (the structural rule), and the walk records the site
+    /// so the clause is evaluated after the walk.
+    pub(crate) fn holds(&self, form: Value, at: DisplayWhenLookup, property: Value) -> bool {
+        match self.verdict(form, at) {
+            DisplayWhenVerdict::Holds => true,
+            DisplayWhenVerdict::Fails => false,
+            DisplayWhenVerdict::Unseen => {
+                if let Self::Evaluated(answers) = self {
+                    answers.visits.note(answers.buffer, at, property);
+                }
+                true
+            }
+        }
     }
+}
+
+/// What a window walk's `when` lookups leave behind for its retained rows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum DisplayWhenRecord {
+    /// No `when` FORM was evaluated for the window's span and the walk took
+    /// no clause by the structural rule.
+    #[default]
+    NoSites,
+    /// Every clause the walk took came from an evaluated answer, or from the
+    /// structural rule where the evaluation after the walk agreed with it.
+    Known,
+    /// A clause the walk took stays unverified: the evaluation failed, the
+    /// site could not be evaluated, or it disagreed again after the one
+    /// replay.  Rows produced from it must not be reused.
+    Unknown,
+}
+
+/// The outcome of evaluating the clauses a walk took by the structural rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DisplayWhenSettlement {
+    Settled(DisplayWhenRecord),
+    /// An answer disagreed with the rule the walk drew by: relayout the frame
+    /// once with the answers carried in the ledger.
+    Replay,
+}
+
+/// The answers evaluated after a walk, carried to the frame relayout that
+/// replays it, and the one-replay budget per window.  Owned by one logical
+/// frame attempt (`RedisplayLispLedger`); its keys' Lisp objects are pushed
+/// onto the scratch GC root stack under the frame function's scope when they
+/// are carried, so the Lisp the replay runs first (fontification, the span
+/// scan) cannot collect them and let another object take their address.
+#[derive(Debug, Default)]
+pub(crate) struct DisplayWhenReplayLedger {
+    windows: FxHashMap<neovm_core::window::WindowId, DisplayWhenCarry>,
+}
+
+#[derive(Debug, Default)]
+struct DisplayWhenCarry {
+    answers: FxHashMap<DisplayWhenSiteKey, bool>,
+    replayed: bool,
+}
+
+impl DisplayWhenReplayLedger {
+    /// The answers carried for WINDOW's replay, if any.
+    #[inline]
+    pub(crate) fn carried(
+        &self,
+        window: neovm_core::window::WindowId,
+    ) -> Option<&FxHashMap<DisplayWhenSiteKey, bool>> {
+        if self.windows.is_empty() {
+            return None;
+        }
+        self.windows
+            .get(&window)
+            .map(|carry| &carry.answers)
+            .filter(|answers| !answers.is_empty())
+    }
+
+    /// How many replays this ledger granted (tests).
+    #[cfg(test)]
+    pub(crate) fn replays(&self) -> usize {
+        self.windows.values().filter(|carry| carry.replayed).count()
+    }
+}
+
+/// Evaluate, with GNU's bindings and in visit order, the clauses the walk of
+/// WINDOW took by the structural rule, and decide what its rows are worth.
+///
+/// Runs after the window's body and chrome, before the leaf is accepted;
+/// the caller re-checks the attempt's freshness afterwards, since the FORMs
+/// are arbitrary Lisp.  GNU evaluated them during its walk instead
+/// (declared: the order relative to chrome differs).  A walk that recorded
+/// nothing -- every window without unscanned `when` clauses -- settles here
+/// without leaving the caller.
+#[inline]
+pub(crate) fn settle_display_when_visits(
+    evaluator: &mut Context,
+    buf_id: BufferId,
+    window_id: neovm_core::window::WindowId,
+    conditions: &DisplayWhenConditions,
+    target: crate::display_property::DisplayPropertyTarget,
+    ledger: &mut DisplayWhenReplayLedger,
+) -> DisplayWhenSettlement {
+    let DisplayWhenConditions::Evaluated(answers) = conditions else {
+        // The span's forms could not be evaluated: the walk drew by the
+        // structural rule throughout.
+        return DisplayWhenSettlement::Settled(DisplayWhenRecord::Unknown);
+    };
+    if answers.visits.unevaluable.get() {
+        return DisplayWhenSettlement::Settled(DisplayWhenRecord::Unknown);
+    }
+    if answers.visits.sites.borrow().is_empty() {
+        return DisplayWhenSettlement::Settled(if answers.exact.is_empty() {
+            DisplayWhenRecord::NoSites
+        } else {
+            DisplayWhenRecord::Known
+        });
+    }
+    evaluate_recorded_display_when_visits(evaluator, buf_id, window_id, answers, target, ledger)
+}
+
+#[inline(never)]
+fn evaluate_recorded_display_when_visits(
+    evaluator: &mut Context,
+    buf_id: BufferId,
+    window_id: neovm_core::window::WindowId,
+    answers: &DisplayWhenAnswers,
+    target: crate::display_property::DisplayPropertyTarget,
+    ledger: &mut DisplayWhenReplayLedger,
+) -> DisplayWhenSettlement {
+    let sites = std::mem::take(&mut *answers.visits.sites.borrow_mut());
+    let evaluated =
+        match evaluator.evaluate_display_when_sites(buf_id, Some(window_id), &sites, |spec| {
+            crate::display_property::classify_resolved_display_spec(spec, target)
+                .replacement()
+                .is_some()
+        }) {
+            Ok(evaluated) => evaluated,
+            Err(flow) => {
+                tracing::warn!(
+                    ?flow,
+                    "display `when' forms met by the walk could not be evaluated; \
+                 its rows stay unverified"
+                );
+                return DisplayWhenSettlement::Settled(DisplayWhenRecord::Unknown);
+            }
+        };
+    // The walk drew every one of these clauses as holding.
+    if evaluated.values().all(|holds| *holds) {
+        return DisplayWhenSettlement::Settled(DisplayWhenRecord::Known);
+    }
+    let carry = ledger.windows.entry(window_id).or_default();
+    if carry.replayed {
+        // The bound: one replay per window and redisplay.  Keep the replay's
+        // rows (the structural rule decided the clauses it newly met) and
+        // never reuse them.
+        return DisplayWhenSettlement::Settled(DisplayWhenRecord::Unknown);
+    }
+    carry.replayed = true;
+    for (key, holds) in evaluated {
+        neovm_core::emacs_core::eval::push_scratch_gc_roots(&[key.form, key.object]);
+        carry.answers.insert(key, holds);
+    }
+    DisplayWhenSettlement::Replay
 }
 
 /// The terminal source position reached by a proved GNU mini measurement.
