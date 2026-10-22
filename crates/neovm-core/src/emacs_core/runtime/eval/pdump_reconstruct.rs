@@ -105,9 +105,7 @@ impl Context {
             tagged_heap,
         }
         .build();
-        let store_state = world.tagged_heap.store_state_root();
         let mut ev = Self {
-            store_state,
             integer_width_context: Default::default(),
             owned_roots: world.owned_roots,
             tagged_heap: world.tagged_heap,

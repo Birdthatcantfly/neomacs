@@ -3580,9 +3580,6 @@ pub struct Context {
     macro_perf_enabled: bool,
     /// Custom variable manager — defcustom/defgroup system.
     pub(crate) custom: CustomManager,
-    /// World-owned store protocol. Appended to preserve every existing ABI
-    /// offset; construction and cold owner activation always install it.
-    pub(crate) store_state: std::ptr::NonNull<crate::tagged::collection_reads::StoreState>,
 }
 
 // A mutex does not make the host hooks, Rc leases or TLS views transferable.

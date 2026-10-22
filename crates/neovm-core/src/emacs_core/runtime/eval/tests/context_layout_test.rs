@@ -10,7 +10,7 @@ use std::mem::{offset_of, size_of};
 #[test]
 #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
 fn every_context_offset_is_mains() {
-    assert_eq!(size_of::<Context>(), 44472, "Context size");
+    assert_eq!(size_of::<Context>(), 44464, "Context size");
     let table: &[(usize, usize, &str)] = &[
         (
             0,
@@ -603,7 +603,6 @@ fn every_context_offset_is_mains() {
             "macro_perf_enabled",
         ),
         (44463, offset_of!(Context, custom), "custom"),
-        (44464, offset_of!(Context, store_state), "store_state"),
     ];
     let moved: Vec<String> = table
         .iter()
