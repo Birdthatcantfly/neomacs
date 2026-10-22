@@ -4,15 +4,15 @@ use super::*;
 use crate::tagged::gc::PlainSymbolBacking;
 
 #[derive(Default)]
-struct Ledger {
-    world: Vec<usize>,
+pub(super) struct Ledger {
+    pub(super) world: Vec<usize>,
     symbols: Vec<usize>,
     projections: Vec<usize>,
-    external: Vec<usize>,
-    extra_work: usize,
+    pub(super) external: Vec<usize>,
+    pub(super) extra_work: usize,
 }
 
-fn ledger(era: &ParallelHeapEra<'_>, stopped: &AllStopped<'_>) -> Ledger {
+pub(super) fn ledger(era: &ParallelHeapEra<'_>, stopped: &AllStopped<'_>) -> Ledger {
     let mut result = Ledger::default();
     let keeper = era.keeper.as_ref().unwrap();
     let mut world = Vec::new();

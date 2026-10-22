@@ -249,5 +249,6 @@ enum Step {
 }
 
 mod gc;
+mod handoff;
 mod tests;
 mod void;
