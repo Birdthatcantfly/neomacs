@@ -29,6 +29,8 @@ fn ready() -> (Context, FrameId, RestoreTerminal) {
     let mut context = Context::new();
     let restore = RestoreTerminal;
     context.gc_stress = false;
+    // These receipts require GEN1, independently of the test runner's policy.
+    context.tagged_heap.set_generational_enabled(true);
     context.tagged_heap.set_gc_threshold(usize::MAX);
     context.gc_collect_exact();
     pure::configure_terminal_runtime(tty_config());

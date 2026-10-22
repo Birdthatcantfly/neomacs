@@ -6,6 +6,8 @@ use crate::tagged::collection_reads::{capture, capture_normalized};
 fn ready() -> (Context, FrameId) {
     let mut context = Context::new();
     context.gc_stress = false;
+    // These receipts require GEN1, independently of the test runner's policy.
+    context.tagged_heap.set_generational_enabled(true);
     context.tagged_heap.set_gc_threshold(usize::MAX);
     context.gc_collect_exact();
     let source = context.buffer_manager().current_buffer().unwrap().id();
