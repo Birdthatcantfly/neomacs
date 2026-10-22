@@ -19,6 +19,9 @@ use neomacs_display_protocol::tty_capabilities::{
 };
 use neomacs_display_protocol::types::{DisplayWindowId, FaceId, Rect, ResolvedBidiDirection};
 
+#[path = "diagnostic_knobs.rs"]
+mod diagnostic_knobs;
+
 #[path = "painter.rs"]
 pub mod painter;
 
@@ -1084,7 +1087,7 @@ impl TtyRif {
             .collect();
         if self.damage.mode != damage::TtyDamageMode::Off {
             self.rasterize_frame_tree_damaged(root, &children);
-            if std::env::var_os("NEOMACS_DUMP_TTY_GLYPHS").is_some() {
+            if diagnostic_knobs::dump_tty_glyphs_enabled() {
                 self.dump_tty_glyphs_to_log();
             }
             return;
@@ -1105,7 +1108,7 @@ impl TtyRif {
             self.rasterize_state_at(child, origin_col, origin_row, true);
         }
 
-        if std::env::var_os("NEOMACS_DUMP_TTY_GLYPHS").is_some() {
+        if diagnostic_knobs::dump_tty_glyphs_enabled() {
             self.dump_tty_glyphs_to_log();
         }
     }
@@ -1119,7 +1122,7 @@ impl TtyRif {
     ) {
         self.install_state_faces(state);
 
-        if std::env::var_os("NEOMACS_DUMP_TTY_GLYPHS").is_some() {
+        if diagnostic_knobs::dump_tty_glyphs_enabled() {
             self.dump_frame_display_state_to_log(state, origin_col, origin_row);
         }
 

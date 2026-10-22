@@ -4,6 +4,7 @@
 //! character position, computes line breaks, positions glyphs on a fixed-width
 //! grid, and publishes `FrameDisplayState` snapshots for render backends.
 
+mod diagnostic_knobs;
 mod mini_eob_scroll;
 mod mini_source_start;
 mod mini_source_stop;
@@ -3880,15 +3881,13 @@ impl LayoutEngine {
         // accepted frame when NEOMACS_LAYOUT_STATS_FILE names a path. This is
         // the only consumer-facing view of LayoutStats; the TTY typing
         // harness uses it to verify which fast path actually engaged.
-        if let Ok(stats_path) = std::env::var("NEOMACS_LAYOUT_STATS_FILE")
-            && !stats_path.is_empty()
-        {
+        if let Some(stats_path) = diagnostic_knobs::layout_stats_path() {
             use std::io::Write as _;
             let s = &self.layout_stats;
             if let Ok(mut f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(&stats_path)
+                .open(stats_path)
             {
                 let _ = writeln!(
                     f,

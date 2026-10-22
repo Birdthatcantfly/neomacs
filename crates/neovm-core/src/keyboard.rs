@@ -23,6 +23,7 @@ use crate::heap_types::LispString;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+mod diagnostic_knobs;
 mod display_service;
 mod input_method;
 mod keysym;
@@ -3008,9 +3009,7 @@ fn sync_opening_gui_frame_size_from_host_in_keyboard_runtime(
     buffers: &crate::buffer::BufferManager,
     display_host: Option<&dyn crate::emacs_core::eval::DisplayHost>,
 ) -> Option<crate::window::FrameId> {
-    let trace_host_sync = std::env::var("NEOMACS_TRACE_HOST_SYNC")
-        .ok()
-        .is_some_and(|value| value == "1");
+    let trace_host_sync = diagnostic_knobs::trace_host_sync_enabled();
     let Some(host) = display_host else {
         if trace_host_sync {
             tracing::debug!("sync_opening_gui_frame_size_from_host: no display host");
