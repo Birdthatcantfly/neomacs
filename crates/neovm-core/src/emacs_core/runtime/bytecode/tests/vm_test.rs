@@ -12688,3 +12688,259 @@ fn vm_verified_switch_follows_a_mutation_only_onto_a_proven_depth() {
     // The function itself stays usable afterwards.
     assert_eq!(run_switch(&mut eval, &func, b), 30);
 }
+
+/// `(lambda (a i) (aref a i))` and `(lambda (a i v) (aset a i v) a)` /
+/// `(lambda (a i v) (aset a i v))` as hand-built, sealed and stack-verified
+/// bytecode: the real `Aref`/`Aset` arms of the VERIFIED driver and their
+/// VM-only helpers.
+fn array_opcode_function(ops: Vec<Op>, nargs: usize, max_stack: usize) -> ByteCodeFunction {
+    let mut func = ByteCodeFunction::new(
+        crate::emacs_core::bytecode::decode::parse_arglist_descriptor(
+            (nargs | (nargs << 8)) as i64,
+        ),
+    );
+    func.ops = ops;
+    func.max_stack = crate::emacs_core::bytecode::StackDepth::for_test(max_stack);
+    func.seal_hand_assembled_ops_for_test();
+    assert!(
+        func.executes_verified_ops(),
+        "the array probe runs verified"
+    );
+    func
+}
+
+/// The VM's answer in GNU's printed form: `OK VALUE`, or for a signal
+/// `ERR (SYMBOL DATA...)` exactly as GNU's `(condition-case err ... (error
+/// err))` prints it (the harness prints the data list in its own parens).
+fn run_array_opcode(eval: &mut Context, func: &ByteCodeFunction, args: Value) -> String {
+    let args = crate::emacs_core::value::list_to_vec(&args).expect("argument list");
+    let result = new_vm(eval).execute(func, args).map_err(map_flow);
+    let printed = crate::emacs_core::error::format_eval_result(&result);
+    match printed
+        .strip_prefix("ERR (")
+        .and_then(|rest| rest.strip_suffix("))"))
+        .and_then(|rest| rest.split_once(" ("))
+    {
+        Some((symbol, data)) => format!("ERR ({symbol} {data})"),
+        None => printed,
+    }
+}
+
+/// Every `aref`/`aset` shape and error a GNU 31.1 byte-compiled
+/// `(lambda (a i) (aref a i))` / `(lambda (a i v) (aset a i v) a)` answers,
+/// recorded from GNU (tmp/v10x/vmgap/array-oracle.el, 2026-10-22): decode
+/// order (CHECK_FIXNUM before the array check), negative and huge indices,
+/// every array kind, and every string-write refusal.
+#[test]
+fn vm_aref_aset_answer_and_signal_like_gnu() {
+    crate::test_utils::init_test_tracing();
+    let mut eval = Context::new_vm_runtime_harness();
+    let aref = array_opcode_function(
+        vec![Op::StackRef(1), Op::StackRef(1), Op::Aref, Op::Return],
+        2,
+        4,
+    );
+    let aset_array = array_opcode_function(
+        vec![
+            Op::StackRef(2),
+            Op::StackRef(2),
+            Op::StackRef(2),
+            Op::Aset,
+            Op::Pop,
+            Op::StackRef(2),
+            Op::Return,
+        ],
+        3,
+        6,
+    );
+    let aset_value = array_opcode_function(
+        vec![
+            Op::StackRef(2),
+            Op::StackRef(2),
+            Op::StackRef(2),
+            Op::Aset,
+            Op::Return,
+        ],
+        3,
+        6,
+    );
+    let char_table_case = "(list (let ((ct (make-char-table 'test))) \
+                           (set-char-table-range ct ?a 7) ct) ?a)";
+    let aref_cases: &[(&str, &str)] = &[
+        ("(list (vector 10 20 30) 2)", "OK 30"),
+        ("(list (record 'r 1 2) 2)", "OK 2"),
+        ("(list \"abc\" 1)", "OK 98"),
+        ("(list (string-to-multibyte \"abc\") 2)", "OK 99"),
+        ("(list \"a\u{e9}c\" 1)", "OK 233"),
+        ("(list \"a\u{e9}c\" 2)", "OK 99"),
+        ("(list (make-bool-vector 3 t) 1)", "OK t"),
+        ("(list (vector 1 2) 2)", "ERR (args-out-of-range [1 2] 2)"),
+        ("(list \"abc\" 3)", "ERR (args-out-of-range \"abc\" 3)"),
+        ("(list \"abc\" -1)", "ERR (args-out-of-range \"abc\" -1)"),
+        (
+            "(list (vector 1 2) 'x)",
+            "ERR (wrong-type-argument fixnump x)",
+        ),
+        (
+            "(list (list 1 2) 0)",
+            "ERR (wrong-type-argument arrayp (1 2))",
+        ),
+        ("(list 5 0)", "ERR (wrong-type-argument arrayp 5)"),
+        (
+            "(list \"abc\" 1.0)",
+            "ERR (wrong-type-argument fixnump 1.0)",
+        ),
+        (char_table_case, "OK 7"),
+        (
+            "(list (make-char-table 'test) -1)",
+            "ERR (wrong-type-argument characterp -1)",
+        ),
+        (
+            "(list (vector 1 2) most-positive-fixnum)",
+            "ERR (args-out-of-range [1 2] 2305843009213693951)",
+        ),
+    ];
+    for (args, want) in aref_cases {
+        let args = eval.eval_str(args).expect("arguments evaluate");
+        assert_eq!(
+            run_array_opcode(&mut eval, &aref, args),
+            *want,
+            "aref {args:?}"
+        );
+    }
+    // (arguments, the array after `aset` or its error, aset's own value).
+    let aset_cases: &[(&str, Option<&str>, &str)] = &[
+        ("(list (make-vector 3 0) 2 9)", Some("OK [0 0 9]"), "OK 9"),
+        ("(list (record 'r 1 2) 1 7)", Some("OK #s(r 7 2)"), "OK 7"),
+        (
+            "(list (make-bool-vector 3 nil) 1 t)",
+            Some("OK #&3\"\u{2}\""),
+            "OK t",
+        ),
+        (
+            "(list (make-vector 2 0) 2 1)",
+            None,
+            "ERR (args-out-of-range [0 0] 2)",
+        ),
+        (
+            "(list (make-vector 2 0) -1 1)",
+            None,
+            "ERR (args-out-of-range [0 0] -1)",
+        ),
+        (
+            "(list (make-vector 2 0) 'x 1)",
+            None,
+            "ERR (wrong-type-argument fixnump x)",
+        ),
+        (
+            "(list (make-bool-vector 3 nil) 3 t)",
+            None,
+            "ERR (args-out-of-range #&3\"\u{0}\" 3)",
+        ),
+        (
+            "(list (list 1 2) 0 1)",
+            None,
+            "ERR (wrong-type-argument arrayp (1 2))",
+        ),
+        ("(list 5 'x 1)", None, "ERR (wrong-type-argument fixnump x)"),
+        (
+            "(list 'sym 0 1)",
+            None,
+            "ERR (wrong-type-argument arrayp sym)",
+        ),
+        (
+            "(list (copy-sequence \"abc\") 0 'x)",
+            None,
+            "ERR (wrong-type-argument characterp x)",
+        ),
+        (
+            "(list (copy-sequence \"abc\") 0 -1)",
+            None,
+            "ERR (wrong-type-argument characterp -1)",
+        ),
+        (
+            "(list (copy-sequence \"abc\") 0 #x400000)",
+            None,
+            "ERR (wrong-type-argument characterp 4194304)",
+        ),
+        (
+            "(list (string-to-unibyte \"abc\") 0 300)",
+            None,
+            "ERR (error \"Attempt to store non-byte value into unibyte string\")",
+        ),
+        (
+            "(list (copy-sequence \"a\u{e9}c\") 0 #xe9)",
+            None,
+            "ERR (error \"Attempt to store non-ASCII char into multibyte string\")",
+        ),
+        (
+            "(list (copy-sequence \"abc\") -1 ?x)",
+            None,
+            "ERR (args-out-of-range \"abc\" -1)",
+        ),
+        (
+            "(list (copy-sequence \"abc\") 3 ?x)",
+            None,
+            "ERR (args-out-of-range \"abc\" 3)",
+        ),
+        (
+            "(list (copy-sequence \"abc\") 1.0 ?x)",
+            None,
+            "ERR (wrong-type-argument fixnump 1.0)",
+        ),
+        ("(list (make-char-table 'test) #x3fffff 'z)", None, "OK z"),
+        (
+            "(list (make-char-table 'test) #x400000 1)",
+            None,
+            "ERR (wrong-type-argument characterp 4194304)",
+        ),
+        (
+            "(list (copy-sequence \"a\u{e9}c\") 2 ?z)",
+            Some("OK \"a\u{e9}z\""),
+            "OK 122",
+        ),
+        (
+            "(list (string-to-unibyte \"abc\") 0 255)",
+            Some("OK \"\\377bc\""),
+            "OK 255",
+        ),
+        (
+            "(list (copy-sequence \"a\u{e9}c\") 1 ?x)",
+            None,
+            "ERR (error \"Attempt to replace non-ASCII char in multibyte string\")",
+        ),
+        (
+            "(list (make-vector 2 0) 1.5 1)",
+            None,
+            "ERR (wrong-type-argument fixnump 1.5)",
+        ),
+        (
+            "(list (vector 1 2) most-positive-fixnum 0)",
+            None,
+            "ERR (args-out-of-range [1 2] 2305843009213693951)",
+        ),
+    ];
+    for (args_src, want_array, want_value) in aset_cases {
+        let args = eval.eval_str(args_src).expect("arguments evaluate");
+        let got_array = run_array_opcode(&mut eval, &aset_array, args);
+        match want_array {
+            Some(want) => assert_eq!(got_array, *want, "aset array {args_src}"),
+            // An error: the array form signals exactly what aset's value does.
+            None if want_value.starts_with("ERR") => {
+                assert_eq!(got_array, *want_value, "aset array {args_src}")
+            }
+            None => {}
+        }
+        let args = eval.eval_str(args_src).expect("arguments evaluate");
+        assert_eq!(
+            run_array_opcode(&mut eval, &aset_value, args),
+            *want_value,
+            "aset value {args_src}"
+        );
+    }
+    // The char-table store landed where `aref` reads it.
+    let args = eval
+        .eval_str("(let ((ct (make-char-table 'test))) (aset ct #x3fffff 'z) (list ct #x3fffff))")
+        .expect("arguments evaluate");
+    assert_eq!(run_array_opcode(&mut eval, &aref, args), "OK z");
+}

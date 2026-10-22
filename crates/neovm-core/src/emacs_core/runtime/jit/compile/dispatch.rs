@@ -315,47 +315,11 @@ const _: () = {
     assert!(tag != TAG_VECLIKE && tag != TAG_FLOAT);
 };
 
-/// `(aref ARRAY INDEX)` on the shapes a loop indexes, answered without the
-/// builtin's `ValueKind` decode and `Result`: a plain vector or record slot,
-/// or a character of a string whose characters are all one byte. `None` for
-/// everything else, which [`builtin_aref_values`](b::builtin_aref_values)
-/// then answers (or signals) exactly as before. Must agree with it wherever it
-/// answers.
-#[inline(always)]
-fn aref_fast(array: Value, index: Value) -> Option<Value> {
-    let idx = usize::try_from(index.as_fixnum()?).ok()?;
-    if let Some(header) = array.as_veclike_ptr() {
-        // SAFETY: the observed header selects the concrete payload type. This
-        // projection reaches no callback or GC safe point before reading it.
-        let items = match unsafe { (*header).type_tag } {
-            crate::tagged::header::VecLikeType::Vector => unsafe {
-                (*(header as *const crate::tagged::header::VectorObj))
-                    .data
-                    .as_slice()
-            },
-            crate::tagged::header::VecLikeType::Record => unsafe {
-                (*(header as *const crate::tagged::header::RecordObj))
-                    .data
-                    .as_slice()
-            },
-            _ => return None,
-        };
-        return items.get(idx).copied();
-    }
-    if array.is_string() {
-        let string = array.as_lisp_string()?;
-        // A byte is the character only where every character is one byte;
-        // a supplied GNU count never qualifies, and the builtin decodes it.
-        if !string.has_one_byte_characters() {
-            return None;
-        }
-        return string
-            .as_bytes()
-            .get(idx)
-            .map(|&byte| Value::fixnum(byte as i64));
-    }
-    None
-}
+// `(aref ARRAY INDEX)` on the shapes a loop indexes: the one fast path both
+// `Baref` entries share (`builtins::aref_fast`; run_loop reaches it through
+// `builtin_aref_values_in_vm_context_slot`). `None` for everything else,
+// which `builtin_aref_values` then answers (or signals) exactly as before.
+use b::aref_fast;
 
 #[cfg(test)]
 #[path = "tests/array_projection_capture_test.rs"]

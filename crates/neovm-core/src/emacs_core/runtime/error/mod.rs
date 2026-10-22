@@ -2521,7 +2521,7 @@ pub(crate) fn expect_fixnum(val: &Value) -> Result<i64, Flow> {
 
 #[cold]
 #[inline(never)]
-fn expect_fixnum_failed(val: &Value) -> Flow {
+pub(crate) fn expect_fixnum_failed(val: &Value) -> Flow {
     signal(
         LispCondition::WrongTypeArgument,
         vec![Value::symbol("fixnump"), *val],

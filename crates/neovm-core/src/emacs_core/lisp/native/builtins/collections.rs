@@ -155,12 +155,87 @@ impl ArraySymbolPolicy for VmArraySymbolSource<'_, '_> {
     }
 }
 
+/// `(aref ARRAY INDEX)` on the shapes a loop indexes, answered without
+/// [`builtin_aref_values`]' `ValueKind` decode, its repeated pointer
+/// observations and its saved-register frame: a plain vector or record slot,
+/// or a character of a string whose characters are all one byte. `None` for
+/// everything else (and for every error), which `builtin_aref_values` then
+/// answers or signals exactly as before. Must agree with it wherever it
+/// answers.
+///
+/// Shared by the two `Baref` entries: run_loop's
+/// [`builtin_aref_values_in_vm_context_slot`] and the JIT's `neovm_jit_aref`.
+///
+/// It reads without the per-projection observation hook, and so makes no
+/// call at all (a hook that returns keeps a register frame on every path):
+/// a traversal this mutator observes ([`reads_need_observation`]) goes to
+/// the builtin, whose projections record every read; when none is observed,
+/// every hook would have been a no-op -- the same precondition run_loop's
+/// unobserved `Car`/`Cdr` rely on.
+///
+/// [`reads_need_observation`]: crate::tagged::collection_reads::reads_need_observation
+#[inline(always)]
+pub(crate) fn aref_fast(array: Value, index: Value) -> Option<Value> {
+    use crate::tagged::value::{TAG_MASK, TAG_STRING, TAG_VECLIKE};
+    let idx = usize::try_from(index.as_fixnum()?).ok()?;
+    if crate::tagged::collection_reads::reads_need_observation() {
+        return None;
+    }
+    let bits = array.bits();
+    let object = bits & !TAG_MASK;
+    match bits & TAG_MASK {
+        TAG_VECLIKE => {
+            let header = object as *const crate::tagged::header::VecLikeHeader;
+            // SAFETY: a live veclike header selects the concrete payload type.
+            // This read reaches no callback or GC safe point.
+            let items = match unsafe { (*header).type_tag } {
+                VecLikeType::Vector => unsafe {
+                    (*(header as *const crate::tagged::header::VectorObj))
+                        .data
+                        .as_slice()
+                },
+                VecLikeType::Record => unsafe {
+                    (*(header as *const crate::tagged::header::RecordObj))
+                        .data
+                        .as_slice()
+                },
+                _ => return None,
+            };
+            items.get(idx).copied()
+        }
+        TAG_STRING => {
+            // SAFETY: a live string object. A reclaimed one (null data) is
+            // left to the builtin, whose borrow reports the use-after-free.
+            let string = unsafe { &(*(object as *const crate::tagged::header::StringObj)).data };
+            // A byte is the character only where every character is one
+            // byte; a supplied GNU count never qualifies, and the builtin
+            // decodes it.
+            if string.is_reclaimed() || !string.has_one_byte_characters() {
+                return None;
+            }
+            string
+                .as_bytes()
+                .get(idx)
+                .map(|&byte| Value::fixnum(byte as i64))
+        }
+        _ => None,
+    }
+}
+
 /// Used only by run_loop: defer the VM Context-slot load to the char-table arm.
+///
+/// Out of line, with the same arguments run_loop has always passed, so the
+/// `Aref` arm's call sequence is unchanged; inside, the [`aref_fast`] shapes
+/// return without a frame and everything else tail-calls the builtin.
+#[inline(never)]
 pub(crate) fn builtin_aref_values_in_vm_context_slot(
     context_slot: &&mut super::eval::Context,
     array: Value,
     index: Value,
 ) -> EvalResult {
+    if let Some(value) = aref_fast(array, index) {
+        return Ok(value);
+    }
     builtin_aref_values(VmArraySymbolSource(context_slot), array, index)
 }
 
@@ -280,43 +355,67 @@ pub(crate) fn builtin_aref_values(
     }
 }
 
+// The `aset` errors, out of line so the hot decode carries no `vec!` and no
+// signal construction (a cold arm built inline keeps registers and blocks
+// inlining). Each builds exactly the payload its inline form used to.
+#[cold]
+#[inline(never)]
+fn aset_args_out_of_range(array: Value, index: Value) -> Flow {
+    signal(LispCondition::ArgsOutOfRange, vec![array, index])
+}
+
+#[cold]
+#[inline(never)]
+fn aset_not_a_character(new_element: Value) -> Flow {
+    signal(
+        LispCondition::WrongTypeArgument,
+        vec![Value::symbol("characterp"), new_element],
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn aset_not_an_array(array: Value) -> Flow {
+    signal(
+        LispCondition::WrongTypeArgument,
+        vec![Value::symbol("arrayp"), array],
+    )
+}
+
+#[cold]
+#[inline(never)]
+fn aset_string_error(message: &'static str) -> Flow {
+    signal(LispCondition::Error, vec![Value::string(message)])
+}
+
 // One source for the complete string-write behavior. The ordinary public
 // boundary validates its inputs; run_loop's String arm has those validations
 // already. Only the VM-only expansion receives a site-specific inline hint.
 macro_rules! aset_string_write_body {
     ($array:ident, $index:ident, $new_element:ident, $idx_fixnum:ident) => {{
         let string = $array.as_lisp_string().expect("string");
-        if $idx_fixnum < 0 || $idx_fixnum as usize >= string.schars() {
-            return Err(signal(
-                LispCondition::ArgsOutOfRange,
-                vec![*$array, *$index],
-            ));
+        // A negative index wraps to a huge one: out of range, one compare.
+        if $idx_fixnum as u64 >= string.schars() as u64 {
+            return Err(aset_args_out_of_range(*$array, *$index));
         }
         let idx = $idx_fixnum as usize;
 
-        let replacement_code = insert_char_code_from_value($new_element)?;
-        if !(0..=0x3F_FFFF).contains(&replacement_code) {
-            return Err(signal(
-                LispCondition::WrongTypeArgument,
-                vec![Value::symbol("characterp"), *$new_element],
-            ));
-        }
-        let replacement_code = replacement_code as u32;
+        // GNU `CHECK_CHARACTER`: a fixnum in 0..=MAX_CHAR. A non-fixnum and
+        // an out-of-range fixnum signal the same `characterp` error, so one
+        // tag test and one unsigned compare decide both.
+        let replacement_code = match $new_element.as_fixnum() {
+            Some(code) if code as u64 <= 0x3F_FFFF => code as u32,
+            _ => return Err(aset_not_a_character(*$new_element)),
+        };
         if !string.is_multibyte() && replacement_code > 0xff {
-            return Err(signal(
-                LispCondition::Error,
-                vec![Value::string(
-                    "Attempt to store non-byte value into unibyte string",
-                )],
+            return Err(aset_string_error(
+                "Attempt to store non-byte value into unibyte string",
             ));
         }
         if string.is_multibyte() {
             if replacement_code > 0x7f {
-                return Err(signal(
-                    LispCondition::Error,
-                    vec![Value::string(
-                        "Attempt to store non-ASCII char into multibyte string",
-                    )],
+                return Err(aset_string_error(
+                    "Attempt to store non-ASCII char into multibyte string",
                 ));
             }
             // GNU `Faset` locates the byte with `string_char_to_byte' (src/fns.c),
@@ -327,17 +426,12 @@ macro_rules! aset_string_write_body {
             // this O(index).
             let byte_pos =
                 crate::emacs_core::string_pos_cache::string_char_to_byte(*$array, string, idx);
-            let old_byte = string
-                .as_bytes()
-                .get(byte_pos)
-                .copied()
-                .ok_or_else(|| signal(LispCondition::ArgsOutOfRange, vec![*$array, *$index]))?;
+            let Some(&old_byte) = string.as_bytes().get(byte_pos) else {
+                return Err(aset_args_out_of_range(*$array, *$index));
+            };
             if old_byte > 0x7f {
-                return Err(signal(
-                    LispCondition::Error,
-                    vec![Value::string(
-                        "Attempt to replace non-ASCII char in multibyte string",
-                    )],
+                return Err(aset_string_error(
+                    "Attempt to replace non-ASCII char in multibyte string",
                 ));
             }
             $array.set_string_byte_same_char_count(byte_pos, replacement_code as u8);
@@ -407,34 +501,54 @@ pub(crate) fn builtin_aset_args_in_context(
 }
 
 /// `aset` reading its arguments in place.
+///
+/// The decode before each store is GNU `Faset`'s: CHECK_FIXNUM on the index
+/// (one tag test, not the `ValueKind` decode), then the array type from its
+/// tag and ONE observed header projection (the former form observed a vector
+/// three times on its way to the length). The stores themselves --
+/// `set_vector_slot`, `set_record_slot`, the string byte store, the
+/// bool-vector and char-table writers -- are unchanged.
 #[inline(never)]
 pub(crate) fn builtin_aset_args(symbols: impl ArraySymbolPolicy, args: &[Value]) -> EvalResult {
     expect_args("aset", args, 3)?;
     // GNU src/data.c:Faset starts with CHECK_FIXNUM (idx) before checking
     // whether ARRAY is mutable by `aset`.
-    let idx_fixnum = expect_fixnum(&args[1])?;
-    match args[0].kind() {
-        ValueKind::Veclike(VecLikeType::CharTable) => {
-            let ch = expect_char_table_index(&args[1])?;
-            super::chartable::builtin_set_char_table_range_with_symbols(
-                vec![args[0], Value::fixnum(ch), args[2]],
-                None,
-                symbols.mode(),
-            )
-        }
+    let Some(idx_fixnum) = args[1].as_fixnum() else {
+        return Err(crate::emacs_core::error::expect_fixnum_failed(&args[1]));
+    };
+    let array = args[0];
+    // A string is told by its tag alone; the write body observes it.
+    if array.is_string() {
+        let _updated = symbols.replace_string(&args[0], &args[1], &args[2], idx_fixnum)?;
+        return Ok(args[2]);
+    }
+    let Some(header) = array.as_veclike_ptr() else {
+        return Err(aset_not_an_array(array));
+    };
+    // SAFETY: a live veclike header; it is read before anything that could
+    // run Lisp or collect.
+    match unsafe { (*header).type_tag } {
         // A vector or record slot (no in-band tags, P3.2 L0.8).
-        ValueKind::Veclike(kind @ (VecLikeType::Vector | VecLikeType::Record)) => {
+        kind @ (VecLikeType::Vector | VecLikeType::Record) => {
+            // SAFETY: the observed header selects the concrete payload type,
+            // as in `aref_fast`; only the length is read here.
+            let len = unsafe {
+                if kind == VecLikeType::Vector {
+                    (*(header as *const crate::tagged::header::VectorObj))
+                        .data
+                        .as_slice()
+                        .len()
+                } else {
+                    (*(header as *const crate::tagged::header::RecordObj))
+                        .data
+                        .as_slice()
+                        .len()
+                }
+            };
+            // A negative index wraps to a huge one: out of range.
             let idx = idx_fixnum as usize;
-            let len = args[0]
-                .as_vector_data()
-                .or_else(|| args[0].as_record_data())
-                .unwrap()
-                .len();
             if idx >= len {
-                return Err(signal(
-                    LispCondition::ArgsOutOfRange,
-                    vec![args[0], args[1]],
-                ));
+                return Err(aset_args_out_of_range(args[0], args[1]));
             }
             if kind == VecLikeType::Vector {
                 args[0].set_vector_slot(idx, args[2]);
@@ -444,24 +558,22 @@ pub(crate) fn builtin_aset_args(symbols: impl ArraySymbolPolicy, args: &[Value])
             Ok(args[2])
         }
         // GNU `Faset`: any non-nil VALUE stores 1.
-        ValueKind::Veclike(VecLikeType::BoolVector) => {
+        VecLikeType::BoolVector => {
             if super::boolvec::bool_vector_set(&args[0], idx_fixnum as usize, args[2].is_truthy()) {
                 Ok(args[2])
             } else {
-                Err(signal(
-                    LispCondition::ArgsOutOfRange,
-                    vec![args[0], args[1]],
-                ))
+                Err(aset_args_out_of_range(args[0], args[1]))
             }
         }
-        ValueKind::String => {
-            let _updated = symbols.replace_string(&args[0], &args[1], &args[2], idx_fixnum)?;
-            Ok(args[2])
+        VecLikeType::CharTable => {
+            let ch = expect_char_table_index(&args[1])?;
+            super::chartable::builtin_set_char_table_range_with_symbols(
+                vec![args[0], Value::fixnum(ch), args[2]],
+                None,
+                symbols.mode(),
+            )
         }
-        _ => Err(signal(
-            LispCondition::WrongTypeArgument,
-            vec![Value::symbol("arrayp"), args[0]],
-        )),
+        _ => Err(aset_not_an_array(array)),
     }
 }
 
