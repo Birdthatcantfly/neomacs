@@ -1620,7 +1620,10 @@ impl<'a> VisualTextWindowCursorPublishContext<'a> {
                     style: resolved_cursor.style,
                     color: resolved_cursor.color,
                     cursor_fg: resolved_cursor.cursor_fg,
-                    effects: spec.effects.clone(),
+                    effects: spec
+                        .effects
+                        .as_ref()
+                        .map(|effects| effects.as_ref().clone()),
                 },
             );
             summary.published += 1;

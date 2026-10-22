@@ -4,6 +4,9 @@
 //! The layout engine produces display rows and frame display state snapshots
 //! that renderers consume without owning display semantics.
 
+mod cursor_effects;
+pub use cursor_effects::SharedCursorEffects;
+
 use neomacs_display_protocol::cursor::CursorBarWidth;
 use neomacs_display_protocol::types::Rect;
 use neovm_core::emacs_core::image_catalog::{
@@ -388,7 +391,7 @@ pub struct WindowParams {
     /// per-frame `cursor_foreground_pixel` / `cursor_foreground_color`.
     pub cursor_foreground: u32,
     /// Neomacs-specific cursor effect profile for this window.
-    pub cursor_effects: Option<neomacs_display_protocol::effect_config::EffectsConfig>,
+    pub cursor_effects: Option<SharedCursorEffects>,
     /// Neomacs-only visual cursors for this window's buffer.
     ///
     /// These do not affect GNU point, mark, selection, command dispatch, or
@@ -549,7 +552,7 @@ pub struct VisualCursorSpec {
     pub cursor_kind: neomacs_display_protocol::frame_glyphs::CursorKind,
     pub cursor_bar_width: CursorBarWidth,
     pub color: u32,
-    pub effects: Option<neomacs_display_protocol::effect_config::EffectsConfig>,
+    pub effects: Option<SharedCursorEffects>,
 }
 
 /// Frame-level parameters for layout.

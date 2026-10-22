@@ -1330,7 +1330,7 @@ fn parse_visual_cursor_spec(
         cursor_kind: cursor.cursor_kind,
         cursor_bar_width: cursor.bar_width,
         color,
-        effects,
+        effects: effects.map(crate::types::SharedCursorEffects::from),
     })
 }
 
@@ -1820,7 +1820,7 @@ pub fn window_params_from_neovm_with_font_sizing(
         x_stretch_cursor,
         cursor_color,
         cursor_foreground,
-        cursor_effects,
+        cursor_effects: cursor_effects.map(crate::types::SharedCursorEffects::from),
         visual_cursors,
         left_fringe_width: left_fringe,
         right_fringe_width: right_fringe,

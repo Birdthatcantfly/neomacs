@@ -37592,3 +37592,6 @@ fn display_when_reuse_needs_a_valid_window_end_not_a_mode_line() {
     );
     assert!(row5(&eval, &engine).starts_with("ORIGINAL"));
 }
+#[cfg(test)]
+#[path = "window_input_ownership_resolver_test.rs"]
+mod window_input_ownership_resolver_test;

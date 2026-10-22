@@ -280,8 +280,14 @@ impl<'emit> BufferSourceOutputState<'emit> {
     }
 
     pub(crate) fn install_cursor_effects(&mut self, params: &WindowParams) -> bool {
-        TextWindowCursorEffectsRequest::new(params.window_id, params.cursor_effects.clone())
-            .install_and_apply(self.output.reborrow())
+        TextWindowCursorEffectsRequest::new(
+            params.window_id,
+            params
+                .cursor_effects
+                .as_ref()
+                .map(|effects| effects.as_ref().clone()),
+        )
+        .install_and_apply(self.output.reborrow())
     }
 
     pub(crate) fn begin_text_window_output(
