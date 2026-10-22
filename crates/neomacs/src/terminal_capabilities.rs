@@ -16,8 +16,7 @@ use neomacs_display_protocol::tty_capabilities::{
     TtyColorDepth, TtyColorSource, TtyDirectColorRoute, TtyNoColorVideo, TtyStyledUnderline,
 };
 
-/// The safe dependency validates numeric formats before invoking ncurses.
-fn expand_capability_parameter(sequence: &[u8], parameters: TerminfoParameters) -> Option<Vec<u8>> {
+fn numeric_parameters(parameters: TerminfoParameters) -> Option<[i32; 9]> {
     let mut values = [0; 9];
     match parameters {
         TerminfoParameters::One(value) => values[0] = i32::try_from(value).ok()?,
@@ -25,11 +24,94 @@ fn expand_capability_parameter(sequence: &[u8], parameters: TerminfoParameters) 
             values[..3].copy_from_slice(&[i32::from(r), i32::from(g), i32::from(b)]);
         }
     }
-    let expanded = neomacs_terminfo::expand_numeric(sequence, values).ok()?;
+    Some(values)
+}
+
+fn expand_prepared_capability(
+    program: &neomacs_terminfo::NumericProgram,
+    parameters: TerminfoParameters,
+) -> Option<Vec<u8>> {
+    let expanded = program.expand(numeric_parameters(parameters)?).ok()?;
     (!expanded.is_empty()).then_some(expanded)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ColorParameterShape {
+    Packed,
+    Separate,
+}
+
+// Immutable terminal-entry preparation, not an on-demand cache. Invalid raw
+// sources stay present in the record and retain their expansion failure.
+fn color_capabilities(
+    orig_pair: Vec<u8>,
+    foreground: Option<Vec<u8>>,
+    background: Option<Vec<u8>>,
+    parameter_shape: ColorParameterShape,
+    depth: TtyColorDepth,
+) -> TtyColorCapabilities {
+    let prepared = NumericExpander::new(
+        foreground
+            .iter()
+            .chain(background.iter())
+            .map(Vec::as_slice),
+    );
+    let rgb_separate = match parameter_shape {
+        ColorParameterShape::Packed => false,
+        ColorParameterShape::Separate => true,
+    };
+    TtyColorCapabilities::new(
+        orig_pair,
+        foreground,
+        background,
+        rgb_separate,
+        depth,
+        TERMINFO_EXPANDER,
+    )
+    .with_prepared_expander(move |sequence, parameters| prepared.expand(sequence, parameters))
+}
+
+// The original function-pointer API remains a generic one-shot native adapter.
+fn expand_capability_parameter(sequence: &[u8], parameters: TerminfoParameters) -> Option<Vec<u8>> {
+    let expanded =
+        neomacs_terminfo::expand_numeric(sequence, numeric_parameters(parameters)?).ok()?;
+    (!expanded.is_empty()).then_some(expanded)
+}
 const TERMINFO_EXPANDER: TerminfoExpander = TerminfoExpander::new(expand_capability_parameter);
+
+/// Immutable load-time preparation. No insertion, state snapshots or cache
+/// invalidation occurs during expansion; native variables remain live.
+#[derive(Debug)]
+struct NumericExpander {
+    programs: std::collections::BTreeMap<
+        Vec<u8>,
+        Result<neomacs_terminfo::NumericProgram, neomacs_terminfo::Error>,
+    >,
+}
+
+impl NumericExpander {
+    fn new<'a>(sources: impl Iterator<Item = &'a [u8]>) -> Self {
+        Self {
+            programs: sources
+                .map(|sequence| {
+                    (
+                        sequence.to_vec(),
+                        neomacs_terminfo::NumericProgram::new(sequence),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn expand(&self, sequence: &[u8], parameters: TerminfoParameters) -> Option<Vec<u8>> {
+        match self.programs.get(sequence) {
+            Some(Ok(program)) => expand_prepared_capability(program, parameters),
+            Some(Err(_)) => None,
+            // Preserve the generic expander contract for unregistered bytes.
+            None => expand_capability_parameter(sequence, parameters),
+        }
+    }
+}
 
 pub(crate) use neomacs_terminfo::{FlagCapability, StringCapability};
 
@@ -198,8 +280,9 @@ pub(crate) fn resolve_tty_attribute_capabilities(
         italic_sequence: sequence(database, Termcap("ZH")),
         strike_through_sequence: sequence(database, Terminfo("smxx")),
         styled_underline: styled_underline_source.and_then(|smulx| {
+            let program = neomacs_terminfo::NumericProgram::new(&smulx).ok()?;
             TtyStyledUnderline::expand_all(|style| {
-                TERMINFO_EXPANDER.expand(&smulx, TerminfoParameters::One(u32::from(style)))
+                expand_prepared_capability(&program, TerminfoParameters::One(u32::from(style)))
             })
         }),
         // GNU `TS_exit_attribute_mode = tgetstr ("me")` (src/term.c:4585) and
@@ -302,26 +385,24 @@ fn resolve_tty_color_entry(
         rendition_capability(database, Terminfo("setf24")),
         rendition_capability(database, Terminfo("setb24")),
     ) {
-        return Some(TtyColorCapabilities::new(
+        return Some(color_capabilities(
             orig_pair,
             Some(fg),
             Some(bg),
-            false,
+            ColorParameterShape::Packed,
             TtyColorDepth::Direct(TtyDirectColorRoute::Setf24),
-            TERMINFO_EXPANDER,
         ));
     }
     if let (Some(fg), Some(bg)) = (
         rendition_capability(database, Terminfo("setrgbf")),
         rendition_capability(database, Terminfo("setrgbb")),
     ) {
-        return Some(TtyColorCapabilities::new(
+        return Some(color_capabilities(
             orig_pair,
             Some(fg),
             Some(bg),
-            true,
+            ColorParameterShape::Separate,
             TtyColorDepth::Direct(TtyDirectColorRoute::Setrgbf),
-            TERMINFO_EXPANDER,
         ));
     }
     // `RGB` replaces no STRING in GNU -- the setters keep the entry's own
@@ -329,13 +410,12 @@ fn resolve_tty_color_entry(
     // (`tty->TN_max_colors = 16777216`, src/term.c:4651), which is the whole
     // content of the arm.
     if database.get_flag(FlagCapability::Terminfo("RGB")) {
-        return Some(TtyColorCapabilities::new(
+        return Some(color_capabilities(
             orig_pair,
             set_foreground,
             set_background,
-            false,
+            ColorParameterShape::Packed,
             TtyColorDepth::Direct(TtyDirectColorRoute::RgbFlag),
-            TERMINFO_EXPANDER,
         ));
     }
     // "Fall back to direct colour by RGB value (semicolon version) if Tc is set
@@ -349,22 +429,20 @@ fn resolve_tty_color_entry(
     if database.get_flag(FlagCapability::Terminfo("Tc"))
         || colorterm.eq_ignore_ascii_case("truecolor")
     {
-        return Some(TtyColorCapabilities::new(
+        return Some(color_capabilities(
             orig_pair,
             Some(b"\x1b[38;2;%p1%d;%p2%d;%p3%d%;m".to_vec()),
             Some(b"\x1b[48;2;%p1%d;%p2%d;%p3%d%;m".to_vec()),
-            true,
+            ColorParameterShape::Separate,
             TtyColorDepth::Direct(TtyDirectColorRoute::TcOrColorterm),
-            TERMINFO_EXPANDER,
         ));
     }
-    Some(TtyColorCapabilities::new(
+    Some(color_capabilities(
         orig_pair,
         set_foreground,
         set_background,
-        false,
+        ColorParameterShape::Packed,
         indexed,
-        TERMINFO_EXPANDER,
     ))
 }
 

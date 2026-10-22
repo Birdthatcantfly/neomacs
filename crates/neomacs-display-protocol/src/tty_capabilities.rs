@@ -201,6 +201,38 @@ impl std::fmt::Debug for TerminfoExpander {
     }
 }
 
+// The public function-pointer expander remains Copy. Only the already
+// private color-record field owns prepared native programs. Terminal records
+// live behind TerminalManager's existing Vec; this adds no TLS field.
+#[derive(Clone)]
+enum ColorExpansion {
+    Function(TerminfoExpander),
+    Prepared(std::sync::Arc<dyn Fn(&[u8], TerminfoParameters) -> Option<Vec<u8>> + Send + Sync>),
+}
+
+impl ColorExpansion {
+    fn expand(&self, sequence: &[u8], parameters: TerminfoParameters) -> Option<Vec<u8>> {
+        match self {
+            Self::Function(expand) => expand.expand(sequence, parameters),
+            Self::Prepared(expand) => expand(sequence, parameters),
+        }
+    }
+}
+
+// Capability bytes define equality; neither callback identity nor whether
+// preparation happened is part of a terminal capability's identity.
+impl PartialEq for ColorExpansion {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+impl Eq for ColorExpansion {}
+impl std::fmt::Debug for ColorExpansion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TerminfoExpander(..)")
+    }
+}
+
 /// The two shapes of `tparam` call `turn_on_face` makes for a colour
 /// (src/term.c:2098-2117):
 ///
@@ -311,7 +343,7 @@ pub struct TtyColorCapabilities {
     orig_pair: Vec<u8>,
     rgb_separate: bool,
     depth: TtyColorDepth,
-    expand: TerminfoExpander,
+    expand: ColorExpansion,
 }
 
 impl TtyColorCapabilities {
@@ -343,8 +375,22 @@ impl TtyColorCapabilities {
             orig_pair,
             rgb_separate,
             depth,
-            expand,
+            expand: ColorExpansion::Function(expand),
         }
+    }
+
+    /// Retain an immutable native-program adapter prepared with this entry.
+    ///
+    /// The callback is Send+Sync and shared only when the capability record is
+    /// cloned. Emission borrows it without cloning the Arc. Existing source
+    /// bytes, presence, parameter shape and equality semantics stay unchanged.
+    #[must_use]
+    pub fn with_prepared_expander(
+        mut self,
+        expand: impl Fn(&[u8], TerminfoParameters) -> Option<Vec<u8>> + Send + Sync + 'static,
+    ) -> Self {
+        self.expand = ColorExpansion::Prepared(std::sync::Arc::new(expand));
+        self
     }
 
     /// Which arm of GNU's chain this entry took, and therefore
@@ -812,3 +858,7 @@ impl Default for TtyAttributeCapabilities {
         Self::full()
     }
 }
+
+#[cfg(test)]
+#[path = "tests/terminfo_program_test.rs"]
+mod terminfo_program_test;

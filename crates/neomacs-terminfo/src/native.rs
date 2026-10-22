@@ -115,25 +115,19 @@ pub(super) fn load(term: &str, queries: &[Query<'_>]) -> Result<Database, Error>
 // Only numeric.rs calls this function, after checking every directive (including
 // branches that are not taken). It is not part of the crate's public interface.
 pub(super) fn expand(
-    format: &CStr,
+    program: &crate::numeric::NumericProgram,
     parameters: [i32; 9],
-    program: Option<&crate::numeric::division::Program<'_>>,
 ) -> Result<Vec<u8>, Error> {
     let guard = NATIVE.lock().map_err(|_| Error::NativeStatePoisoned)?;
-    if let Some(program) = program {
+    if let Some(division) = program.division() {
         let mut variables = [0; 52];
-        if !program.variables.is_empty() {
+        if let Some(probe) = &division.variable_probe {
             // Reading variables does not assign them. On native versions where
             // lowercase variables reset per call, this observes their initial
             // zero; on older versions it observes their preserved values.
-            let mut probe = Vec::new();
-            for name in &program.variables {
-                probe.extend_from_slice(&[b'%', b'g', *name, b'%', b'd', b';']);
-            }
-            let probe = CString::new(probe).expect("internally generated numeric probe");
-            let output = call_numeric(&guard, &probe, [0; 9])?;
+            let output = call_numeric(&guard, probe, [0; 9])?;
             let mut values = output.split(|byte| *byte == b';');
-            for name in &program.variables {
+            for name in &division.variables {
                 variables[crate::numeric::division::variable(*name)] = values
                     .next()
                     .and_then(|value| std::str::from_utf8(value).ok())
@@ -141,9 +135,9 @@ pub(super) fn expand(
                     .ok_or(Error::InvalidNumericFormat)?;
             }
         }
-        program.validate(parameters, variables)?;
+        division.validate(program.as_bytes(), program.tokens(), parameters, variables)?;
     }
-    call_numeric(&guard, format, parameters)
+    call_numeric(&guard, program.format(), parameters)
 }
 
 // Caller holds the process-wide lock and supplies a completely numeric format:

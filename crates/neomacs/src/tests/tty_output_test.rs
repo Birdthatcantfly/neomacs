@@ -277,3 +277,7 @@ fn missing_terminal_description_is_an_initialization_error() {
     assert!(Capabilities::load("").is_err());
     assert!(Capabilities::load("neo-certainly-no-such-terminal-363").is_err());
 }
+
+#[cfg(test)]
+#[path = "tty_output_program_test.rs"]
+mod numeric_program_tests;

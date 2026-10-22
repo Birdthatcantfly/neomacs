@@ -1,12 +1,14 @@
 //! Preflight numeric arithmetic using a snapshot of the native context.
 //! ncurses still owns output formatting and all persistent variable updates.
 use crate::Error;
+use std::ffi::CString;
 use std::ops::Range;
 
-pub(crate) struct Program<'a> {
-    sequence: &'a [u8],
-    tokens: Vec<Range<usize>>,
+#[derive(Clone, Debug)]
+pub(crate) struct Program {
     pub(crate) variables: Vec<u8>,
+    pub(crate) variable_probe: Option<CString>,
+    explicit_parameters: bool,
 }
 
 pub(crate) fn variable(name: u8) -> usize {
@@ -60,8 +62,8 @@ fn skip_target(sequence: &[u8], mut offset: usize, allow_else: bool) -> usize {
     sequence.len()
 }
 
-impl<'a> Program<'a> {
-    pub(crate) fn new(sequence: &'a [u8], tokens: Vec<Range<usize>>) -> Self {
+impl Program {
+    pub(crate) fn new(sequence: &[u8], tokens: &[Range<usize>]) -> Self {
         let mut variables = tokens
             .iter()
             .filter_map(|range| {
@@ -71,28 +73,42 @@ impl<'a> Program<'a> {
             .collect::<Vec<_>>();
         variables.sort_unstable();
         variables.dedup();
+        let variable_probe = (!variables.is_empty()).then(|| {
+            let mut probe = Vec::new();
+            for name in &variables {
+                probe.extend_from_slice(&[b'%', b'g', *name, b'%', b'd', b';']);
+            }
+            CString::new(probe).expect("internally generated numeric probe")
+        });
         Self {
-            sequence,
-            tokens,
             variables,
+            variable_probe,
+            explicit_parameters: tokens
+                .iter()
+                .any(|range| sequence[range.clone()].starts_with(b"%p")),
         }
     }
 
-    pub(crate) fn validate(&self, parameters: [i32; 9], variables: [i32; 52]) -> Result<(), Error> {
-        let explicit = self
-            .tokens
-            .iter()
-            .any(|range| self.sequence[range.clone()].starts_with(b"%p"));
+    pub(crate) fn validate(
+        &self,
+        sequence: &[u8],
+        tokens: &[Range<usize>],
+        parameters: [i32; 9],
+        variables: [i32; 52],
+    ) -> Result<(), Error> {
+        let explicit = self.explicit_parameters;
         // Native releases differ in implicit termcap argument inference. Cover
         // every possible count without binding to a private ncurses function.
         for count in 0..=if explicit { 0 } else { 9 } {
-            self.validate_stack(parameters, variables, count, explicit)?;
+            self.validate_stack(sequence, tokens, parameters, variables, count, explicit)?;
         }
         Ok(())
     }
 
     fn validate_stack(
         &self,
+        sequence: &[u8],
+        tokens: &[Range<usize>],
         mut parameters: [i32; 9],
         mut variables: [i32; 52],
         count: usize,
@@ -101,8 +117,8 @@ impl<'a> Program<'a> {
         let mut stack: Vec<i32> = parameters[..count].iter().rev().copied().collect();
         let mut incremented = false;
         let mut index = 0;
-        while let Some(range) = self.tokens.get(index) {
-            let token = &self.sequence[range.clone()];
+        while let Some(range) = tokens.get(index) {
+            let token = &sequence[range.clone()];
             index += 1;
             if token[0] != b'%' || token == b"%%" {
                 continue;
@@ -137,11 +153,11 @@ impl<'a> Program<'a> {
                 }
                 b't' | b'e' => {
                     if token[1] == b'e' || stack.pop().unwrap_or(0) == 0 {
-                        let offset = skip_target(self.sequence, range.end, token[1] == b't');
-                        index = if offset == self.sequence.len() {
-                            self.tokens.len()
+                        let offset = skip_target(sequence, range.end, token[1] == b't');
+                        index = if offset == sequence.len() {
+                            tokens.len()
                         } else {
-                            self.tokens
+                            tokens
                                 .binary_search_by_key(&offset, |range| range.start)
                                 .map_err(|_| Error::InvalidNumericFormat)?
                         };

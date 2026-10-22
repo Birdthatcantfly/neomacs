@@ -14,7 +14,7 @@ mod padding;
 pub use padding::Padding;
 
 mod numeric;
-pub use numeric::expand_numeric;
+pub use numeric::{NumericProgram, expand_numeric};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[allow(unsafe_code)]

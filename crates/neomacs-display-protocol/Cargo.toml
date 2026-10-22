@@ -22,6 +22,7 @@ strum.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+static_assertions.workspace = true
 neomacs-infra.workspace = true
 proptest.workspace = true
 

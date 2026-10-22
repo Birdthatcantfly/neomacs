@@ -4,9 +4,11 @@ Private safe interface to ncurses capability snapshots and numeric expansion.
 Editor policy stays in `neomacs`. Only `src/native.rs` permits unsafe code.
 
 `Database::load` copies requested values under the same lock used for expansion.
-Snapshots own their bytes; ncurses owns its terminal cache. `expand_numeric`
-validates a conservative numeric grammar with regex, then calls native tparm
-with nine C long arguments. It rejects string-consuming directives. Native
+Snapshots own their bytes; ncurses owns its terminal cache. `NumericProgram`
+validates a conservative numeric grammar with regex once and owns its CString,
+token ranges and division metadata. Repeated `expand` calls reuse that immutable
+preparation, then call native tparm with nine C long arguments. The one-shot
+`expand_numeric` API constructs a program and expands it. It rejects string-consuming directives. Native
 variables follow the current ncurses terminal context, not individual snapshots.
 This crate must be the sole owner of ncurses access in the process.
 
@@ -26,7 +28,10 @@ See [design](../../docs/design/neomacs-terminfo-decision.md) and
 [native contracts and research](../../docs/design/terminfo-native-research.md).
 
 Numeric division and remainder are preflighted using the actual parameters and
-native variable values under the same mutex as expansion. The executed branch,
+native variable values under the same mutex as expansion. Construction never
+executes native directives or snapshots variable values; the immutable program
+is Send+Sync and its prepared variable-reading probe observes current native
+state on every expansion. The executed branch,
 32-bit arithmetic, zero division, and ncurses' dropped stack pushes determine
 whether a signed division can trap. ncurses still produces all output and owns
 variable updates. See [follow-up](../../docs/design/terminfo-numeric-followup.md).

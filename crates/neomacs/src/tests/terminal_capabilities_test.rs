@@ -1204,3 +1204,7 @@ fn standout_requires_an_exit_and_falls_back_after_cookie_checks() {
     assert_eq!(caps.standout_sequence.as_deref(), Some(b"SO".as_slice()));
     assert_eq!(caps.exit_standout_mode.as_deref(), Some(b"ME".as_slice()));
 }
+
+#[cfg(test)]
+#[path = "terminal_capabilities_program_test.rs"]
+mod numeric_program_tests;

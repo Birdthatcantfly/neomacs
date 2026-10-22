@@ -154,8 +154,11 @@ fn native_snapshots() {
     ];
     // Native reads total more than the old fixed 32KiB tgetstr arena.
     queries.extend(std::iter::repeat_n(Query::String(Termcap("md")), 2000));
+    let prepared = neomacs_terminfo::NumericProgram::new(b"%p1%d").unwrap();
     let first = Database::load("neo-pr363-a", &queries).unwrap();
+    assert_eq!(prepared.expand(params(&[17])).unwrap(), b"17");
     let second = Database::load("neo-pr363-b", &queries).unwrap();
+    assert_eq!(prepared.expand(params(&[34])).unwrap(), b"34");
     assert_eq!(
         first.string(Termcap("md")),
         Some(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".as_slice())

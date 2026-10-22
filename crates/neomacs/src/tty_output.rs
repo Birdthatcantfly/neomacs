@@ -65,9 +65,52 @@ fn encode_cells(output: &mut Output, cells: &[TtyCell], caps: &TtyAttributeCapab
     });
 }
 
+// Programs are built with the terminal entry. Retaining validation failure
+// preserves raw capability presence and the original use-site error behavior.
+#[derive(Clone, Debug)]
+enum Control {
+    Literal(Vec<u8>),
+    Numeric {
+        bytes: Vec<u8>,
+        program: Result<neomacs_terminfo::NumericProgram, neomacs_terminfo::Error>,
+    },
+}
+
+impl Control {
+    fn new(name: &str, bytes: Vec<u8>) -> Self {
+        match name {
+            "cm" | "IC" => {
+                let program = neomacs_terminfo::NumericProgram::new(&bytes);
+                Self::Numeric { bytes, program }
+            }
+            _ => Self::Literal(bytes),
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Literal(bytes) | Self::Numeric { bytes, .. } => bytes,
+        }
+    }
+
+    fn expand(&self, parameters: [i32; 9]) -> Result<Vec<u8>, neomacs_terminfo::Error> {
+        match self {
+            Self::Numeric {
+                program: Ok(program),
+                ..
+            } => program.expand(parameters),
+            Self::Numeric {
+                program: Err(error),
+                ..
+            } => Err(*error),
+            Self::Literal(bytes) => neomacs_terminfo::expand_numeric(bytes, parameters),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Capabilities {
-    strings: std::collections::BTreeMap<&'static str, Vec<u8>>,
+    strings: std::collections::BTreeMap<&'static str, Control>,
     pub(crate) attributes: TtyAttributeCapabilities,
     pub(crate) ansi: bool,
     auto_wrap: bool,
@@ -102,7 +145,7 @@ impl Capabilities {
                 database
                     .get_string(StringCapability::Termcap(name))
                     .filter(|bytes| !bytes.is_empty())
-                    .map(|bytes| (*name, bytes))
+                    .map(|bytes| (*name, Control::new(name, bytes)))
             })
             .collect();
         use super::terminal_capabilities::FlagCapability::Termcap;
@@ -112,7 +155,7 @@ impl Capabilities {
             strings.insert("do", value);
         }
         if database.get_flag(Termcap("bs")) {
-            strings.insert("le", vec![8]);
+            strings.insert("le", Control::Literal(vec![8]));
         } else if !strings.contains_key("le")
             && let Some(value) = strings.get("bc").cloned()
         {
@@ -124,7 +167,7 @@ impl Capabilities {
         let needs_padding = attributes.requires_padding()
             || strings
                 .values()
-                .any(|bytes| bytes.windows(2).any(|pair| pair == b"$<"));
+                .any(|control| control.as_bytes().windows(2).any(|pair| pair == b"$<"));
         let result = Self {
             strings,
             ansi,
@@ -168,7 +211,15 @@ impl Capabilities {
     }
 
     fn control(&self, name: &str) -> &[u8] {
-        self.strings.get(name).map_or(&[], Vec::as_slice)
+        self.strings.get(name).map_or(&[], Control::as_bytes)
+    }
+
+    fn expand_control(&self, name: &str, parameters: [i32; 9]) -> io::Result<Vec<u8>> {
+        self.strings
+            .get(name)
+            .ok_or_else(|| io::Error::other("missing numeric terminal control"))?
+            .expand(parameters)
+            .map_err(io::Error::other)
     }
 
     fn append(&self, output: &mut Output, name: &str) {
@@ -187,8 +238,7 @@ impl Capabilities {
             let mut parameters = [0; 9];
             parameters[0] = i32::try_from(row).map_err(io::Error::other)?;
             parameters[1] = i32::try_from(col).map_err(io::Error::other)?;
-            let sequence = neomacs_terminfo::expand_numeric(self.control("cm"), parameters)
-                .map_err(io::Error::other)?;
+            let sequence = self.expand_control("cm", parameters)?;
             output.control(&sequence, 1);
         } else {
             // Re-anchor each run, including after a failed/partial previous
@@ -341,9 +391,7 @@ impl<W: Write> TerminfoPainter<'_, W> {
             if multi_insert {
                 let mut parameters = [0; 9];
                 parameters[0] = first_width as i32;
-                let sequence =
-                    neomacs_terminfo::expand_numeric(self.caps.control("IC"), parameters)
-                        .map_err(io::Error::other)?;
+                let sequence = self.caps.expand_control("IC", parameters)?;
                 self.bytes.control(&sequence, 1);
             } else {
                 // Some terminals require insert mode even for their single-
