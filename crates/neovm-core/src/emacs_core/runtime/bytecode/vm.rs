@@ -3597,6 +3597,19 @@ impl<'a> Vm<'a> {
         func: &ByteCodeFunction,
         nargs: usize,
     ) -> bool {
+        if let Some(admitted) = func.lazy_iterative_admission(nargs) {
+            return admitted;
+        }
+        Self::can_enter_eager_interpreter_frame_iteratively(func, nargs)
+    }
+
+    /// Preserve the eager classifier's exact gates behind a tail-callable
+    /// fallback, keeping its decode/verification frame off cached GNU hits.
+    #[inline(never)]
+    fn can_enter_eager_interpreter_frame_iteratively(
+        func: &ByteCodeFunction,
+        nargs: usize,
+    ) -> bool {
         let Some(shape) = func.params.stack_shape() else {
             return false;
         };

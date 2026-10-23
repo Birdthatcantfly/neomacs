@@ -47,6 +47,7 @@ never	emacs_core/lisp/native/builtins/symbols.rs	symbol_function_by_id	run_loop
 never	emacs_core/lisp/native/builtins/symbols.rs	symbol_property_get	run_loop
 never	emacs_core/lisp/native/builtins/types.rs	builtin_equal_2	run_loop
 never	emacs_core/runtime/bytecode/chunk.rs	<ByteCodeFunction as Clone>::clone	run_loop
+never	emacs_core/runtime/bytecode/chunk.rs	ByteCodeFunction::initialize_lazy_iterative_admission	run_loop
 never	emacs_core/runtime/bytecode/chunk.rs	LazyGnuCode::decode	run_loop,apply1
 never	emacs_core/runtime/bytecode/vm.rs	<InterpreterFrameAuxStack as Drop>::drop	run_loop	# unique auxiliary-owner teardown; semantic unwind boundary, not an inferred protected-neutral tuning hint
 never	emacs_core/runtime/bytecode/vm.rs	Vm::assign_var_id	run_loop
@@ -60,6 +61,7 @@ never	emacs_core/runtime/bytecode/vm.rs	Vm::apply_arguments_from_stack	run_loop
 never	emacs_core/runtime/bytecode/vm.rs	Vm::call_function_untraced_from_stack	run_loop
 never	emacs_core/runtime/bytecode/vm.rs	Vm::call_resolved_builtin_from_stack_args	run_loop
 never	emacs_core/runtime/bytecode/vm.rs	Vm::can_enter_interpreter_frame_iteratively	run_loop
+never	emacs_core/runtime/bytecode/vm.rs	Vm::can_enter_eager_interpreter_frame_iteratively	run_loop
 never	emacs_core/runtime/bytecode/vm.rs	Vm::complete_interpreter_frame_chain	run_loop
 never	emacs_core/runtime/bytecode/vm.rs	Vm::dispatch_call_builtin_sym	run_loop
 never	emacs_core/runtime/bytecode/vm.rs	Vm::dispatch_vm_builtin_by_id_from_stack	run_loop

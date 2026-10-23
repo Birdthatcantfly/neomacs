@@ -49,6 +49,27 @@ pub(crate) struct LazyGnuCode {
     /// Initialized inside `decoded.get_or_init`, before publishing decoded;
     /// every reader acquires decoded before consulting this sibling cell.
     proof: OnceLock<super::decode::StackProof>,
+    /// Source-invariant iterative admission, excluding the per-instance env.
+    /// Append only: decoded/proof offsets are used by inlined VM projections.
+    iterative_admission: OnceLock<Option<IterativeArgRange>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct IterativeArgRange {
+    required: u16,
+    nonrest: u16,
+}
+
+impl IterativeArgRange {
+    #[inline(always)]
+    fn accepts(self, nargs: usize) -> bool {
+        let required = usize::from(self.required);
+        let nonrest = usize::from(self.nonrest);
+        // Installation proved required <= nonrest <= u16::MAX.
+        // Values below required wrap above this bounded interval's width.
+        debug_assert!(required <= nonrest);
+        nargs.wrapping_sub(required) <= nonrest - required
+    }
 }
 
 #[cfg(test)]
@@ -84,6 +105,7 @@ impl LazyGnuCode {
         Self {
             decoded: OnceLock::new(),
             proof: OnceLock::new(),
+            iterative_admission: OnceLock::new(),
         }
     }
 
@@ -476,6 +498,76 @@ impl ByteCodeFunction {
     #[inline(always)]
     pub(crate) fn executes_sealed_ops(&self) -> bool {
         self.lazy_gnu_code.is_some() || self.ops_sealed
+    }
+
+    /// Admission for GNU-backed code, whose parameter/stack contract is
+    /// immutable and shared by all clones of this decode cell. Eager code
+    /// retains the VM's original classification path.
+    ///
+    /// Captured environments are per-instance, so they must never enter the
+    /// shared proof. A clone with an environment cannot poison its env-less
+    /// prototype's admission, or consume admission from that prototype.
+    #[inline(always)]
+    pub(crate) fn lazy_iterative_admission(&self, nargs: usize) -> Option<bool> {
+        let lazy = self.lazy_gnu_code.as_ref()?;
+        if self.env.is_some() {
+            return Some(false);
+        }
+        if let Some(range) = lazy.iterative_admission.get() {
+            return Some(range.is_some_and(|range| range.accepts(nargs)));
+        }
+        Some(self.initialize_lazy_iterative_admission(nargs))
+    }
+
+    /// Initialize the immutable admission proof without imposing a save frame
+    /// on the cached probe. Only the lazy, env-less miss above calls this.
+    #[cold]
+    #[inline(never)]
+    fn initialize_lazy_iterative_admission(&self, nargs: usize) -> bool {
+        let lazy = self
+            .lazy_gnu_code
+            .as_ref()
+            .expect("lazy admission initialization needs GNU metadata");
+        debug_assert!(self.env.is_none());
+        let Some(shape) = self.params.stack_shape() else {
+            return false;
+        };
+        let required = shape.required();
+        let nonrest = shape.nonrest();
+        // Match the original short circuit: a wrong-arity call must neither
+        // decode code for verification nor publish a permanent refusal for
+        // a later valid call with a different argument count.
+        if nargs < required || nargs > nonrest {
+            return false;
+        }
+        let params_on_stack = match &self.params {
+            FunctionParams::Stack(_) => true,
+            FunctionParams::Dynamic(_) => false,
+            FunctionParams::Named(_) => {
+                self.lexical || matches!(self.arglist.kind(), ValueKind::Fixnum(_))
+            }
+        };
+        let range = if !shape.rest().is_present()
+            && (nonrest == 0 || params_on_stack)
+            && nonrest <= self.max_stack.get()
+            && self.max_stack <= StackDepth::ITERATIVE_FRAME_LIMIT
+            && self.executes_sealed_ops()
+            && self.executes_verified_ops()
+        {
+            Some(IterativeArgRange {
+                // Both counts fit because nonrest <= max_stack <= u16::MAX,
+                // and this call already proved required <= nargs <= nonrest.
+                required: required as u16,
+                nonrest: nonrest as u16,
+            })
+        } else {
+            None
+        };
+        // Clones share the same immutable source contract. Concurrent
+        // classifiers therefore publish the same range/refusal; a losing
+        // set need not retry or wait before using its own identical answer.
+        let _ = lazy.iterative_admission.set(range);
+        range.is_some()
     }
 
     /// A lazy pdump stub awaiting materialization from its mapped extras.
@@ -898,3 +990,7 @@ impl ByteCodeFunction {
 #[cfg(test)]
 #[path = "tests/chunk_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/iterative_admission_test.rs"]
+mod iterative_admission_test;
