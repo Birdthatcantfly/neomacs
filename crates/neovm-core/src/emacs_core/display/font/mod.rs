@@ -540,7 +540,8 @@ fn resolve_live_frame_font_request_in_state(
 
     if let Some(frame) = frames.get(frame_id)
         && font_value_matches_frame_font_parameter(frame, requested)
-        && let Some(font_value) = frame.parameter("font-parameter")
+        && let Some(font_value) =
+            frame.fixed_parameter(crate::window::FrameQueryParam::FontParameter)
         && is_font(&font_value)
     {
         return LiveFrameFontResolution { font_value };
@@ -581,7 +582,9 @@ enum FontResizeAxis {
 
 impl FontChangeGeometryPolicy {
     fn for_live_frame(frame: &crate::window::Frame, inhibit: Value, axis: FontResizeAxis) -> Self {
-        let fullscreen = frame.parameter("fullscreen").unwrap_or(Value::NIL);
+        let fullscreen = frame
+            .known_parameter(crate::window::FrameParam::Fullscreen)
+            .unwrap_or(Value::NIL);
         let fills_axis = !fullscreen.is_nil()
             && fullscreen
                 != Value::symbol(match axis {
@@ -612,10 +615,13 @@ fn frame_minimum_inner_pixels(
         return Ok(1);
     };
     let (parameter, unit) = match axis {
-        FontResizeAxis::Horizontal => ("min-width", frame.char_width),
-        FontResizeAxis::Vertical => ("min-height", frame.char_height),
+        FontResizeAxis::Horizontal => (crate::window::FrameQueryParam::MinWidth, frame.char_width),
+        FontResizeAxis::Vertical => (crate::window::FrameQueryParam::MinHeight, frame.char_height),
     };
-    if let Some(cells) = frame.parameter(parameter).and_then(|value| value.as_int()) {
+    if let Some(cells) = frame
+        .fixed_parameter(parameter)
+        .and_then(|value| value.as_int())
+    {
         return Ok((cells.max(1).min(i64::from(u32::MAX)) as u32)
             .saturating_mul(unit.max(1.0).round() as u32));
     }
@@ -785,7 +791,8 @@ fn sync_live_frame_font_state_in_state(
     // selector here also forces default-font-height through font-info.
     let public_font_name = public_frame_font_parameter_value(resolution.font_value);
 
-    let font_changed = frame.parameter("font-parameter") != Some(resolution.font_value);
+    let font_changed = frame.fixed_parameter(crate::window::FrameQueryParam::FontParameter)
+        != Some(resolution.font_value);
     let new_font_pixel_size = metrics.pixel_size.max(1) as f32;
     let new_char_width = metrics.average_width.max(1) as f32;
     let new_char_height = metrics.height.max(1) as f32;
@@ -1074,7 +1081,7 @@ pub fn seed_live_frame_default_face_from_font_parameter(
     let Some(font_value) = eval
         .frames
         .get(frame_id)
-        .and_then(|frame| frame.parameter("font-parameter"))
+        .and_then(|frame| frame.fixed_parameter(crate::window::FrameQueryParam::FontParameter))
     else {
         return;
     };
@@ -3226,7 +3233,7 @@ pub(crate) fn live_frame_font_attribute_fallback(
         FrameFontRealization::Terminal => return None,
         FrameFontRealization::WindowSystem => {}
     }
-    let font_value = frame.parameter("font-parameter")?;
+    let font_value = frame.fixed_parameter(crate::window::FrameQueryParam::FontParameter)?;
     if !is_font(&font_value) {
         return None;
     }
@@ -3810,14 +3817,16 @@ fn named_font_opening_size(spec: Value, frame: &crate::window::Frame) -> FontOpe
         // Keep the default distinct from an explicit point size: GNU uses
         // different DPI conversion and NS frame policy for unsized names.
         _ => FontOpeningSize::NamedDefault {
-            frame_fontsize: frame.parameter("fontsize").and_then(|value| {
-                let points = match value.kind() {
-                    ValueKind::Fixnum(points) => points as f64,
-                    ValueKind::Float => value.xfloat(),
-                    _ => return None,
-                };
-                PositiveFontScalar::new(points)
-            }),
+            frame_fontsize: frame
+                .fixed_parameter(crate::window::FrameQueryParam::Fontsize)
+                .and_then(|value| {
+                    let points = match value.kind() {
+                        ValueKind::Fixnum(points) => points as f64,
+                        ValueKind::Float => value.xfloat(),
+                        _ => return None,
+                    };
+                    PositiveFontScalar::new(points)
+                }),
         },
     }
 }

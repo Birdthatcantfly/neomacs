@@ -188,7 +188,7 @@ fn frame_x_display_value(frame: &crate::window::Frame) -> Option<Value> {
             identity.x_display().map(Value::string)
         }
         crate::window::FrameDisplayIdentity::None => frame
-            .parameter("display")
+            .fixed_parameter(crate::window::FrameQueryParam::Display)
             .filter(|value| value.as_lisp_string().is_some()),
     }
 }

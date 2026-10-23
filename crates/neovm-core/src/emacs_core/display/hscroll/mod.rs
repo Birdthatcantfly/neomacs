@@ -327,7 +327,7 @@ fn line_is_truncated(ctx: &Context, frame: &crate::window::Frame, window: &Windo
         0
     };
     let frame_cols = frame
-        .parameter("width")
+        .fixed_parameter(crate::window::FrameQueryParam::Width)
         .and_then(|value| value.as_int())
         .unwrap_or(frame.columns() as i64);
     if total_cols >= frame_cols {

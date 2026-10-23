@@ -6,10 +6,11 @@
 //! same split here: typed known parameters for Rust internals, plus dynamic
 //! symbol keys for Lisp-visible unknown parameters.
 
-use crate::emacs_core::intern::{SymId, resolve_sym};
+use crate::emacs_core::intern::{EpochCachedSymbol, SymId, resolve_sym};
 use crate::emacs_core::value::Value;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
-use strum::{EnumString, IntoStaticStr};
+use std::sync::LazyLock;
+use strum::{EnumCount, EnumString, IntoStaticStr, VariantArray};
 
 pub const GNU_FRAME_PARAM_COUNT: usize = 54;
 
@@ -22,6 +23,7 @@ pub const GNU_FRAME_PARAM_COUNT: usize = 54;
     Eq,
     Hash,
     EnumString,
+    EnumCount,
     IntoStaticStr,
     IntoPrimitive,
     TryFromPrimitive,
@@ -231,6 +233,45 @@ pub const GNU_FRAME_PARAMS: [FrameParam; GNU_FRAME_PARAM_COUNT] = [
     FrameParam::NsTransparentTitlebar,
 ];
 
+// The GNU handler domain stays separate from native queries of parameters
+// which have no entry in frame_parms[]. Neither table hashes on a warm query.
+static FRAME_PARAMETER_SYMBOLS: LazyLock<[EpochCachedSymbol; FrameParam::COUNT]> =
+    LazyLock::new(|| GNU_FRAME_PARAMS.map(|param| EpochCachedSymbol::new(param.name())));
+
+/// Fixed Core query keys outside GNU's indexed frame-parameter handler table.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, EnumCount, IntoPrimitive, IntoStaticStr, VariantArray)]
+#[strum(serialize_all = "kebab-case")]
+pub(crate) enum FrameQueryParam {
+    Width,
+    Height,
+    WindowSystem,
+    FontParameter,
+    Fontsize,
+    Tooltip,
+    Display,
+    MinWidth,
+    MinHeight,
+    #[strum(serialize = "neovm--frame-text-lines")]
+    TextLines,
+    #[strum(serialize = "neovm--frame-total-cols")]
+    TotalCols,
+    #[strum(serialize = "neovm--frame-total-lines")]
+    TotalLines,
+}
+
+const _: [(); FrameQueryParam::COUNT] = [(); FrameQueryParam::VARIANTS.len()];
+static FRAME_QUERY_SYMBOLS: LazyLock<[EpochCachedSymbol; FrameQueryParam::COUNT]> =
+    LazyLock::new(|| {
+        std::array::from_fn(|index| EpochCachedSymbol::new(FrameQueryParam::VARIANTS[index].into()))
+    });
+
+impl From<FrameQueryParam> for FrameParamKey {
+    fn from(value: FrameQueryParam) -> Self {
+        Self::Unknown(FRAME_QUERY_SYMBOLS[usize::from(u8::from(value))].get())
+    }
+}
+
 impl FrameParam {
     pub fn gnu_index(self) -> usize {
         usize::from(u8::from(self))
@@ -246,7 +287,7 @@ impl FrameParam {
     }
 
     pub fn symbol(self) -> Value {
-        Value::symbol(self.name())
+        Value::from_sym_id(FRAME_PARAMETER_SYMBOLS[self.gnu_index()].get())
     }
 
     pub fn from_name(name: &str) -> Option<Self> {

@@ -492,7 +492,7 @@ pub(crate) fn builtin_frame_native_width(
             frame.height,
             uses_window_system_pixels,
             frame.effective_window_system(),
-            frame.parameter("window-system")
+            frame.fixed_parameter(crate::window::FrameQueryParam::WindowSystem)
         );
     }
     Ok(Value::fixnum(if uses_window_system_pixels {
@@ -1453,14 +1453,14 @@ pub(crate) fn builtin_frame_parameters(
         Value::fixnum(frame.columns() as i64)
     } else {
         frame
-            .parameter("width")
+            .fixed_parameter(crate::window::FrameQueryParam::Width)
             .unwrap_or(Value::fixnum(frame.columns() as i64))
     };
     let height = if frame_is_top_level_non_window(frame) {
         Value::fixnum(frame_realized_lines(frame))
     } else {
         frame
-            .parameter("height")
+            .fixed_parameter(crate::window::FrameQueryParam::Height)
             .unwrap_or(Value::fixnum(frame.lines() as i64))
     };
     pairs.push(Value::cons(Value::symbol("width"), width));
@@ -2249,7 +2249,7 @@ pub(crate) fn frame_resize_request_from_params(
 
 pub(crate) fn frame_text_lines(frame: &crate::window::Frame) -> i64 {
     frame
-        .parameter(FRAME_TEXT_LINES_PARAM)
+        .fixed_parameter(crate::window::FrameQueryParam::TextLines)
         .and_then(|v| v.as_int())
         .unwrap_or_else(|| frame_total_lines(frame))
 }
@@ -2511,10 +2511,10 @@ pub(crate) fn frame_parameter_value(
             Value::fixnum(frame_realized_lines(frame))
         }
         "width" => frame
-            .parameter("width")
+            .fixed_parameter(crate::window::FrameQueryParam::Width)
             .unwrap_or(Value::fixnum(frame.columns() as i64)),
         "height" => frame
-            .parameter("height")
+            .fixed_parameter(crate::window::FrameQueryParam::Height)
             .unwrap_or(Value::fixnum(frame.lines() as i64)),
         // GNU frame.c:4117 — buffer-list frame parameter stored
         // directly from f->buffer_list (most-recently-shown first).

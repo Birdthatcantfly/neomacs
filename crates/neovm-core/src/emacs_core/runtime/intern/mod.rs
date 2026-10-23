@@ -10,6 +10,9 @@
 //! more closely: a symbol is an object with a name, not just "slot N in the
 //! string interner".
 
+mod fixed_symbol;
+pub(crate) use fixed_symbol::EpochCachedSymbol;
+
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 use rustc_hash::{FxBuildHasher, FxHashMap};
@@ -1428,7 +1431,9 @@ fn global_symbol_registry() -> &'static RwLock<SymbolRegistry> {
 /// The epoch positive canonical-name caches validate against. Removing a
 /// canonical mapping publishes invalidation under the registry write guard;
 /// readers load it with Acquire. Fresh intern/dump insertions preserve existing
-/// mappings, and these caches never retain misses, so insertions need no bump.
+/// mappings, and these caches never retain misses, so fresh insertions need no
+/// bump. The public dump-restore seam conservatively republishes invalidation
+/// under the same write guard, including a partially failed restore.
 /// Caches outside this module, including `TaggedValue::subr_from_sym_id`'s memo,
 /// can use the same invalidation.
 pub(crate) fn symbol_registry_epoch_value() -> u64 {
@@ -1451,7 +1456,12 @@ pub(crate) fn restore_runtime_interner(
     canonical: Option<&[bool]>,
 ) -> Result<RestoredDumpSymbolTable, String> {
     let mut registry = global_symbol_registry().write();
-    registry.restore_dump_symbol_table(names, symbol_names, canonical)
+    let restored = registry.restore_dump_symbol_table(names, symbol_names, canonical);
+    // The current restore merges an append-only registry. Publish anyway at
+    // this boundary so fixed-symbol cells cannot retain an ID across a dump
+    // restore, including one which made partial progress before an error.
+    symbol_registry_epoch().fetch_add(1, Ordering::AcqRel);
+    restored
 }
 
 /// Intern a string using the global runtime symbol registry.

@@ -357,7 +357,7 @@ fn run_inner(pass: &mut ChangePass<'_>) -> EvalResult {
         // frames retain GNU's explicit exclusion. Frame creation/size mutation
         // publishers are responsible for FRAME_WINDOW_CHANGE.
         if frame
-            .parameter("tooltip")
+            .fixed_parameter(crate::window::FrameQueryParam::Tooltip)
             .is_some_and(|value| value.is_truthy())
         {
             continue;

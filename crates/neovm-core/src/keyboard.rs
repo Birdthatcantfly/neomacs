@@ -3922,7 +3922,7 @@ impl crate::emacs_core::eval::Context {
                     frame.width,
                     frame.height,
                     frame.effective_window_system(),
-                    frame.parameter("window-system")
+                    frame.fixed_parameter(crate::window::FrameQueryParam::WindowSystem)
                 );
             }
             if let Some(frame) = apply_resize_input_event_in_keyboard_runtime(
@@ -3951,7 +3951,7 @@ impl crate::emacs_core::eval::Context {
                         frame.width,
                         frame.height,
                         frame.effective_window_system(),
-                        frame.parameter("window-system")
+                        frame.fixed_parameter(crate::window::FrameQueryParam::WindowSystem)
                     );
                 }
             }

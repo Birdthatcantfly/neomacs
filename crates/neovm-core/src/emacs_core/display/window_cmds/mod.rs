@@ -5703,9 +5703,13 @@ impl FrameResizeRequest {
 
 pub(crate) fn frame_total_cols(frame: &crate::window::Frame) -> i64 {
     frame
-        .parameter(FRAME_TOTAL_COLS_PARAM)
+        .fixed_parameter(crate::window::FrameQueryParam::TotalCols)
         .and_then(|v| v.as_int())
-        .or_else(|| frame.parameter("width").and_then(|v| v.as_int()))
+        .or_else(|| {
+            frame
+                .fixed_parameter(crate::window::FrameQueryParam::Width)
+                .and_then(|v| v.as_int())
+        })
         .unwrap_or(frame.columns() as i64)
 }
 
@@ -5824,9 +5828,13 @@ pub(crate) fn frame_size_param_to_pixels(param: FrameSizeParam, item_size: f32) 
 
 pub(crate) fn frame_total_lines(frame: &crate::window::Frame) -> i64 {
     frame
-        .parameter(FRAME_TOTAL_LINES_PARAM)
+        .fixed_parameter(crate::window::FrameQueryParam::TotalLines)
         .and_then(|v| v.as_int())
-        .or_else(|| frame.parameter("height").and_then(|v| v.as_int()))
+        .or_else(|| {
+            frame
+                .fixed_parameter(crate::window::FrameQueryParam::Height)
+                .and_then(|v| v.as_int())
+        })
         .unwrap_or(frame.lines() as i64)
 }
 
@@ -7314,7 +7322,8 @@ pub(crate) fn x_create_frame_impl(
             .and_then(|parent_id| frames.get(parent_id))
             .and_then(|parent| {
                 let public_font = parent.known_parameter(FrameParam::Font)?;
-                let font_parameter = parent.parameter("font-parameter")?;
+                let font_parameter =
+                    parent.fixed_parameter(crate::window::FrameQueryParam::FontParameter)?;
                 Some((public_font, font_parameter))
             })
     };

@@ -33,6 +33,7 @@ pub(crate) use display::WindowScrollUpdate;
 pub use display_table_input::LayoutDisplayTableInput;
 mod face_input;
 mod frame_params;
+pub(crate) use frame_params::FrameQueryParam;
 pub mod geometry;
 mod history;
 mod invisibility_input;
@@ -4697,7 +4698,7 @@ impl Frame {
         self.window_system
             .filter(|value| value.is_truthy())
             .or_else(|| {
-                self.parameter("window-system")
+                self.fixed_parameter(crate::window::FrameQueryParam::WindowSystem)
                     .filter(|value| value.is_truthy())
             })
     }
@@ -4834,6 +4835,10 @@ impl Frame {
         self.set_known_parameter(FrameParam::RightFringe, Value::fixnum(8));
         self.set_known_parameter(FrameParam::InternalBorderWidth, Value::fixnum(0));
         self.set_known_parameter(FrameParam::BorderWidth, Value::fixnum(0));
+    }
+
+    pub(crate) fn fixed_parameter(&self, key: FrameQueryParam) -> Option<Value> {
+        self.parameter_key(key.into())
     }
 
     pub fn parameter(&self, key: &str) -> Option<Value> {
