@@ -1,7 +1,7 @@
 //! Actual VM/named cache hits retire at the owned-era admission boundary.
 use super::*;
 use crate::emacs_core::eval::Context;
-use crate::tagged::gc::{FunctionEraEdit, FunctionEraReceipt};
+use crate::tagged::gc::function_boundary_testkit::{FunctionEraEdit, FunctionEraReceipt};
 use crate::tagged::transport::SharedRoot;
 
 fn constant(answer: i64) -> Value {

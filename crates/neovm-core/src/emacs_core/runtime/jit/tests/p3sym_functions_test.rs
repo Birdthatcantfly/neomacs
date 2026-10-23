@@ -10,7 +10,7 @@ use crate::emacs_core::error::FlowRef;
 use crate::emacs_core::eval::Context;
 use crate::emacs_core::intern::{SymId, intern};
 use crate::emacs_core::value::{LambdaParams, Value};
-use crate::tagged::gc::{FunctionBoundaryPoint, FunctionEraEdit};
+use crate::tagged::gc::function_boundary_testkit::{FunctionBoundaryPoint, FunctionEraEdit};
 use crate::tagged::transport::SharedRoot;
 
 struct Profit(compile::ProfitGateTestPolicy);

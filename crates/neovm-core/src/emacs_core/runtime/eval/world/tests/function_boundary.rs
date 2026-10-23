@@ -1,7 +1,9 @@
 //! Test-only bridge. The owned projection cannot capture this Context/header.
 use crate::emacs_core::eval::{Context, NamedCallTarget};
 use crate::emacs_core::intern::SymId;
-use crate::tagged::gc::{FunctionBoundaryPoint, FunctionEraEdit, FunctionEraReceipt};
+use crate::tagged::gc::function_boundary_testkit::{
+    FunctionBoundaryPoint, FunctionEraEdit, FunctionEraReceipt,
+};
 use crate::tagged::transport::SharedRoot;
 
 impl Context {
@@ -14,7 +16,7 @@ impl Context {
     ) -> FunctionEraReceipt {
         let result = self
             .admit_owned_parallel(|projection| {
-                let result = crate::tagged::gc::exercise_function_era(
+                let result = crate::tagged::gc::function_boundary_testkit::exercise_function_era(
                     projection.era(),
                     ids,
                     edit,

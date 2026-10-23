@@ -2817,12 +2817,8 @@ pub use facade_mark::{
     ConcurrentMarkPermit, FacadeEpochRetention, FacadeMarkExclusion, FacadeMarkExclusionError,
     QuiescentCollector,
 };
-#[cfg(test)]
-pub use mutator_registration::FunctionOpKind;
 #[cfg(all(test, not(feature = "gc-memory-telemetry")))]
-pub(crate) use mutator_registration::symbol_functions::boundary::{
-    FunctionBoundaryPoint, FunctionEraEdit, FunctionEraReceipt, exercise_function_era,
-};
+pub(crate) use mutator_registration::symbol_functions::boundary as function_boundary_testkit;
 pub use mutator_registration::{
     AllStopped, AllStoppedFailure, CollectionError, CollectionReport, FunctionActivation,
     FunctionCallCache, FunctionError, FunctionStep, GlobalError, KeeperSymbols, KeeperTableMut,
