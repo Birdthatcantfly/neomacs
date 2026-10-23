@@ -77,8 +77,9 @@ fn fixture_config(
     prepare: bool,
     body: impl for<'owner, 'era> FnOnce(&mut RunAccess<'owner, 'era>, &[SymbolHandle], &mut Homes<'era>),
 ) -> std::thread::Result<()> {
-    Context::with_test_symbol_functions_init_era(
+    fixture_initialized(
         kind,
+        prepare,
         |obarray, ids| match initial {
             InitialFunction::Bound => {}
             InitialFunction::Empty => obarray.clear_function_silent_id(ids[0]),
@@ -93,103 +94,112 @@ fn fixture_config(
                 obarray.set_function_epoch_for_test(u64::MAX - 1);
             }
         },
-        |era, ids| {
-            let handles: Vec<_> = ids
-                .iter()
-                .map(|&id| era.admit_plain_symbol(id).unwrap())
-                .collect();
-            if prepare {
-                for key in &handles {
-                    era.prepare_function_symbol(key).unwrap();
-                }
-            }
-            let mut stopped = era.stop().unwrap();
-            let input = era
-                .with_stopped_heap_for_test(&stopped, |heap| unsafe {
-                    // SAFETY: scalar setup on the actual matching stopped heap.
-                    SharedRoot::new(heap, Value::NIL)
-                })
-                .unwrap();
-            stopped.trace(|_, _| Ok(())).unwrap();
-            stopped.complete().unwrap();
-            let owner = era
-                .register(1, 16)
-                .unwrap()
-                .activate(era.heap_identity(), 1)
-                .unwrap();
-            let cleanup = Rc::new(RefCell::new(None));
-            let receipt = Rc::clone(&cleanup);
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                let mut guard = FixtureGuard {
-                    owner: Some(owner),
-                    input: Some(input),
-                    homes: None,
-                    cleanup: receipt,
-                };
-                let mut run = guard.owner.as_mut().unwrap().run_access().unwrap();
-                let input = guard.input.as_ref().unwrap();
-                guard.homes = Some(Homes {
-                    symbol: ids[0],
-                    old: run.root_slot(input).unwrap(),
-                    new: run.root_slot(input).unwrap(),
-                    dst: run.root_slot(input).unwrap(),
-                    cache: run.root_slot(input).unwrap(),
-                    activation: run.root_slot(input).unwrap(),
-                });
-                let homes = guard.homes.as_mut().unwrap();
-                // Existing C3 reads supply actual immutable definition operands.
-                run.sym_value_into(&handles[0], &mut homes.old).unwrap();
-                run.sym_value_into(&handles[1], &mut homes.new).unwrap();
-                assert!(Value::from_bits(homes.old.word_for_test(&run)).is_cons());
-                assert!(Value::from_bits(homes.new.word_for_test(&run)).is_cons());
-                body(&mut run, &handles, homes);
-            }));
-            assert_eq!(
-                cleanup.borrow().as_ref(),
-                Some(&Ok(())),
-                "C4 fixture teardown failed independently of op outcome"
-            );
-            let pending = era.registry().symbols.functions.finish_ready().is_err();
-            let era = if pending {
-                let failure = era
-                    .finish()
-                    .expect_err("dirty function era must refuse serial return");
-                assert_eq!(
-                    failure.reason,
-                    crate::tagged::gc::RegistrationError::PendingRoots
-                );
-                failure.era
-            } else {
-                era
-            };
-            let mut stopped = era.stop().unwrap();
-            let mut symbols = stopped.symbols().unwrap();
-            let mut journal = Vec::new();
-            symbols.append_function_roots(&mut journal).unwrap();
-            assert_eq!(
-                !journal.is_empty(),
-                pending,
-                "original-target root obligation"
-            );
-            symbols.reconcile_functions().unwrap();
-            journal.clear();
-            symbols.append_function_roots(&mut journal).unwrap();
-            assert!(
-                journal.is_empty(),
-                "successful stopped reconciliation discharged originals"
-            );
-            drop(symbols);
-            stopped.trace(|_, _| Ok(())).unwrap();
-            stopped.complete().unwrap();
-            let (collector, keeper) = era
-                .finish()
-                .expect("C4 era finish after complete fixture cleanup");
-            drop(collector);
-            drop(keeper);
-            eprintln!("P3SYM_C4_TEARDOWN_OK {kind:?}");
-            outcome
-        },
+        body,
     )
+}
+fn fixture_initialized(
+    kind: PlainSymbolBacking,
+    prepare: bool,
+    init: impl FnOnce(&mut crate::emacs_core::symbol::Obarray, &[crate::emacs_core::intern::SymId]),
+    body: impl for<'owner, 'era> FnOnce(&mut RunAccess<'owner, 'era>, &[SymbolHandle], &mut Homes<'era>),
+) -> std::thread::Result<()> {
+    Context::with_test_symbol_functions_init_era(kind, init, |era, ids| {
+        let handles: Vec<_> = ids
+            .iter()
+            .map(|&id| era.admit_plain_symbol(id).unwrap())
+            .collect();
+        if prepare {
+            for key in &handles {
+                era.prepare_function_symbol(key).unwrap();
+            }
+        }
+        let mut stopped = era.stop().unwrap();
+        let input = era
+            .with_stopped_heap_for_test(&stopped, |heap| unsafe {
+                // SAFETY: scalar setup on the actual matching stopped heap.
+                SharedRoot::new(heap, Value::NIL)
+            })
+            .unwrap();
+        stopped.trace(|_, _| Ok(())).unwrap();
+        stopped.complete().unwrap();
+        let owner = era
+            .register(1, 16)
+            .unwrap()
+            .activate(era.heap_identity(), 1)
+            .unwrap();
+        let cleanup = Rc::new(RefCell::new(None));
+        let receipt = Rc::clone(&cleanup);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let mut guard = FixtureGuard {
+                owner: Some(owner),
+                input: Some(input),
+                homes: None,
+                cleanup: receipt,
+            };
+            let mut run = guard.owner.as_mut().unwrap().run_access().unwrap();
+            let input = guard.input.as_ref().unwrap();
+            guard.homes = Some(Homes {
+                symbol: ids[0],
+                old: run.root_slot(input).unwrap(),
+                new: run.root_slot(input).unwrap(),
+                dst: run.root_slot(input).unwrap(),
+                cache: run.root_slot(input).unwrap(),
+                activation: run.root_slot(input).unwrap(),
+            });
+            let homes = guard.homes.as_mut().unwrap();
+            // Existing C3 reads supply actual immutable definition operands.
+            run.sym_value_into(&handles[0], &mut homes.old).unwrap();
+            run.sym_value_into(&handles[1], &mut homes.new).unwrap();
+            let old = Value::from_bits(homes.old.word_for_test(&run));
+            assert!(old.is_cons() || old.is_bytecode());
+            assert!(Value::from_bits(homes.new.word_for_test(&run)).is_cons());
+            body(&mut run, &handles, homes);
+        }));
+        assert_eq!(
+            cleanup.borrow().as_ref(),
+            Some(&Ok(())),
+            "C4 fixture teardown failed independently of op outcome"
+        );
+        let pending = era.registry().symbols.functions.finish_ready().is_err();
+        let era = if pending {
+            let failure = era
+                .finish()
+                .expect_err("dirty function era must refuse serial return");
+            assert_eq!(
+                failure.reason,
+                crate::tagged::gc::RegistrationError::PendingRoots
+            );
+            failure.era
+        } else {
+            era
+        };
+        let mut stopped = era.stop().unwrap();
+        let mut symbols = stopped.symbols().unwrap();
+        let mut journal = Vec::new();
+        symbols.append_function_roots(&mut journal).unwrap();
+        assert_eq!(
+            !journal.is_empty(),
+            pending,
+            "original-target root obligation"
+        );
+        symbols.reconcile_functions().unwrap();
+        journal.clear();
+        symbols.append_function_roots(&mut journal).unwrap();
+        assert!(
+            journal.is_empty(),
+            "successful stopped reconciliation discharged originals"
+        );
+        drop(symbols);
+        stopped.trace(|_, _| Ok(())).unwrap();
+        stopped.complete().unwrap();
+        let (collector, keeper) = era
+            .finish()
+            .expect("C4 era finish after complete fixture cleanup");
+        drop(collector);
+        drop(keeper);
+        eprintln!("P3SYM_C4_TEARDOWN_OK {kind:?}");
+        outcome
+    })
 }
 fn oracle() -> Vec<&'static str> {
     let rows: Vec<_> = include_str!("../symbol_functions_oracle.expected")
@@ -731,4 +741,5 @@ fn p3sym_c4_fmakunbound_unprepared_invalid_and_cleared_homes_refuse() {
     }
 }
 
+mod bytecode;
 mod call;

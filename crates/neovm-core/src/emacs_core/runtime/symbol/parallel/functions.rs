@@ -16,6 +16,11 @@ impl FunctionUpdate {
             Self::Unbind => (super::super::Value::NIL, true),
         }
     }
+
+    fn matches(self, value: super::super::Value, explicitly_unbound: bool) -> bool {
+        let (desired, desired_unbound) = self.parts();
+        desired_unbound == explicitly_unbound && desired.bits() == value.bits()
+    }
 }
 
 pub(crate) struct FunctionCommit {
@@ -24,6 +29,26 @@ pub(crate) struct FunctionCommit {
 }
 
 impl SymbolBacking {
+    /// Identity-only no-op check for an opaque initial bytecode definition.
+    /// No bytecode payload, runtime metadata, stamp or clock is read.
+    /// # Safety
+    /// The matching live writer excludes every reader and legacy view.
+    pub(crate) unsafe fn function_write_is_noop(
+        &self,
+        id: SymId,
+        update: FunctionUpdate,
+        _authority: &SymbolWriteToken<'_>,
+    ) -> Result<bool, FunctionError> {
+        let obarray = unsafe { self.obarray.as_ref() };
+        if obarray.generation() != self.generation {
+            return Err(RegistrationError::Publication.into());
+        }
+        let symbol = obarray
+            .get_by_id(id)
+            .ok_or(RegistrationError::Publication)?;
+        Ok(update.matches(symbol.function.get(), symbol.function_unbound))
+    }
+
     /// The ORIGINAL canonical clock is loaded before testing the existing
     /// per-symbol floor/stamp rule. The caller must retain this exact clock.
     /// # Safety
@@ -81,10 +106,7 @@ impl SymbolBacking {
         let symbol = obarray
             .get_by_id(id)
             .ok_or(RegistrationError::Publication)?;
-        let (value, explicitly_unbound) = update.parts();
-        if symbol.function_unbound == explicitly_unbound
-            && symbol.function.get().bits() == value.bits()
-        {
+        if update.matches(symbol.function.get(), symbol.function_unbound) {
             return Ok(None);
         }
         let epoch = obarray

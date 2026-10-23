@@ -56,6 +56,35 @@ fn closed_definition(value: Value, lambda: SymId) -> bool {
     value.is_nil() || scalar_return(value, lambda).is_some()
 }
 
+/// Serial preparation may retain an existing compiled constant as an opaque
+/// read/replacement target. Never materialize a saved-image function here,
+/// and never inspect bytecode data during an overlapping owner operation.
+/// Restricted execution and changed fset inputs still use closed_definition.
+fn opaque_initial_bytecode(value: Value) -> bool {
+    use crate::emacs_core::bytecode::Op;
+
+    value.bytecode_data_if_materialized().is_some_and(|f| {
+        f.lexical
+            && f.params.fixed_arity() == Some(0)
+            && f.arglist.is_nil()
+            && f.ops_sealed
+            && f.stack_verified
+            && f.ops.as_slice() == [Op::Constant(0), Op::Return]
+            && f.constants.len() == 1
+            && f.constants
+                .first()
+                .is_some_and(|answer| answer.is_nil() || answer.is_t() || answer.is_fixnum())
+            && f.env.is_none()
+            && f.interactive.is_none()
+            && f.doc_form.is_none()
+            && f.docstring.is_none()
+            && f.extra_slots.is_empty()
+            && f.gnu_bytecode_bytes.is_none()
+            && f.gnu_byte_offset_map.is_none()
+            && f.lazy_gnu_code.is_none()
+    })
+}
+
 pub(super) fn scalar_return(value: Value, lambda: SymId) -> Option<Value> {
     if !value.is_cons() || value.cons_car_unobserved().as_bare_symbol_id() != Some(lambda) {
         return None;
@@ -116,7 +145,7 @@ impl ParallelHeapEra<'_> {
         // SAFETY: retained backing, identity checked and exclusive admission.
         let initial = unsafe { symbols.backing.prepare_function(key.symbol, &authority) }?;
         if let FunctionCellSnapshot::Bound(value) = initial {
-            if !closed_definition(value, lambda) {
+            if !closed_definition(value, lambda) && !opaque_initial_bytecode(value) {
                 return Err(FunctionError::UnsupportedDefinition);
             }
         }
@@ -188,7 +217,23 @@ pub(in crate::tagged::gc::mutator_registration::symbol_authority) fn publish(
     let answer = match update {
         FunctionUpdate::Set(value) => {
             if !closed_definition(value, record.lambda) {
-                return Err(FunctionError::UnsupportedDefinition);
+                // An admitted compiled definition may be returned unchanged,
+                // never installed in a different cell or executed here. Check
+                // exact complete state before epoch planning, preserving the
+                // unsupported-input refusal even at epoch exhaustion.
+                if !value.is_bytecode()
+                    // SAFETY: the same identity-bound WRITER spans this
+                    // complete-state check and destination installation.
+                    || !unsafe {
+                        symbols
+                            .backing
+                            .function_write_is_noop(id, update, authority)
+                    }?
+                {
+                    return Err(FunctionError::UnsupportedDefinition);
+                }
+                *dst = MarkWord::of(value);
+                return Ok(());
             }
             value
         }
