@@ -5,6 +5,7 @@
 //! from optional metadata.
 
 use crate::emacs_core::Value;
+use crate::emacs_core::intern::{EpochCachedSymbol, SymId};
 use crate::heap_types::{LispString, LispStringStorageKind};
 use crate::window::Frame;
 pub use neomacs_display_protocol::ImageAnimationPolicy;
@@ -19,6 +20,31 @@ pub use neomacs_display_protocol::{
     ImageMaskKind, ImageMaskPolicy, ImageNativeExtent, ImageReportedExtent, ImageRotation,
     ImageSizeLimit, ImageSizeSpec, ImageStateEvent, OversizedImage,
 };
+
+/// Fixed image variable identities; values are read anew at every use.
+/// Shared cells contain scalar IDs only and follow the registry epoch across
+/// all mutators. Their guards are released before any owner or Lisp read.
+#[derive(Clone, Copy)]
+enum ImageVariable {
+    ScalingFactor,
+    SizeLimit,
+}
+
+impl ImageVariable {
+    #[inline]
+    fn sym_id(self) -> SymId {
+        match self {
+            Self::ScalingFactor => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("image-scaling-factor");
+                SYMBOL.get()
+            }
+            Self::SizeLimit => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("max-image-size");
+                SYMBOL.get()
+            }
+        }
+    }
+}
 
 /// A finite, non-negative image scale stored by bits so image requests remain
 /// exact cache keys.
@@ -189,7 +215,7 @@ pub fn image_scale_environment(
     frame: &Frame,
     vars: crate::emacs_core::eval::VariableView<'_>,
 ) -> ImageScaleEnvironment {
-    let default_scale = match vars.value_by_name("image-scaling-factor") {
+    let default_scale = match vars.value(ImageVariable::ScalingFactor.sym_id()) {
         Some(value) if value.is_bare_symbol_named("auto") => ImageDefaultScale::Auto,
         Some(value) => numeric_image_scale(value)
             .map(ImageDefaultScale::Explicit)
@@ -219,7 +245,7 @@ pub fn image_size_limit(
 ) -> ImageSizeLimit {
     // GNU tests `FIXNUMP` before `FLOATP`; `Value` splits the same way, and
     // anything else (nil, a string, a symbol) is GNU's "no explicit limit".
-    match vars.value_by_name("max-image-size") {
+    match vars.value(ImageVariable::SizeLimit.sym_id()) {
         Some(value) if value.as_int().is_some() => {
             ImageSizeLimit::from_axis_pixels(value.as_int().expect("tested fixnum"))
         }
@@ -754,3 +780,7 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/image_size_limit_test.rs"]
 mod size_limit_tests;
+
+#[cfg(test)]
+#[path = "tests/fixed_symbols_test.rs"]
+mod fixed_symbols_tests;
