@@ -8,6 +8,7 @@
 //! any owner is activated.
 #![cfg(not(feature = "gc-memory-telemetry"))]
 
+use super::symbol_functions::FunctionOp;
 use super::symbol_globals::GlobalOp;
 use super::{
     AllStopped, HeapIdentity, Mutator, MutatorPermit, OwnerRootSlot, ParallelHeapEra,
@@ -15,6 +16,7 @@ use super::{
     SliceRoot, TableMut, TableRef,
 };
 
+mod functions;
 mod globals;
 use crate::emacs_core::builtins::maybe_resize_hash_table_for_insert;
 use crate::emacs_core::eval::Context;
@@ -36,6 +38,7 @@ const CHANNEL_WAIT: Duration = Duration::from_secs(90);
 enum Op {
     /// C3: an index into a session's admitted, immutable symbol-handle table.
     Global(GlobalOp),
+    Function(FunctionOp),
     ConstNil {
         dst: u16,
     },
@@ -144,6 +147,7 @@ enum Op {
 enum Insn {
     Allowed(Op),
     Global(GlobalOp),
+    Function(FunctionOp),
     SymbolValue,
     Obarray,
     Buffer,
@@ -194,6 +198,7 @@ enum ExecError {
     /// revalidation rounds: the epoch moved under every scan.
     EpochRetry,
     VoidVariable,
+    Function(super::FunctionError),
 }
 
 /// Why exec handed control back to the driver. A safepoint pauses for the
@@ -398,6 +403,7 @@ fn lower(insns: &[Insn]) -> Result<Vec<Op>, Reject> {
         ops.push(match *insn {
             Insn::Allowed(op) => op,
             Insn::Global(op) => Op::Global(op),
+            Insn::Function(op) => Op::Function(op),
             Insn::SymbolValue => return Err(Reject::Excluded("symbol")),
             Insn::Obarray => return Err(Reject::Excluded("obarray")),
             Insn::Buffer => return Err(Reject::Excluded("buffer")),
@@ -454,7 +460,7 @@ fn prevalidate_with(
     step_cap: u32,
     initial: &[(u16, Abs)],
 ) -> Result<(), Reject> {
-    prevalidate_inner(ops, nslots, bound, step_cap, initial, None)
+    prevalidate_inner(ops, nslots, bound, step_cap, initial, None, None)
 }
 
 fn prevalidate_inner(
@@ -464,14 +470,17 @@ fn prevalidate_inner(
     step_cap: u32,
     initial: &[(u16, Abs)],
     globals: Option<usize>,
+    functions: Option<usize>,
 ) -> Result<(), Reject> {
     // Scan the entire tape, including unreachable code. A global session
     // checks all participating tapes before any participant is registered.
     globals::check_tape(ops, nslots, globals)?;
+    functions::check_tape(ops, nslots, functions)?;
     let mut slots = vec![Abs::Nil; nslots];
     for &(index, kind) in initial {
         slots[slot_index(index, nslots)?] = kind;
     }
+    let mut call_selected = false;
     let mut pc = 0usize;
     let mut backedges = 0u32;
     let mut steps = 0u32;
@@ -482,6 +491,10 @@ fn prevalidate_inner(
         }
         let from = u16::try_from(pc).map_err(|_| Reject::Slot)?;
         match ops[pc] {
+            Op::Function(op) => {
+                functions::abstract_step(op, &mut slots, &mut call_selected)?;
+                pc += 1;
+            }
             Op::Global(op) => {
                 globals::abstract_step(op, &mut slots)?;
                 pc += 1;
@@ -1124,7 +1137,8 @@ fn exec<'brand>(
             | Op::HtMake { .. }
             | Op::HtCopy { .. }
             | Op::HtCount { .. }
-            | Op::Global(_) => {
+            | Op::Global(_)
+            | Op::Function(_) => {
                 // Leases mint from `&mut RunAccess`, and the open slice
                 // region is borrowing it: leave pc on the op and let the
                 // driver perform it between regions (design §6).
