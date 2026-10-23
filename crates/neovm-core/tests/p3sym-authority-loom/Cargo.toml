@@ -35,3 +35,7 @@ path = "tests/keeper.rs"
 [[test]]
 name = "globals"
 path = "tests/globals.rs"
+
+[[test]]
+name = "functions"
+path = "tests/functions.rs"

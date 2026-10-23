@@ -1,5 +1,34 @@
 # Proof 3 symbol authority models — C1
 
+## C4 preparation extension
+
+`tests/functions.rs` adds ten cases (seven positive, three negative) on the
+stacked C3 tip `baa49909d5`. The complete crate now has **47 cases** and
+**13 expected negative witnesses**. These are scalar protocol/lifetime models,
+not callable Lisp, production VM/JIT overlap, real GC or GNU oracle evidence.
+
+Coverage: Empty/ExplicitlyUnbound transitions and same-definition no-ops;
+refusal of the reserved maximum epoch before mutation; two symbols sharing one
+change clock; unrelated-stamp resync without target refill; affected-target
+refill; activation rooting before reader release; an active old definition
+surviving unbind and later reclamation; deduplicated quarantine until stopped
+legacy-cache eviction. No snapshot is retagged with a later clock. Positive
+contention cases retain Busy as a legal result and complete through an explicit
+serial suffix after joins; no refused try-acquire is unwrapped. No payload mutex
+or fairness assumption is added. Run all 47 cases at bounds 2 and 3 with the
+same existing receipt accounting.
+
+The added exact negative witnesses are:
+
+* `restricted call accepted a retagged old definition`
+* `explicit unbound transition omitted its stamp`
+* `legacy cache target lost before stopped eviction`
+
+C4 engine qualification separately requires real rooted cells, bounded calls,
+owner-private dispatch-header retirement, inline-dependent eviction, old-target
+GC reclamation, GNU 31.1 twins, Miri/TSan, zero dormant census and board. Distinct
+actual Worlds retain independent bindings; these models cover one shared World.
+
 ## C3 preparation extension
 
 `tests/globals.rs` adds ten cases on b142 (`fd1bd8edbb`), while production
