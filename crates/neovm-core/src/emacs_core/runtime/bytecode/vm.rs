@@ -10000,6 +10000,10 @@ mod world_bases_admission_tests;
 #[path = "tests/world_bases_call_reader_test.rs"]
 mod world_bases_call_reader_tests;
 
+#[cfg(all(test, not(feature = "gc-memory-telemetry")))]
+#[path = "tests/p3sym_function_boundary_test.rs"]
+mod p3sym_function_boundary_tests;
+
 impl ArithGenericKind {
     /// The builtin this kind's slow arm calls: the SAME cached symbol ids the
     /// interpreter always used (`Negate` is `-` with one operand).

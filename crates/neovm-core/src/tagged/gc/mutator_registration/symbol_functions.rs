@@ -17,3 +17,6 @@ pub(super) enum FunctionOp {
 
 #[cfg(not(feature = "gc-memory-telemetry"))]
 mod tests;
+
+#[cfg(not(feature = "gc-memory-telemetry"))]
+pub(crate) mod boundary;

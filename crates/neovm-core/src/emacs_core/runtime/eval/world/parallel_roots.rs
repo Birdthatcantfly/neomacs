@@ -332,3 +332,7 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/symbol_fixture.rs"]
 mod symbol_fixture;
+
+#[cfg(all(test, not(feature = "gc-memory-telemetry")))]
+#[path = "tests/function_boundary.rs"]
+mod function_boundary;

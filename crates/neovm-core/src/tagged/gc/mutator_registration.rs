@@ -31,7 +31,7 @@ mod rendezvous;
 mod summaries;
 mod symbol_authority;
 #[cfg(test)]
-mod symbol_functions;
+pub(crate) mod symbol_functions;
 #[cfg(test)]
 mod symbol_globals;
 #[cfg(test)]
