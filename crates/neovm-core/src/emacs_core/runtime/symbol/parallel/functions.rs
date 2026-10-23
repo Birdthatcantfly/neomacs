@@ -24,6 +24,27 @@ pub(crate) struct FunctionCommit {
 }
 
 impl SymbolBacking {
+    /// The ORIGINAL canonical clock is loaded before testing the existing
+    /// per-symbol floor/stamp rule. The caller must retain this exact clock.
+    /// # Safety
+    /// The matching counted reader retains this World and stable symbol spine.
+    pub(crate) unsafe fn function_version(
+        &self,
+        id: SymId,
+        since: Option<u64>,
+        _authority: &crate::tagged::gc::SymbolReadToken<'_>,
+    ) -> Option<(u64, bool)> {
+        let obarray = unsafe { self.obarray.as_ref() };
+        if obarray.generation() != self.generation || obarray.get_by_id(id).is_none() {
+            return None;
+        }
+        let clock = obarray.function_epoch();
+        let unchanged = since.is_some_and(|since| {
+            since != u64::MAX && (since == clock || obarray.fn_unchanged_since(id, since))
+        });
+        Some((clock, unchanged))
+    }
+
     /// # Safety
     /// The matching serial admission holds WRITER, before owner registration.
     pub(crate) unsafe fn prepare_function(

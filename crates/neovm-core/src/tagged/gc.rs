@@ -2820,9 +2820,10 @@ pub use facade_mark::{
 #[cfg(test)]
 pub use mutator_registration::FunctionOpKind;
 pub use mutator_registration::{
-    AllStopped, AllStoppedFailure, CollectionError, CollectionReport, FunctionError, GlobalError,
-    KeeperSymbols, KeeperTableMut, Mode, Mutator, MutatorEntry, MutatorFinishFailure, MutatorKey,
-    MutatorPermit, MutatorStartFailure, NativeReturn, NativeRoots, OwnerPublication, OwnerRootSlot,
+    AllStopped, AllStoppedFailure, CollectionError, CollectionReport, FunctionActivation,
+    FunctionCallCache, FunctionError, FunctionStep, GlobalError, KeeperSymbols, KeeperTableMut,
+    Mode, Mutator, MutatorEntry, MutatorFinishFailure, MutatorKey, MutatorPermit,
+    MutatorStartFailure, NativeReturn, NativeRoots, OwnerPublication, OwnerRootSlot,
     ParallelHeapEra, Phase, PlainSymbolBacking, RegistrationCensus, RegistrationError, Rendezvous,
     RendezvousError, Request, ResumeGcImage, ResumeGcImageFailure, RootedRetireFailure, RunAccess,
     RunSlice, SealedTableAccess, SliceRoot, Snapshot, StoppedSummaries, SymbolHandle, SymbolMut,

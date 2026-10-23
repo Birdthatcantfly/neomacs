@@ -3,9 +3,9 @@ mod globals;
 pub use globals::GlobalError;
 pub(crate) use globals::{SymbolReadToken, SymbolWriteToken};
 mod functions;
-pub use functions::FunctionError;
 #[cfg(test)]
 pub use functions::FunctionOpKind;
+pub use functions::{FunctionActivation, FunctionCallCache, FunctionError, FunctionStep};
 #[cfg(all(test, not(feature = "gc-memory-telemetry")))]
 mod closed_graph;
 mod word;
@@ -63,7 +63,7 @@ impl SymbolSidecar {
 
 /// Identity + admitted metadata, never a pointer or execution authority.
 /// Private fields prevent an arbitrary SymId from forging a backing admission.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct SymbolHandle {
     heap: HeapIdentity,
     world: usize,

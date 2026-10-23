@@ -1,0 +1,11 @@
+error[E0616]: field `home` of struct `FunctionCallCache` is private
+ --> tests/p1rv_ui/p3sym_call_private_homes.rs:4:11
+  |
+4 |     cache.home.clone()
+  |           ^^^^ private field
+
+error[E0616]: field `home` of struct `FunctionActivation` is private
+ --> tests/p1rv_ui/p3sym_call_private_homes.rs:8:16
+  |
+8 |     activation.home.clone()
+  |                ^^^^ private field

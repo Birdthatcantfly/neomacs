@@ -37,8 +37,8 @@ mod symbol_globals;
 #[cfg(test)]
 pub use symbol_authority::FunctionOpKind;
 pub use symbol_authority::{
-    FunctionError, GlobalError, KeeperSymbols, PlainSymbolBacking, SymbolHandle, SymbolMut,
-    SymbolRef,
+    FunctionActivation, FunctionCallCache, FunctionError, FunctionStep, GlobalError, KeeperSymbols,
+    PlainSymbolBacking, SymbolHandle, SymbolMut, SymbolRef,
 };
 pub(crate) use symbol_authority::{SymbolReadToken, SymbolWriteToken};
 mod token;

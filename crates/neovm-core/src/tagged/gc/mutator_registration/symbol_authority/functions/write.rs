@@ -15,10 +15,24 @@ pub(in crate::tagged::gc::mutator_registration) struct FunctionState {
 }
 // SAFETY: records are prepared only before registration under WRITER. Running
 // writes require that same word; stopped visits require the matching keeper
-// minted with word zero. Readers do not access records. Only encoded mark
+// minted with word zero. Counted readers borrow records only immutably. Only encoded mark
 // words and symbol identities cross threads, never a Value or manager view.
 unsafe impl Sync for FunctionState {}
 impl FunctionState {
+    /// # Safety
+    /// The matching live symbol reader holds the era's word. No writer or
+    /// keeper can change the prepared record vector during this short loan.
+    pub(super) unsafe fn lambda_for(
+        &self,
+        id: SymId,
+        _authority: &SymbolReadToken<'_>,
+    ) -> Option<SymId> {
+        let records = unsafe { &*self.records.get() };
+        records
+            .iter()
+            .find(|record| record.symbol == id)
+            .map(|record| record.lambda)
+    }
     pub(in crate::tagged::gc::mutator_registration) fn new() -> Self {
         Self {
             records: UnsafeCell::new(Vec::new()),
@@ -39,22 +53,23 @@ impl FunctionState {
 /// The initial closed call subset: no callbacks, mutable captures, alias
 /// resolution or internal UNBOUND. The shared graph is immutable in this era.
 fn closed_definition(value: Value, lambda: SymId) -> bool {
-    if value.is_nil() {
-        return true;
-    }
+    value.is_nil() || scalar_return(value, lambda).is_some()
+}
+
+pub(super) fn scalar_return(value: Value, lambda: SymId) -> Option<Value> {
     if !value.is_cons() || value.cons_car_unobserved().as_bare_symbol_id() != Some(lambda) {
-        return false;
+        return None;
     }
     let args = value.cons_cdr_unobserved();
     if !args.is_cons() || !args.cons_car_unobserved().is_nil() {
-        return false;
+        return None;
     }
     let body = args.cons_cdr_unobserved();
     if !body.is_cons() || !body.cons_cdr_unobserved().is_nil() {
-        return false;
+        return None;
     }
     let answer = body.cons_car_unobserved();
-    answer.is_nil() || answer.is_t() || answer.is_fixnum()
+    (answer.is_nil() || answer.is_t() || answer.is_fixnum()).then_some(answer)
 }
 
 fn keeper_compiler_quiescent() -> bool {

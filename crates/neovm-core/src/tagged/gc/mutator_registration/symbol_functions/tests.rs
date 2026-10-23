@@ -113,7 +113,7 @@ fn fixture_config(
             stopped.trace(|_, _| Ok(())).unwrap();
             stopped.complete().unwrap();
             let owner = era
-                .register(1, 8)
+                .register(1, 16)
                 .unwrap()
                 .activate(era.heap_identity(), 1)
                 .unwrap();
@@ -204,9 +204,9 @@ fn primitive(kind: PlainSymbolBacking, op: FunctionOpKind) {
             FunctionOpKind::Function => run.sym_function_into(&handles[0], &mut homes.dst),
             FunctionOpKind::Fset => run.sym_fset_into(&handles[0], &homes.new, &mut homes.dst),
             FunctionOpKind::Fmakunbound => run.sym_fmakunbound_into(&handles[0], &mut homes.dst),
-            FunctionOpKind::CallBegin => {
-                let mut cache = FunctionCallCache::empty(homes.cache.clone());
-                let mut activation = FunctionActivation::empty(homes.activation.clone());
+            FunctionOpKind::CallBegin => (|| {
+                let mut cache = FunctionCallCache::new(run)?;
+                let mut activation = FunctionActivation::new(run)?;
                 run.sym_call_begin(&handles[0], &mut cache, &mut activation)
                     .and_then(|()| {
                         for _ in 0..4 {
@@ -221,18 +221,9 @@ fn primitive(kind: PlainSymbolBacking, op: FunctionOpKind) {
                         }
                         Err(FunctionError::UnsupportedDefinition)
                     })
-            }
+            })(),
             _ => panic!("not a primitive fixture op"),
         };
-        if let Err(FunctionError::MissingOperation(actual)) = outcome {
-            // Prove the exact missing op before the intentional red assertion;
-            // then unwind this RunAccess before FixtureGuard clears the bank.
-            assert_eq!(actual, op, "C4 missing-op identity");
-            panic!(
-                "P3SYM_C4_RED missing executor op {}: {outcome:?}",
-                op.method()
-            );
-        }
         assert_eq!(outcome, Ok(()), "unexpected C4 operation outcome");
         let answer = homes.dst.word_for_test(run);
         let (value, expected) = match op {
@@ -265,15 +256,6 @@ fn p3sym_c4_noop_fixture_releases_roots_and_finishes() {
         fixture(kind, |_, _, _| {}).expect("C4 no-op fixture completion");
     }
 }
-macro_rules! red {
-    ($name:ident, $kind:ident, $op:ident) => {
-        #[test]
-        #[ignore = "C4 preparation: must fail on the named missing-op assertion"]
-        fn $name() {
-            primitive(PlainSymbolBacking::$kind, FunctionOpKind::$op);
-        }
-    };
-}
 #[test]
 fn p3sym_c4_plain_function() {
     primitive(PlainSymbolBacking::Unprojected, FunctionOpKind::Function);
@@ -286,7 +268,10 @@ fn p3sym_c4_plain_fset() {
 fn p3sym_c4_plain_fmakunbound() {
     primitive(PlainSymbolBacking::Unprojected, FunctionOpKind::Fmakunbound);
 }
-red!(p3sym_c4_red_plain_call, Unprojected, CallBegin);
+#[test]
+fn p3sym_c4_plain_call() {
+    primitive(PlainSymbolBacking::Unprojected, FunctionOpKind::CallBegin);
+}
 #[test]
 fn p3sym_c4_projected_function() {
     primitive(PlainSymbolBacking::Projected, FunctionOpKind::Function);
@@ -299,7 +284,10 @@ fn p3sym_c4_projected_fset() {
 fn p3sym_c4_projected_fmakunbound() {
     primitive(PlainSymbolBacking::Projected, FunctionOpKind::Fmakunbound);
 }
-red!(p3sym_c4_red_projected_call, Projected, CallBegin);
+#[test]
+fn p3sym_c4_projected_call() {
+    primitive(PlainSymbolBacking::Projected, FunctionOpKind::CallBegin);
+}
 
 #[test]
 fn p3sym_c4_surface_preserves_owner_root_and_fuel_types() {
@@ -400,8 +388,9 @@ fn p3sym_c4_function_read_has_no_fatal_decode_or_value_escape() {
         "-> usize",
     ] {
         assert!(
-            !source.contains(forbidden),
-            "function read exposed {forbidden}"
+            !source.contains(forbidden)
+                && !include_str!("../symbol_authority/functions/call.rs").contains(forbidden),
+            "rooted function API exposed {forbidden}"
         );
     }
     assert!(source.contains("check_home(self, dst)?"));
@@ -741,3 +730,5 @@ fn p3sym_c4_fmakunbound_unprepared_invalid_and_cleared_homes_refuse() {
         .expect("invalid and cleared homes refuse without recreating a root bank");
     }
 }
+
+mod call;

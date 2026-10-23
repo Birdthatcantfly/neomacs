@@ -1,9 +1,11 @@
 //! Direct function-cell answers move into owner roots under symbol authority.
+mod call;
 pub(super) mod write;
 use super::*;
 use crate::emacs_core::symbol::FunctionCellSnapshot;
 use crate::tagged::gc::mark_word::MarkWord;
 use crate::tagged::value::TaggedValue as Value;
+pub use call::{FunctionActivation, FunctionCallCache, FunctionStep};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FunctionError {
@@ -11,10 +13,8 @@ pub enum FunctionError {
     VoidFunction,
     UnsupportedDefinition,
     EpochExhausted,
-    /// Preparation fixtures retain explicit missing outcomes for the other
-    /// operations. This variant and its opcode type do not ship.
-    #[cfg(test)]
-    MissingOperation(FunctionOpKind),
+    ActiveActivation,
+    InactiveActivation,
 }
 impl From<RegistrationError> for FunctionError {
     fn from(error: RegistrationError) -> Self {

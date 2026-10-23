@@ -87,6 +87,35 @@ impl RootSlotOps for OwnerRootSlot<'_> {
 impl RootedSlot for OwnerRootSlot<'_> {}
 
 impl<'owner, 'era> RunAccess<'owner, 'era> {
+    /// C4's opaque cache/activation owns this freshly reserved home. Unlike
+    /// operand homes it is never exposed or clonable through that API. NIL
+    /// needs no heap import seal, and the pre-reserved bank never grows here.
+    pub(super) fn private_nil_root(&mut self) -> Result<OwnerRootSlot<'era>, RegistrationError> {
+        self.owner.check_thread()?;
+        if self.symbol_loan {
+            return Err(RegistrationError::OutstandingLoan);
+        }
+        let local = self
+            .owner
+            .local
+            .as_mut()
+            .ok_or(RegistrationError::StaleRegistration)?;
+        let index = local.root_scratch.len();
+        if index >= local.root_slot_limit || index >= local.root_scratch.capacity() {
+            return Err(RegistrationError::Capacity);
+        }
+        local
+            .root_scratch
+            .push(super::super::mark_word::MarkWord::of(TaggedValue::NIL));
+        Ok(OwnerRootSlot {
+            key: self.owner.entry.key,
+            generation: local.root_slot_generation,
+            index,
+            _era: PhantomData,
+            _thread: PhantomData,
+        })
+    }
+
     /// Only the sealed transport bridge can admit a live source word.
     pub(crate) fn admit_root_slot(
         &mut self,
