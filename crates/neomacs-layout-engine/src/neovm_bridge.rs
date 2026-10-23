@@ -51,6 +51,7 @@ use neovm_core::emacs_core::effect_profile::{
     EffectScope, effect_name_from_lisp, effect_operation_from_lisp,
 };
 use neovm_core::emacs_core::image_catalog::image_scale_environment;
+use neovm_core::emacs_core::intern::EpochCachedSymbol;
 use neovm_core::emacs_core::invisibility::{Invisibility, text_prop_means_invisible};
 use neovm_core::emacs_core::plist::plist_get;
 use neovm_core::emacs_core::textprop::{DirectCharProperties, resolve_effective_char_property};
@@ -86,6 +87,12 @@ use neomacs_display_protocol::face::{BasicFaceId, BoxLineWidth};
 use neomacs_display_protocol::types::{FaceId, Rect};
 use neomacs_display_protocol::{EffectsConfig, PresentedResizeEdge};
 use strum::{EnumString, IntoStaticStr};
+
+// Lazy native key identities only. Every query checks the registry epoch;
+// concurrent mutators share no property values, overlay order or Lisp roots.
+static OVERLAY_FACE_PROPERTY: EpochCachedSymbol = EpochCachedSymbol::new("face");
+static OVERLAY_PRIORITY_PROPERTY: EpochCachedSymbol = EpochCachedSymbol::new("priority");
+static OVERLAY_CATEGORY_PROPERTY: EpochCachedSymbol = EpochCachedSymbol::new("category");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, EnumString, IntoStaticStr)]
 #[strum(serialize_all = "kebab-case")]
@@ -2630,8 +2637,8 @@ impl LayoutCharPropertyLookup {
         // overlay carrying only a `category' is ordered by that symbol's
         // `priority'. The overlay layer cannot follow a category on its own;
         // this view already knows how, for the property values below.
-        let priority_property = Value::symbol("priority");
-        let category_property = Value::symbol("category");
+        let priority_property = Value::symbol(&OVERLAY_PRIORITY_PROPERTY);
+        let category_property = Value::symbol(&OVERLAY_CATEGORY_PROPERTY);
         let priority_of = |overlay: Value| -> Option<Value> {
             if let Some(own) = overlays.overlay_get_named(overlay, priority_property) {
                 return Some(own);
@@ -2696,7 +2703,7 @@ pub(crate) fn overlay_faces_at<B: LayoutBufferView + ?Sized>(
     // applicability rule, so this path cannot drift from the single-winner
     // resolvers. It previously ordered by a bare `priority` integer, which reads
     // a `(PRIMARY . SECONDARY)` priority as 0 and drops GNU's containment rule.
-    let faces = LayoutCharPropertyLookup::new(buffer, Value::symbol("face"))
+    let faces = LayoutCharPropertyLookup::new(buffer, Value::symbol(&OVERLAY_FACE_PROPERTY))
         .overlay_values_ascending_at(buffer, bytepos, current_window_id);
     OverlayFacesAtPosition {
         faces,
