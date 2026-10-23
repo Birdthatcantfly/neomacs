@@ -186,9 +186,11 @@ impl super::eval::Context {
         // window's buffer current).
         let window = Value::make_window(window_id.0);
         let specpdl_count = self.specpdl.len();
-        if let Err(flow) =
-            self.try_specbind_or_unwind_to(specpdl_count, intern("inhibit-redisplay"), Value::T)
-        {
+        if let Err(flow) = self.try_specbind_or_unwind_to(
+            specpdl_count,
+            ModeLineSymbol::InhibitRedisplay.id(),
+            Value::T,
+        ) {
             tracing::debug!("window-scroll binding signalled (ignored): {flow:?}");
             return;
         }
@@ -2418,6 +2420,73 @@ pub(crate) fn finish_format_mode_line_in_state_with_eval(
     result
 }
 
+/// Fixed mode-line identities pre-resolve native spellings per registry epoch.
+/// The shared cache is safe for concurrent mutators; this enum holds no Lisp
+/// values or per-format mutable state. Resolve again after arbitrary Lisp.
+#[derive(Clone, Copy, Debug, strum::EnumIter)]
+enum ModeLineSymbol {
+    ModeName,
+    DefaultDirectory,
+    RiskyLocalVariable,
+    InhibitRedisplay,
+    InhibitQuit,
+    Eval,
+}
+
+impl ModeLineSymbol {
+    #[inline]
+    fn id(self) -> crate::emacs_core::intern::SymId {
+        use crate::emacs_core::intern::EpochCachedSymbol;
+
+        match self {
+            Self::ModeName => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("mode-name");
+                SYMBOL.get()
+            }
+            Self::DefaultDirectory => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("default-directory");
+                SYMBOL.get()
+            }
+            Self::RiskyLocalVariable => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("risky-local-variable");
+                SYMBOL.get()
+            }
+            Self::InhibitRedisplay => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("inhibit-redisplay");
+                SYMBOL.get()
+            }
+            Self::InhibitQuit => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("inhibit-quit");
+                SYMBOL.get()
+            }
+            Self::Eval => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("eval");
+                SYMBOL.get()
+            }
+        }
+    }
+}
+
+/// The existing name-based read, specialized only for closed fixed keys.
+/// Keep the buffer-local gate and owner-aware fallback identical to the
+/// general helper; a cached identity is not a cached variable value.
+#[inline]
+fn mode_line_fixed_symbol_value_in_state(
+    vars: VariableView<'_>,
+    buffers: &crate::buffer::BufferManager,
+    symbol: ModeLineSymbol,
+) -> Option<Value> {
+    let obarray = vars.obarray();
+    let sym = symbol.id();
+    if let Some(buf) = buffers.current_buffer()
+        && let Some(value) = buf.get_buffer_local_by_sym_id_gated(sym, obarray.is_localized(sym))
+    {
+        return Some(value);
+    }
+
+    vars.value(sym)
+}
+
 fn mode_line_symbol_value_in_state(
     vars: VariableView<'_>,
     _dynamic: &[OrderedRuntimeBindingMap],
@@ -2520,7 +2589,7 @@ fn mode_line_process_status_in_state(
 
 fn mode_line_symbol_is_risky(obarray: &crate::emacs_core::symbol::Obarray, name: &str) -> bool {
     obarray
-        .get_property(name, "risky-local-variable")
+        .get_property_id(intern(name), ModeLineSymbol::RiskyLocalVariable.id())
         .is_some_and(|value| !value.is_nil())
 }
 
@@ -5011,7 +5080,7 @@ fn expand_mode_line_percent_in_state(
             Some('m') => {
                 // GNU: major mode name from buffer-local `mode-name`.
                 if let Some(mode_name) =
-                    mode_line_symbol_value_in_state(vars, dynamic, buffers, "mode-name")
+                    mode_line_fixed_symbol_value_in_state(vars, buffers, ModeLineSymbol::ModeName)
                         .filter(|value| value.is_string())
                 {
                     append_mode_line_percent_lisp_text_spec(
@@ -5167,11 +5236,14 @@ fn expand_mode_line_percent_in_state(
             }
             Some('@') => {
                 // GNU xdisp.c:29477 — "@" if default-directory is remote, "-" otherwise.
-                let remote =
-                    mode_line_symbol_value_in_state(vars, dynamic, buffers, "default-directory")
-                        .and_then(|v| mode_line_runtime_string(&v))
-                        .map(|dir| is_remote_directory(&dir))
-                        .unwrap_or(false);
+                let remote = mode_line_fixed_symbol_value_in_state(
+                    vars,
+                    buffers,
+                    ModeLineSymbol::DefaultDirectory,
+                )
+                .and_then(|v| mode_line_runtime_string(&v))
+                .map(|dir| is_remote_directory(&dir))
+                .unwrap_or(false);
                 append_mode_line_percent_string_spec(
                     result,
                     if remote { "@" } else { "-" },
@@ -8545,9 +8617,11 @@ fn call_fontification_functions_at<O: FontificationDemandObserver>(
     // hook cannot prevent later hooks from running.
     for function in functions {
         let call_count = ctx.specpdl.len();
-        if let Err(flow) =
-            ctx.try_specbind_or_unwind_to(call_count, intern("inhibit-redisplay"), Value::T)
-        {
+        if let Err(flow) = ctx.try_specbind_or_unwind_to(
+            call_count,
+            ModeLineSymbol::InhibitRedisplay.id(),
+            Value::T,
+        ) {
             let rendered = super::error::format_flow_with_eval(ctx, &flow);
             tracing::warn!(
                 "error binding redisplay inhibition at {}: {}",
@@ -10270,3 +10344,7 @@ mod mode_line_outer_handlers;
 #[cfg(test)]
 #[path = "tests/fontification_demand_test.rs"]
 mod fontification_demand_tests;
+
+#[cfg(test)]
+#[path = "tests/mode_line_fixed_symbols_test.rs"]
+mod mode_line_fixed_symbols;

@@ -29,8 +29,8 @@ pub(super) fn eval_form(eval: &mut super::super::eval::Context, form: &Value) ->
     // GNU xdisp.c dsafe__call binds these before installing its Qt condition
     // handler, even for Fformat_mode_line. Binding failures stay outside it.
     let count = eval.specpdl.len();
-    eval.try_specbind_or_unwind_to(count, intern("inhibit-redisplay"), Value::T)?;
-    eval.try_specbind_or_unwind_to(count, intern("inhibit-quit"), Value::T)?;
+    eval.try_specbind_or_unwind_to(count, ModeLineSymbol::InhibitRedisplay.id(), Value::T)?;
+    eval.try_specbind_or_unwind_to(count, ModeLineSymbol::InhibitQuit.id(), Value::T)?;
     let condition_stack_base = eval.condition_stack_len();
     eval.push_condition_frame(ConditionFrame::ConditionCase {
         conditions: Value::T,
@@ -42,7 +42,10 @@ pub(super) fn eval_form(eval: &mut super::super::eval::Context, form: &Value) ->
     // dsafe_eval calls the current `eval` function with lexical argument t.
     // The internal handler blocks outer handler-bind callbacks and ordinary
     // debugger entry; debug-on-signal retains GNU's explicit override.
-    let result = eval.funcall_general(Value::symbol("eval"), vec![*form, Value::T]);
+    let result = eval.funcall_general(
+        Value::from_sym_id(ModeLineSymbol::Eval.id()),
+        vec![*form, Value::T],
+    );
     eval.truncate_condition_stack(condition_stack_base);
     let result = if result.is_err() {
         handle_error(eval, form, result)
