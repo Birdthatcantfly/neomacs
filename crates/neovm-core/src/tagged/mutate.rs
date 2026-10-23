@@ -25,10 +25,6 @@ mod chartable;
 pub use chartable::{CharTableWrite, SubCharTableWrite};
 pub(crate) use chartable::{with_char_table_write, with_sub_char_table_write};
 
-thread_local! {
-    static COLLECTION_REVISION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
 /// Short-lived observations can depend on mutable Lisp collections nested
 /// inside display properties without a buffer-property write. Allocating a
 /// fresh object does not change this revision; mutating an existing one does.
@@ -771,19 +767,3 @@ pub fn with_xwidget_view_mut<R>(
 #[cfg(debug_assertions)]
 #[path = "gc/tests/heap_mut_closure_test.rs"]
 mod gc_heap_mut_closure_tests;
-
-/// Round 3w (plan-3w.md section 7, C1): this World state lives in a
-/// thread-local while its World's Baton holder runs, and in the World while
-/// it is parked; the Green runtime moves it at each park and resume, so
-/// every Lisp thread sees one value, as in GNU. (N-mutator mode needs shared
-/// storage instead: a recorded obligation.)
-#[cold]
-pub(crate) fn world_state_placeholder() -> Box<dyn std::any::Any> {
-    Box::new(0_u64)
-}
-
-#[cold]
-pub(crate) fn swap_world_state(slot: &mut dyn std::any::Any) {
-    let slot = slot.downcast_mut::<u64>().expect("carried World state");
-    COLLECTION_REVISION.with(|revision| *slot = revision.replace(*slot));
-}

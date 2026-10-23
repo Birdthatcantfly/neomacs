@@ -62,12 +62,7 @@ const CARRIERS: &[(Placeholder, Swap)] = &[
         crate::emacs_core::value::world_state_placeholder,
         crate::emacs_core::value::swap_world_state,
     ),
-    // The collection-write revision (observation epoch).
-    (
-        crate::tagged::mutate::world_state_placeholder,
-        crate::tagged::mutate::swap_world_state,
-    ),
-    // Collection-read capture state (observation).
+    // World-owned collection revision, journal and capture state.
     (
         crate::tagged::collection_reads::world_state_placeholder,
         crate::tagged::collection_reads::swap_world_state,
