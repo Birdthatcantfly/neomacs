@@ -144,6 +144,38 @@ impl ChunkSide {
         unsafe { (*stamps)[slot].store(epoch, Ordering::Release) };
     }
 
+    /// Era preparation only: reserve without publishing a binding change.
+    /// The symbol writer excludes competing preparations and spine growth.
+    #[cold]
+    pub(super) fn try_prepare_stamps(&self) -> Option<usize> {
+        if !self.fn_stamps.load(Ordering::Acquire).is_null() {
+            return Some(0);
+        }
+        let layout = std::alloc::Layout::new::<StampChunk>();
+        // SAFETY: a zeroed AtomicU64 is valid; allocation remains fallible.
+        let stamps = unsafe { std::alloc::alloc_zeroed(layout) }.cast::<StampChunk>();
+        if stamps.is_null() {
+            return None;
+        }
+        self.fn_stamps.store(stamps, Ordering::Release);
+        Some(layout.size())
+    }
+
+    pub(super) fn stamps_prepared(&self) -> bool {
+        !self.fn_stamps.load(Ordering::Acquire).is_null()
+    }
+
+    /// Allocation-free publication. Missing storage refuses, never allocates.
+    pub(super) fn stamp_prepared(&self, slot: usize, epoch: u64) -> bool {
+        let stamps = self.fn_stamps.load(Ordering::Acquire);
+        if stamps.is_null() || slot >= OBARRAY_CHUNK {
+            return false;
+        }
+        // SAFETY: prepared storage is retained for this whole Obarray life.
+        unsafe { (*stamps)[slot].store(epoch, Ordering::Release) };
+        true
+    }
+
     /// Whether this chunk holds a stamp array (tests: the lazy allocation).
     #[cfg(test)]
     pub(super) fn has_stamps(&self) -> bool {
@@ -174,6 +206,28 @@ fn alloc_stamp_chunk() -> *mut StampChunk {
         std::alloc::handle_alloc_error(layout);
     }
     ptr
+}
+
+#[cfg(test)]
+mod prepared_tests {
+    use super::*;
+    #[test]
+    fn p3sym_c4_prepared_stamps_refuse_missing_storage_and_never_grow_at_commit() {
+        let side = ChunkSide::new(0);
+        assert!(!side.stamps_prepared());
+        assert!(!side.stamp_prepared(3, 17));
+        assert_eq!(
+            side.try_prepare_stamps(),
+            Some(std::mem::size_of::<StampChunk>())
+        );
+        assert_eq!(side.stamp(3), 0);
+        assert_eq!(side.try_prepare_stamps(), Some(0));
+        assert!(side.stamp_prepared(3, 17));
+        assert_eq!(side.stamp(3), 17);
+        assert_eq!(side.floor(), 0);
+        assert!(!side.stamp_prepared(OBARRAY_CHUNK, 18));
+        assert_eq!(side.stamp(3), 17);
+    }
 }
 
 #[cfg(test)]

@@ -54,6 +54,7 @@ enum InitialFunction {
     Bound,
     Empty,
     Unbound,
+    Exhausted,
 }
 fn fixture(
     kind: PlainSymbolBacking,
@@ -66,18 +67,32 @@ fn fixture_state(
     initial: InitialFunction,
     body: impl for<'owner, 'era> FnOnce(&mut RunAccess<'owner, 'era>, &[SymbolHandle], &mut Homes<'era>),
 ) -> std::thread::Result<()> {
+    fixture_config(kind, initial, true, body)
+}
+fn fixture_config(
+    kind: PlainSymbolBacking,
+    initial: InitialFunction,
+    prepare: bool,
+    body: impl for<'owner, 'era> FnOnce(&mut RunAccess<'owner, 'era>, &[SymbolHandle], &mut Homes<'era>),
+) -> std::thread::Result<()> {
     Context::with_test_symbol_functions_init_era(
         kind,
         |obarray, ids| match initial {
             InitialFunction::Bound => {}
             InitialFunction::Empty => obarray.clear_function_silent_id(ids[0]),
             InitialFunction::Unbound => obarray.fmakunbound_id(ids[0]),
+            InitialFunction::Exhausted => obarray.set_function_epoch_for_test(u64::MAX - 1),
         },
         |era, ids| {
             let handles: Vec<_> = ids
                 .iter()
                 .map(|&id| era.admit_plain_symbol(id).unwrap())
                 .collect();
+            if prepare {
+                for key in &handles {
+                    era.prepare_function_symbol(key).unwrap();
+                }
+            }
             let mut stopped = era.stop().unwrap();
             let input = era
                 .with_stopped_heap_for_test(&stopped, |heap| unsafe {
@@ -124,6 +139,38 @@ fn fixture_state(
                 Some(&Ok(())),
                 "C4 fixture teardown failed independently of op outcome"
             );
+            let pending = era.registry().symbols.functions.finish_ready().is_err();
+            let era = if pending {
+                let failure = era
+                    .finish()
+                    .expect_err("dirty function era must refuse serial return");
+                assert_eq!(
+                    failure.reason,
+                    crate::tagged::gc::RegistrationError::PendingRoots
+                );
+                failure.era
+            } else {
+                era
+            };
+            let mut stopped = era.stop().unwrap();
+            let mut symbols = stopped.symbols().unwrap();
+            let mut journal = Vec::new();
+            symbols.append_function_roots(&mut journal).unwrap();
+            assert_eq!(
+                !journal.is_empty(),
+                pending,
+                "original-target root obligation"
+            );
+            symbols.reconcile_functions().unwrap();
+            journal.clear();
+            symbols.append_function_roots(&mut journal).unwrap();
+            assert!(
+                journal.is_empty(),
+                "successful stopped reconciliation discharged originals"
+            );
+            drop(symbols);
+            stopped.trace(|_, _| Ok(())).unwrap();
+            stopped.complete().unwrap();
             let (collector, keeper) = era
                 .finish()
                 .expect("C4 era finish after complete fixture cleanup");
@@ -221,14 +268,20 @@ macro_rules! red {
 fn p3sym_c4_plain_function() {
     primitive(PlainSymbolBacking::Unprojected, FunctionOpKind::Function);
 }
-red!(p3sym_c4_red_plain_fset, Unprojected, Fset);
+#[test]
+fn p3sym_c4_plain_fset() {
+    primitive(PlainSymbolBacking::Unprojected, FunctionOpKind::Fset);
+}
 red!(p3sym_c4_red_plain_fmakunbound, Unprojected, Fmakunbound);
 red!(p3sym_c4_red_plain_call, Unprojected, CallBegin);
 #[test]
 fn p3sym_c4_projected_function() {
     primitive(PlainSymbolBacking::Projected, FunctionOpKind::Function);
 }
-red!(p3sym_c4_red_projected_fset, Projected, Fset);
+#[test]
+fn p3sym_c4_projected_fset() {
+    primitive(PlainSymbolBacking::Projected, FunctionOpKind::Fset);
+}
 red!(p3sym_c4_red_projected_fmakunbound, Projected, Fmakunbound);
 red!(p3sym_c4_red_projected_call, Projected, CallBegin);
 
@@ -249,7 +302,7 @@ fn p3sym_c4_surface_preserves_owner_root_and_fuel_types() {
         );
     }
     assert!(surface.contains("fuel: NonZeroU32"));
-    assert!(surface.contains("impl KeeperSymbols"));
+    assert!(include_str!("../symbol_authority/functions/write.rs").contains("impl KeeperSymbols"));
 }
 
 #[test]
@@ -338,4 +391,151 @@ fn p3sym_c4_function_read_has_no_fatal_decode_or_value_escape() {
     assert!(source.contains("check_home(self, dst)?"));
     assert!(source.contains("symbol_ref(symbol)?"));
     assert!(source.contains("self.read_token()"));
+}
+
+#[test]
+fn p3sym_c4_fset_noop_and_two_symbol_clock() {
+    for kind in [
+        PlainSymbolBacking::Unprojected,
+        PlainSymbolBacking::Projected,
+    ] {
+        fixture(kind, |run, handles, homes| {
+            let left = run.function_facts_for_test(&handles[0]).unwrap();
+            let right = run.function_facts_for_test(&handles[1]).unwrap();
+            run.sym_fset_into(&handles[0], &homes.old, &mut homes.dst)
+                .unwrap();
+            assert_eq!(run.function_facts_for_test(&handles[0]).unwrap(), left);
+            assert_eq!(homes.dst.word_for_test(run), homes.old.word_for_test(run));
+            run.sym_fset_into(&handles[0], &homes.new, &mut homes.dst)
+                .unwrap();
+            let first = run.function_facts_for_test(&handles[0]).unwrap();
+            assert_eq!(first, (left.0 + 1, left.0 + 1, true));
+            let unrelated = run.function_facts_for_test(&handles[1]).unwrap();
+            assert_eq!(unrelated, (first.0, right.1, true));
+            run.sym_fset_into(&handles[1], &homes.old, &mut homes.dst)
+                .unwrap();
+            let second = run.function_facts_for_test(&handles[1]).unwrap();
+            assert_eq!(second, (first.0 + 1, first.0 + 1, true));
+            assert_eq!(run.function_facts_for_test(&handles[0]).unwrap().1, first.1);
+            run.sym_function_into(&handles[0], &mut homes.dst).unwrap();
+            let literal = |bits| {
+                let value = Value::from_bits(bits);
+                crate::emacs_core::print_value(
+                    &value
+                        .cons_cdr_unobserved()
+                        .cons_cdr_unobserved()
+                        .cons_car_unobserved(),
+                )
+            };
+            let a = literal(homes.dst.word_for_test(run));
+            run.sym_function_into(&handles[1], &mut homes.dst).unwrap();
+            let b = literal(homes.dst.word_for_test(run));
+            assert_eq!(format!("({a} {b})"), oracle()[11]);
+        })
+        .expect("two-symbol function publication and stopped discharge");
+    }
+}
+
+#[test]
+fn p3sym_c4_fset_nil_distinguishes_empty_and_explicit_unbound() {
+    for kind in [
+        PlainSymbolBacking::Unprojected,
+        PlainSymbolBacking::Projected,
+    ] {
+        for initial in [InitialFunction::Empty, InitialFunction::Unbound] {
+            fixture_state(kind, initial, |run, handles, homes| {
+                run.sym_function_into(&handles[0], &mut homes.dst).unwrap();
+                let before = run.function_facts_for_test(&handles[0]).unwrap();
+                let nil = homes.dst.clone();
+                run.sym_fset_into(&handles[0], &nil, &mut homes.dst)
+                    .unwrap();
+                let after = run.function_facts_for_test(&handles[0]).unwrap();
+                let changed = matches!(initial, InitialFunction::Unbound);
+                assert_eq!(after.0, before.0 + u64::from(changed));
+                assert_eq!(after.2, changed);
+                assert_eq!(
+                    crate::emacs_core::print_value(&Value::from_bits(homes.dst.word_for_test(run))),
+                    oracle()[18].split_whitespace().nth(1).unwrap()
+                );
+                run.sym_fset_into(&handles[0], &nil, &mut homes.dst)
+                    .unwrap();
+                assert_eq!(run.function_facts_for_test(&handles[0]).unwrap(), after);
+            })
+            .expect("nil transition preserves exact unbound state and teardown");
+        }
+    }
+}
+
+#[test]
+fn p3sym_c4_fset_exhaustion_allows_only_noop() {
+    for kind in [
+        PlainSymbolBacking::Unprojected,
+        PlainSymbolBacking::Projected,
+    ] {
+        fixture_state(kind, InitialFunction::Exhausted, |run, handles, homes| {
+            let before = run.function_facts_for_test(&handles[0]).unwrap();
+            run.sym_fset_into(&handles[0], &homes.old, &mut homes.dst)
+                .unwrap();
+            let answer = homes.dst.word_for_test(run);
+            assert_eq!(
+                run.sym_fset_into(&handles[0], &homes.new, &mut homes.dst),
+                Err(FunctionError::EpochExhausted)
+            );
+            assert_eq!(run.function_facts_for_test(&handles[0]).unwrap(), before);
+            assert_eq!(homes.dst.word_for_test(run), answer);
+            run.sym_function_into(&handles[0], &mut homes.dst).unwrap();
+            assert_eq!(homes.dst.word_for_test(run), homes.old.word_for_test(run));
+        })
+        .expect("epoch exhaustion refuses before mutation or journal retention");
+    }
+}
+
+#[test]
+fn p3sym_c4_fset_refuses_unprepared_unsupported_and_stale_homes() {
+    use crate::tagged::gc::{RegistrationError, mark_word::MarkWord};
+    for kind in [
+        PlainSymbolBacking::Unprojected,
+        PlainSymbolBacking::Projected,
+    ] {
+        fixture_config(
+            kind,
+            InitialFunction::Bound,
+            false,
+            |run, handles, homes| {
+                let before = run.function_facts_for_test(&handles[0]).unwrap();
+                let answer = homes.dst.word_for_test(run);
+                assert_eq!(
+                    run.sym_fset_into(&handles[0], &homes.new, &mut homes.dst),
+                    Err(FunctionError::Authority(RegistrationError::Publication))
+                );
+                assert_eq!(run.function_facts_for_test(&handles[0]).unwrap(), before);
+                assert_eq!(homes.dst.word_for_test(run), answer);
+            },
+        )
+        .expect("missing preparation refuses without mutation");
+        fixture(kind, |run, handles, homes| {
+            let before = run.function_facts_for_test(&handles[0]).unwrap();
+            let answer = homes.dst.word_for_test(run);
+            for bad in [Value::UNBOUND, Value::fixnum(123)] {
+                run.owner.local.as_mut().unwrap().root_scratch[homes.cache.index] =
+                    MarkWord::of(bad);
+                assert_eq!(
+                    run.sym_fset_into(&handles[0], &homes.cache, &mut homes.dst),
+                    Err(FunctionError::UnsupportedDefinition)
+                );
+                assert_eq!(run.function_facts_for_test(&handles[0]).unwrap(), before);
+                assert_eq!(homes.dst.word_for_test(run), answer);
+            }
+            let mut invalid = homes.dst.clone();
+            invalid.index = usize::MAX;
+            assert_eq!(
+                run.sym_fset_into(&handles[0], &homes.new, &mut invalid),
+                Err(FunctionError::Authority(
+                    RegistrationError::StaleRegistration
+                ))
+            );
+            assert_eq!(run.function_facts_for_test(&handles[0]).unwrap(), before);
+        })
+        .expect("unsupported operands and stale homes preserve cell/version/answer");
+    }
 }

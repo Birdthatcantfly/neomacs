@@ -563,6 +563,7 @@ impl<'heap> ParallelHeapEra<'heap> {
 
     fn prepare_finish(&mut self) -> Result<(), RegistrationError> {
         self.registry().symbols.ready()?;
+        self.registry().symbols.functions.finish_ready()?;
         if self.suspended_cons.get_mut().is_some() {
             return Err(RegistrationError::OpenRegion);
         }
@@ -683,6 +684,9 @@ impl<'heap> ParallelHeapEra<'heap> {
                 registry.validate(&state, entry.key)?;
                 entry_ready(entry, index, &*entry_guard(registry, entry)?)?;
             }
+            // All owners are now terminal: an earlier zero word/clean flag
+            // alone could race an owner's last write before retirement.
+            registry.symbols.functions.finish_ready()?;
             // Only Arc snapshots of the canonical set: no second owner or
             // payload registry. All image/root preflight precedes any removal.
             let mut entries = Vec::new();

@@ -1,4 +1,5 @@
 //! Direct function-cell answers move into owner roots under symbol authority.
+pub(super) mod write;
 use super::*;
 use crate::emacs_core::symbol::FunctionCellSnapshot;
 use crate::tagged::gc::mark_word::MarkWord;

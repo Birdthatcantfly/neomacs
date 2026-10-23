@@ -1,6 +1,7 @@
 //! Narrow backing for proof-3 authority. No serial accessor calls this module.
 #![allow(dead_code)]
 
+mod functions;
 mod write;
 
 use super::{Obarray, SymbolTrappedWrite, ValueCell};

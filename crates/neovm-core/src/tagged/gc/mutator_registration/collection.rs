@@ -274,6 +274,7 @@ impl<'heap> ParallelHeapEra<'heap> {
             })??;
         }
         let mut roots = Vec::new();
+        stopped.symbols()?.append_function_roots(&mut roots)?;
         self.legacy_roots
             .as_ref()
             .ok_or(RendezvousError::Publication)?

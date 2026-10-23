@@ -45,6 +45,15 @@ pub(super) fn check_home(
     )
 }
 
+impl AdmissionWriter<'_> {
+    pub(super) fn write_token(&self) -> SymbolWriteToken<'_> {
+        SymbolWriteToken {
+            _word: &self.0.word,
+            _thread: PhantomData,
+        }
+    }
+}
+
 impl<'era> RunAccess<'_, 'era> {
     /// A void error leaves dst unchanged. The loaded value becomes a root
     /// before the counted-reader lease is released, including heap pointers.
@@ -152,6 +161,26 @@ impl<'era> RunAccess<'_, 'era> {
 }
 
 impl SymbolMut<'_, '_, '_> {
+    pub(super) fn set_function_into(
+        &mut self,
+        index: usize,
+        value: Value,
+    ) -> Result<(), FunctionError> {
+        let registry = self.run.owner.registry;
+        let dst = self
+            .run
+            .owner
+            .local
+            .as_mut()
+            .and_then(|local| local.root_scratch.get_mut(index))
+            .ok_or(RegistrationError::StaleRegistration)?;
+        let authority = SymbolWriteToken {
+            _word: &registry.symbols.word,
+            _thread: PhantomData,
+        };
+        functions::write::fset(&registry.symbols, self.key.symbol, value, dst, &authority)
+    }
+
     fn store_into(&mut self, index: usize, value: Value, answer: Value) -> Result<(), GlobalError> {
         let registry = self.run.owner.registry;
         let local = self

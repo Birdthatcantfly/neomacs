@@ -20,6 +20,7 @@ pub(super) struct SymbolSidecar {
     poisoned: AtomicBool,
     backing: SymbolBacking,
     era: NonZeroU64,
+    pub(super) functions: functions::write::FunctionState,
 }
 impl SymbolSidecar {
     pub(super) fn new(backing: SymbolBacking, era: NonZeroU64) -> Self {
@@ -28,6 +29,7 @@ impl SymbolSidecar {
             poisoned: AtomicBool::new(false),
             backing,
             era,
+            functions: functions::write::FunctionState::new(),
         }
     }
     pub(super) fn ready(&self) -> Result<(), RegistrationError> {

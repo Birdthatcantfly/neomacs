@@ -210,6 +210,10 @@ impl Context {
     }
 
     fn recover_serial_context(&mut self, retired_dead_windows: bool) {
+        // The original returning continuation owns the current receiver.
+        // Retire parallel function publication before any serial allocation
+        // or entry; never retain or refresh a parked admission-header pointer.
+        self.obarray.refresh_admission();
         self.tagged_heap.install_tagged_heap();
         if retired_dead_windows {
             self.install_empty_dead_windows_table();

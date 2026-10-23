@@ -10,6 +10,27 @@ use crate::emacs_core::value::{HashTableTest, HashTableWeakness, LispHashTable};
 use crate::tagged::gc::{ParallelHeapEra, RegistrationError};
 
 struct ScratchScope(usize);
+
+#[test]
+fn p3sym_c4_cold_function_admission_refuses_live_legacy_roots() {
+    use crate::emacs_core::eval::SpecBinding;
+    let mut context = Context::new_minimal_vm_harness();
+    assert!(context.function_cells_quiescent());
+    context.jit_root_stack_top = 1;
+    let rooted_native = context.function_cells_quiescent();
+    context.jit_root_stack_top = 0;
+    assert!(!rooted_native);
+    let depth = context.specpdl.len();
+    context.specpdl.push(SpecBinding::Backtrace1 {
+        debug_on_exit: false,
+        function: TaggedValue::NIL,
+        arg: TaggedValue::NIL,
+    });
+    let legacy_call = context.function_cells_quiescent();
+    context.specpdl.truncate(depth);
+    assert!(!legacy_call);
+    assert!(context.function_cells_quiescent());
+}
 impl Drop for ScratchScope {
     fn drop(&mut self) {
         restore_scratch_gc_roots(self.0);

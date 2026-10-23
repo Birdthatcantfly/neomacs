@@ -137,6 +137,8 @@ impl Context {
         let frozen = FrozenLegacyRoots {
             heap: collector.heap_identity(),
             words: Vec::new(),
+            // No Context or legacy activation exists in this minimal World.
+            functions_quiescent: true,
         };
         let era = ParallelHeapEra::admit_rooted(collector, keeper, frozen)
             .unwrap_or_else(|e| panic!("minimal symbol fixture admission: {:?}", e.reason));

@@ -1,6 +1,6 @@
 //! C4 restricted call syntax and remaining preparation bodies. Direct
 //! function reads use the production sealed root-to-root API.
-use super::{FunctionError, FunctionOpKind, KeeperSymbols, OwnerRootSlot, RunAccess, SymbolHandle};
+use super::{FunctionError, FunctionOpKind, OwnerRootSlot, RunAccess, SymbolHandle};
 use std::num::NonZeroU32;
 
 /// Cache payload remains in this owner's existing root census. Epoch/symbol
@@ -55,14 +55,6 @@ pub(super) enum FunctionOp {
 }
 
 impl<'era> RunAccess<'_, 'era> {
-    pub(super) fn sym_fset_into(
-        &mut self,
-        _symbol: &SymbolHandle,
-        _src: &OwnerRootSlot<'era>,
-        _dst: &mut OwnerRootSlot<'era>,
-    ) -> Result<(), FunctionError> {
-        Err(FunctionError::MissingOperation(FunctionOpKind::Fset))
-    }
     pub(super) fn sym_fmakunbound_into(
         &mut self,
         _symbol: &SymbolHandle,
@@ -85,12 +77,6 @@ impl<'era> RunAccess<'_, 'era> {
         _fuel: NonZeroU32,
     ) -> Result<FunctionStep, FunctionError> {
         Err(FunctionError::MissingOperation(FunctionOpKind::CallStep))
-    }
-}
-
-impl KeeperSymbols<'_> {
-    pub(super) fn reconcile_functions(&mut self) -> Result<(), FunctionError> {
-        Err(FunctionError::MissingOperation(FunctionOpKind::Reconcile))
     }
 }
 
