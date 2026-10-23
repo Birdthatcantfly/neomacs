@@ -40,6 +40,7 @@ use text_measurement::TextMeasurement;
 mod fontification_boundary;
 mod mode_line_gc;
 mod mode_line_numeric_padding;
+mod mode_line_symbols;
 use fontification_boundary::{FontificationBoundaryAdmission, FontificationBoundaryMode};
 pub(crate) mod motion;
 
@@ -2487,6 +2488,8 @@ fn mode_line_fixed_symbol_value_in_state(
     vars.value(sym)
 }
 
+// Name-based baseline retained for fixed-key equivalence tests.
+#[cfg(test)]
 fn mode_line_symbol_value_in_state(
     vars: VariableView<'_>,
     _dynamic: &[OrderedRuntimeBindingMap],
@@ -2587,6 +2590,7 @@ fn mode_line_process_status_in_state(
         .unwrap_or("no process")
 }
 
+#[cfg(test)]
 fn mode_line_symbol_is_risky(obarray: &crate::emacs_core::symbol::Obarray, name: &str) -> bool {
     obarray
         .get_property_id(intern(name), ModeLineSymbol::RiskyLocalVariable.id())
@@ -2612,8 +2616,9 @@ fn mode_line_conditional_branch(cdr: Value, branch_is_then: bool) -> Option<Valu
 ///
 /// Corresponds to the `struct window *w` and `struct frame *f` parameters
 /// in GNU's `decode_mode_spec` (xdisp.c:29083).
-#[derive(Clone)]
 struct ModeLinePercentContext {
+    /// Identity reuse is scoped to this formatter pass and existing registry epoch.
+    dynamic_symbols: std::cell::RefCell<mode_line_symbols::DynamicSymbols>,
     /// Internal zero-based character offset of the first visible character.
     /// Derived from GNU `marker_position(w->start)`, which is Lisp one-based.
     window_start: usize,
@@ -2688,6 +2693,7 @@ impl BufferCodingDisplay {
 impl Default for ModeLinePercentContext {
     fn default() -> Self {
         Self {
+            dynamic_symbols: Default::default(),
             window_start: 0,
             window_end: 0,
             frame_name: None,
@@ -4247,8 +4253,12 @@ fn format_mode_line_recursive_rooted(
             // discarded the `(:eval (unless (display-graphic-p) "-%-"))`
             // dash-fill construct that bindings.el installs on TTY.
             if let Some(name) = format.as_symbol_name(symbol_mode)
-                && let Some(val) =
-                    mode_line_symbol_value_in_state(eval.variables(), &[], &eval.buffers, name)
+                && let Some((symbol, val)) = {
+                    let symbol = pctx.resolve_dynamic_symbol(name);
+                    symbol
+                        .value(eval.variables(), &eval.buffers)
+                        .map(|value| (symbol, value))
+                }
                 && !val.is_nil()
             {
                 if val.is_string() {
@@ -4270,7 +4280,7 @@ fn format_mode_line_recursive_rooted(
                         &val,
                         result,
                         depth + 1,
-                        risky || !mode_line_symbol_is_risky(&eval.obarray, name),
+                        risky || !symbol.is_risky(&eval.obarray),
                         selection.as_deref_mut(),
                     )?;
                 }
@@ -4354,13 +4364,10 @@ fn format_mode_line_recursive_rooted(
 
             if car.is_symbol(symbol_mode) && !car.is_symbol_named("t", symbol_mode) {
                 if let Some(sym_name) = car.as_symbol_name(symbol_mode)
-                    && mode_line_symbol_value_in_state(
-                        eval.variables(),
-                        &[],
-                        &eval.buffers,
-                        sym_name,
-                    )
-                    .is_some_and(|value| value.is_truthy())
+                    && pctx
+                        .resolve_dynamic_symbol(sym_name)
+                        .value(eval.variables(), &eval.buffers)
+                        .is_some_and(|value| value.is_truthy())
                     && let Some(branch) = mode_line_conditional_branch(cdr, true)
                 {
                     format_mode_line_recursive(
@@ -4452,7 +4459,10 @@ fn format_mode_line_recursive_in_state(
             // mode-line-end-spaces; see the note on the equivalent
             // branch in `format_mode_line_recursive`.
             if let Some(name) = format.as_bare_symbol_name()
-                && let Some(val) = mode_line_symbol_value_in_state(vars, dynamic, buffers, name)
+                && let Some((symbol, val)) = {
+                    let symbol = pctx.resolve_dynamic_symbol(name);
+                    symbol.value(vars, buffers).map(|value| (symbol, value))
+                }
                 && !val.is_nil()
             {
                 if val.is_string() {
@@ -4468,7 +4478,7 @@ fn format_mode_line_recursive_in_state(
                     &val,
                     result,
                     depth + 1,
-                    risky || !mode_line_symbol_is_risky(obarray, name),
+                    risky || !symbol.is_risky(obarray),
                 ) {
                     return true;
                 }
@@ -4535,7 +4545,9 @@ fn format_mode_line_recursive_in_state(
 
             if car.is_bare_symbol() && !car.is_bare_symbol_named("t") {
                 let branch = if let Some(sym_name) = car.as_bare_symbol_name()
-                    && mode_line_symbol_value_in_state(vars, dynamic, buffers, sym_name)
+                    && pctx
+                        .resolve_dynamic_symbol(sym_name)
+                        .value(vars, buffers)
                         .is_some_and(|value| value.is_truthy())
                 {
                     mode_line_conditional_branch(cdr, true)
@@ -4626,7 +4638,10 @@ fn format_mode_line_recursive_in_state_with_eval_rooted(
             // mode-line-end-spaces; they are ordinary symbols whose
             // value must be resolved and recursed on.
             if let Some(name) = format.as_bare_symbol_name()
-                && let Some(val) = mode_line_symbol_value_in_state(vars, dynamic, buffers, name)
+                && let Some((symbol, val)) = {
+                    let symbol = pctx.resolve_dynamic_symbol(name);
+                    symbol.value(vars, buffers).map(|value| (symbol, value))
+                }
                 && !val.is_nil()
             {
                 if val.is_string() {
@@ -4643,7 +4658,7 @@ fn format_mode_line_recursive_in_state_with_eval_rooted(
                         &val,
                         result,
                         depth + 1,
-                        risky || !mode_line_symbol_is_risky(obarray, name),
+                        risky || !symbol.is_risky(obarray),
                         eval_form,
                         roots,
                     )?;
@@ -4737,7 +4752,9 @@ fn format_mode_line_recursive_in_state_with_eval_rooted(
 
             if car.is_bare_symbol() && !car.is_bare_symbol_named("t") {
                 let branch = if let Some(sym_name) = car.as_bare_symbol_name()
-                    && mode_line_symbol_value_in_state(vars, dynamic, buffers, sym_name)
+                    && pctx
+                        .resolve_dynamic_symbol(sym_name)
+                        .value(vars, buffers)
                         .is_some_and(|value| value.is_truthy())
                 {
                     mode_line_conditional_branch(cdr, true)
