@@ -99,7 +99,6 @@ fn synthetic_matrix(base: i64, n_body: usize) -> RetainedWindowMatrix {
         chrome_uses_column: false,
         chrome_modified_flag: false,
         chrome_fingerprints: None,
-        display_when: Default::default(),
     }
 }
 

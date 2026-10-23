@@ -918,11 +918,6 @@ pub struct LayoutEngine {
     /// One renderer-inert full mini measurement. Owned numeric attempt result;
     /// never shared with other Context mutators or retained presentations.
     mini_preparation_height: Option<f32>,
-    /// This frame attempt's `when` record per window (settled after each
-    /// walk, inherited by a reuse without evaluation); committed into the
-    /// retained matrices with the accepted frame.  A frame has few windows:
-    /// a vector cleared per attempt keeps its capacity and allocates once.
-    display_when_records: Vec<(DisplayWindowId, crate::display_when::DisplayWhenRecord)>,
     /// Granted only by the canonical walk's semantic reuse barrier. Geometry
     /// queries with evaluated Lisp conditions must never skip that walk.
     query_body_reuse_allowed: bool,
@@ -975,9 +970,6 @@ pub struct LayoutEngine {
     /// Last accepted layout per window, used by cursor, scroll, and edit
     /// replay. Speculative attempts never replace this state.
     retained_window_matrices: rustc_hash::FxHashMap<DisplayWindowId, RetainedWindowMatrix>,
-    /// Whether any loaded retained matrix carries rows whose `when` answers
-    /// stayed unverified; false lets every window skip that lookup.
-    retained_any_unverified: bool,
     prepared_viewports: PreparedViewports,
     scroll_coverage: scroll_coverage::ScrollCoverage,
     /// Every OTHER frame's retained state, parked while this one is laid out.
@@ -1487,7 +1479,6 @@ impl LayoutEngine {
         self.face_composed_sources = None;
         self.face_tty_realization = None;
         self.retained_window_matrices.clear();
-        self.retained_any_unverified = false;
         self.prepared_viewports = PreparedViewports::default();
         self.scroll_coverage.cancel();
         self.retained_window_chrome_metrics.clear();
@@ -1511,7 +1502,6 @@ impl LayoutEngine {
         self.prepared_window_ids.clear();
         self.scroll_window_ids.clear();
         self.edit_window_ids.clear();
-        self.display_when_records.clear();
     }
 
     fn accept_frame_relayout_request(
@@ -1657,7 +1647,6 @@ impl LayoutEngine {
             query_target_prefix_policy: false,
             mini_preparation_height: None,
             query_body_reuse_allowed: false,
-            display_when_records: Default::default(),
             query_cache: Default::default(),
             font_metrics: Some(FontMetricsService::new()),
             font_sizing: FontSizing::native_gui(),
@@ -1670,7 +1659,6 @@ impl LayoutEngine {
             face_composed_sources: None,
             face_tty_realization: None,
             retained_window_matrices: rustc_hash::FxHashMap::default(),
-            retained_any_unverified: false,
             prepared_viewports: PreparedViewports::default(),
             scroll_coverage: scroll_coverage::ScrollCoverage::default(),
             retained_by_frame: rustc_hash::FxHashMap::default(),
@@ -1703,7 +1691,6 @@ impl LayoutEngine {
             query_target_prefix_policy: false,
             mini_preparation_height: None,
             query_body_reuse_allowed: false,
-            display_when_records: Default::default(),
             query_cache: Default::default(),
             font_metrics: None,
             font_sizing: FontSizing::native_gui(),
@@ -1716,7 +1703,6 @@ impl LayoutEngine {
             face_composed_sources: None,
             face_tty_realization: None,
             retained_window_matrices: rustc_hash::FxHashMap::default(),
-            retained_any_unverified: false,
             prepared_viewports: PreparedViewports::default(),
             scroll_coverage: scroll_coverage::ScrollCoverage::default(),
             retained_by_frame: rustc_hash::FxHashMap::default(),
@@ -2340,6 +2326,10 @@ impl LayoutEngine {
                 .other_window_buffer_changed(evaluator.buffer_manager());
 
             self.reset_frame_attempt_state();
+            // A relayout pass must not inherit `when` records settled by the
+            // rejected pass. The replay budget in the same ledger is per
+            // logical attempt, not per pass, so it stays.
+            lisp_ledger.display_when.begin_frame_pass();
             let mut face_attempt = committed_face_arena.begin_attempt();
             self.frame_output.set_face_attempt(face_attempt.clone());
             self.frame_output.set_presentation_id(presentation_id);
@@ -3831,17 +3821,6 @@ impl LayoutEngine {
                                     .get(&window_id)
                                     .and_then(|prev| prev.chrome_fingerprints.clone())
                             },
-                            // No record (a window whose leaf did not settle a
-                            // walk) is not evidence: reuse must evaluate.
-                            display_when: crate::display_when::DisplayWhenRetention {
-                                record: self
-                                    .display_when_records
-                                    .iter()
-                                    .rev()
-                                    .find(|(id, _)| *id == window_id)
-                                    .map_or(crate::display_when::DisplayWhenRecord::Unknown, |(_, record)| *record),
-                                mode_line_generation: evaluator.chrome_dirty().all_generation(),
-                            },
                         },
                     );
                 }
@@ -3981,7 +3960,6 @@ impl LayoutEngine {
             self.frame_face_arenas.get(&frame_id),
         );
         self.retained_window_matrices = next_retained_window_matrices;
-        self.note_retained_display_when();
         self.frame_face_arenas.insert(frame_id, sealed_face_arena);
         for buffer_id in acked_buffer_ids {
             if let Some(buffer) = evaluator
@@ -4006,9 +3984,37 @@ impl LayoutEngine {
             evaluator.note_chrome_generated(neovm_core::window::WindowId(window_id as u64));
         }
 
+        // The accepted `when` dependency record per window, committed with
+        // the sealed presentation exactly like the retained matrices.  The
+        // chrome-dirty generation is frame-wide: one value describes every
+        // window the sealed pass laid out.
+        let display_when_generation = evaluator.chrome_dirty().all_generation();
+        let mut accepted_display_when: rustc_hash::FxHashMap<
+            DisplayWindowId,
+            crate::display_when::DisplayWhenRetention,
+        > = lisp_ledger
+            .display_when
+            .settled_entries()
+            .map(|(window, record)| {
+                (
+                    DisplayWindowId::new(window.0 as i64),
+                    crate::display_when::DisplayWhenRetention {
+                        record,
+                        mode_line_generation: display_when_generation,
+                    },
+                )
+            })
+            .collect();
+        // Exactly the windows this sealed presentation committed (the same
+        // set the retained-matrix commit writes); a window that settled but
+        // did not reach the presentation is not evidence.
+        accepted_display_when.retain(|window, _| curr_window_infos.contains_key(window));
         self.frame_visual_histories.commit(
             frame_id,
-            FrameVisualHistory::from_accepted_presentation(curr_window_infos),
+            FrameVisualHistory::from_accepted_presentation(
+                curr_window_infos,
+                accepted_display_when,
+            ),
         );
         {
             let frame_manager = evaluator.frame_manager_mut();
@@ -4562,14 +4568,6 @@ impl LayoutEngine {
         self.retained_window_matrices = loaded.matrices;
         self.retained_window_chrome_metrics = loaded.chrome_metrics;
         self.retained_frame = Some(frame_id);
-        self.note_retained_display_when();
-    }
-
-    /// Recompute [`Self::retained_any_unverified`] for the loaded matrices.
-    fn note_retained_display_when(&mut self) {
-        self.retained_any_unverified = self.retained_window_matrices.values().any(|retained| {
-            retained.display_when.record == crate::display_when::DisplayWhenRecord::Unknown
-        });
     }
 
     fn build_cursor_only_replay(
@@ -5273,15 +5271,19 @@ impl LayoutEngine {
         // the minibuffer, `show-trailing-whitespace`, line numbers and an
         // overlay arrow.  Anything else that can move the rows is in the
         // retained key the replay already matched.
+        // The accepted dependency record for this window. It lives in the
+        // sealed per-frame visual history, not in the retained matrix and not
+        // in LayoutEngine: per-thread state may not grow.
+        let accepted_display_when = self
+            .frame_visual_histories
+            .get(frame_id)
+            .and_then(|history| history.display_when_for(DisplayWindowId::new(params.window_id)));
         let display_when_reuse = cursor_only_replay.is_some()
-            && self
-                .retained_window_matrices
-                .get(&DisplayWindowId::new(params.window_id))
-                .is_some_and(|retained| {
-                    retained.display_when.record == crate::display_when::DisplayWhenRecord::Known
-                        && retained.display_when.mode_line_generation
-                            == evaluator.chrome_dirty().all_generation()
-                })
+            && accepted_display_when.is_some_and(|retention| {
+                retention.record == crate::display_when::DisplayWhenRecord::Known
+                    && retention.mode_line_generation
+                        == evaluator.chrome_dirty().all_generation()
+            })
             // Rows from the retained matrix: a replay of a prepared viewport
             // carries rows the record does not describe.
             && !self
@@ -5347,13 +5349,13 @@ impl LayoutEngine {
         // fallback, an unevaluable site, a failed evaluation) are never
         // reused, even when this attempt's scan finds nothing to evaluate:
         // the clauses they were drawn by lie outside the scan.
-        let retained_rows_unverified = self.retained_any_unverified
-            && self
-                .retained_window_matrices
-                .get(&DisplayWindowId::new(params.window_id))
-                .is_some_and(|retained| {
-                    retained.display_when.record == crate::display_when::DisplayWhenRecord::Unknown
-                });
+        let retained_rows_unverified = self
+            .frame_visual_histories
+            .get(frame_id)
+            .is_some_and(|history| history.any_display_when_unverified())
+            && accepted_display_when.is_some_and(|retention| {
+                retention.record == crate::display_when::DisplayWhenRecord::Unknown
+            });
         let (cursor_only_replay, scroll_replay, is_edit) = if display_when_reuse {
             (cursor_only_replay, None, false)
         } else if display_when.allows_body_reuse() && !retained_rows_unverified {
@@ -5671,8 +5673,10 @@ impl LayoutEngine {
                     tracing::trace!(target: "neomacs_layout_engine::display_when",
                         window = window_id.0, ?record, display_when_reuse,
                         "walk's `when' record settled");
-                    self.display_when_records
-                        .push((DisplayWindowId::new(params.window_id), record));
+                    // The record lives with the frame attempt's display-when
+                    // ledger (a stack local), not in LayoutEngine: it must not
+                    // add bytes to the thread-local redisplay runtime.
+                    lisp_ledger.display_when.settle_window(window_id, record);
                 }
             }
         }

@@ -437,11 +437,14 @@ pub(crate) enum DisplayWhenRecord {
     Unknown,
 }
 
-/// What a retained matrix remembers about the `when` answers its rows were
-/// built from, for GNU's cursor-motion reuse: the record, and the chrome-dirty
-/// generation (GNU `update_mode_lines`, folding in
+/// What the accepted frame remembers about the `when` answers a window's
+/// retained rows were built from, for GNU's cursor-motion reuse: the record,
+/// and the chrome-dirty generation (GNU `update_mode_lines`, folding in
 /// `prevent_redisplay_optimizations_p` from `force-mode-line-update`) at the
 /// redisplay that produced them.  Numeric: no Lisp object outlives the frame.
+/// Stored per window in [`crate::frame_visual_history::FrameVisualHistory`],
+/// which is heap-backed per frame; it must not grow `RetainedWindowMatrix`
+/// (embedded inline in the thread-local `ScrollCoverage`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DisplayWhenRetention {
     pub(crate) record: DisplayWhenRecord,
@@ -458,11 +461,14 @@ pub(crate) enum DisplayWhenSettlement {
 }
 
 /// The answers evaluated after a walk, carried to the frame relayout that
-/// replays it, and the one-replay budget per window.  Owned by one logical
-/// frame attempt (`RedisplayLispLedger`); its keys' Lisp objects are pushed
-/// onto the scratch GC root stack under the frame function's scope when they
-/// are carried, so the Lisp the replay runs first (fontification, the span
-/// scan) cannot collect them and let another object take their address.
+/// replays it, the one-replay budget per window, and the record each window's
+/// walk settled in the current frame pass.  Owned by one logical frame
+/// attempt (`RedisplayLispLedger`, a stack local of the frame function), so
+/// none of it is thread-local or otherwise per-thread state that outlives an
+/// attempt; its keys' Lisp objects are pushed onto the scratch GC root stack
+/// under the frame function's scope when they are carried, so the Lisp the
+/// replay runs first (fontification, the span scan) cannot collect them and
+/// let another object take their address.
 #[derive(Debug, Default)]
 pub(crate) struct DisplayWhenReplayLedger {
     windows: FxHashMap<neovm_core::window::WindowId, DisplayWhenCarry>,
@@ -472,6 +478,9 @@ pub(crate) struct DisplayWhenReplayLedger {
 struct DisplayWhenCarry {
     answers: FxHashMap<DisplayWhenSiteKey, bool>,
     replayed: bool,
+    /// What this frame pass's walk settled for the window; `None` until a
+    /// leaf settles one (a window the pass did not lay out keeps no record).
+    settled: Option<DisplayWhenRecord>,
 }
 
 impl DisplayWhenReplayLedger {
@@ -488,6 +497,36 @@ impl DisplayWhenReplayLedger {
             .get(&window)
             .map(|carry| &carry.answers)
             .filter(|answers| !answers.is_empty())
+    }
+
+    /// Record what this frame pass's walk settled for WINDOW.  Last write
+    /// wins, like the per-frame list this replaces; the replay budget and its
+    /// carried answers are untouched.
+    #[inline]
+    pub(crate) fn settle_window(
+        &mut self,
+        window: neovm_core::window::WindowId,
+        record: DisplayWhenRecord,
+    ) {
+        self.windows.entry(window).or_default().settled = Some(record);
+    }
+
+    /// Every record this frame pass settled, in no particular order, for the
+    /// accepted-frame dependency map.
+    pub(crate) fn settled_entries(
+        &self,
+    ) -> impl Iterator<Item = (neovm_core::window::WindowId, DisplayWhenRecord)> + '_ {
+        self.windows
+            .iter()
+            .filter_map(|(window, carry)| carry.settled.map(|record| (*window, record)))
+    }
+
+    /// Start a new frame pass: forget the records the previous pass settled.
+    /// The one-replay budget is per logical attempt, not per pass, and stays.
+    pub(crate) fn begin_frame_pass(&mut self) {
+        for carry in self.windows.values_mut() {
+            carry.settled = None;
+        }
     }
 
     /// How many replays this ledger granted (tests).

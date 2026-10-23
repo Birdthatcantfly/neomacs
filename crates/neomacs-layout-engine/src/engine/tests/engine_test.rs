@@ -37527,12 +37527,15 @@ fn display_when_unverified_rows_are_not_reused_on_cursor_motion() {
     let mut engine = LayoutEngine::new();
     engine.layout_frame_rust(&mut eval, frame_id);
     let window = eval.frame_manager().get(frame_id).unwrap().selected_window;
-    let retained = engine
-        .retained_window_matrices
-        .get(&DisplayWindowId::new(window.0 as i64))
-        .expect("retained matrix");
+    let history = engine
+        .frame_visual_histories
+        .get(frame_id)
+        .expect("accepted visual history");
     assert_eq!(
-        retained.display_when.record,
+        history
+            .display_when_for(DisplayWindowId::new(window.0 as i64))
+            .expect("window's accepted `when` record")
+            .record,
         crate::display_when::DisplayWhenRecord::Unknown
     );
     let before = eval.eval_str("dw-b").unwrap().as_fixnum().unwrap();

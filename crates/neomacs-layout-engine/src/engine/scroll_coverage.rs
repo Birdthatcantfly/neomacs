@@ -866,7 +866,6 @@ impl LayoutEngine {
             chrome_uses_column: false,
             chrome_modified_flag: retained.chrome_modified_flag,
             chrome_fingerprints: None,
-            display_when: Default::default(),
         };
         tracing::debug!(target: "neomacs_layout_engine::scroll_coverage",
             window = window.0, start = start.get(), row_count,
