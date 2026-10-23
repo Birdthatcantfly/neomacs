@@ -8,10 +8,14 @@
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, JoinHandle};
+#[cfg(not(unix))]
+use std::thread;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::thread_comm::{InputEvent, LifecycleCommand, RenderCommand, RenderComms};
+use crate::thread_comm::{InputEvent, RenderComms};
+#[cfg(not(unix))]
+use crate::thread_comm::{LifecycleCommand, RenderCommand};
 #[cfg(not(unix))]
 use crossterm::event::Event;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -155,83 +159,6 @@ fn raw_tty_input_event(bytes: Vec<u8>) -> InputEvent {
     }
 }
 
-#[cfg(unix)]
-fn read_tty_events(
-    tx: crossbeam_channel::Sender<InputEvent>,
-    stop: Arc<AtomicBool>,
-    _paused: Arc<AtomicBool>,
-) {
-    let mut last_size = crossterm::terminal::size().ok();
-
-    while !stop.load(Ordering::Relaxed) {
-        if let Ok(size) = crossterm::terminal::size()
-            && last_size != Some(size)
-        {
-            last_size = Some(size);
-            let event = InputEvent::WindowResize {
-                width: size.0 as u32,
-                height: size.1 as u32,
-                scale_factor: 1.0,
-                emacs_frame_id: 0,
-            };
-            if tx.send(event).is_err() {
-                tracing::warn!("tty_input: channel closed");
-                return;
-            }
-        }
-
-        let mut pollfd = libc::pollfd {
-            fd: libc::STDIN_FILENO,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // This timeout only lets the reader observe stop/resize state. It is
-        // not an input-sequence or ESC ambiguity deadline.
-        let poll_timeout_ms = TTY_READER_POLL_INTERVAL.as_millis() as libc::c_int;
-        let poll_result = unsafe { libc::poll(&mut pollfd, 1, poll_timeout_ms) };
-        if poll_result < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() != io::ErrorKind::Interrupted {
-                tracing::warn!("tty_input: poll error: {}", err);
-                thread::sleep(Duration::from_millis(100));
-            }
-            continue;
-        }
-        if poll_result == 0 || pollfd.revents & libc::POLLIN == 0 {
-            continue;
-        }
-
-        let mut buf = [0u8; GNU_KBD_BUFFER_SIZE - 1];
-        let nread = unsafe {
-            libc::read(
-                libc::STDIN_FILENO,
-                buf.as_mut_ptr().cast::<libc::c_void>(),
-                buf.len(),
-            )
-        };
-
-        if nread < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() != io::ErrorKind::Interrupted && err.kind() != io::ErrorKind::WouldBlock {
-                tracing::warn!("tty_input: read error: {}", err);
-                thread::sleep(Duration::from_millis(100));
-            }
-            continue;
-        }
-        if nread == 0 {
-            thread::sleep(Duration::from_millis(10));
-            continue;
-        }
-
-        let event = raw_tty_input_event(buf[..nread as usize].to_vec());
-        tracing::debug!("tty_input: raw byte batch {:?}", event);
-        if tx.send(event).is_err() {
-            tracing::warn!("tty_input: channel closed");
-            return;
-        }
-    }
-}
-
 #[cfg(not(unix))]
 fn read_tty_events(
     tx: crossbeam_channel::Sender<InputEvent>,
@@ -290,23 +217,60 @@ fn read_tty_events(
 // Public API
 // ---------------------------------------------------------------------------
 
-/// A standalone TTY input reader that forwards terminal key and resize
-/// events to `RenderComms` using crossterm.
+/// A standalone TTY input reader that publishes byte and resize facts through
+/// the existing bounded RenderComms channel. Non-Unix keeps crossterm mapping.
 ///
 /// Used by the `-nw` path when rendering goes through `TtyRif` on the
 /// evaluator thread.
+#[derive(Debug)]
 pub struct TtyInputReader {
     handle: Option<JoinHandle<()>>,
     stop: Arc<AtomicBool>,
+    #[cfg(unix)]
+    capacity_notifier: TtyInputCapacityNotifier,
 }
 
+#[cfg(unix)]
+mod unix_reader;
+#[cfg(unix)]
+pub use unix_reader::TtyInputCapacityNotifier;
+
+/// Non-Unix input retains its existing forwarding path and has no capacity wake.
+#[cfg(not(unix))]
+#[derive(Clone, Debug)]
+pub struct TtyInputCapacityNotifier {
+    _private: (),
+}
+
+#[cfg(not(unix))]
+impl TtyInputCapacityNotifier {
+    #[must_use = "a failed capacity wake can delay queued TTY input"]
+    pub fn notify_capacity(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+// The owner and bridge may share the notifier; the join/stop handle may move
+// between native threads. These compile-only contracts execute no code.
+const _: fn() = || {
+    fn assert_shareable_debug<T: Send + Sync + std::fmt::Debug>() {}
+    assert_shareable_debug::<TtyInputCapacityNotifier>();
+    assert_shareable_debug::<TtyInputReader>();
+};
+
 impl TtyInputReader {
-    /// Spawn a background thread that reads terminal input and sends events
-    /// through `comms.send_input()`.
-    pub fn spawn(comms: RenderComms) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let input_stop = Arc::clone(&stop);
-        let handle = thread::Builder::new()
+    /// Spawn terminal input acquisition. Unix owns its pending FIFO and direct
+    /// bounded delivery; non-Unix retains its existing forwarding worker.
+    pub fn spawn(comms: RenderComms) -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            unix_reader::spawn_default(comms)
+        }
+        #[cfg(not(unix))]
+        {
+            let stop = Arc::new(AtomicBool::new(false));
+            let input_stop = Arc::clone(&stop);
+            let handle = thread::Builder::new()
             .name("tty-input-reader".to_string())
             .spawn(move || {
                 let pause = Arc::new(AtomicBool::new(false));
@@ -343,17 +307,59 @@ impl TtyInputReader {
                     let _ = h.join();
                 }
             })
-            .expect("Failed to spawn tty-input-reader thread");
+            ?;
 
-        Self {
-            handle: Some(handle),
-            stop,
+            Ok(Self {
+                handle: Some(handle),
+                stop,
+            })
         }
+    }
+
+    /// Capacity notification for the primary bridge after it receives an event.
+    pub fn capacity_notifier(&self) -> Option<TtyInputCapacityNotifier> {
+        #[cfg(unix)]
+        {
+            Some(self.capacity_notifier.clone())
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    }
+
+    fn request_stop(&self) -> io::Result<()> {
+        self.stop.store(true, Ordering::Release);
+        #[cfg(unix)]
+        {
+            self.capacity_notifier.notify_owner_stop()
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(())
+        }
+    }
+
+    #[cfg(all(unix, test))]
+    fn spawn_with_test_source(
+        comms: RenderComms,
+        input: std::os::fd::OwnedFd,
+        size_query: Box<dyn FnMut() -> io::Result<(u16, u16)> + Send>,
+        hook: Option<Arc<dyn Fn(unix_reader::ReaderTestObservation) + Send + Sync>>,
+    ) -> io::Result<Self> {
+        unix_reader::spawn_with_source(comms, input, size_query, hook)
+    }
+
+    #[cfg(all(unix, test))]
+    fn request_stop_for_test(&self) -> io::Result<()> {
+        self.request_stop()
     }
 
     /// Signal the input reader to stop and wait for it to finish.
     pub fn join(mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        if let Err(error) = self.request_stop() {
+            tracing::warn!(%error, "tty_input: failed to wake stopped reader");
+        }
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -363,3 +369,7 @@ impl TtyInputReader {
 #[cfg(test)]
 #[path = "tty_input/tests/tty_input_test.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "tty_input/tests/tty_relay_test.rs"]
+mod relay_tests;

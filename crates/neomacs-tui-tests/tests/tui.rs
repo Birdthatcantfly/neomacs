@@ -153,6 +153,9 @@ mod strict_grid;
 mod tty_color_index;
 #[path = "tty_input.rs"]
 mod tty_input;
+#[cfg(test)]
+#[path = "tty_relay.rs"]
+mod tty_relay;
 #[path = "window_divider_overlay_arrow.rs"]
 mod window_divider_overlay_arrow;
 #[path = "window_end_oracle.rs"]
