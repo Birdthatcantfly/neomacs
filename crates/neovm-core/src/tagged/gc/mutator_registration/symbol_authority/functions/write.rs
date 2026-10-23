@@ -1,5 +1,6 @@
 //! Prepared, bounded function writes and stopped serial-cache reconciliation.
 use super::*;
+use crate::emacs_core::symbol::parallel::FunctionUpdate;
 use std::cell::UnsafeCell;
 
 struct FunctionRecord {
@@ -138,14 +139,27 @@ impl<'era> RunAccess<'_, 'era> {
             .and_then(|local| local.root_scratch.get(src.index))
             .ok_or(RegistrationError::StaleRegistration)?
             .value();
-        self.symbol_mut(symbol)?.set_function_into(dst.index, value)
+        self.symbol_mut(symbol)?
+            .write_function_into(dst.index, FunctionUpdate::Set(value))
+    }
+
+    /// Store the explicit-unbound state, returning the original symbol even
+    /// for a repeated no-op. Every validation precedes mutation of the answer.
+    pub fn sym_fmakunbound_into(
+        &mut self,
+        symbol: &SymbolHandle,
+        dst: &mut OwnerRootSlot<'era>,
+    ) -> Result<(), FunctionError> {
+        globals::check_home(self, dst)?;
+        self.symbol_mut(symbol)?
+            .write_function_into(dst.index, FunctionUpdate::Unbind)
     }
 }
 
-pub(in crate::tagged::gc::mutator_registration::symbol_authority) fn fset(
+pub(in crate::tagged::gc::mutator_registration::symbol_authority) fn publish(
     symbols: &SymbolSidecar,
     id: SymId,
-    value: Value,
+    update: FunctionUpdate,
     dst: &mut MarkWord,
     authority: &SymbolWriteToken<'_>,
 ) -> Result<(), FunctionError> {
@@ -156,11 +170,17 @@ pub(in crate::tagged::gc::mutator_registration::symbol_authority) fn fset(
         .iter_mut()
         .find(|r| r.symbol == id)
         .ok_or(RegistrationError::Publication)?;
-    if !closed_definition(value, record.lambda) {
-        return Err(FunctionError::UnsupportedDefinition);
-    }
+    let answer = match update {
+        FunctionUpdate::Set(value) => {
+            if !closed_definition(value, record.lambda) {
+                return Err(FunctionError::UnsupportedDefinition);
+            }
+            value
+        }
+        FunctionUpdate::Unbind => Value::from_sym_id(id),
+    };
     // SAFETY: retained World and exclusive word, no callback or structural change.
-    let planned = unsafe { symbols.backing.plan_fset(id, value, authority) }?;
+    let planned = unsafe { symbols.backing.plan_function_write(id, update, authority) }?;
     if let Some(commit) = planned {
         if record.previous.is_none() {
             record.previous = Some(MarkWord::of(commit.previous));
@@ -168,12 +188,16 @@ pub(in crate::tagged::gc::mutator_registration::symbol_authority) fn fset(
         symbols.functions.dirty.store(true, Ordering::Release);
         // Original legacy target is now a stopped trace obligation. Every
         // remaining store is allocation-free; unexpected refusal is terminal.
-        if let Err(error) = unsafe { symbols.backing.commit_fset(id, value, commit, authority) } {
+        if let Err(error) = unsafe {
+            symbols
+                .backing
+                .commit_function_write(id, update, commit, authority)
+        } {
             symbols.poison();
             return Err(error);
         }
     }
-    *dst = MarkWord::of(value);
+    *dst = MarkWord::of(answer);
     Ok(())
 }
 

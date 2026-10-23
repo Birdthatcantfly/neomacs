@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 mod functions;
+pub(crate) use functions::FunctionUpdate;
 mod write;
 
 use super::{Obarray, SymbolTrappedWrite, ValueCell};

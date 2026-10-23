@@ -55,6 +55,8 @@ enum InitialFunction {
     Empty,
     Unbound,
     Exhausted,
+    ExhaustedEmpty,
+    ExhaustedUnbound,
 }
 fn fixture(
     kind: PlainSymbolBacking,
@@ -82,6 +84,14 @@ fn fixture_config(
             InitialFunction::Empty => obarray.clear_function_silent_id(ids[0]),
             InitialFunction::Unbound => obarray.fmakunbound_id(ids[0]),
             InitialFunction::Exhausted => obarray.set_function_epoch_for_test(u64::MAX - 1),
+            InitialFunction::ExhaustedEmpty => {
+                obarray.clear_function_silent_id(ids[0]);
+                obarray.set_function_epoch_for_test(u64::MAX - 1);
+            }
+            InitialFunction::ExhaustedUnbound => {
+                obarray.fmakunbound_id(ids[0]);
+                obarray.set_function_epoch_for_test(u64::MAX - 1);
+            }
         },
         |era, ids| {
             let handles: Vec<_> = ids
@@ -272,7 +282,10 @@ fn p3sym_c4_plain_function() {
 fn p3sym_c4_plain_fset() {
     primitive(PlainSymbolBacking::Unprojected, FunctionOpKind::Fset);
 }
-red!(p3sym_c4_red_plain_fmakunbound, Unprojected, Fmakunbound);
+#[test]
+fn p3sym_c4_plain_fmakunbound() {
+    primitive(PlainSymbolBacking::Unprojected, FunctionOpKind::Fmakunbound);
+}
 red!(p3sym_c4_red_plain_call, Unprojected, CallBegin);
 #[test]
 fn p3sym_c4_projected_function() {
@@ -282,7 +295,10 @@ fn p3sym_c4_projected_function() {
 fn p3sym_c4_projected_fset() {
     primitive(PlainSymbolBacking::Projected, FunctionOpKind::Fset);
 }
-red!(p3sym_c4_red_projected_fmakunbound, Projected, Fmakunbound);
+#[test]
+fn p3sym_c4_projected_fmakunbound() {
+    primitive(PlainSymbolBacking::Projected, FunctionOpKind::Fmakunbound);
+}
 red!(p3sym_c4_red_projected_call, Projected, CallBegin);
 
 #[test]
@@ -537,5 +553,191 @@ fn p3sym_c4_fset_refuses_unprepared_unsupported_and_stale_homes() {
             assert_eq!(run.function_facts_for_test(&handles[0]).unwrap(), before);
         })
         .expect("unsupported operands and stale homes preserve cell/version/answer");
+    }
+}
+
+#[test]
+fn p3sym_c4_fmakunbound_transitions_and_exact_identity() {
+    for kind in [
+        PlainSymbolBacking::Unprojected,
+        PlainSymbolBacking::Projected,
+    ] {
+        for initial in [
+            InitialFunction::Bound,
+            InitialFunction::Empty,
+            InitialFunction::Unbound,
+        ] {
+            fixture_state(kind, initial, |run, handles, homes| {
+                let before = run.function_facts_for_test(&handles[0]).unwrap();
+                run.sym_fmakunbound_into(&handles[0], &mut homes.dst)
+                    .unwrap();
+                let identity =
+                    homes.dst.word_for_test(run) == Value::from_sym_id(homes.symbol).bits();
+                assert_eq!(
+                    crate::emacs_core::print_value(&Value::bool_val(identity)),
+                    oracle()[2]
+                );
+                let after = run.function_facts_for_test(&handles[0]).unwrap();
+                let changed = !matches!(initial, InitialFunction::Unbound);
+                assert_eq!(after.0, before.0 + u64::from(changed));
+                assert_eq!(after.1, if changed { after.0 } else { before.1 });
+                assert_eq!(after.2, changed);
+                run.sym_function_into(&handles[0], &mut homes.cache)
+                    .unwrap();
+                let nil = oracle()[16]
+                    .trim_start_matches('(')
+                    .split_whitespace()
+                    .next()
+                    .unwrap();
+                assert_eq!(
+                    crate::emacs_core::print_value(&Value::from_bits(
+                        homes.cache.word_for_test(run)
+                    )),
+                    nil
+                );
+                run.sym_fmakunbound_into(&handles[0], &mut homes.dst)
+                    .unwrap();
+                assert_eq!(
+                    homes.dst.word_for_test(run),
+                    Value::from_sym_id(homes.symbol).bits()
+                );
+                assert_eq!(run.function_facts_for_test(&handles[0]).unwrap(), after);
+            })
+            .expect("GNU unbind identity/state, repeated no-op, and stopped discharge");
+        }
+    }
+}
+
+#[test]
+fn p3sym_c4_fmakunbound_set_nil_and_two_symbol_epochs() {
+    for kind in [
+        PlainSymbolBacking::Unprojected,
+        PlainSymbolBacking::Projected,
+    ] {
+        fixture(kind, |run, handles, homes| {
+            let left = run.function_facts_for_test(&handles[0]).unwrap();
+            let right = run.function_facts_for_test(&handles[1]).unwrap();
+            run.sym_fmakunbound_into(&handles[0], &mut homes.dst)
+                .unwrap();
+            let unbound = run.function_facts_for_test(&handles[0]).unwrap();
+            assert_eq!(unbound, (left.0 + 1, left.0 + 1, true));
+            assert_eq!(
+                run.function_facts_for_test(&handles[1]).unwrap(),
+                (unbound.0, right.1, true)
+            );
+            run.sym_function_into(&handles[0], &mut homes.cache)
+                .unwrap();
+            run.sym_fset_into(&handles[0], &homes.cache, &mut homes.dst)
+                .unwrap();
+            let empty = run.function_facts_for_test(&handles[0]).unwrap();
+            assert_eq!(empty, (unbound.0 + 1, unbound.0 + 1, true));
+            run.sym_fset_into(&handles[0], &homes.cache, &mut homes.dst)
+                .unwrap();
+            assert_eq!(run.function_facts_for_test(&handles[0]).unwrap(), empty);
+            run.sym_fmakunbound_into(&handles[1], &mut homes.dst)
+                .unwrap();
+            let second = run.function_facts_for_test(&handles[1]).unwrap();
+            assert_eq!(second, (empty.0 + 1, empty.0 + 1, true));
+            assert_eq!(run.function_facts_for_test(&handles[0]).unwrap().1, empty.1);
+            run.sym_fmakunbound_into(&handles[0], &mut homes.dst)
+                .unwrap();
+            assert_eq!(
+                run.function_facts_for_test(&handles[0]).unwrap(),
+                (second.0 + 1, second.0 + 1, true)
+            );
+            assert_eq!(
+                homes.dst.word_for_test(run),
+                Value::from_sym_id(homes.symbol).bits()
+            );
+        })
+        .expect("set NIL clears explicit state, mixed-symbol writes keep unique epochs");
+    }
+}
+
+#[test]
+fn p3sym_c4_fmakunbound_exhaustion_preserves_state_and_answer() {
+    for kind in [
+        PlainSymbolBacking::Unprojected,
+        PlainSymbolBacking::Projected,
+    ] {
+        for initial in [
+            InitialFunction::Exhausted,
+            InitialFunction::ExhaustedEmpty,
+            InitialFunction::ExhaustedUnbound,
+        ] {
+            fixture_state(kind, initial, |run, handles, homes| {
+                run.sym_function_into(&handles[0], &mut homes.cache)
+                    .unwrap();
+                let function = homes.cache.word_for_test(run);
+                let before = run.function_facts_for_test(&handles[0]).unwrap();
+                let answer = homes.dst.word_for_test(run);
+                let outcome = run.sym_fmakunbound_into(&handles[0], &mut homes.dst);
+                if matches!(initial, InitialFunction::ExhaustedUnbound) {
+                    assert_eq!(outcome, Ok(()));
+                    assert_eq!(
+                        homes.dst.word_for_test(run),
+                        Value::from_sym_id(homes.symbol).bits()
+                    );
+                } else {
+                    assert_eq!(outcome, Err(FunctionError::EpochExhausted));
+                    assert_eq!(homes.dst.word_for_test(run), answer);
+                }
+                assert_eq!(run.function_facts_for_test(&handles[0]).unwrap(), before);
+                run.sym_function_into(&handles[0], &mut homes.activation)
+                    .unwrap();
+                assert_eq!(homes.activation.word_for_test(run), function);
+            })
+            .expect("exhaustion preserves binding/stamp/journal; repeated unbind is legal");
+        }
+    }
+}
+
+#[test]
+fn p3sym_c4_fmakunbound_unprepared_invalid_and_cleared_homes_refuse() {
+    use crate::tagged::gc::RegistrationError;
+    for kind in [
+        PlainSymbolBacking::Unprojected,
+        PlainSymbolBacking::Projected,
+    ] {
+        fixture_config(
+            kind,
+            InitialFunction::Bound,
+            false,
+            |run, handles, homes| {
+                let before = run.function_facts_for_test(&handles[0]).unwrap();
+                let answer = homes.dst.word_for_test(run);
+                assert_eq!(
+                    run.sym_fmakunbound_into(&handles[0], &mut homes.dst),
+                    Err(FunctionError::Authority(RegistrationError::Publication))
+                );
+                assert_eq!(run.function_facts_for_test(&handles[0]).unwrap(), before);
+                assert_eq!(homes.dst.word_for_test(run), answer);
+            },
+        )
+        .expect("unprepared unbind refuses before publication");
+        fixture(kind, |run, handles, homes| {
+            let before = run.function_facts_for_test(&handles[0]).unwrap();
+            let answer = homes.dst.word_for_test(run);
+            let mut invalid = homes.dst.clone();
+            invalid.index = usize::MAX;
+            assert_eq!(
+                run.sym_fmakunbound_into(&handles[0], &mut invalid),
+                Err(FunctionError::Authority(
+                    RegistrationError::StaleRegistration
+                ))
+            );
+            assert_eq!(run.function_facts_for_test(&handles[0]).unwrap(), before);
+            assert_eq!(homes.dst.word_for_test(run), answer);
+            run.clear_root_slots().unwrap();
+            assert_eq!(
+                run.sym_fmakunbound_into(&handles[0], &mut homes.dst),
+                Err(FunctionError::Authority(
+                    RegistrationError::StaleRegistration
+                ))
+            );
+            assert_eq!(run.function_facts_for_test(&handles[0]).unwrap(), before);
+            assert!(run.owner.local.as_ref().unwrap().root_scratch.is_empty());
+        })
+        .expect("invalid and cleared homes refuse without recreating a root bank");
     }
 }

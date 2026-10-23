@@ -3,6 +3,21 @@ use super::*;
 use crate::tagged::gc::{FunctionError, RegistrationError, SymbolWriteToken};
 use std::sync::atomic::Ordering;
 
+/// One complete desired state; Unbind cannot carry a non-NIL payload.
+#[derive(Clone, Copy)]
+pub(crate) enum FunctionUpdate {
+    Set(super::super::Value),
+    Unbind,
+}
+impl FunctionUpdate {
+    pub(crate) fn parts(self) -> (super::super::Value, bool) {
+        match self {
+            Self::Set(value) => (value, false),
+            Self::Unbind => (super::super::Value::NIL, true),
+        }
+    }
+}
+
 pub(crate) struct FunctionCommit {
     pub(crate) previous: super::super::Value,
     epoch: u64,
@@ -32,10 +47,10 @@ impl SymbolBacking {
 
     /// # Safety
     /// The matching live writer excludes every reader, marker and legacy view.
-    pub(crate) unsafe fn plan_fset(
+    pub(crate) unsafe fn plan_function_write(
         &self,
         id: SymId,
-        value: super::super::Value,
+        update: FunctionUpdate,
         _authority: &SymbolWriteToken<'_>,
     ) -> Result<Option<FunctionCommit>, FunctionError> {
         let obarray = unsafe { self.obarray.as_ref() };
@@ -45,7 +60,10 @@ impl SymbolBacking {
         let symbol = obarray
             .get_by_id(id)
             .ok_or(RegistrationError::Publication)?;
-        if !symbol.function_unbound && symbol.function.get().bits() == value.bits() {
+        let (value, explicitly_unbound) = update.parts();
+        if symbol.function_unbound == explicitly_unbound
+            && symbol.function.get().bits() == value.bits()
+        {
             return Ok(None);
         }
         let epoch = obarray
@@ -71,10 +89,10 @@ impl SymbolBacking {
     /// WRITER spans plan, journal retention and this commit. No callback or
     /// reference escapes. Derive the exclusive metadata loan from the original
     /// UnsafeCell root, after all symbol readers and legacy loans have ended.
-    pub(crate) unsafe fn commit_fset(
+    pub(crate) unsafe fn commit_function_write(
         &self,
         id: SymId,
-        value: super::super::Value,
+        update: FunctionUpdate,
         commit: FunctionCommit,
         _authority: &SymbolWriteToken<'_>,
     ) -> Result<(), FunctionError> {
@@ -96,8 +114,9 @@ impl SymbolBacking {
             .ok_or(RegistrationError::Poisoned)?;
         // Use the landed interior-mutable cell, never an atomic cast or a
         // serial setter (which would touch another owner's TLS and SATB).
+        let (value, explicitly_unbound) = update.parts();
         symbol.function.store_atomic(value);
-        symbol.function_unbound = false;
+        symbol.function_unbound = explicitly_unbound;
         let published = obarray.symbols.sides.get(index >> 12).is_some_and(|side| {
             side.stamp_prepared(index & (super::super::OBARRAY_CHUNK - 1), commit.epoch)
         });

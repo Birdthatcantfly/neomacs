@@ -55,13 +55,6 @@ pub(super) enum FunctionOp {
 }
 
 impl<'era> RunAccess<'_, 'era> {
-    pub(super) fn sym_fmakunbound_into(
-        &mut self,
-        _symbol: &SymbolHandle,
-        _dst: &mut OwnerRootSlot<'era>,
-    ) -> Result<(), FunctionError> {
-        Err(FunctionError::MissingOperation(FunctionOpKind::Fmakunbound))
-    }
     pub(super) fn sym_call_begin(
         &mut self,
         _symbol: &SymbolHandle,

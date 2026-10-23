@@ -1,5 +1,6 @@
 //! Slot-to-slot Plain globals. No legacy TLS or raw-value public API.
 use super::*;
+use crate::emacs_core::symbol::parallel::FunctionUpdate;
 use crate::emacs_core::value::Value;
 use crate::tagged::gc::mark_word::MarkWord;
 
@@ -161,10 +162,10 @@ impl<'era> RunAccess<'_, 'era> {
 }
 
 impl SymbolMut<'_, '_, '_> {
-    pub(super) fn set_function_into(
+    pub(super) fn write_function_into(
         &mut self,
         index: usize,
-        value: Value,
+        update: FunctionUpdate,
     ) -> Result<(), FunctionError> {
         let registry = self.run.owner.registry;
         let dst = self
@@ -178,7 +179,7 @@ impl SymbolMut<'_, '_, '_> {
             _word: &registry.symbols.word,
             _thread: PhantomData,
         };
-        functions::write::fset(&registry.symbols, self.key.symbol, value, dst, &authority)
+        functions::write::publish(&registry.symbols, self.key.symbol, update, dst, &authority)
     }
 
     fn store_into(&mut self, index: usize, value: Value, answer: Value) -> Result<(), GlobalError> {
