@@ -31,6 +31,8 @@ mod rendezvous;
 mod summaries;
 mod symbol_authority;
 #[cfg(test)]
+mod symbol_functions;
+#[cfg(test)]
 mod symbol_globals;
 pub use symbol_authority::{
     GlobalError, KeeperSymbols, PlainSymbolBacking, SymbolHandle, SymbolMut, SymbolRef,

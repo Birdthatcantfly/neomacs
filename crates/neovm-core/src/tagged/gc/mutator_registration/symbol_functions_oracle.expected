@@ -1,0 +1,20 @@
+t
+t
+t
+73
+(97 97)
+(73 97)
+(73 nil nil void-function)
+(t t 73)
+(t t nil nil)
+(nil nil nil void-function)
+(97 101)
+(97 73)
+((41 42) 97)
+(void-function 23)
+(97 73)
+(t nil)
+(nil nil)
+(t nil nil)
+(nil nil nil)
+(73 97 t)

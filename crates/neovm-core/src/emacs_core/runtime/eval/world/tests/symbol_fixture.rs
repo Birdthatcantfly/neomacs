@@ -23,6 +23,37 @@ impl Context {
         kinds: &[crate::tagged::gc::PlainSymbolBacking],
         body: impl for<'heap> FnOnce(crate::tagged::gc::ParallelHeapEra<'heap>, Vec<SymId>) -> R,
     ) -> R {
+        Self::with_test_symbol_backings_init_era(kinds, |_, _| {}, body)
+    }
+
+    /// C4's real immutable `(lambda () N)` definitions are created and stored
+    /// by the sole serial setup owner. The matching value homes provide
+    /// rooted input operands through the already-qualified C3 read API.
+    pub(crate) fn with_test_symbol_functions_era<R>(
+        kind: crate::tagged::gc::PlainSymbolBacking,
+        body: impl for<'heap> FnOnce(crate::tagged::gc::ParallelHeapEra<'heap>, Vec<SymId>) -> R,
+    ) -> R {
+        Self::with_test_symbol_backings_init_era(
+            &[kind, kind],
+            |obarray, ids| {
+                let lambda = TaggedValue::from_sym_id(crate::emacs_core::intern::intern("lambda"));
+                for (&id, answer) in ids.iter().zip([73, 97]) {
+                    let body = TaggedValue::cons(TaggedValue::fixnum(answer), TaggedValue::NIL);
+                    let args = TaggedValue::cons(TaggedValue::NIL, body);
+                    let definition = TaggedValue::cons(lambda, args);
+                    obarray.seed_value_id(id, definition);
+                    obarray.set_symbol_function_id(id, definition);
+                }
+            },
+            body,
+        )
+    }
+
+    fn with_test_symbol_backings_init_era<R>(
+        kinds: &[crate::tagged::gc::PlainSymbolBacking],
+        init: impl FnOnce(&mut Obarray, &[SymId]),
+        body: impl for<'heap> FnOnce(crate::tagged::gc::ParallelHeapEra<'heap>, Vec<SymId>) -> R,
+    ) -> R {
         use crate::tagged::gc::{AliasableBox, ParallelHeapEra, TaggedHeap};
 
         let heap = AliasableBox::new(TaggedHeap::new());
@@ -40,6 +71,7 @@ impl Context {
                 id
             })
             .collect();
+        init(&mut obarray, &ids);
         let mut ready = WorldStorageBuilder {
             owned_roots: Default::default(),
             tagged_heap: heap,
