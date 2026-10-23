@@ -33,8 +33,19 @@ use neovm_core::emacs_core::Value;
 use neovm_core::emacs_core::composite::composition_display_text_for_property;
 use neovm_core::emacs_core::composite::{AutomaticCompositionRules, AutomaticCompositionSpan};
 use neovm_core::emacs_core::emacs_char::EmacsChar;
+use neovm_core::emacs_core::intern::EpochCachedSymbol;
 use neovm_core::emacs_core::value::{get_string_text_properties_table_for_value, list_to_vec};
 use neovm_core::face::LispFaceId;
+
+// Each key is resolved lazily at its original query boundary. Cells contain
+// only epoch-validated native identities and are shared safely across mutators.
+static DISPLAY_PROPERTY: EpochCachedSymbol = EpochCachedSymbol::new("display");
+static COMPOSITION_PROPERTY: EpochCachedSymbol = EpochCachedSymbol::new("composition");
+static FACE_PROPERTY: EpochCachedSymbol = EpochCachedSymbol::new("face");
+static FONT_LOCK_FACE_PROPERTY: EpochCachedSymbol = EpochCachedSymbol::new("font-lock-face");
+static MOUSE_FACE_PROPERTY: EpochCachedSymbol = EpochCachedSymbol::new("mouse-face");
+static LINE_HEIGHT_PROPERTY: EpochCachedSymbol = EpochCachedSymbol::new("line-height");
+static LINE_SPACING_PROPERTY: EpochCachedSymbol = EpochCachedSymbol::new("line-spacing");
 
 pub(crate) struct DisplaySourceContext<'a> {
     target: crate::display_property::DisplayPropertyTarget,
@@ -3418,17 +3429,17 @@ impl LispStringSourceFrame {
             tty_glyphless_char_display.method_for(character),
         ) {
             if let DisplayItemKind::RowBreak(row_break) = &mut kind {
-                let property = |name| {
+                let property = |name: &EpochCachedSymbol| {
                     self.props.as_ref().and_then(|props| {
                         props.get_property_at_char_pos(CharPos0::new(start), Value::symbol(name))
                     })
                 };
                 *row_break = row_break
                     .with_line_height(DisplayLineHeightPolicy::from_property(property(
-                        "line-height",
+                        &LINE_HEIGHT_PROPERTY,
                     )))
                     .with_line_spacing(DisplayLineSpacingPolicy::from_property(property(
-                        "line-spacing",
+                        &LINE_SPACING_PROPERTY,
                     )));
             }
             self.char_index = start + 1;
@@ -3576,13 +3587,14 @@ impl LispStringSourceFrame {
     fn display_prop_at(&self, char_index: usize) -> Option<Value> {
         self.props
             .as_ref()?
-            .get_property_at_char_pos(CharPos0::new(char_index), Value::symbol("display"))
+            .get_property_at_char_pos(CharPos0::new(char_index), Value::symbol(&DISPLAY_PROPERTY))
     }
 
     fn composition_prop_at(&self, char_index: usize) -> Option<Value> {
-        self.props
-            .as_ref()?
-            .get_property_at_char_pos(CharPos0::new(char_index), Value::symbol("composition"))
+        self.props.as_ref()?.get_property_at_char_pos(
+            CharPos0::new(char_index),
+            Value::symbol(&COMPOSITION_PROPERTY),
+        )
     }
 
     fn display_value_extent(&self, value: Value, mut extent: usize) -> usize {
@@ -3607,8 +3619,10 @@ impl LispStringSourceFrame {
         };
         let char_pos = CharPos0::new(char_index);
         let face = props
-            .get_property_at_char_pos(char_pos, Value::symbol("face"))
-            .or_else(|| props.get_property_at_char_pos(char_pos, Value::symbol("font-lock-face")));
+            .get_property_at_char_pos(char_pos, Value::symbol(&FACE_PROPERTY))
+            .or_else(|| {
+                props.get_property_at_char_pos(char_pos, Value::symbol(&FONT_LOCK_FACE_PROPERTY))
+            });
         face.map(|value| context.resolve_face_ref(self.base_face, value))
             .unwrap_or(self.base_face)
     }
@@ -3669,7 +3683,7 @@ impl LispStringSourceFrame {
         context: &mut DisplaySourceContext<'_>,
     ) -> Option<DisplayPointerAppearance> {
         let props = self.props.as_ref()?;
-        let property = Value::symbol("mouse-face");
+        let property = Value::symbol(&MOUSE_FACE_PROPERTY);
         let char_pos = CharPos0::new(char_index);
         let value = props.get_property_at_char_pos(char_pos, property)?;
         if value.is_nil() {

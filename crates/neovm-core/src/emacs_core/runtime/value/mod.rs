@@ -2500,6 +2500,26 @@ impl IntoSymbol for &str {
     }
 }
 
+// Fixed spellings keep the string constructor's nil/keyword tags and observable
+// symbol accounting, while validating the canonical ID at every call boundary.
+impl IntoSymbol for &super::intern::EpochCachedSymbol {
+    #[inline]
+    fn into_symbol(self) -> Value {
+        match self.name() {
+            "nil" => Value::NIL,
+            "t" => Value::T,
+            name => {
+                add_wrapping(MemoryUseCountSlot::Symbols, 1);
+                if name.starts_with(':') {
+                    TaggedValue::from_kw_id(self.get())
+                } else {
+                    TaggedValue::from_sym_id(self.get())
+                }
+            }
+        }
+    }
+}
+
 impl IntoSymbol for String {
     fn into_symbol(self) -> Value {
         self.as_str().into_symbol()

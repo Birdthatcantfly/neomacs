@@ -11,7 +11,7 @@
 //! string interner".
 
 mod fixed_symbol;
-pub(crate) use fixed_symbol::EpochCachedSymbol;
+pub use fixed_symbol::EpochCachedSymbol;
 
 use hashbrown::HashMap;
 use parking_lot::RwLock;

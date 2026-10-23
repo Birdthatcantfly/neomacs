@@ -98,3 +98,43 @@ fn completed_cross_thread_unintern_invalidates_all_fixed_symbol_readers() {
     }
     assert_ne!(replacement, old);
 }
+
+#[test]
+fn fixed_symbol_value_preserves_tags_and_symbol_accounting() {
+    use crate::emacs_core::Value;
+    let ordinary = EpochCachedSymbol::new("editpath-fixed-value-accounting");
+    let keyword = EpochCachedSymbol::new(":editpath-fixed-value-accounting");
+    let nil = EpochCachedSymbol::new("nil");
+    let truth = EpochCachedSymbol::new("t");
+    let expected = Value::symbol(ordinary.name);
+    let expected_keyword = Value::symbol(keyword.name);
+    let before = Value::memory_use_counts_snapshot();
+    assert_eq!(Value::symbol(&ordinary), expected);
+    assert_eq!(Value::symbol(&ordinary), expected);
+    assert_eq!(Value::symbol(&keyword), expected_keyword);
+    assert_eq!(Value::symbol(&nil), Value::NIL);
+    assert_eq!(Value::symbol(&truth), Value::T);
+    let after = Value::memory_use_counts_snapshot();
+    assert_eq!(after[3] - before[3], 3);
+}
+
+#[test]
+fn fixed_symbol_construction_is_lazy_and_each_cell_is_independent() {
+    let first = EpochCachedSymbol::new("editpath-fixed-lazy-first");
+    let second = EpochCachedSymbol::new("editpath-fixed-lazy-second");
+    assert!(first.resolved.read().is_none());
+    assert!(second.resolved.read().is_none());
+    assert!(global_symbol_registry().read().lookup(first.name).is_none());
+    let resolved = first.get();
+    assert_eq!(
+        global_symbol_registry().read().lookup(first.name),
+        Some(resolved)
+    );
+    assert!(second.resolved.read().is_none());
+    assert!(
+        global_symbol_registry()
+            .read()
+            .lookup(second.name)
+            .is_none()
+    );
+}

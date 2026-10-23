@@ -17,21 +17,25 @@ struct ResolvedSymbol {
 /// so it cannot publish a stale ID with a newer epoch after concurrent unintern.
 /// This uses the existing full-width registry generation, not a packed counter.
 #[derive(Debug)]
-pub(crate) struct EpochCachedSymbol {
+pub struct EpochCachedSymbol {
     name: &'static str,
     resolved: RwLock<Option<ResolvedSymbol>>,
 }
 
 impl EpochCachedSymbol {
-    pub(crate) const fn new(name: &'static str) -> Self {
+    pub const fn new(name: &'static str) -> Self {
         Self {
             name,
             resolved: RwLock::new(None),
         }
     }
 
+    pub(crate) fn name(&self) -> &'static str {
+        self.name
+    }
+
     #[inline]
-    pub(crate) fn get(&self) -> SymId {
+    pub fn get(&self) -> SymId {
         {
             let resolved = self.resolved.read();
             if let Some(resolved) = *resolved
