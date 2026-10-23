@@ -345,3 +345,5 @@ impl Session {
 }
 
 mod tests;
+
+mod handoff;

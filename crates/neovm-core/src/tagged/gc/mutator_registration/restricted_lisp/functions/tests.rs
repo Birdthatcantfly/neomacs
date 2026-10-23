@@ -1,7 +1,7 @@
 use super::*;
 use crate::tagged::gc::PlainSymbolBacking;
 
-fn source(ops: Vec<Op>, nslots: usize) -> Source {
+pub(super) fn source(ops: Vec<Op>, nslots: usize) -> Source {
     Source {
         insns: ops
             .into_iter()
@@ -69,7 +69,7 @@ fn words<'era>(owner: &mut Mutator<'era>, frame: &Frame<'era>) -> Vec<usize> {
 }
 
 /// Finish the real era independently of an executor refusal or assertion.
-fn case(
+pub(super) fn case(
     kind: PlainSymbolBacking,
     ops: Vec<Op>,
     nslots: usize,
