@@ -1,6 +1,8 @@
 //! Real native calls and installed inline dependencies across owned eras.
 #[path = "p3sym_functions_test/receiver.rs"]
 mod receiver;
+#[path = "p3sym_functions_test/reclamation.rs"]
+mod reclamation;
 
 use super::{cache, compile, test_support};
 use crate::emacs_core::bytecode::{ByteCodeFunction, Op, StackDepth};
