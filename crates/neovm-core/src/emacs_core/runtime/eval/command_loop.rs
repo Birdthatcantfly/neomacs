@@ -5,6 +5,132 @@
 
 use super::*;
 
+/// Fixed command-loop identities. Each spelling is resolved once per registry
+/// epoch. A use after arbitrary Lisp
+/// must call `id` again: callbacks may unintern a symbol or replace the registry.
+#[derive(Clone, Copy, Debug, strum::EnumIter)]
+enum CommandLoopSymbol {
+    PrefixArg,
+    LastPrefixArg,
+    CurrentPrefixArg,
+    ThisCommand,
+    RealThisCommand,
+    ThisOriginalCommand,
+    LastCommandEvent,
+    DeactivateMark,
+    DisablePointAdjustment,
+    GlobalDisablePointAdjustment,
+    LastCommand,
+    RealLastCommand,
+    LastRepeatableCommand,
+    InhibitQuit,
+    UndoAutoAddBoundary,
+    MemoryFull,
+    DelayedWarningsList,
+    AutoSaveInterval,
+    CommandRemapping,
+    Undefined,
+    CommandExecute,
+}
+
+impl CommandLoopSymbol {
+    #[inline]
+    fn id(self) -> SymId {
+        use crate::emacs_core::intern::EpochCachedSymbol;
+
+        match self {
+            Self::PrefixArg => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("prefix-arg");
+                SYMBOL.get()
+            }
+            Self::LastPrefixArg => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("last-prefix-arg");
+                SYMBOL.get()
+            }
+            Self::CurrentPrefixArg => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("current-prefix-arg");
+                SYMBOL.get()
+            }
+            Self::ThisCommand => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("this-command");
+                SYMBOL.get()
+            }
+            Self::RealThisCommand => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("real-this-command");
+                SYMBOL.get()
+            }
+            Self::ThisOriginalCommand => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("this-original-command");
+                SYMBOL.get()
+            }
+            Self::LastCommandEvent => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("last-command-event");
+                SYMBOL.get()
+            }
+            Self::DeactivateMark => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("deactivate-mark");
+                SYMBOL.get()
+            }
+            Self::DisablePointAdjustment => {
+                static SYMBOL: EpochCachedSymbol =
+                    EpochCachedSymbol::new("disable-point-adjustment");
+                SYMBOL.get()
+            }
+            Self::GlobalDisablePointAdjustment => {
+                static SYMBOL: EpochCachedSymbol =
+                    EpochCachedSymbol::new("global-disable-point-adjustment");
+                SYMBOL.get()
+            }
+            Self::LastCommand => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("last-command");
+                SYMBOL.get()
+            }
+            Self::RealLastCommand => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("real-last-command");
+                SYMBOL.get()
+            }
+            Self::LastRepeatableCommand => {
+                static SYMBOL: EpochCachedSymbol =
+                    EpochCachedSymbol::new("last-repeatable-command");
+                SYMBOL.get()
+            }
+            Self::InhibitQuit => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("inhibit-quit");
+                SYMBOL.get()
+            }
+            Self::UndoAutoAddBoundary => {
+                static SYMBOL: EpochCachedSymbol =
+                    EpochCachedSymbol::new("undo-auto--add-boundary");
+                SYMBOL.get()
+            }
+            Self::MemoryFull => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("memory-full");
+                SYMBOL.get()
+            }
+            Self::DelayedWarningsList => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("delayed-warnings-list");
+                SYMBOL.get()
+            }
+            Self::AutoSaveInterval => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("auto-save-interval");
+                SYMBOL.get()
+            }
+            Self::CommandRemapping => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("command-remapping");
+                SYMBOL.get()
+            }
+            Self::Undefined => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("undefined");
+                SYMBOL.get()
+            }
+            Self::CommandExecute => {
+                static SYMBOL: EpochCachedSymbol = EpochCachedSymbol::new("command-execute");
+                SYMBOL.get()
+            }
+        }
+    }
+}
+
 #[path = "gc_generational.rs"]
 mod gc_generational;
 
@@ -503,8 +629,8 @@ impl Context {
                     let diagnostic = self.capture_command_loop_diagnostic(&sig);
                     // GNU `cmd_error' clears both prefix arguments and key
                     // echoing before calling `cmd_error_internal'.
-                    self.assign("prefix-arg", Value::NIL);
-                    self.assign("last-prefix-arg", Value::NIL);
+                    self.assign_by_id(CommandLoopSymbol::PrefixArg.id(), Value::NIL);
+                    self.assign_by_id(CommandLoopSymbol::LastPrefixArg.id(), Value::NIL);
                     self.cancel_key_echo_state();
 
                     let data = self.signal_error_data_value(&sig);
@@ -595,8 +721,10 @@ impl Context {
             // calls `call-interactively`, and prefix commands such as
             // `universal-argument` rely on `prefix-arg` surviving
             // until that point.
-            let outgoing_prefix_arg = self.eval_symbol("current-prefix-arg").unwrap_or(Value::NIL);
-            self.assign("last-prefix-arg", outgoing_prefix_arg);
+            let outgoing_prefix_arg = self
+                .eval_symbol_by_id(CommandLoopSymbol::CurrentPrefixArg.id())
+                .unwrap_or(Value::NIL);
+            self.assign_by_id(CommandLoopSymbol::LastPrefixArg.id(), outgoing_prefix_arg);
 
             // Reset this-command and related variables before reading
             // the next key sequence.  GNU keyboard.c:1416-1419 clears
@@ -604,9 +732,9 @@ impl Context {
             // and Vthis_command_keys_shift_translated to nil so that idle
             // timer callbacks (e.g. which-key) running inside
             // read_key_sequence observe (null this-command) => t.
-            self.assign("this-command", Value::NIL);
-            self.assign("real-this-command", Value::NIL);
-            self.assign("this-original-command", Value::NIL);
+            self.assign_by_id(CommandLoopSymbol::ThisCommand.id(), Value::NIL);
+            self.assign_by_id(CommandLoopSymbol::RealThisCommand.id(), Value::NIL);
+            self.assign_by_id(CommandLoopSymbol::ThisOriginalCommand.id(), Value::NIL);
 
             // Read a complete key sequence (may be multi-key, e.g. C-x C-f).
             //
@@ -629,7 +757,11 @@ impl Context {
             // this binding) and bind no `inhibit-quit`, so their waits stay
             // interruptible by C-g — the sleep-for quit fix is preserved.
             let read_specpdl_count = self.specpdl.len();
-            self.try_specbind_or_unwind_to(read_specpdl_count, intern("inhibit-quit"), Value::T)?;
+            self.try_specbind_or_unwind_to(
+                read_specpdl_count,
+                CommandLoopSymbol::InhibitQuit.id(),
+                Value::T,
+            )?;
             let read_result = self.read_command_key_sequence_with_options(
                 crate::keyboard::ReadKeySequenceOptions::new(Value::NIL, false, false, true),
             );
@@ -732,7 +864,7 @@ impl Context {
             self.sync_current_buffer_to_selected_window();
 
             if input_end.is_some() {
-                self.assign("this-command", Value::NIL);
+                self.assign_by_id(CommandLoopSymbol::ThisCommand.id(), Value::NIL);
                 return Ok(Value::NIL);
             }
 
@@ -765,13 +897,13 @@ impl Context {
             // the preceding command's `post-command-hook` and leaves that
             // value visible to the next `pre-command-hook` (keyboard.c's
             // `kset_real_last_command` near the command-loop finalize tail).
-            self.assign("real-this-command", binding);
+            self.assign_by_id(CommandLoopSymbol::RealThisCommand.id(), binding);
 
             // Apply command remapping per GNU
             // `keyboard.c:1340-1343`. The remapped command becomes
             // this-command for execution. Finding 4.
             let remapped = self.command_remapping_for_loop(binding);
-            self.assign("this-command", remapped);
+            self.assign_by_id(CommandLoopSymbol::ThisCommand.id(), remapped);
             let mut command_observation = command_observation_start.map(|start| {
                 UserCommandObservation::begin(
                     start,
@@ -793,15 +925,15 @@ impl Context {
             // (pre-remap) command for the duration of the iteration
             // unless a pre-command-hook explicitly cleared it.
             if self
-                .eval_symbol("this-original-command")
+                .eval_symbol_by_id(CommandLoopSymbol::ThisOriginalCommand.id())
                 .unwrap_or(Value::NIL)
                 .is_nil()
             {
-                self.assign("this-original-command", binding);
+                self.assign_by_id(CommandLoopSymbol::ThisOriginalCommand.id(), binding);
             }
 
             if let Some(last) = keys.last() {
-                self.assign("last-command-event", *last);
+                self.assign_by_id(CommandLoopSymbol::LastCommandEvent.id(), *last);
             }
             tracing::debug!(
                 "command_loop_1: binding={} current_buffer={:?} active_minibuffer_window={:?}",
@@ -818,7 +950,7 @@ impl Context {
             // (left by an earlier buffer-modifying command such as self-insert)
             // leaks forward and immediately kills a freshly `set-mark`ed region,
             // so e.g. `C-SPC M-> M-;` sees no active region.
-            self.assign("deactivate-mark", Value::NIL);
+            self.assign_by_id(CommandLoopSymbol::DeactivateMark.id(), Value::NIL);
 
             // GNU `keyboard.c:1500-1506` records the command pseudo-event
             // before `pre-command-hook`, so `recent-keys 'include-cmds` can
@@ -835,8 +967,14 @@ impl Context {
             // `pre-command-hook` and before command execution, so the
             // previous command's edits are grouped before the next command
             // mutates any buffer state.
-            if self.obarray.fboundp("undo-auto--add-boundary") {
-                let _ = self.apply(Value::symbol("undo-auto--add-boundary"), vec![]);
+            if self
+                .obarray
+                .fboundp_id(CommandLoopSymbol::UndoAutoAddBoundary.id())
+            {
+                let _ = self.apply(
+                    Value::from_sym_id(CommandLoopSymbol::UndoAutoAddBoundary.id()),
+                    vec![],
+                );
             }
             if let Some(current_id) = self.buffers.current_buffer_id() {
                 let _ = self.buffers.record_undo_point_before_command(current_id);
@@ -852,7 +990,7 @@ impl Context {
                 .and_then(|id| self.buffers.get(id))
                 .map(|b| b.modified_tick())
                 .unwrap_or(0);
-            self.assign("disable-point-adjustment", Value::NIL);
+            self.assign_by_id(CommandLoopSymbol::DisablePointAdjustment.id(), Value::NIL);
 
             // Execute the remapped command, matching GNU's
             // `calln (Qcommand_execute, Vthis_command)`.
@@ -925,11 +1063,11 @@ impl Context {
                     .and_then(|w| w.buffer_id());
                 let cur_pt = cur_buffer.map(|id| self.apfp_point(id)).unwrap_or(0);
                 let disabled = self
-                    .eval_symbol("disable-point-adjustment")
+                    .eval_symbol_by_id(CommandLoopSymbol::DisablePointAdjustment.id())
                     .unwrap_or(Value::NIL)
                     .is_truthy()
                     || self
-                        .eval_symbol("global-disable-point-adjustment")
+                        .eval_symbol_by_id(CommandLoopSymbol::GlobalDisablePointAdjustment.id())
                         .unwrap_or(Value::NIL)
                         .is_truthy();
                 if cur_buffer.is_some()
@@ -954,27 +1092,31 @@ impl Context {
             // kset_real_last_command near the bottom of command_loop_1).
             // Undo uses `last-command` to decide whether a following undo
             // continues the same undo chain or starts a redo.
-            if let Ok(this_cmd) = self.eval_symbol("this-command") {
-                self.assign("last-command", this_cmd);
+            if let Ok(this_cmd) = self.eval_symbol_by_id(CommandLoopSymbol::ThisCommand.id()) {
+                self.assign_by_id(CommandLoopSymbol::LastCommand.id(), this_cmd);
             }
-            let real_this = self.eval_symbol("real-this-command").unwrap_or(Value::NIL);
-            self.assign("real-last-command", real_this);
+            let real_this = self
+                .eval_symbol_by_id(CommandLoopSymbol::RealThisCommand.id())
+                .unwrap_or(Value::NIL);
+            self.assign_by_id(CommandLoopSymbol::RealLastCommand.id(), real_this);
 
             // GNU records the real command as last-repeatable-command for
             // ordinary key events.
-            let last_event = self.eval_symbol("last-command-event").unwrap_or(Value::NIL);
+            let last_event = self
+                .eval_symbol_by_id(CommandLoopSymbol::LastCommandEvent.id())
+                .unwrap_or(Value::NIL);
             if !last_event.is_cons() {
-                self.assign("last-repeatable-command", real_this);
+                self.assign_by_id(CommandLoopSymbol::LastRepeatableCommand.id(), real_this);
             }
 
             // Reset this-original-command for the next iteration so
             // a fresh command starts the cycle clean (mirroring
             // GNU's clear at the bottom of command_loop_1).
-            self.assign("this-original-command", Value::NIL);
+            self.assign_by_id(CommandLoopSymbol::ThisOriginalCommand.id(), Value::NIL);
 
             if self.command_loop.keyboard.kboard.defining_kbd_macro
                 && self
-                    .eval_symbol("prefix-arg")
+                    .eval_symbol_by_id(CommandLoopSymbol::PrefixArg.id())
                     .unwrap_or(Value::NIL)
                     .is_nil()
             {
@@ -1021,9 +1163,9 @@ impl Context {
     /// `inhibit-redisplay` during startup and clears it from an initial
     /// `post-command-hook` before the first input wait/redisplay.
     pub(super) fn command_loop_1_entry_prologue(&mut self) -> EvalResult {
-        self.assign("prefix-arg", Value::NIL);
-        self.assign("last-prefix-arg", Value::NIL);
-        self.assign("deactivate-mark", Value::NIL);
+        self.assign_by_id(CommandLoopSymbol::PrefixArg.id(), Value::NIL);
+        self.assign_by_id(CommandLoopSymbol::LastPrefixArg.id(), Value::NIL);
+        self.assign_by_id(CommandLoopSymbol::DeactivateMark.id(), Value::NIL);
 
         // GNU `command_loop_1` clears `this_command_key_count` and
         // `this_single_command_key_start` before its initial
@@ -1035,14 +1177,14 @@ impl Context {
         self.set_translated_command_keys(Vec::new());
 
         if self
-            .eval_symbol("memory-full")
+            .eval_symbol_by_id(CommandLoopSymbol::MemoryFull.id())
             .unwrap_or(Value::NIL)
             .is_nil()
         {
             self.safe_run_hook_if_bound("post-command-hook")?;
 
             if self
-                .eval_symbol("delayed-warnings-list")
+                .eval_symbol_by_id(CommandLoopSymbol::DelayedWarningsList.id())
                 .unwrap_or(Value::NIL)
                 .is_truthy()
             {
@@ -1050,15 +1192,24 @@ impl Context {
             }
         }
 
-        let this_command = self.eval_symbol("this-command").unwrap_or(Value::NIL);
-        self.assign("last-command", this_command);
+        let this_command = self
+            .eval_symbol_by_id(CommandLoopSymbol::ThisCommand.id())
+            .unwrap_or(Value::NIL);
+        self.assign_by_id(CommandLoopSymbol::LastCommand.id(), this_command);
 
-        let real_this_command = self.eval_symbol("real-this-command").unwrap_or(Value::NIL);
-        self.assign("real-last-command", real_this_command);
+        let real_this_command = self
+            .eval_symbol_by_id(CommandLoopSymbol::RealThisCommand.id())
+            .unwrap_or(Value::NIL);
+        self.assign_by_id(CommandLoopSymbol::RealLastCommand.id(), real_this_command);
 
-        let last_command_event = self.eval_symbol("last-command-event").unwrap_or(Value::NIL);
+        let last_command_event = self
+            .eval_symbol_by_id(CommandLoopSymbol::LastCommandEvent.id())
+            .unwrap_or(Value::NIL);
         if !last_command_event.is_cons() {
-            self.assign("last-repeatable-command", real_this_command);
+            self.assign_by_id(
+                CommandLoopSymbol::LastRepeatableCommand.id(),
+                real_this_command,
+            );
         }
 
         Ok(Value::NIL)
@@ -1067,7 +1218,10 @@ impl Context {
     /// Per-iteration `auto-save-interval` check, mirroring GNU
     /// `keyboard.c:1491-1506`. Keyboard audit Finding 9.
     pub(super) fn command_loop_1_maybe_auto_save(&mut self) {
-        let interval = match self.eval_symbol("auto-save-interval").ok() {
+        let interval = match self
+            .eval_symbol_by_id(CommandLoopSymbol::AutoSaveInterval.id())
+            .ok()
+        {
             Some(v) => match v.as_fixnum() {
                 Some(n) if n > 0 => n,
                 _ => return,
@@ -1130,7 +1284,10 @@ impl Context {
         if command.is_nil() {
             return command;
         }
-        match self.apply(Value::symbol("command-remapping"), vec![command]) {
+        match self.apply(
+            Value::from_sym_id(CommandLoopSymbol::CommandRemapping.id()),
+            vec![command],
+        ) {
             Ok(remapped) if !remapped.is_nil() => remapped,
             _ => command,
         }
@@ -1141,7 +1298,9 @@ impl Context {
     pub(super) fn dispatch_command_in_loop(&mut self, command: Value) -> EvalResult {
         // Re-resolve `this-command` from the obarray so a
         // pre-command-hook that mutated the symbol takes effect.
-        let cmd = self.eval_symbol("this-command").unwrap_or(command);
+        let cmd = self
+            .eval_symbol_by_id(CommandLoopSymbol::ThisCommand.id())
+            .unwrap_or(command);
         if cmd.is_nil() {
             // GNU `command_loop_1` keyboard.c:1512-1514:
             //   if (NILP (Vthis_command))
@@ -1153,13 +1312,19 @@ impl Context {
             // key gives the same feedback as GNU instead of silently doing
             // nothing. If `undefined` is not yet defined (minimal runtimes),
             // fall back to a bare ding so the key is still audible.
-            if self.obarray.fboundp("undefined") {
-                return self.apply(Value::symbol("undefined"), vec![]);
+            if self.obarray.fboundp_id(CommandLoopSymbol::Undefined.id()) {
+                return self.apply(
+                    Value::from_sym_id(CommandLoopSymbol::Undefined.id()),
+                    vec![],
+                );
             }
             let _ = super::super::builtins::dispatch_builtin(self, "ding", vec![]);
             return Ok(Value::NIL);
         }
-        self.apply(Value::symbol("command-execute"), vec![cmd])
+        self.apply(
+            Value::from_sym_id(CommandLoopSymbol::CommandExecute.id()),
+            vec![cmd],
+        )
     }
 
     /// Run a hook with `safe-run-hooks` semantics: each hook
@@ -1198,7 +1363,11 @@ impl Context {
         // that when its local `post-command-hook` calls
         // `exit-minibuffer`.
         let specpdl_count = self.specpdl.len();
-        self.try_specbind_or_unwind_to(specpdl_count, intern("inhibit-quit"), Value::T)?;
+        self.try_specbind_or_unwind_to(
+            specpdl_count,
+            CommandLoopSymbol::InhibitQuit.id(),
+            Value::T,
+        )?;
         let result = super::super::hook_runtime::safe_run_named_hook(self, hook_sym, &[]);
         self.unbind_to_with_result(specpdl_count, result)
     }
@@ -1208,7 +1377,7 @@ impl Context {
         if !saved_running {
             self.command_loop.running = true;
         }
-        self.assign("prefix-arg", Value::NIL);
+        self.assign_by_id(CommandLoopSymbol::PrefixArg.id(), Value::NIL);
         let result = self.command_loop_2();
         if !saved_running && self.command_loop.running {
             self.command_loop.running = false;
@@ -1226,7 +1395,9 @@ impl Context {
     {
         let scope = ExecutingKbdMacroRuntimeScope {
             snapshot: self.snapshot_executing_kbd_macro_runtime(),
-            real_this_command: self.eval_symbol("real-this-command").unwrap_or(Value::NIL),
+            real_this_command: self
+                .eval_symbol_by_id(CommandLoopSymbol::RealThisCommand.id())
+                .unwrap_or(Value::NIL),
         };
         self.begin_executing_kbd_macro_runtime(macro_events);
         let result = run(self);
@@ -1247,7 +1418,10 @@ impl Context {
         scope: ExecutingKbdMacroRuntimeScope,
     ) -> EvalResult {
         self.restore_executing_kbd_macro_runtime(scope.snapshot);
-        self.assign("real-this-command", scope.real_this_command);
+        self.assign_by_id(
+            CommandLoopSymbol::RealThisCommand.id(),
+            scope.real_this_command,
+        );
         self.run_hook_if_bound("kbd-macro-termination-hook")
     }
 
@@ -1308,11 +1482,14 @@ impl Context {
         }
 
         if !self
-            .eval_symbol("deactivate-mark")
+            .eval_symbol_by_id(CommandLoopSymbol::DeactivateMark.id())
             .unwrap_or(Value::NIL)
             .is_nil()
         {
-            let _ = self.apply(Value::symbol("deactivate-mark"), vec![])?;
+            let _ = self.apply(
+                Value::from_sym_id(CommandLoopSymbol::DeactivateMark.id()),
+                vec![],
+            )?;
             self.assign("saved-region-selection", Value::NIL);
             return Ok(Value::NIL);
         }
@@ -1342,7 +1519,9 @@ impl Context {
             return Ok(Value::NIL);
         }
 
-        let this_command = self.eval_symbol("this-command").unwrap_or(Value::NIL);
+        let this_command = self
+            .eval_symbol_by_id(CommandLoopSymbol::ThisCommand.id())
+            .unwrap_or(Value::NIL);
         let inhibited_commands = self
             .eval_symbol("selection-inhibit-update-commands")
             .unwrap_or(Value::NIL);
@@ -2051,7 +2230,7 @@ impl Context {
     }
 
     pub(super) fn this_command_name_for_log(&self) -> String {
-        self.eval_symbol("this-command")
+        self.eval_symbol_by_id(CommandLoopSymbol::ThisCommand.id())
             .map(|value| format!("{}", value))
             .unwrap_or_else(|_| "<unbound>".to_string())
     }
@@ -3447,3 +3626,7 @@ mod gc_heap_mut_closure_tests;
 #[cfg(test)]
 #[path = "tests/chrome_transitions_test.rs"]
 mod chrome_transition_tests;
+
+#[cfg(test)]
+#[path = "tests/command_symbols_test.rs"]
+mod command_symbols_tests;
