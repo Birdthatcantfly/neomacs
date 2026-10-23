@@ -1232,6 +1232,8 @@ fn idle_preparation_covers_unselected_windows_even_when_selected_rows_are_unsupp
 
 #[test]
 fn moving_selected_window_does_not_starve_other_window_preparation() {
+    use neomacs_display_protocol::types::DisplayWindowId;
+
     let line = "ordinary offscreen text\n";
     let (mut eval, frame, buffer, selected) = incr_editing_frame(&line.repeat(300), 800, 600);
     let other = eval
@@ -1251,31 +1253,101 @@ fn moving_selected_window_does_not_starve_other_window_preparation() {
         .window_system = Some(Value::symbol("neomacs"));
     let mut engine = LayoutEngine::new();
     engine.layout_frame_rust(&mut eval, frame);
-    let owner = neomacs_display_protocol::types::DisplayWindowId::new(other.0 as i64);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut steps = 0;
-    while !engine.prepared_viewports.has_computed(frame, owner) {
-        assert!(engine.maintain_scroll_coverage(&eval).is_some());
-        assert!(std::time::Instant::now() < deadline);
-        // Change the selected viewport while its bounded page is in flight.
-        // A global "observed window" would continually retarget that window.
-        {
-            let start = (steps % 60 + 1) * line.len();
-            scroll_window_to(&mut eval, frame, selected, buffer, start as i64 + 1, start);
-            if let neovm_core::window::Window::Leaf { force_start, .. } = eval
-                .frame_manager_mut()
-                .get_mut(frame)
-                .unwrap()
-                .find_window_mut(selected)
-                .unwrap()
-            {
-                *force_start = true;
-            }
-            engine.layout_frame_rust(&mut eval, frame);
+    let selected_owner = DisplayWindowId::new(selected.0 as i64);
+    let other_owner = DisplayWindowId::new(other.0 as i64);
+    assert_eq!(engine.scroll_coverage.fairness_owner_for_test(), None);
+    assert!(
+        !engine
+            .prepared_viewports
+            .has_computed(frame, selected_owner)
+    );
+    assert!(!engine.prepared_viewports.has_computed(frame, other_owner));
+
+    // Prime exactly one real acquisition step. No worker preview can be
+    // submitted by this first ordinary-line fragment.
+    assert!(engine.maintain_scroll_coverage(&eval).is_some());
+    assert_eq!(
+        engine.scroll_coverage.active_owner_for_test(),
+        Some(selected_owner)
+    );
+    assert_eq!(engine.scroll_coverage.admission_owner_for_test(), None);
+    let mut drained_owners = Vec::new();
+    for (window, owner, moved_lines) in [(selected, selected_owner, 1), (other, other_owner, 2)] {
+        if owner == other_owner {
+            // Prove the actual scheduler selected the peer BEFORE replacing
+            // its first fragment with the explicit full-page worker request.
+            assert!(engine.maintain_scroll_coverage(&eval).is_some());
+            assert_eq!(
+                engine.scroll_coverage.active_owner_for_test(),
+                Some(other_owner),
+                "the next acquisition turn after selected completion belongs to the peer"
+            );
+            assert_eq!(engine.scroll_coverage.admission_owner_for_test(), None);
         }
-        steps += 1;
-        std::thread::yield_now();
+        assert!(!engine.prepared_viewports.has_computed(frame, owner));
+        engine
+            .request_scroll_coverage(&eval, frame, window, CharPos0::new(120 * line.len()))
+            .unwrap();
+        // This existing helper acquires/submits a full real RowWorker page;
+        // it never consumes the result, even if the worker already finished.
+        assert_eq!(
+            engine.scroll_coverage.active_capture_progress_for_test(),
+            None
+        );
+        assert_eq!(
+            engine.scroll_coverage.admission_owner_for_test(),
+            Some(owner)
+        );
+        assert_eq!(engine.scroll_coverage.active_owner_for_test(), Some(owner));
+
+        // Change the selected viewport while each actual owner admission is
+        // pending. Placement motion must not retarget that owner's receipt.
+        let start = moved_lines * line.len();
+        scroll_window_to(&mut eval, frame, selected, buffer, start as i64 + 1, start);
+        if let neovm_core::window::Window::Leaf { force_start, .. } = eval
+            .frame_manager_mut()
+            .get_mut(frame)
+            .unwrap()
+            .find_window_mut(selected)
+            .unwrap()
+        {
+            *force_start = true;
+        }
+        assert_eq!(
+            engine.scroll_coverage.admission_owner_for_test(),
+            Some(owner)
+        );
+        let guard = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            // ONLY the early frame drain may consume this receipt. No idle
+            // maintenance poll races it or substitutes a different owner.
+            engine.layout_frame_rust(&mut eval, frame);
+            // Check completion before the hang guard, including a frame that
+            // itself was delayed beyond the guard under machine load.
+            if engine.scroll_coverage.admission_owner_for_test().is_none() {
+                break;
+            }
+            assert_eq!(
+                engine.scroll_coverage.admission_owner_for_test(),
+                Some(owner)
+            );
+            assert!(
+                std::time::Instant::now() < guard,
+                "actual worker receipt never reached the early frame drain"
+            );
+            std::thread::yield_now();
+        }
+        let completed_owner = engine.scroll_coverage.fairness_owner_for_test();
+        assert_eq!(
+            completed_owner,
+            Some(owner),
+            "the early frame drain must retire the admitted owner's scheduling turn"
+        );
+        assert!(engine.prepared_viewports.has_computed(frame, owner));
+        assert_eq!(engine.scroll_coverage.active_owner_for_test(), None);
+        drained_owners.push(completed_owner.unwrap());
     }
+    assert_eq!(drained_owners, vec![selected_owner, other_owner]);
 }
 
 #[test]

@@ -134,6 +134,11 @@ impl ScrollCoverage {
     }
 
     #[cfg(test)]
+    pub(super) fn admission_owner_for_test(&self) -> Option<DisplayWindowId> {
+        self.admission.as_ref().map(|admission| admission.window)
+    }
+
+    #[cfg(test)]
     pub(super) fn active_capture_start_for_test(&self) -> Option<usize> {
         self.capture
             .as_ref()
