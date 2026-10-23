@@ -225,6 +225,15 @@ impl MeasuredDisplayRow {
             .materialize_output_row(0.0, self.row_height(), self.row_ascent())
     }
 
+    pub(crate) fn into_window_relative_output_row(self, window_bounds: Rect) -> GlyphRow {
+        let pixel_y = self.bounds.y - window_bounds.y;
+        let height = self.row_height();
+        let ascent = self.row_ascent();
+        self.rendered
+            .into_materialized_output_row(pixel_y, height, ascent)
+    }
+
+    #[cfg(test)]
     pub(crate) fn window_relative_output_row(&self, window_bounds: Rect) -> GlyphRow {
         self.rendered.materialize_output_row(
             self.bounds.y - window_bounds.y,

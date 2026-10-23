@@ -171,6 +171,32 @@ impl RenderedDisplayRow {
         row
     }
 
+    /// Consume a fresh, unpublished row at its terminal output handoff.
+    ///
+    /// Glyph storage and every row-local dependency table move together.
+    /// Unlike retained MatrixRows this row has no presentation owner; its
+    /// original fresh appearance remains unique. Face publication must finish
+    /// before the caller consumes the rendered output.
+    pub(crate) fn into_materialized_output_row(
+        self,
+        pixel_y: f32,
+        height_px: f32,
+        ascent_px: f32,
+    ) -> GlyphRow {
+        let Self {
+            mut row,
+            source_slots,
+            faces: _faces,
+            ..
+        } = self;
+        apply_display_row_source_slot_bounds(&mut row, &source_slots);
+        glyph_row_writer::normalize_external_row(&mut row);
+        row.pixel_y = pixel_y;
+        row.height_px = height_px;
+        row.ascent_px = ascent_px;
+        row
+    }
+
     #[cfg(test)]
     pub(crate) fn append_fragment_to_current_row(&self, row: &mut GlyphRow) -> DisplayRowPosition {
         let rendered_row = self.row();

@@ -1196,12 +1196,12 @@ impl<'face> WindowChromeDisplayRowRenderRequest<'face> {
         };
         measured.reanchor_y(final_y);
         let progress = measured.output_progress();
-        state.output.install_measured_window_display_row(&measured);
+        state.output.install_measured_window_display_row(measured);
         state.output_emitter.emit_chrome_progress(
             state.evaluator,
             ChromeRowProgress::new(output.with_y(final_y), progress),
         );
-        Some(measured.row_height())
+        Some(measured_height)
     }
 }
 

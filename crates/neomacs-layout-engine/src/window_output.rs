@@ -340,7 +340,7 @@ impl<'a> TextWindowOutputTarget<'a> {
         install_rendered_display_row_fragment_assets(self.builder(), faces);
     }
 
-    pub(crate) fn install_measured_window_display_row(&mut self, measured: &MeasuredDisplayRow) {
+    pub(crate) fn install_measured_window_display_row(&mut self, measured: MeasuredDisplayRow) {
         install_measured_window_display_row(self.builder(), measured);
     }
 }

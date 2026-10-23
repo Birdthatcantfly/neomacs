@@ -7,7 +7,7 @@ use neomacs_display_protocol::frame_chrome::ChromeDisplayRow;
 
 pub(crate) fn install_measured_window_display_row(
     builder: &mut DisplayOutputBuilder,
-    measured: &MeasuredDisplayRow,
+    measured: MeasuredDisplayRow,
 ) {
     MeasuredWindowDisplayRowInstallRequest { measured }.install(builder);
 }
@@ -39,11 +39,11 @@ pub(crate) fn install_rendered_display_row_fragment_assets(
     install_faces(builder, faces);
 }
 
-struct MeasuredWindowDisplayRowInstallRequest<'a> {
-    measured: &'a MeasuredDisplayRow,
+struct MeasuredWindowDisplayRowInstallRequest {
+    measured: MeasuredDisplayRow,
 }
 
-impl MeasuredWindowDisplayRowInstallRequest<'_> {
+impl MeasuredWindowDisplayRowInstallRequest {
     fn install(self, builder: &mut DisplayOutputBuilder) {
         let measured = self.measured;
         let DisplayRowOwner::WindowChrome { window_id, kind } = measured.owner() else {
@@ -57,7 +57,7 @@ impl MeasuredWindowDisplayRowInstallRequest<'_> {
         ));
         let display_row_index = measured.row_index() as usize;
         install_faces(builder, measured.rendered().faces());
-        let row = measured.window_relative_output_row(builder.current_window_pixel_bounds());
+        let row = measured.into_window_relative_output_row(builder.current_window_pixel_bounds());
         builder.install_output_row_lifecycle(
             crate::output::row_request::OutputRowLifecycleRequest::complete(
                 display_row_index,
@@ -89,3 +89,7 @@ fn install_faces(builder: &mut DisplayOutputBuilder, faces: &[RealizedFrameFace]
         builder.publish_output_face(face);
     }
 }
+
+#[cfg(test)]
+#[path = "display_rendered_row_output_install/tests/window_chrome_move_test.rs"]
+mod window_chrome_move_test;
