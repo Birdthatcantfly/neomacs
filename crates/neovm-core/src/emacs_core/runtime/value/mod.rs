@@ -2478,6 +2478,60 @@ pub trait IntoSymbol {
     fn into_symbol(self) -> Value;
 }
 
+/// A dynamic symbol producer's exact immutable name projection.
+///
+/// Only constructed from the actual bare symbol Value. This owns no Lisp
+/// heap object and retains no canonical-membership proof: conversion checks
+/// registry epoch/membership at each use. Not a name-to-ID cache.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ProducerSymbolName {
+    symbol: SymId,
+    spelling: &'static str,
+    characters: usize,
+}
+
+static_assertions::assert_impl_all!(ProducerSymbolName: Send, Sync);
+
+impl ProducerSymbolName {
+    pub(crate) fn from_value(value: Value) -> Option<Self> {
+        let symbol = value.as_bare_symbol_id()?;
+        let atom = super::intern::resolve_sym_lisp_string(symbol);
+        Some(Self {
+            symbol,
+            spelling: atom.as_utf8_str()?,
+            characters: atom.schars(),
+        })
+    }
+
+    pub(crate) fn spelling(&self) -> &'static str {
+        self.spelling
+    }
+}
+
+impl IntoSymbol for &ProducerSymbolName {
+    fn into_symbol(self) -> Value {
+        match self.spelling {
+            "nil" => Value::NIL,
+            "t" => Value::T,
+            name if self.characters == name.chars().count()
+                && super::intern::is_canonical_id(self.symbol) =>
+            {
+                // Match the &str constructor's observable accounting and
+                // keyword tag even when the producer avoids another intern.
+                add_wrapping(MemoryUseCountSlot::Symbols, 1);
+                if name.starts_with(':') {
+                    TaggedValue::from_kw_id(self.symbol)
+                } else {
+                    TaggedValue::from_sym_id(self.symbol)
+                }
+            }
+            // Uninterned/replaced IDs and ambiguous name representations
+            // retain the original live canonical-name lookup and accounting.
+            name => name.into_symbol(),
+        }
+    }
+}
+
 impl IntoSymbol for SymId {
     fn into_symbol(self) -> Value {
         TaggedValue::from_sym_id(self)

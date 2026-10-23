@@ -712,10 +712,16 @@ impl DisplaySourceFaceScope {
         }
     }
 
-    fn resolve_named_face(self, resolver: &FaceResolver, name: &str) -> ResolvedFace {
+    fn resolve_named_face_producer(
+        self,
+        resolver: &FaceResolver,
+        value: Value,
+    ) -> Option<ResolvedFace> {
         match self {
-            Self::FrameLocal => resolver.resolve_named_face(name),
-            Self::BufferLocal(remapping) => resolver.resolve_remapped_named_face(remapping, name),
+            Self::FrameLocal => resolver.resolve_named_face_producer(value),
+            Self::BufferLocal(remapping) => {
+                resolver.resolve_remapped_named_face_producer(remapping, value)
+            }
         }
     }
 
@@ -850,13 +856,10 @@ impl<'a> DisplaySourcePropertyResolver<'a> {
             // GNU treats `(t . FACTOR)` as the current font and otherwise
             // performs an exact named-face lookup for the target window.
             DisplayLineSpacingReference::Named(face) if face.is_t() => current().font_line_height,
-            DisplayLineSpacingReference::Named(face) => face
-                .as_bare_symbol_name()
-                .map(|name| {
-                    self.face_scope
-                        .resolve_named_face(face_basis.face_resolver(), name)
-                        .font_line_height
-                })
+            DisplayLineSpacingReference::Named(face) => self
+                .face_scope
+                .resolve_named_face_producer(face_basis.face_resolver(), face)
+                .map(|resolved| resolved.font_line_height)
                 .unwrap_or(0.0),
         };
         let pixels = factor * height;

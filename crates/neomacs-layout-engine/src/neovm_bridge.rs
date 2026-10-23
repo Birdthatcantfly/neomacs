@@ -37,6 +37,9 @@ mod property_keys_alias_tests;
 mod property_keys;
 use property_keys::PropertyKeyOrder;
 
+mod fixed_faces;
+use fixed_faces::FixedFace;
+
 mod face_colors;
 use face_colors::{FaceColorAttributes, FaceColorState, TtyPaint, TtyPaintKey};
 mod face_sources;
@@ -498,9 +501,8 @@ fn frame_parameter_int(frame: &Frame, name: &str, default: i64) -> i64 {
 /// decode through. `resolve` follows `:inherit` chains, so faces like
 /// `nobreak-space` (`:inherit escape-glyph`) report the inherited color.
 /// `fallback` is returned when the face leaves its foreground unspecified.
-fn face_fg_pixel(face_table: &FaceTable, name: &str, fallback: u32) -> u32 {
-    face_table
-        .resolve(name)
+fn face_fg_pixel(face_table: &FaceTable, name: FixedFace, fallback: u32) -> u32 {
+    name.resolve(face_table)
         .foreground
         .map(|c| (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32)
         .unwrap_or(fallback)
@@ -510,9 +512,8 @@ fn face_fg_pixel(face_table: &FaceTable, name: &str, fallback: u32) -> u32 {
 ///
 /// Sibling of [`face_fg_pixel`]; see it for the encoding and inheritance
 /// semantics.
-fn face_bg_pixel(face_table: &FaceTable, name: &str, fallback: u32) -> u32 {
-    face_table
-        .resolve(name)
+fn face_bg_pixel(face_table: &FaceTable, name: FixedFace, fallback: u32) -> u32 {
+    name.resolve(face_table)
         .background
         .map(|c| (c.r as u32) << 16 | (c.g as u32) << 8 | c.b as u32)
         .unwrap_or(fallback)
@@ -549,7 +550,7 @@ pub fn frame_params_from_neovm(
         image_scale_environment: image_scale_environment(frame, vars),
         window_system: frame.effective_window_system().is_some(),
         background: bg,
-        vertical_border_fg: face_fg_pixel(face_table, "vertical-border", fg),
+        vertical_border_fg: face_fg_pixel(face_table, FixedFace::VerticalBorder, fg),
         zero_width_vertical_border_edge: match frame
             .known_parameter(neovm_core::window::FrameParam::VerticalScrollBars)
             .and_then(|value| VerticalScrollBarType::from_symbol_value(&value))
@@ -559,9 +560,9 @@ pub fn frame_params_from_neovm(
         },
         right_divider_width: frame.effective_divider_width(FrameDivider::Right) as i32,
         bottom_divider_width: frame.effective_divider_width(FrameDivider::Bottom) as i32,
-        divider_fg: face_fg_pixel(face_table, "window-divider", fg),
-        divider_first_fg: face_fg_pixel(face_table, "window-divider-first-pixel", fg),
-        divider_last_fg: face_fg_pixel(face_table, "window-divider-last-pixel", fg),
+        divider_fg: face_fg_pixel(face_table, FixedFace::WindowDivider, fg),
+        divider_first_fg: face_fg_pixel(face_table, FixedFace::WindowDividerFirstPixel, fg),
+        divider_last_fg: face_fg_pixel(face_table, FixedFace::WindowDividerLastPixel, fg),
     }
 }
 
@@ -1162,10 +1163,10 @@ fn frame_cursor_spec(frame: &Frame) -> CursorSpec {
 }
 
 fn default_cursor_color_pixel(face_table: &FaceTable) -> u32 {
-    face_table
-        .resolve("cursor")
+    FixedFace::Cursor
+        .resolve(face_table)
         .background
-        .or_else(|| face_table.resolve("default").foreground)
+        .or_else(|| FixedFace::Default.resolve(face_table).foreground)
         .map(|color| color_to_pixel(&color))
         .unwrap_or(0x000000)
 }
@@ -1175,8 +1176,8 @@ fn frame_background_color_pixel(frame: &Frame, face_table: &FaceTable) -> u32 {
         .parameter("background-color")
         .and_then(|value| parse_color_pixel(&value))
         .or_else(|| {
-            face_table
-                .resolve("default")
+            FixedFace::Default
+                .resolve(face_table)
                 .background
                 .map(|color| color_to_pixel(&color))
         })
@@ -1188,8 +1189,8 @@ fn frame_foreground_color_pixel(frame: &Frame, face_table: &FaceTable) -> u32 {
         .parameter("foreground-color")
         .and_then(|value| parse_color_pixel(&value))
         .or_else(|| {
-            face_table
-                .resolve("default")
+            FixedFace::Default
+                .resolve(face_table)
                 .foreground
                 .map(|color| color_to_pixel(&color))
         })
@@ -1850,28 +1851,28 @@ pub fn window_params_from_neovm_with_font_sizing(
             vars,
             LayoutVar::ShowTrailingWhitespace,
         ),
-        trailing_ws_bg: face_bg_pixel(face_table, "trailing-whitespace", 0),
+        trailing_ws_bg: face_bg_pixel(face_table, FixedFace::TrailingWhitespace, 0),
         fill_column_indicator: fill_column_indicator
             .map(|(column, _)| column)
             .unwrap_or(-1),
         fill_column_indicator_char: fill_column_indicator
             .map(|(_, character)| character)
             .unwrap_or('|'),
-        fill_column_indicator_fg: face_fg_pixel(face_table, "fill-column-indicator", 0),
+        fill_column_indicator_fg: face_fg_pixel(face_table, FixedFace::FillColumnIndicator, 0),
         extra_line_spacing: match buffer_local_value(buffer, LayoutVar::LineSpacing) {
             Some(v) if v.is_fixnum() => v.as_fixnum().unwrap() as f32,
             Some(v) if v.is_float() => v.xfloat() as f32,
             _ => 0.0,
         },
         selective_display: buffer_selective_display(buffer),
-        escape_glyph_fg: face_fg_pixel(face_table, "escape-glyph", 0),
+        escape_glyph_fg: face_fg_pixel(face_table, FixedFace::EscapeGlyph, 0),
         nobreak_char_display: effective_nobreak_char_display(buffer, vars),
         // GNU merges `nobreak-space` for non-ASCII spaces (and `nobreak-hyphen`
         // for hyphens) in highlight mode; `nobreak-space` inherits `escape-glyph`,
         // so `resolve` yields the escape-glyph color when nobreak-space itself
         // sets no foreground (xdisp.c:8594-8617, faces.el `nobreak-space`).
-        nobreak_char_fg: face_fg_pixel(face_table, "nobreak-space", 0),
-        glyphless_char_fg: face_fg_pixel(face_table, "glyphless-char", 0),
+        nobreak_char_fg: face_fg_pixel(face_table, FixedFace::NobreakSpace, 0),
+        glyphless_char_fg: face_fg_pixel(face_table, FixedFace::GlyphlessChar, 0),
         wrap_prefix: Vec::new(),
         line_prefix: Vec::new(),
         left_margin_width: left_margin,
@@ -4433,7 +4434,7 @@ impl FaceResolver {
     ) -> Self {
         let frame_font_domain =
             FrameFontDomain::for_frame(window_system.is_some(), default_font_size);
-        let neo_default = face_table.resolve("default");
+        let neo_default = FixedFace::Default.resolve(face_table);
         let mut df = ResolvedFace::default();
         if let Some(color) = neo_default.foreground.as_ref() {
             df.set_foreground(color);
@@ -4863,6 +4864,25 @@ impl FaceResolver {
             resolved.face_id = BasicFaceId::SENTINEL;
         }
         resolved
+    }
+
+    /// Resolve an actual bare symbol without discarding producer identity.
+    /// The existing basic-face hit precedes any symbol constructor accounting.
+    pub(crate) fn resolve_named_face_producer(&self, value: Value) -> Option<ResolvedFace> {
+        let name = value.as_bare_symbol_name()?;
+        if let Some(role) = BasicFace::from_name(name)
+            && let Some(faces) = &self.realized_basic_faces
+            && let Some(face) = &faces[role]
+        {
+            return Some(face.clone());
+        }
+        let face = self.face_table.resolve_producer(value)?;
+        let mut resolved = self.realize_face(&face);
+        resolved.lisp_name = Some(name.to_string());
+        resolved.face_id = BasicFaceId::from_name(name)
+            .map(u32::from)
+            .unwrap_or(BasicFaceId::SENTINEL);
+        Some(resolved)
     }
 
     /// Resolve a named face while ignoring its final `:inverse-video`
@@ -5868,6 +5888,25 @@ impl FaceResolver {
         resolved
     }
 
+    /// Keep a caller-owned named symbol through frame resolution while
+    /// retaining the existing window-remapping interpreter and basic fastpath.
+    pub(crate) fn resolve_remapped_named_face_producer(
+        &self,
+        remapping: BufferFaceRemapping,
+        value: Value,
+    ) -> Option<ResolvedFace> {
+        let name = value.as_bare_symbol_name()?;
+        if let Some(face_id) = BasicFaceId::from_name(name) {
+            return Some(self.resolve_remapped_basic_face(remapping, face_id));
+        }
+        if remapping.alist().is_none_or(Value::is_nil) {
+            return self.resolve_named_face_producer(value);
+        }
+        // Nonempty remappings keep their name-keyed memo, diagnostics,
+        // cycle handling and canonical-name constructor exactly as before.
+        Some(self.resolve_remapped_named_face(remapping, name))
+    }
+
     /// GNU display_mode_line initializes its iterator with the selected
     /// active/inactive tab-line basic source, then lookup_basic_face applies
     /// buffer remapping (xdisp.c:3257-3290,28145; xfaces.c:5198-5199).
@@ -6459,3 +6498,7 @@ mod line_count_test;
 #[cfg(test)]
 #[path = "neovm_bridge/tests/rows_face_witness_test.rs"]
 mod rows_face_witness_test;
+
+#[cfg(test)]
+#[path = "neovm_bridge/tests/face_producer_transport_test.rs"]
+mod face_producer_transport_test;

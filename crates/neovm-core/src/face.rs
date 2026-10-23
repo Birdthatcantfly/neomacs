@@ -11,7 +11,7 @@
 //! - Face merging (overlay face on top of base face)
 
 use crate::emacs_core::intern::{SymId, resolve_sym};
-use crate::emacs_core::value::{Value, ValueKind};
+use crate::emacs_core::value::{ProducerSymbolName, Value, ValueKind};
 use crate::gc_trace::GcTrace;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use std::collections::HashMap;
@@ -2336,12 +2336,44 @@ impl FaceTable {
         )
     }
 
+    /// Resolve an actual bare symbol producer with the same spelling fallback
+    /// as `resolve`. Unsupported/non-UTF8 values remain the caller's fallback.
+    pub fn resolve_producer(&self, value: Value) -> Option<Face> {
+        let producer = ProducerSymbolName::from_value(value)?;
+        Some(self.resolve_producer_depth(&producer, 0))
+    }
+
+    /// Resolve a module-owned fixed spelling with its epoch-validated handle.
+    /// The ordinary string constructor's tags/accounting are preserved once.
+    pub fn resolve_fixed_symbol(
+        &self,
+        symbol: &crate::emacs_core::intern::EpochCachedSymbol,
+    ) -> Face {
+        let key = Value::symbol(symbol);
+        self.resolve_key_depth(symbol.name(), key, 0)
+    }
+
     fn resolve_depth(&self, name: &str, depth: usize) -> Face {
         if depth > 10 {
             return Face::new(name);
         }
-
         let key = face_symbol_value(name);
+        self.resolve_key_depth(name, key, depth)
+    }
+
+    fn resolve_producer_depth(&self, producer: &ProducerSymbolName, depth: usize) -> Face {
+        let name = producer.spelling();
+        if depth > 10 {
+            return Face::new(name);
+        }
+        let key = Value::symbol(producer);
+        self.resolve_key_depth(name, key, depth)
+    }
+
+    // Keep the original pure clone/merge kernel in both entry bodies. Inlining
+    // avoids a new shared out-of-line adapter on existing name-only callers.
+    #[inline(always)]
+    fn resolve_key_depth(&self, name: &str, key: Value, depth: usize) -> Face {
         let Some(face) = self.faces.map.get(&key) else {
             return Face::new(name);
         };
@@ -2382,8 +2414,8 @@ impl FaceTable {
         if face_ref.is_nil() || face_ref.is_bare_symbol_named("nil") {
             return Face::default();
         }
-        if let Some(name) = face_ref.as_bare_symbol_name() {
-            return self.resolve_depth(name, depth);
+        if let Some(producer) = ProducerSymbolName::from_value(face_ref) {
+            return self.resolve_producer_depth(&producer, depth);
         }
         let Some(items) = crate::emacs_core::value::list_to_vec(&face_ref) else {
             return Face::default();
@@ -2553,3 +2585,7 @@ mod tests;
 #[cfg(test)]
 #[path = "face/tests/color_specifications_test.rs"]
 mod color_specifications_tests;
+
+#[cfg(test)]
+#[path = "face/tests/producer_identity_test.rs"]
+mod producer_identity_tests;
