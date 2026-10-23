@@ -8,6 +8,10 @@ use neomacs_display_protocol::types::FaceId;
 #[path = "glyph_row_writer/tests/glyph_row_writer_test.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "glyph_row_writer/tests/bidi_identity_differential_test.rs"]
+mod bidi_identity_differential_tests;
+
 #[derive(Clone, Copy)]
 struct BidiGlyphUnit {
     ch: char,
@@ -22,27 +26,139 @@ impl BidiGlyphUnit {
     }
 }
 
+/// Attempt-local proof of the finalizer's existing all-LTR shortcut.
+/// This borrows only immutable units from the current row; it retains no
+/// buffer, scanner or callback-dependent state and creates no shared cache.
+#[derive(Clone, Copy)]
+struct LtrBidiUnits<'a> {
+    units: &'a [BidiGlyphUnit],
+}
+
+impl<'a> LtrBidiUnits<'a> {
+    fn certify(units: &'a [BidiGlyphUnit]) -> Option<Self> {
+        units
+            .iter()
+            .all(|unit| unit.ch < '\u{0590}')
+            .then_some(Self { units })
+    }
+
+    fn remap_cursor(self, cursor: Option<u16>) -> Option<u16> {
+        cursor.and_then(|col| {
+            self.units
+                .iter()
+                .find(|unit| unit.cols().contains(&(col as usize)))
+                .map(|unit| unit.start as u16)
+        })
+    }
+
+    fn finish(self, row: &mut GlyphRow, phys_cursor_col: Option<u16>) -> Option<u16> {
+        // Preserve the old zero-level writes, including padding belonging to
+        // a unit. Excluded media/orphan padding remain untouched as before.
+        for unit in self.units {
+            for glyph in &mut row.glyphs[GlyphArea::Text.index()][unit.cols()] {
+                glyph.bidi_level = 0;
+            }
+        }
+        row.reversed_p = false;
+        if let Some(col) = self.remap_cursor(row.cursor_col) {
+            row.cursor_col = Some(col);
+        }
+        let remapped_phys_cursor = self.remap_cursor(phys_cursor_col);
+        // Identity order still requires physical box-terminal restamping.
+        restamp_visual_box_runs(row, self);
+        remapped_phys_cursor
+    }
+}
+
+/// Private statically dispatched traversal of the same current-row units.
+/// The single box-topology algorithm is instantiated for certified identity
+/// and resolved order; no enum or dynamic dispatch is tested per glyph.
+trait BidiVisualTraversal {
+    fn units(&self) -> &[BidiGlyphUnit];
+    fn len(&self) -> usize;
+    fn logical_index(&self, visual_index: usize) -> usize;
+    fn level(&self, logical_index: usize) -> u8;
+    fn target_start(&self, logical_index: usize, next_col: usize) -> Option<usize>;
+}
+
+impl BidiVisualTraversal for LtrBidiUnits<'_> {
+    #[inline]
+    fn units(&self) -> &[BidiGlyphUnit] {
+        self.units
+    }
+    #[inline]
+    fn len(&self) -> usize {
+        self.units.len()
+    }
+    #[inline]
+    fn logical_index(&self, visual_index: usize) -> usize {
+        visual_index
+    }
+    #[inline]
+    fn level(&self, _logical_index: usize) -> u8 {
+        0
+    }
+    #[inline]
+    fn target_start(&self, logical_index: usize, _next_col: usize) -> Option<usize> {
+        Some(self.units[logical_index].start)
+    }
+}
+
+struct ResolvedBidiTraversal<'a> {
+    units: &'a [BidiGlyphUnit],
+    levels: &'a [u8],
+    order: &'a [usize],
+    available_cols: Vec<usize>,
+}
+
+impl<'a> ResolvedBidiTraversal<'a> {
+    fn new(units: &'a [BidiGlyphUnit], levels: &'a [u8], order: &'a [usize]) -> Self {
+        Self {
+            units,
+            levels,
+            order,
+            available_cols: units.iter().flat_map(BidiGlyphUnit::cols).collect(),
+        }
+    }
+}
+
+impl BidiVisualTraversal for ResolvedBidiTraversal<'_> {
+    #[inline]
+    fn units(&self) -> &[BidiGlyphUnit] {
+        self.units
+    }
+    #[inline]
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+    #[inline]
+    fn logical_index(&self, visual_index: usize) -> usize {
+        self.order[visual_index]
+    }
+    #[inline]
+    fn level(&self, logical_index: usize) -> u8 {
+        self.levels[logical_index]
+    }
+    #[inline]
+    fn target_start(&self, _logical_index: usize, next_col: usize) -> Option<usize> {
+        self.available_cols.get(next_col).copied()
+    }
+}
+
 /// Recompute physical terminals from visual adjacency after UAX#9 reordering.
 /// Swapping each odd glyph independently is insufficient: reordering can put
 /// boxed glyphs from different logical runs next to one another, or separate
 /// logical neighbors. GNU decides the physical terminals from visual
 /// boxed/unboxed adjacency while preserving independently open viewport/row
 /// boundaries. The explicit membership bit makes `Neither` unambiguous.
-fn restamp_visual_box_runs(
-    row: &mut GlyphRow,
-    units: &[BidiGlyphUnit],
-    levels: &[u8],
-    visual_order: &[usize],
-) {
-    let available_cols = units
-        .iter()
-        .flat_map(BidiGlyphUnit::cols)
-        .collect::<Vec<_>>();
+fn restamp_visual_box_runs(row: &mut GlyphRow, visual_order: impl BidiVisualTraversal) {
+    let units = visual_order.units();
     let mut next_col = 0usize;
     let text = &mut row.glyphs[GlyphArea::Text.index()];
-    for (visual_index, &logical_index) in visual_order.iter().enumerate() {
+    for visual_index in 0..visual_order.len() {
+        let logical_index = visual_order.logical_index(visual_index);
         let unit_len = units[logical_index].len;
-        let Some(&target_start) = available_cols.get(next_col) else {
+        let Some(target_start) = visual_order.target_start(logical_index, next_col) else {
             return;
         };
         let membership = units[logical_index].edges.membership();
@@ -56,17 +172,20 @@ fn restamp_visual_box_runs(
             continue;
         }
         let source_edges = units[logical_index].edges;
-        let physical_edges = if levels[logical_index] & 1 == 1 {
+        let physical_edges = if visual_order.level(logical_index) & 1 == 1 {
             source_edges.reversed()
         } else {
             source_edges
         };
-        let previous_boxed = visual_index
-            .checked_sub(1)
-            .is_some_and(|index| units[visual_order[index]].edges.membership().is_boxed());
-        let next_boxed = visual_order
-            .get(visual_index + 1)
-            .is_some_and(|&index| units[index].edges.membership().is_boxed());
+        let previous_boxed = visual_index.checked_sub(1).is_some_and(|index| {
+            units[visual_order.logical_index(index)]
+                .edges
+                .membership()
+                .is_boxed()
+        });
+        let next_boxed = (visual_index + 1 < visual_order.len())
+            .then(|| visual_order.logical_index(visual_index + 1))
+            .is_some_and(|index| units[index].edges.membership().is_boxed());
         let owns_left = if visual_index == 0 {
             physical_edges.owns_left()
         } else {
@@ -577,19 +696,13 @@ pub(crate) fn reorder_row_bidi(row: &mut GlyphRow, phys_cursor_col: Option<u16>)
     // digits to level 2, but 2 is even — every consumer tests `bidi_level & 1`,
     // and an all-even row has no odd run for rule L2 to reverse, so the result is
     // observably identical to a full resolve.
-    let all_ltr = !units.iter().any(|unit| unit.ch >= '\u{0590}');
-    let (levels, reversed_p) = if all_ltr {
-        (vec![0u8; units.len()], false)
-    } else {
-        let chars: String = units.iter().map(|unit| unit.ch).collect();
-        let levels = bidi::resolve_levels(&chars, BidiDir::Auto);
-        // GNU marks a row whose paragraph base direction is right-to-left as
-        // `reversed_p` and displays it flush to the right margin (src/xdisp.c).
-        // Row materialization reads the same flag to offset glyphs to the right
-        // edge. Determined from logical-order representative chars.
-        let reversed_p = bidi::paragraph_base_level(&chars, BidiDir::Auto) & 1 == 1;
-        (levels, reversed_p)
-    };
+    if let Some(identity) = LtrBidiUnits::certify(&units) {
+        return identity.finish(row, phys_cursor_col);
+    }
+    let chars: String = units.iter().map(|unit| unit.ch).collect();
+    let levels = bidi::resolve_levels(&chars, BidiDir::Auto);
+    // Preserve the existing non-LTR resolver and paragraph alignment path.
+    let reversed_p = bidi::paragraph_base_level(&chars, BidiDir::Auto) & 1 == 1;
     if levels.len() != units.len() {
         return None;
     }
@@ -620,6 +733,9 @@ pub(crate) fn reorder_row_bidi(row: &mut GlyphRow, phys_cursor_col: Option<u16>)
         cursor_logical_idx,
         phys_cursor_logical_idx,
     );
-    restamp_visual_box_runs(row, &units, &levels, &visual_order);
+    restamp_visual_box_runs(
+        row,
+        ResolvedBidiTraversal::new(&units, &levels, &visual_order),
+    );
     remapped_cursor
 }
