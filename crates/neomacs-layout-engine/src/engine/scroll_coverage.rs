@@ -124,6 +124,16 @@ pub(super) struct ScrollCoverage {
 
 impl ScrollCoverage {
     #[cfg(test)]
+    pub(super) fn fairness_owner_for_test(&self) -> Option<DisplayWindowId> {
+        self.last_window
+    }
+
+    #[cfg(test)]
+    pub(super) fn active_owner_for_test(&self) -> Option<DisplayWindowId> {
+        self.active_window()
+    }
+
+    #[cfg(test)]
     pub(super) fn active_capture_start_for_test(&self) -> Option<usize> {
         self.capture
             .as_ref()
@@ -202,6 +212,10 @@ impl ScrollCoverage {
         let Some(mut admission) = self.admission.take() else {
             return Err(RowProgramError::Cancelled);
         };
+        // Retiring this admission consumes its owner's scheduling turn, even
+        // when its result is rejected below. Frame redisplay and idle upkeep
+        // share this handoff; the cursor grants no authority to reuse rows.
+        self.last_window = Some(admission.window);
         if admission.ticket != result.ticket
             || admission.retained.key.fontset_generation
                 != neovm_core::emacs_core::fontset::fontset_generation()
@@ -686,12 +700,10 @@ impl LayoutEngine {
         match self.scroll_coverage.drain(&mut self.prepared_viewports) {
             Ok(true) => {
                 tracing::debug!(target: "neomacs_layout_engine::scroll_coverage", "worker page ready");
-                self.scroll_coverage.last_window = Some(window_id);
                 return Some(ScrollCoverageProgress::Continue);
             }
             Err(error) => {
                 tracing::debug!(target: "neomacs_layout_engine::scroll_coverage", ?error, "worker page rejected");
-                self.scroll_coverage.last_window = Some(window_id);
                 return Some(ScrollCoverageProgress::Continue);
             }
             Ok(false) => {}

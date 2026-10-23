@@ -36993,6 +36993,10 @@ mod prepared_viewport_test;
 #[path = "offscreen_row_test.rs"]
 mod offscreen_row_test;
 
+#[cfg(test)]
+#[path = "scroll_coverage_fairness_test.rs"]
+mod scroll_coverage_fairness_test;
+
 #[test]
 fn borrowed_and_snapshot_views_agree_on_composition_span_queries() {
     // The two LayoutBufferView implementations derive their composition spans
