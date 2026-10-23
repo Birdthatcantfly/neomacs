@@ -1,0 +1,7 @@
+error[E0308]: mismatched types
+ --> tests/p1rv_ui/p3sym_function_value_export.rs:9:5
+  |
+8 | ) -> TaggedValue {
+  |      ----------- expected `TaggedValue` because of return type
+9 |     run.sym_function_into(symbol, home).unwrap()
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `TaggedValue`, found `()`

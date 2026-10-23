@@ -36,6 +36,27 @@ unsafe impl Send for SymbolBacking {}
 unsafe impl Sync for SymbolBacking {}
 
 impl SymbolBacking {
+    /// Copy the function word and explicit-unbound state under one real
+    /// symbol reader. This uses the landed interior-mutable function cell;
+    /// no builtin fallback, callback, stamp or owner-private cache is touched.
+    ///
+    /// # Safety
+    /// The token's live reader word belongs to this retained World. All
+    /// ordinary views and concurrent markers remain excluded by that era.
+    pub(crate) unsafe fn read_function(
+        &self,
+        id: SymId,
+        _authority: &crate::tagged::gc::SymbolReadToken<'_>,
+    ) -> Option<super::FunctionCellSnapshot> {
+        // SAFETY: original retained root, with the matching reader held.
+        let obarray = unsafe { self.obarray.as_ref() };
+        if obarray.generation() != self.generation {
+            return None;
+        }
+        obarray.get_by_id(id)?;
+        Some(obarray.function_cell_snapshot(id))
+    }
+
     /// # Safety
     /// Roots belong to the same live World, all ordinary views are escrowed,
     /// and the keeper retains that World until all era access ends. All calls

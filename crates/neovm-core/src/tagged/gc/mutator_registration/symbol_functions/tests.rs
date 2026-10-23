@@ -49,69 +49,90 @@ impl Drop for FixtureGuard<'_> {
         *self.cleanup.borrow_mut() = Some(cleanup);
     }
 }
+#[derive(Clone, Copy)]
+enum InitialFunction {
+    Bound,
+    Empty,
+    Unbound,
+}
 fn fixture(
     kind: PlainSymbolBacking,
     body: impl for<'owner, 'era> FnOnce(&mut RunAccess<'owner, 'era>, &[SymbolHandle], &mut Homes<'era>),
 ) -> std::thread::Result<()> {
-    Context::with_test_symbol_functions_era(kind, |era, ids| {
-        let handles: Vec<_> = ids
-            .iter()
-            .map(|&id| era.admit_plain_symbol(id).unwrap())
-            .collect();
-        let mut stopped = era.stop().unwrap();
-        let input = era
-            .with_stopped_heap_for_test(&stopped, |heap| unsafe {
-                // SAFETY: scalar setup on the actual matching stopped heap.
-                SharedRoot::new(heap, Value::NIL)
-            })
-            .unwrap();
-        stopped.trace(|_, _| Ok(())).unwrap();
-        stopped.complete().unwrap();
-        let owner = era
-            .register(1, 8)
-            .unwrap()
-            .activate(era.heap_identity(), 1)
-            .unwrap();
-        let cleanup = Rc::new(RefCell::new(None));
-        let receipt = Rc::clone(&cleanup);
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let mut guard = FixtureGuard {
-                owner: Some(owner),
-                input: Some(input),
-                homes: None,
-                cleanup: receipt,
-            };
-            let mut run = guard.owner.as_mut().unwrap().run_access().unwrap();
-            let input = guard.input.as_ref().unwrap();
-            guard.homes = Some(Homes {
-                symbol: ids[0],
-                old: run.root_slot(input).unwrap(),
-                new: run.root_slot(input).unwrap(),
-                dst: run.root_slot(input).unwrap(),
-                cache: run.root_slot(input).unwrap(),
-                activation: run.root_slot(input).unwrap(),
-            });
-            let homes = guard.homes.as_mut().unwrap();
-            // Existing C3 reads supply actual immutable definition operands.
-            run.sym_value_into(&handles[0], &mut homes.old).unwrap();
-            run.sym_value_into(&handles[1], &mut homes.new).unwrap();
-            assert!(Value::from_bits(homes.old.word_for_test(&run)).is_cons());
-            assert!(Value::from_bits(homes.new.word_for_test(&run)).is_cons());
-            body(&mut run, &handles, homes);
-        }));
-        assert_eq!(
-            cleanup.borrow().as_ref(),
-            Some(&Ok(())),
-            "C4 fixture teardown failed independently of op outcome"
-        );
-        let (collector, keeper) = era
-            .finish()
-            .expect("C4 era finish after complete fixture cleanup");
-        drop(collector);
-        drop(keeper);
-        eprintln!("P3SYM_C4_TEARDOWN_OK {kind:?}");
-        outcome
-    })
+    fixture_state(kind, InitialFunction::Bound, body)
+}
+fn fixture_state(
+    kind: PlainSymbolBacking,
+    initial: InitialFunction,
+    body: impl for<'owner, 'era> FnOnce(&mut RunAccess<'owner, 'era>, &[SymbolHandle], &mut Homes<'era>),
+) -> std::thread::Result<()> {
+    Context::with_test_symbol_functions_init_era(
+        kind,
+        |obarray, ids| match initial {
+            InitialFunction::Bound => {}
+            InitialFunction::Empty => obarray.clear_function_silent_id(ids[0]),
+            InitialFunction::Unbound => obarray.fmakunbound_id(ids[0]),
+        },
+        |era, ids| {
+            let handles: Vec<_> = ids
+                .iter()
+                .map(|&id| era.admit_plain_symbol(id).unwrap())
+                .collect();
+            let mut stopped = era.stop().unwrap();
+            let input = era
+                .with_stopped_heap_for_test(&stopped, |heap| unsafe {
+                    // SAFETY: scalar setup on the actual matching stopped heap.
+                    SharedRoot::new(heap, Value::NIL)
+                })
+                .unwrap();
+            stopped.trace(|_, _| Ok(())).unwrap();
+            stopped.complete().unwrap();
+            let owner = era
+                .register(1, 8)
+                .unwrap()
+                .activate(era.heap_identity(), 1)
+                .unwrap();
+            let cleanup = Rc::new(RefCell::new(None));
+            let receipt = Rc::clone(&cleanup);
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let mut guard = FixtureGuard {
+                    owner: Some(owner),
+                    input: Some(input),
+                    homes: None,
+                    cleanup: receipt,
+                };
+                let mut run = guard.owner.as_mut().unwrap().run_access().unwrap();
+                let input = guard.input.as_ref().unwrap();
+                guard.homes = Some(Homes {
+                    symbol: ids[0],
+                    old: run.root_slot(input).unwrap(),
+                    new: run.root_slot(input).unwrap(),
+                    dst: run.root_slot(input).unwrap(),
+                    cache: run.root_slot(input).unwrap(),
+                    activation: run.root_slot(input).unwrap(),
+                });
+                let homes = guard.homes.as_mut().unwrap();
+                // Existing C3 reads supply actual immutable definition operands.
+                run.sym_value_into(&handles[0], &mut homes.old).unwrap();
+                run.sym_value_into(&handles[1], &mut homes.new).unwrap();
+                assert!(Value::from_bits(homes.old.word_for_test(&run)).is_cons());
+                assert!(Value::from_bits(homes.new.word_for_test(&run)).is_cons());
+                body(&mut run, &handles, homes);
+            }));
+            assert_eq!(
+                cleanup.borrow().as_ref(),
+                Some(&Ok(())),
+                "C4 fixture teardown failed independently of op outcome"
+            );
+            let (collector, keeper) = era
+                .finish()
+                .expect("C4 era finish after complete fixture cleanup");
+            drop(collector);
+            drop(keeper);
+            eprintln!("P3SYM_C4_TEARDOWN_OK {kind:?}");
+            outcome
+        },
+    )
 }
 fn oracle() -> Vec<&'static str> {
     let rows: Vec<_> = include_str!("../symbol_functions_oracle.expected")
@@ -196,11 +217,17 @@ macro_rules! red {
         }
     };
 }
-red!(p3sym_c4_red_plain_function, Unprojected, Function);
+#[test]
+fn p3sym_c4_plain_function() {
+    primitive(PlainSymbolBacking::Unprojected, FunctionOpKind::Function);
+}
 red!(p3sym_c4_red_plain_fset, Unprojected, Fset);
 red!(p3sym_c4_red_plain_fmakunbound, Unprojected, Fmakunbound);
 red!(p3sym_c4_red_plain_call, Unprojected, CallBegin);
-red!(p3sym_c4_red_projected_function, Projected, Function);
+#[test]
+fn p3sym_c4_projected_function() {
+    primitive(PlainSymbolBacking::Projected, FunctionOpKind::Function);
+}
 red!(p3sym_c4_red_projected_fset, Projected, Fset);
 red!(p3sym_c4_red_projected_fmakunbound, Projected, Fmakunbound);
 red!(p3sym_c4_red_projected_call, Projected, CallBegin);
@@ -223,4 +250,92 @@ fn p3sym_c4_surface_preserves_owner_root_and_fuel_types() {
     }
     assert!(surface.contains("fuel: NonZeroU32"));
     assert!(surface.contains("impl KeeperSymbols"));
+}
+
+#[test]
+fn p3sym_c4_function_empty_and_unbound_are_nil() {
+    for kind in [
+        PlainSymbolBacking::Unprojected,
+        PlainSymbolBacking::Projected,
+    ] {
+        for (initial, row, field) in [
+            (InitialFunction::Empty, 16, 0),
+            (InitialFunction::Unbound, 17, 1),
+        ] {
+            fixture_state(kind, initial, |run, handles, homes| {
+                run.sym_function_into(&handles[0], &mut homes.dst).unwrap();
+                // Select only symbol-function's scalar field from the pinned
+                // GNU rows (fboundp and the unbind identity are separate fields).
+                let expected = oracle()[row]
+                    .trim_start_matches('(')
+                    .trim_end_matches(')')
+                    .split_whitespace()
+                    .nth(field)
+                    .unwrap();
+                assert_eq!(
+                    crate::emacs_core::print_value(&Value::from_bits(homes.dst.word_for_test(run))),
+                    expected
+                );
+            })
+            .expect("GNU nil function-cell state and cleanup");
+        }
+    }
+}
+
+#[test]
+fn p3sym_c4_function_invalid_and_cleared_homes_refuse() {
+    for kind in [
+        PlainSymbolBacking::Unprojected,
+        PlainSymbolBacking::Projected,
+    ] {
+        fixture(kind, |run, handles, homes| {
+            let before = homes.dst.word_for_test(run);
+            let mut invalid = homes.dst.clone();
+            invalid.index = usize::MAX;
+            assert_eq!(
+                run.sym_function_into(&handles[0], &mut invalid),
+                Err(FunctionError::Authority(
+                    crate::tagged::gc::RegistrationError::StaleRegistration
+                ))
+            );
+            assert_eq!(
+                homes.dst.word_for_test(run),
+                before,
+                "invalid destination preserves the real home"
+            );
+            run.sym_function_into(&handles[0], &mut homes.dst).unwrap();
+            assert_eq!(homes.dst.word_for_test(run), homes.old.word_for_test(run));
+            run.clear_root_slots().unwrap();
+            assert_eq!(
+                run.sym_function_into(&handles[0], &mut homes.dst),
+                Err(FunctionError::Authority(
+                    crate::tagged::gc::RegistrationError::StaleRegistration
+                ))
+            );
+            assert!(run.owner.local.as_ref().unwrap().root_scratch.is_empty());
+        })
+        .expect("total function-home validation and cleanup");
+    }
+}
+
+#[test]
+fn p3sym_c4_function_read_has_no_fatal_decode_or_value_escape() {
+    let source = include_str!("../symbol_authority/functions.rs");
+    for forbidden in [
+        ".expect(",
+        ".unwrap(",
+        "panic!(",
+        "unreachable!(",
+        "-> Value",
+        "-> TaggedValue",
+        "-> usize",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "function read exposed {forbidden}"
+        );
+    }
+    assert!(source.contains("check_home(self, dst)?"));
+    assert!(source.contains("symbol_ref(symbol)?"));
+    assert!(source.contains("self.read_token()"));
 }

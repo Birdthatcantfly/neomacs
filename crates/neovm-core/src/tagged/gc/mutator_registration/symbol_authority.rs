@@ -2,6 +2,10 @@
 mod globals;
 pub use globals::GlobalError;
 pub(crate) use globals::{SymbolReadToken, SymbolWriteToken};
+mod functions;
+pub use functions::FunctionError;
+#[cfg(test)]
+pub use functions::FunctionOpKind;
 #[cfg(all(test, not(feature = "gc-memory-telemetry")))]
 mod closed_graph;
 mod word;

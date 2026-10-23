@@ -33,6 +33,16 @@ impl Context {
         kind: crate::tagged::gc::PlainSymbolBacking,
         body: impl for<'heap> FnOnce(crate::tagged::gc::ParallelHeapEra<'heap>, Vec<SymId>) -> R,
     ) -> R {
+        Self::with_test_symbol_functions_init_era(kind, |_, _| {}, body)
+    }
+
+    /// A fixture may change initial binding states while this setup still
+    /// exclusively owns the actual Obarray. The callback ends before the era.
+    pub(crate) fn with_test_symbol_functions_init_era<R>(
+        kind: crate::tagged::gc::PlainSymbolBacking,
+        init: impl FnOnce(&mut Obarray, &[SymId]),
+        body: impl for<'heap> FnOnce(crate::tagged::gc::ParallelHeapEra<'heap>, Vec<SymId>) -> R,
+    ) -> R {
         Self::with_test_symbol_backings_init_era(
             &[kind, kind],
             |obarray, ids| {
@@ -44,6 +54,7 @@ impl Context {
                     obarray.seed_value_id(id, definition);
                     obarray.set_symbol_function_id(id, definition);
                 }
+                init(obarray, ids);
             },
             body,
         )

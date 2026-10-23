@@ -1,39 +1,7 @@
-//! C4 preparation-only rooted API. No executable overlap instruction calls
-//! these explicit missing-operation bodies before the storage/call stages.
-use super::{KeeperSymbols, OwnerRootSlot, RegistrationError, RunAccess, SymbolHandle};
+//! C4 restricted call syntax and remaining preparation bodies. Direct
+//! function reads use the production sealed root-to-root API.
+use super::{FunctionError, FunctionOpKind, KeeperSymbols, OwnerRootSlot, RunAccess, SymbolHandle};
 use std::num::NonZeroU32;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FunctionOpKind {
-    Function,
-    Fset,
-    Fmakunbound,
-    CallBegin,
-    CallStep,
-    Reconcile,
-}
-
-impl FunctionOpKind {
-    pub(super) fn method(self) -> &'static str {
-        match self {
-            Self::Function => "sym_function_into",
-            Self::Fset => "sym_fset_into",
-            Self::Fmakunbound => "sym_fmakunbound_into",
-            Self::CallBegin => "sym_call_begin",
-            Self::CallStep => "sym_call_step",
-            Self::Reconcile => "reconcile_functions",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum FunctionError {
-    Authority(RegistrationError),
-    VoidFunction,
-    UnsupportedDefinition,
-    EpochExhausted,
-    MissingOperation(FunctionOpKind),
-}
 
 /// Cache payload remains in this owner's existing root census. Epoch/symbol
 /// are metadata only, never execution or lifetime authority on their own.
@@ -87,13 +55,6 @@ pub(super) enum FunctionOp {
 }
 
 impl<'era> RunAccess<'_, 'era> {
-    pub(super) fn sym_function_into(
-        &mut self,
-        _symbol: &SymbolHandle,
-        _dst: &mut OwnerRootSlot<'era>,
-    ) -> Result<(), FunctionError> {
-        Err(FunctionError::MissingOperation(FunctionOpKind::Function))
-    }
     pub(super) fn sym_fset_into(
         &mut self,
         _symbol: &SymbolHandle,

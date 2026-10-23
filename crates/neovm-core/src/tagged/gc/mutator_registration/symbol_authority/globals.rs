@@ -29,7 +29,10 @@ pub(crate) struct SymbolWriteToken<'lease> {
     _thread: PhantomData<Rc<()>>,
 }
 
-fn check_home(run: &RunAccess<'_, '_>, home: &OwnerRootSlot<'_>) -> Result<(), RegistrationError> {
+pub(super) fn check_home(
+    run: &RunAccess<'_, '_>,
+    home: &OwnerRootSlot<'_>,
+) -> Result<(), RegistrationError> {
     let local = run
         .owner
         .local
@@ -65,6 +68,15 @@ impl<'era> RunAccess<'_, 'era> {
 }
 
 impl SymbolRef<'_, '_, '_> {
+    /// The constructor stays beside the token's private fields. Only a real
+    /// identity-checked reader lease can mint this short backing admission.
+    pub(super) fn read_token(&self) -> SymbolReadToken<'_> {
+        SymbolReadToken {
+            _word: &self.run.owner.registry.symbols.word,
+            _thread: PhantomData,
+        }
+    }
+
     fn copy_into(&mut self, index: usize, boundp: bool) -> Result<(), GlobalError> {
         let registry = self.run.owner.registry;
         // Obtain the destination before loading: no fallible work or poll is
