@@ -3762,35 +3762,31 @@ pub(crate) fn builtin_text_property_any_in_state(
         });
     }
 
-    if val.is_nil() {
-        let mut cursor = byte_beg;
-        while cursor < byte_end {
-            let found =
-                lookup_buffer_text_property_at_emacs_byte_pos(vars, buffers, buf, cursor, prop);
-            if found.is_nil() {
-                return Ok(Value::fixnum(byte_to_elisp_pos(buf, cursor)));
-            }
-            match buf.text_props_next_interval_boundary_after_emacs_byte_pos(cursor) {
-                Some(next) if next <= byte_end => {
-                    cursor = next;
+    // GNU textprop.c:Ftext_property_any seats one interval walk, then
+    // resolves each interval plist before stepping to its successor. Reuse
+    // that immutable scan so value and boundary queries do not independently
+    // locate the same byte position on every iteration.
+    let first = buf.text_props_first_char_pos_where_in_emacs_byte_range(byte_range, |plist| {
+        let found = lookup_char_property_from_direct(
+            vars,
+            buffers,
+            |name| {
+                // Match get-text-property and the neighboring NOT-ALL scan,
+                // including names added through a live interval plist.
+                if buf.text_props_property_name_presence(name)
+                    == crate::buffer::text_props::PropertyNamePresence::DefinitelyAbsent
+                {
+                    None
+                } else {
+                    plist_get_value(plist, name)
                 }
-                _ => break,
-            }
-        }
-        return Ok(Value::NIL);
-    }
-    let mut cursor = byte_beg;
-    while cursor < byte_end {
-        let found = lookup_buffer_text_property_at_emacs_byte_pos(vars, buffers, buf, cursor, prop);
-        if eq_value(&found, val) {
-            return Ok(Value::fixnum(byte_to_elisp_pos(buf, cursor)));
-        }
-        match buf.text_props_next_interval_boundary_after_emacs_byte_pos(cursor) {
-            Some(next) if next > cursor && next <= byte_end => cursor = next,
-            _ => break,
-        }
-    }
-    Ok(Value::NIL)
+            },
+            prop,
+            CharPropertyCarrier::Text,
+        );
+        eq_value(&found, val)
+    });
+    Ok(first.map_or(Value::NIL, |pos| Value::fixnum(pos.to_lisp().as_i64())))
 }
 
 /// (text-property-not-all BEG END PROP VAL &optional OBJECT)
@@ -4085,3 +4081,7 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/char_property_carrier_test.rs"]
 mod char_property_carrier_tests;
+
+#[cfg(test)]
+#[path = "tests/text_property_any_interval_test.rs"]
+mod text_property_any_interval_tests;
