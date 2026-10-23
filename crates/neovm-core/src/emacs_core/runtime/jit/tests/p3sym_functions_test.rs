@@ -1,4 +1,7 @@
 //! Real native calls and installed inline dependencies across owned eras.
+#[path = "p3sym_functions_test/receiver.rs"]
+mod receiver;
+
 use super::{cache, compile, test_support};
 use crate::emacs_core::bytecode::{ByteCodeFunction, Op, StackDepth};
 use crate::emacs_core::error::FlowRef;
