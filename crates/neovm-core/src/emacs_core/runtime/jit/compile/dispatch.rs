@@ -421,15 +421,23 @@ fn scan_cdr<const OBSERVE: bool>(cell: Value) -> Value {
     }
 }
 
+/// A bounded `memq` walk's answer: `Ok` is the answer (a matching tail or
+/// `NIL`), `Err` is the tail where the walk stopped -- an improper cell or
+/// the cell after [`LIST_SHIM_FAST_STEPS`] checked ones -- and the builtin's
+/// scan continues there instead of re-walking the prefix. Both variants are
+/// one `Value`, so the walk returns in two registers; a three-word struct
+/// would go through the stack and tax every match.
+type MemqWalk = Result<Value, Value>;
+
 /// `(memq ELT LIST)` for a short list: bit identity, and -- while
 /// `symbols-with-pos-enabled` (`eq` then looks through positions) -- GNU
 /// `slow_eq`'s positioned-symbol rule, the same one the builtin applies.
-/// `None` when the list is improper before a match or longer than
-/// [`LIST_SHIM_FAST_STEPS`]; the builtin answers those. A match is found
-/// before the builtin's cycle check could fire: that check fires only after
-/// every distinct cons has been visited.
+/// `answer` is `None` when the list is improper before a match or longer
+/// than [`LIST_SHIM_FAST_STEPS`]; the builtin answers those, continuing from
+/// `tail`. A match is found before the builtin's cycle check could fire:
+/// that check fires only after every distinct cons has been visited.
 #[inline(always)]
-fn memq_fast(ctx: &Context, elt: Value, list: Value) -> Option<Value> {
+fn memq_fast(ctx: &Context, elt: Value, list: Value) -> MemqWalk {
     if !crate::tagged::collection_reads::reads_need_observation() {
         memq_fast_walk::<false>(ctx, elt, list)
     } else {
@@ -442,7 +450,7 @@ fn memq_fast(ctx: &Context, elt: Value, list: Value) -> Option<Value> {
 /// walks and keeps its former prologue; the observation calls themselves
 /// are unchanged.
 #[inline(never)]
-fn memq_observed_walk(ctx: &Context, elt: Value, list: Value) -> Option<Value> {
+fn memq_observed_walk(ctx: &Context, elt: Value, list: Value) -> MemqWalk {
     memq_fast_walk::<true>(ctx, elt, list)
 }
 
@@ -451,38 +459,46 @@ fn memq_observed_walk(ctx: &Context, elt: Value, list: Value) -> Option<Value> {
 /// `memq`, and a per-cell flag test or a stack frame would tax them all (the
 /// observed instantiation is out of line for the same reason).
 #[inline(always)]
-fn memq_fast_walk<const OBSERVE: bool>(ctx: &Context, elt: Value, list: Value) -> Option<Value> {
+fn memq_fast_walk<const OBSERVE: bool>(ctx: &Context, elt: Value, list: Value) -> MemqWalk {
     if ctx.symbols_with_pos_enabled {
         return memq_swp_walk::<OBSERVE>(elt, list);
     }
     let mut tail = list;
     for _ in 0..LIST_SHIM_FAST_STEPS {
         if !tail.is_cons() {
-            return tail.is_nil().then_some(Value::NIL);
+            return if tail.is_nil() {
+                Ok(Value::NIL)
+            } else {
+                Err(tail)
+            };
         }
         if scan_car::<OBSERVE>(tail).bits() == elt.bits() {
-            return Some(tail);
+            return Ok(tail);
         }
         tail = scan_cdr::<OBSERVE>(tail);
     }
-    None
+    Err(tail)
 }
 
 /// GNU `BASE_EQ`: a short-list scan with the flag off (also the shape the
 /// flag-on walk uses when the target is no symbol).
 #[inline(always)]
-fn memq_bits_walk<const OBSERVE: bool>(elt: Value, list: Value) -> Option<Value> {
+fn memq_bits_walk<const OBSERVE: bool>(elt: Value, list: Value) -> MemqWalk {
     let mut tail = list;
     for _ in 0..LIST_SHIM_FAST_STEPS {
         if !tail.is_cons() {
-            return tail.is_nil().then_some(Value::NIL);
+            return if tail.is_nil() {
+                Ok(Value::NIL)
+            } else {
+                Err(tail)
+            };
         }
         if scan_car::<OBSERVE>(tail).bits() == elt.bits() {
-            return Some(tail);
+            return Ok(tail);
         }
         tail = scan_cdr::<OBSERVE>(tail);
     }
-    None
+    Err(tail)
 }
 
 /// GNU `EQ` while the flag is on (`lisp.h` `EQ` -> `data.c` `slow_eq`): bit
@@ -496,7 +512,7 @@ fn memq_bits_walk<const OBSERVE: bool>(elt: Value, list: Value) -> Option<Value>
 /// the same symbol. The positioned-target shape, which must also compare
 /// the element's bits with the bare symbol, is out of line.
 #[inline(always)]
-fn memq_swp_walk<const OBSERVE: bool>(elt: Value, list: Value) -> Option<Value> {
+fn memq_swp_walk<const OBSERVE: bool>(elt: Value, list: Value) -> MemqWalk {
     let elt_bare = b::positioned_symbol_scan::<OBSERVE>(elt).unwrap_or(elt);
     if !elt_bare.is_bare_symbol() {
         return memq_bits_walk::<OBSERVE>(elt, list);
@@ -507,7 +523,11 @@ fn memq_swp_walk<const OBSERVE: bool>(elt: Value, list: Value) -> Option<Value> 
     let mut tail = list;
     for _ in 0..LIST_SHIM_FAST_STEPS {
         if !tail.is_cons() {
-            return tail.is_nil().then_some(Value::NIL);
+            return if tail.is_nil() {
+                Ok(Value::NIL)
+            } else {
+                Err(tail)
+            };
         }
         let element = scan_car::<OBSERVE>(tail);
         if element.bits() == elt.bits()
@@ -515,11 +535,11 @@ fn memq_swp_walk<const OBSERVE: bool>(elt: Value, list: Value) -> Option<Value> 
                 && b::positioned_symbol_scan::<OBSERVE>(element)
                     .is_some_and(|sym| sym.bits() == elt.bits()))
         {
-            return Some(tail);
+            return Ok(tail);
         }
         tail = scan_cdr::<OBSERVE>(tail);
     }
-    None
+    Err(tail)
 }
 
 /// [`memq_swp_walk`] with a symbol-with-position target: the element must be
@@ -530,20 +550,24 @@ fn memq_positioned_target_walk<const OBSERVE: bool>(
     elt: Value,
     elt_bare: Value,
     list: Value,
-) -> Option<Value> {
+) -> MemqWalk {
     let mut tail = list;
     for _ in 0..LIST_SHIM_FAST_STEPS {
         if !tail.is_cons() {
-            return tail.is_nil().then_some(Value::NIL);
+            return if tail.is_nil() {
+                Ok(Value::NIL)
+            } else {
+                Err(tail)
+            };
         }
         let element = scan_car::<OBSERVE>(tail);
         if element.bits() == elt.bits() || b::eq_bare_symbol_swp_scan::<OBSERVE>(element, elt_bare)
         {
-            return Some(tail);
+            return Ok(tail);
         }
         tail = scan_cdr::<OBSERVE>(tail);
     }
-    None
+    Err(tail)
 }
 
 /// `(assq KEY LIST)` for a short list, as [`memq_fast`]: the first element
@@ -673,8 +697,8 @@ pub extern "C" fn neovm_jit_memq(ctx: *mut u8, elt: i64, list: i64) -> i64 {
     // SAFETY: seam-provided dormant Context; read-only access.
     let ctx_ref = unsafe { &*(ctx as *const Context) };
     match memq_fast(ctx_ref, elt, list) {
-        Some(value) => value.bits() as i64,
-        None => list_slow(ctx, pure_memq, elt, list),
+        Ok(value) => value.bits() as i64,
+        Err(tail) => list_slow_memq_from(ctx, elt, list, tail),
     }
 }
 
@@ -819,6 +843,29 @@ fn list_slow(ctx: *mut u8, builtin: JitBuiltin2Pure, a: Value, b_: Value) -> i64
         // SAFETY: seam-provided dormant Context; read-only access.
         let ctx_ref = unsafe { &*(ctx as *const Context) };
         match builtin(ctx_ref, a, b_) {
+            Ok(value) => value.bits() as i64,
+            Err(flow) => {
+                stash_pending_flow(flow);
+                VALUE_SHIM_SIGNAL
+            }
+        }
+    })
+}
+
+/// [`list_slow`] for `memq`: the builtin's budgeted scan continues at `tail`
+/// (where [`memq_fast`] stopped) instead of re-visiting the prefix that walk
+/// already checked. `list` stays the original head, which only the exact
+/// fallback (improper, circular, or budget-exhausted) reads, so every error
+/// and its data are unchanged.
+#[cold]
+#[inline(never)]
+fn list_slow_memq_from(ctx: *mut u8, elt: Value, list: Value, tail: Value) -> i64 {
+    #[cfg(test)]
+    ARRAY_SHIM_SLOW_CALLS.with(|c| c.set(c.get() + 1));
+    jit_shim_contain!(ctx, VALUE_SHIM_SIGNAL, {
+        // SAFETY: seam-provided dormant Context; read-only access.
+        let ctx_ref = unsafe { &*(ctx as *const Context) };
+        match b::builtin_memq_values_from(elt, list, tail, ctx_ref.symbols_with_pos_enabled) {
             Ok(value) => value.bits() as i64,
             Err(flow) => {
                 stash_pending_flow(flow);

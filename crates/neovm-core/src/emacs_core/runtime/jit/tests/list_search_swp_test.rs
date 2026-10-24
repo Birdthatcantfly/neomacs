@@ -478,6 +478,11 @@ fn observed_walks_answer_like_unobserved_ones() {
         ("(position-symbol 'zeta 9)", "(list 'qa 'qb)"),
         ("'zeta", "'(qa qb . tail)"),
         ("'beta", "(let ((l (list 'q 'beta))) (setcdr (cdr l) l) l)"),
+        // Beyond the bounded walk: the observed slow path continues at the
+        // spill tail (`builtin_memq_values_from`), and must still answer
+        // like the unobserved one.
+        ("'zulu", "(append (make-list 64 'q) '(zulu))"),
+        ("'zulu", "(make-list 100 'q)"),
     ];
     for op in [false, true] {
         for swp in [false, true] {
@@ -529,4 +534,77 @@ fn shim_answers_match_the_opcode_arm() {
         }
     }
     eval.symbols_with_pos_enabled = false;
+}
+
+/// The slow path continues at the tail the bounded walk reached instead of
+/// re-walking the prefix from the head. That continuation must answer like
+/// the walk from the head for every shape that spills: a match at or beyond
+/// the bound, no match, and -- through the exact fallback, which always
+/// restarts at the original head -- the same improper/circular signal with
+/// the same data.
+#[test]
+fn memq_continuation_answers_like_the_full_scan() {
+    use crate::emacs_core::builtins::{builtin_memq_values, builtin_memq_values_from};
+    let mut eval = Context::new();
+    // `LIST_SHIM_FAST_STEPS` is the dispatch module's constant (64, asserted
+    // by `swp_walk_refuses_only_the_unbounded_shapes`' 63/64 cases).
+    const FAST_STEPS: usize = 64;
+    // (target, list, symbols-with-pos-enabled). Every list spills: either a
+    // match at/after cell 64, no match, or an improper/circular tail.
+    let cases: &[(&str, &str, bool)] = &[
+        ("'zulu", "(append (make-list 64 'q) '(zulu))", true),
+        ("'zulu", "(append (make-list 200 'q) '(zulu))", true),
+        ("'zulu", "(make-list 100 'q)", true),
+        ("'zulu", "'(alpha beta . tail)", true),
+        (
+            "'zulu",
+            "(let ((l (make-list 100 'q))) (setcdr (nthcdr 99 l) l) l)",
+            true,
+        ),
+        (
+            "(position-symbol 'zulu 3)",
+            "(append (make-list 70 'q) (list (position-symbol 'zulu 1)))",
+            true,
+        ),
+        ("5", "(append (make-list 70 'q) '(5))", false),
+        ("'zulu", "(append (make-list 70 'q) '(zulu))", false),
+    ];
+    for &(target_src, list_src, swp) in cases {
+        eval.symbols_with_pos_enabled = swp;
+        let pair = eval
+            .eval_str(&format!("(cons (cons {target_src} nil) {list_src})"))
+            .expect("operands");
+        crate::emacs_core::eval::push_scratch_gc_root(pair);
+        let target = pair.cons_car().cons_car();
+        let list = pair.cons_cdr();
+        // The tail the shim's fast walk would hand the builtin: 64 cells, or
+        // the first improper cell if the list ends before that.
+        let mut tail = list;
+        let mut steps = 0;
+        while tail.is_cons() && steps < FAST_STEPS {
+            tail = tail.cons_cdr();
+            steps += 1;
+        }
+        let what = format!("(memq {target_src} {list_src}) swp={swp}");
+        let full = outcome(builtin_memq_values(target, list, swp));
+        let continued = outcome(builtin_memq_values_from(target, list, tail, swp));
+        assert_eq!(continued, full, "{what}: continuation from the spill tail");
+    }
+    eval.symbols_with_pos_enabled = false;
+}
+
+/// A comparable rendering of an answer: the value, or the signal's symbol
+/// and every datum (the improper/circular signal carries the original list,
+/// so the tail object is part of what must match).
+fn outcome(result: Result<Value, Flow>) -> (String, Vec<String>) {
+    match result {
+        Ok(value) => ("ok".to_string(), vec![print_value(&value)]),
+        Err(flow) => match flow.into_kind() {
+            crate::emacs_core::error::FlowKind::Signal(sig) => (
+                format!("signal {}", sig.symbol_name()),
+                sig.data.iter().map(print_value).collect(),
+            ),
+            other => (format!("{other:?}"), Vec::new()),
+        },
+    }
 }
