@@ -3841,7 +3841,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "crossbeam-channel",
  "crossterm",
@@ -3878,7 +3878,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-allocator"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "mimalloc",
  "tikv-jemallocator",
@@ -3886,7 +3886,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-diagnostics"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "axum",
  "http-body-util",
@@ -3902,7 +3902,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-display-protocol"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "bitflags 2.13.1",
  "neomacs-infra",
@@ -3919,7 +3919,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-display-runtime"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "arboard",
  "ash",
@@ -3976,7 +3976,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-font-materializer"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "allsorts",
  "cosmic-text",
@@ -3994,7 +3994,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-gui-tests"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "core-foundation",
  "getrandom 0.4.3",
@@ -4016,7 +4016,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-infra"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "fs4",
  "getrandom 0.4.3",
@@ -4029,7 +4029,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-layout-engine"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "cosmic-text",
  "dwrote",
@@ -4063,7 +4063,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-melpa-test-support"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "command-group",
  "fs4",
@@ -4077,7 +4077,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-melpa-tests"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "base64 0.22.1",
  "expect-test",
@@ -4095,7 +4095,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-parity-reference"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "neomacs-infra",
  "sha2",
@@ -4104,7 +4104,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-perf"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "clap",
  "gstreamer",
@@ -4123,7 +4123,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-renderer-wgpu"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "ash",
  "bytemuck",
@@ -4160,7 +4160,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-terminfo"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "neomacs-infra",
  "pkg-config",
@@ -4172,7 +4172,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-test-fonts"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "flate2",
  "fs4",
@@ -4185,11 +4185,11 @@ dependencies = [
 
 [[package]]
 name = "neomacs-test-oracle"
-version = "0.0.19"
+version = "0.0.20"
 
 [[package]]
 name = "neomacs-tui-tests"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "expect-test",
  "libc",
@@ -4204,7 +4204,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-video"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "ash",
  "bytemuck",
@@ -4235,7 +4235,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-video-model"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "neomacs-display-protocol",
  "thiserror 2.0.20",
@@ -4243,7 +4243,7 @@ dependencies = [
 
 [[package]]
 name = "neomacs-webview"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "bindgen",
  "bitflags 2.13.1",
@@ -4272,7 +4272,7 @@ dependencies = [
 
 [[package]]
 name = "neovm-core"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -4367,11 +4367,11 @@ dependencies = [
 
 [[package]]
 name = "neovm-host-abi"
-version = "0.0.19"
+version = "0.0.20"
 
 [[package]]
 name = "neovm-oracle-tests"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "colored",
  "expect-test",
@@ -4389,7 +4389,7 @@ dependencies = [
 
 [[package]]
 name = "neovm-worker"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "neovm-core",
  "neovm-host-abi",
@@ -9308,7 +9308,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "flate2",
  "rayon",
