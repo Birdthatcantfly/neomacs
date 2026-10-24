@@ -37,7 +37,7 @@ impl PendingOutput {
         let pending = crate::elisp_string_literal(&self.pending);
         let expression = format!(
             "(progn (require 'bytecomp) (setq byte-compile-dest-file-function \
-             (lambda (file) (if (equal (expand-file-name file) {source}) \
+             (lambda (file) (if (equal (expand-file-name file) (expand-file-name {source})) \
              {pending} (error \"Unexpected nested byte-compile target: %s\" file)))))"
         );
         args.splice(
@@ -59,7 +59,7 @@ pub(crate) struct PlannedWave {
 
 impl PlannedWave {
     pub(crate) fn create(root: &Path, sources: &[PathBuf]) -> io::Result<Self> {
-        let root = root.canonicalize()?;
+        let root = canonical_path(root)?;
         // Same filesystem: publication renames preserve raw bytes/mode/mtime.
         // This private directory is never appended to load-path.
         let directory = tempfile::Builder::new()
@@ -73,7 +73,7 @@ impl PlannedWave {
                     "bytecode source must be regular, not a symlink",
                 ));
             }
-            let source = source.canonicalize()?;
+            let source = canonical_path(source)?;
             let relative = source.strip_prefix(&root).map_err(io::Error::other)?;
             if source.extension().is_none_or(|suffix| suffix != "el") {
                 return Err(io::Error::other("bytecode source must end in .el"));
@@ -211,8 +211,51 @@ pub(crate) fn parse_load_dependencies(
     edges
 }
 
+/// `Path::canonicalize` with Windows verbatim prefixes removed.
+///
+/// On Windows `canonicalize` answers `\\?\C:\...` (or `\\?\UNC\server\share`),
+/// a form the Lisp side turns into `//?/C:/...` under `expand-file-name`;
+/// the byte-compiler then cannot match it against the source it was asked
+/// to compile and refuses the output as an unexpected nested target. GNU
+/// never hands Lisp verbatim paths, so neither does this driver.
+pub(crate) fn canonical_path(path: &Path) -> io::Result<PathBuf> {
+    Ok(strip_verbatim_prefix(path.canonicalize()?))
+}
+
 fn canonical_or_same(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    canonical_path(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Rewrite `\\?\C:\x` as `C:\x` and `\\?\UNC\s\v\x` as `\\s\v\x`.
+/// Any other path, and every path on a non-Windows host, is returned as is.
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    use std::path::{Component, Prefix};
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return path;
+    };
+    let head: Option<PathBuf> = match prefix.kind() {
+        Prefix::VerbatimDisk(letter) => Some(PathBuf::from(format!("{}:\\", letter as char))),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut head = std::ffi::OsString::from("\\\\");
+            head.push(server);
+            head.push("\\");
+            head.push(share);
+            head.push("\\");
+            Some(PathBuf::from(head))
+        }
+        _ => None,
+    };
+    let Some(mut rebuilt) = head else {
+        return path;
+    };
+    for component in components {
+        match component {
+            Component::RootDir => {}
+            other => rebuilt.push(other.as_os_str()),
+        }
+    }
+    rebuilt
 }
 
 /// Order `sources` into compile waves so a file compiles only after the
