@@ -490,12 +490,47 @@ fn memq_bits_walk<const OBSERVE: bool>(elt: Value, list: Value) -> Option<Value>
 /// position. Hoist the target's unwrap out of the loop. A target that is no
 /// symbol after unwrapping can only match by identity (a positioned symbol
 /// unwraps to a symbol), exactly as the builtin's scan decides.
+///
+/// A bare-symbol target (94% of the byte compiler's calls) is the hot shape:
+/// its identity test just ran, so a positioned element only has to unwrap to
+/// the same symbol. The positioned-target shape, which must also compare
+/// the element's bits with the bare symbol, is out of line.
 #[inline(always)]
 fn memq_swp_walk<const OBSERVE: bool>(elt: Value, list: Value) -> Option<Value> {
     let elt_bare = b::positioned_symbol_scan::<OBSERVE>(elt).unwrap_or(elt);
     if !elt_bare.is_bare_symbol() {
         return memq_bits_walk::<OBSERVE>(elt, list);
     }
+    if elt_bare.bits() != elt.bits() {
+        return memq_positioned_target_walk::<OBSERVE>(elt, elt_bare, list);
+    }
+    let mut tail = list;
+    for _ in 0..LIST_SHIM_FAST_STEPS {
+        if !tail.is_cons() {
+            return tail.is_nil().then_some(Value::NIL);
+        }
+        let element = scan_car::<OBSERVE>(tail);
+        if element.bits() == elt.bits()
+            || (element.is_veclike()
+                && b::positioned_symbol_scan::<OBSERVE>(element)
+                    .is_some_and(|sym| sym.bits() == elt.bits()))
+        {
+            return Some(tail);
+        }
+        tail = scan_cdr::<OBSERVE>(tail);
+    }
+    None
+}
+
+/// [`memq_swp_walk`] with a symbol-with-position target: the element must be
+/// the target itself, its bare symbol, or a positioned symbol of that
+/// symbol.
+#[inline(never)]
+fn memq_positioned_target_walk<const OBSERVE: bool>(
+    elt: Value,
+    elt_bare: Value,
+    list: Value,
+) -> Option<Value> {
     let mut tail = list;
     for _ in 0..LIST_SHIM_FAST_STEPS {
         if !tail.is_cons() {
@@ -566,13 +601,46 @@ fn assq_bits_walk<const OBSERVE: bool>(key: Value, list: Value) -> Option<Value>
 }
 
 /// GNU `EQ` with the flag on, as [`memq_swp_walk`]: the first entry that is
-/// a cons whose key is `eq` to KEY.
+/// a cons whose key is `eq` to KEY. The bare-key shape (53% of the byte
+/// compiler's calls) is `memq_swp_walk`'s hot shape; the positioned-key
+/// shape is out of line.
 #[inline(always)]
 fn assq_swp_walk<const OBSERVE: bool>(key: Value, list: Value) -> Option<Value> {
     let key_bare = b::positioned_symbol_scan::<OBSERVE>(key).unwrap_or(key);
     if !key_bare.is_bare_symbol() {
         return assq_bits_walk::<OBSERVE>(key, list);
     }
+    if key_bare.bits() != key.bits() {
+        return assq_positioned_key_walk::<OBSERVE>(key, key_bare, list);
+    }
+    let mut tail = list;
+    for _ in 0..LIST_SHIM_FAST_STEPS {
+        if !tail.is_cons() {
+            return tail.is_nil().then_some(Value::NIL);
+        }
+        let entry = scan_car::<OBSERVE>(tail);
+        if entry.is_cons() {
+            let entry_key = scan_car::<OBSERVE>(entry);
+            if entry_key.bits() == key.bits()
+                || (entry_key.is_veclike()
+                    && b::positioned_symbol_scan::<OBSERVE>(entry_key)
+                        .is_some_and(|sym| sym.bits() == key.bits()))
+            {
+                return Some(entry);
+            }
+        }
+        tail = scan_cdr::<OBSERVE>(tail);
+    }
+    None
+}
+
+/// [`assq_swp_walk`] with a symbol-with-position key.
+#[inline(never)]
+fn assq_positioned_key_walk<const OBSERVE: bool>(
+    key: Value,
+    key_bare: Value,
+    list: Value,
+) -> Option<Value> {
     let mut tail = list;
     for _ in 0..LIST_SHIM_FAST_STEPS {
         if !tail.is_cons() {
