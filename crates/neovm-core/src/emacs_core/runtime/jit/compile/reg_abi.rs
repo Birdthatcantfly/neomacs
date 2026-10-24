@@ -81,6 +81,18 @@ impl LeafAbi {
         dynamic_prefix: usize,
         self_site: bool,
     ) -> Self {
+        // The register ABI returns its two words the way SysV x86_64 returns
+        // a 16-byte `#[repr(C)]` aggregate (`rax:rdx`; AAPCS64 likewise uses
+        // `x0:x1`), and Cranelift's `windows_fastcall` returns two i64s in
+        // `rax:rdx` as well. Rust's `extern "C"` on Windows x64 does not: a
+        // 16-byte aggregate comes back through a hidden pointer passed in
+        // `rcx`, which shifts every parameter by one register, so the leaf
+        // would run with the return slot as its vmctx. Every body keeps the
+        // memory ABI there (release v0.0.20: the Windows x86_64 bootstrap's
+        // loaddefs run overflowed its stack on exactly that).
+        if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+            return LeafAbi::Memory;
+        }
         if !aot
             && !osr
             && arity <= MAX_REG_ARGS
@@ -229,7 +241,8 @@ pub(crate) fn emit_leaf_return(
     }
 }
 
-/// What a register-ABI entry returns: `rax:rdx` under SysV.
+/// What a register-ABI entry returns: `rax:rdx` under SysV, `x0:x1` under
+/// AAPCS64; never produced on Windows x64 (see [`LeafAbi::for_build`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NativeRet {
