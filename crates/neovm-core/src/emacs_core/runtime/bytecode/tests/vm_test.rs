@@ -18,6 +18,9 @@ mod primitive_opcode_cells;
 #[path = "primitive_error_backtrace_test.rs"]
 mod primitive_error_backtrace;
 
+#[path = "verified_dead_checks_test.rs"]
+mod verified_dead_checks;
+
 fn new_vm(eval: &mut Context) -> Vm<'_> {
     Vm::from_context(eval)
 }

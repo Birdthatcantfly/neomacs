@@ -6012,7 +6012,15 @@ impl<'a> Vm<'a> {
                     // Inline car/cdr/car-safe/cdr-safe match GNU Emacs exactly:
                     // direct cons field access, nil passthrough, error on wrong type.
                     Op::Car => {
-                        let top = stk!().last_mut().unwrap();
+                        let top = if VERIFIED {
+                            debug_assert!(depth!(frame_base) > 0);
+                            let index = cursor.len - 1;
+                            // SAFETY: decode.rs:455-474 unary rule (1, 0) and
+                            // its :544 depth gate prove this frame owns index.
+                            unsafe { cursor.get_unchecked_mut(index) }
+                        } else {
+                            stk!().last_mut().unwrap()
+                        };
                         if !observe_collections && top.is_cons() {
                             *top = top.cons_car_unobserved();
                             continue;
@@ -6034,7 +6042,15 @@ impl<'a> Vm<'a> {
                         // nil → nil: no change needed
                     }
                     Op::Cdr => {
-                        let top = stk!().last_mut().unwrap();
+                        let top = if VERIFIED {
+                            debug_assert!(depth!(frame_base) > 0);
+                            let index = cursor.len - 1;
+                            // SAFETY: decode.rs:455-474 unary rule (1, 0) and
+                            // its :544 depth gate prove this frame owns index.
+                            unsafe { cursor.get_unchecked_mut(index) }
+                        } else {
+                            stk!().last_mut().unwrap()
+                        };
                         if !observe_collections && top.is_cons() {
                             *top = top.cons_cdr_unobserved();
                             continue;
