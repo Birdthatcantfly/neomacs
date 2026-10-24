@@ -955,14 +955,22 @@ impl TaggedValue {
     #[inline(always)]
     pub(crate) fn cons_car_unobserved(self) -> Self {
         debug_assert!(self.is_cons());
-        unsafe { (*((self.0 & !TAG_MASK) as *const ConsCell)).car.get() }
+        // An admitted cons has exact tag TAG_CONS. Subtracting it
+        // recovers the same aligned base and permits a field displacement.
+        unsafe {
+            (*(self.0.wrapping_sub(TAG_CONS) as *const ConsCell))
+                .car
+                .get()
+        }
     }
 
     /// Same capture precondition as [`Self::cons_car_unobserved`].
     #[inline(always)]
     pub(crate) fn cons_cdr_unobserved(self) -> Self {
         debug_assert!(self.is_cons());
-        unsafe { (*((self.0 & !TAG_MASK) as *const ConsCell)).cdr() }
+        // An admitted cons has exact tag TAG_CONS. Subtracting it
+        // recovers the same aligned base and permits a field displacement.
+        unsafe { (*(self.0.wrapping_sub(TAG_CONS) as *const ConsCell)).cdr() }
     }
 
     /// Set the car of a cons cell. Panics if not a cons.

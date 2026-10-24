@@ -22,6 +22,7 @@ use crate::emacs_core::intern::{SymId, intern, lookup_interned, resolve_sym};
 // storage_char_len and storage_substring no longer needed here — using emacs_char + LispString
 use crate::emacs_core::value::*;
 use crate::tagged::header::{SubrDispatchKind, SubrFn, SubrObj};
+use crate::tagged::value::{FIXNUM_CHECK_MASK, FIXNUM_CHECK_VALUE, FIXNUM_SHIFT};
 use crate::window::FrameId;
 
 /// Dynamic, execution-weighted opcode histogram for the Tier-0 interpreter
@@ -5558,15 +5559,19 @@ impl<'a> Vm<'a> {
                             }
                             let b = unsafe { *cursor.get_unchecked(len - 1) };
                             let a = unsafe { *cursor.get_unchecked(len - 2) };
-                            if a.is_fixnum() && b.is_fixnum() {
-                                let av = a.xfixnum();
-                                let bv = b.xfixnum();
-                                let res = av + bv;
-                                if (Value::MOST_NEGATIVE_FIXNUM..=Value::MOST_POSITIVE_FIXNUM)
-                                    .contains(&res)
+                            if (((a.bits() ^ FIXNUM_CHECK_VALUE) | (b.bits() ^ FIXNUM_CHECK_VALUE))
+                                & FIXNUM_CHECK_MASK)
+                                == 0
+                            {
+                                // T(n) = 4*n+2. T(b)-2 is representable for every
+                                // fixnum; the checked final tagged result fits i64 iff
+                                // the Lisp sum/difference fits the fixnum payload.
+                                let rhs_payload = fixnum_tagged_i64(b) - FIXNUM_CHECK_VALUE as i64;
+                                if let Some(encoded) = fixnum_tagged_i64(a).checked_add(rhs_payload)
                                 {
                                     unsafe {
-                                        *cursor.get_unchecked_mut(len - 2) = Value::fixnum(res);
+                                        *cursor.get_unchecked_mut(len - 2) =
+                                            Value::from_bits(encoded as usize);
                                     }
                                     cursor.len = len - 1;
                                     None
@@ -5604,14 +5609,16 @@ impl<'a> Vm<'a> {
                         let len = stk!().len();
                         let b = stk!()[len - 1];
                         let a = stk!()[len - 2];
-                        if a.is_fixnum() && b.is_fixnum() {
-                            let av = a.xfixnum();
-                            let bv = b.xfixnum();
-                            let res = av - bv;
-                            if (Value::MOST_NEGATIVE_FIXNUM..=Value::MOST_POSITIVE_FIXNUM)
-                                .contains(&res)
-                            {
-                                stk!()[len - 2] = Value::fixnum(res);
+                        if (((a.bits() ^ FIXNUM_CHECK_VALUE) | (b.bits() ^ FIXNUM_CHECK_VALUE))
+                            & FIXNUM_CHECK_MASK)
+                            == 0
+                        {
+                            // T(n) = 4*n+2. T(b)-2 is representable for every
+                            // fixnum; the checked final tagged result fits i64 iff
+                            // the Lisp sum/difference fits the fixnum payload.
+                            let rhs_payload = fixnum_tagged_i64(b) - FIXNUM_CHECK_VALUE as i64;
+                            if let Some(encoded) = fixnum_tagged_i64(a).checked_sub(rhs_payload) {
+                                stk!()[len - 2] = Value::from_bits(encoded as usize);
                                 stk!().pop();
                             } else {
                                 let result = vm_try!(self.call_arith_builtin_from_stack_args(
@@ -5755,10 +5762,14 @@ impl<'a> Vm<'a> {
                             }
                             let top = unsafe { *cursor.get_unchecked(len - 1) };
                             if top.is_fixnum() {
-                                let n = top.xfixnum();
-                                if n != Value::MOST_POSITIVE_FIXNUM {
+                                // A unit payload step changes the tagged word by four; signed
+                                // overflow is exactly the Lisp fixnum boundary.
+                                if let Some(encoded) =
+                                    fixnum_tagged_i64(top).checked_add(1_i64 << FIXNUM_SHIFT)
+                                {
                                     unsafe {
-                                        *cursor.get_unchecked_mut(len - 1) = Value::fixnum(n + 1);
+                                        *cursor.get_unchecked_mut(len - 1) =
+                                            Value::from_bits(encoded as usize);
                                     }
                                     None
                                 } else {
@@ -5784,9 +5795,12 @@ impl<'a> Vm<'a> {
                     Op::Sub1 => {
                         let top = *stk!().last().unwrap();
                         if top.is_fixnum() {
-                            let n = top.xfixnum();
-                            if n != Value::MOST_NEGATIVE_FIXNUM {
-                                *stk!().last_mut().unwrap() = Value::fixnum(n - 1);
+                            // A unit payload step changes the tagged word by four; signed
+                            // overflow is exactly the Lisp fixnum boundary.
+                            if let Some(encoded) =
+                                fixnum_tagged_i64(top).checked_sub(1_i64 << FIXNUM_SHIFT)
+                            {
+                                *stk!().last_mut().unwrap() = Value::from_bits(encoded as usize);
                             } else {
                                 let args_start = stk!().len() - 1;
                                 let result = vm_try!(self.call_arith_builtin_from_stack_args(
@@ -5850,7 +5864,10 @@ impl<'a> Vm<'a> {
                         let len = stk!().len();
                         let b = stk!()[len - 1];
                         let a = stk!()[len - 2];
-                        if a.is_fixnum() && b.is_fixnum() {
+                        if (((a.bits() ^ FIXNUM_CHECK_VALUE) | (b.bits() ^ FIXNUM_CHECK_VALUE))
+                            & FIXNUM_CHECK_MASK)
+                            == 0
+                        {
                             stk!()[len - 2] = if a.0 == b.0 { Value::T } else { Value::NIL };
                             stk!().pop();
                         } else {
@@ -5869,7 +5886,10 @@ impl<'a> Vm<'a> {
                         let len = stk!().len();
                         let b = stk!()[len - 1];
                         let a = stk!()[len - 2];
-                        if a.is_fixnum() && b.is_fixnum() {
+                        if (((a.bits() ^ FIXNUM_CHECK_VALUE) | (b.bits() ^ FIXNUM_CHECK_VALUE))
+                            & FIXNUM_CHECK_MASK)
+                            == 0
+                        {
                             stk!()[len - 2] = if fixnum_gt(a, b) {
                                 Value::T
                             } else {
@@ -5896,7 +5916,10 @@ impl<'a> Vm<'a> {
                             }
                             let b = unsafe { *cursor.get_unchecked(len - 1) };
                             let a = unsafe { *cursor.get_unchecked(len - 2) };
-                            if a.is_fixnum() && b.is_fixnum() {
+                            if (((a.bits() ^ FIXNUM_CHECK_VALUE) | (b.bits() ^ FIXNUM_CHECK_VALUE))
+                                & FIXNUM_CHECK_MASK)
+                                == 0
+                            {
                                 unsafe {
                                     *cursor.get_unchecked_mut(len - 2) = if fixnum_lt(a, b) {
                                         Value::T
@@ -5927,7 +5950,10 @@ impl<'a> Vm<'a> {
                         let len = stk!().len();
                         let b = stk!()[len - 1];
                         let a = stk!()[len - 2];
-                        if a.is_fixnum() && b.is_fixnum() {
+                        if (((a.bits() ^ FIXNUM_CHECK_VALUE) | (b.bits() ^ FIXNUM_CHECK_VALUE))
+                            & FIXNUM_CHECK_MASK)
+                            == 0
+                        {
                             stk!()[len - 2] = if fixnum_le(a, b) {
                                 Value::T
                             } else {
@@ -5950,7 +5976,10 @@ impl<'a> Vm<'a> {
                         let len = stk!().len();
                         let b = stk!()[len - 1];
                         let a = stk!()[len - 2];
-                        if a.is_fixnum() && b.is_fixnum() {
+                        if (((a.bits() ^ FIXNUM_CHECK_VALUE) | (b.bits() ^ FIXNUM_CHECK_VALUE))
+                            & FIXNUM_CHECK_MASK)
+                            == 0
+                        {
                             stk!()[len - 2] = if fixnum_ge(a, b) {
                                 Value::T
                             } else {
@@ -10106,3 +10135,11 @@ mod sole_owner_cursor_tests;
 #[cfg(test)]
 #[path = "tests/aux_stack_drop_test.rs"]
 mod aux_stack_drop_tests;
+
+#[cfg(test)]
+#[path = "tests/arithmetic_shape_boundary_test.rs"]
+mod arithmetic_shape_boundary_tests;
+
+#[cfg(test)]
+#[path = "tests/cons_tagged_displacement_test.rs"]
+mod cons_tagged_displacement_tests;
