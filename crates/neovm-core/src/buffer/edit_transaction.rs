@@ -545,15 +545,19 @@ impl Buffer {
 
         // GNU `replace_range` (insdel.c:1638-1639) records the insertion
         // first, so the `record_point` prologue runs for the *insertion's*
-        // beg -- `from + SCHARS (deletion)`, i.e. the old range's end -- and
-        // the following `record_delete` finds the list off a boundary and adds
-        // nothing.
+        // beg -- `from + SCHARS (deletion)`, i.e. the old range's end.
+        // The deletion runs its own prologue below: being off a boundary
+        // suppresses a second point entry, but not a first-change sentinel
+        // while the buffer is still clean (MODIFF increments after recording).
         self.undo_prepare_change(plan.old_char_end());
         let mut ul = self.get_undo_list();
         if undo::undo_list_is_disabled(&ul) {
             return;
         }
         undo::undo_list_record_insert(&mut ul, plan.old_char_end(), plan.new_char_len());
+        self.set_undo_list(ul);
+        self.undo_prepare_change(plan.old_char_start());
+        let mut ul = self.get_undo_list();
         undo::undo_list_record_delete(
             &mut ul,
             plan.old_char_start(),
@@ -2516,3 +2520,7 @@ mod casify_extent_tests;
 #[cfg(test)]
 #[path = "edit_transaction/tests/delete_live_undo.rs"]
 mod delete_live_undo_tests;
+
+#[cfg(test)]
+#[path = "edit_transaction/tests/replacement_undo_gnu.rs"]
+mod replacement_undo_gnu_tests;
