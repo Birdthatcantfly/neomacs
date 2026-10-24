@@ -3,8 +3,8 @@
 //!
 //! Cons blocks and object-arena pages are 64 KiB, 64 KiB-aligned
 //! allocations, so the granule `addr >> 16` names at most one of them. The
-//! map is a two-level radix over the 47-bit user address space: a level-1
-//! array of leaf pointers indexed by VA bits 46..32, and 256 KiB leaves of
+//! map is a two-level radix over the 48-bit user address space: a level-1
+//! array of leaf pointers indexed by VA bits 47..32, and 256 KiB leaves of
 //! [`ChunkEntry`] words indexed by bits 31..16. A lookup is two dependent
 //! loads. Leaves are allocated on demand (zeroed, so faulted in lazily) and
 //! freed only with the map; a process's heap pages typically occupy one or
@@ -122,7 +122,12 @@ const GRANULE_SHIFT: usize = 16;
 const LEAF_BITS: usize = 16;
 const LEAF_LEN: usize = 1 << LEAF_BITS;
 const L1_SHIFT: usize = GRANULE_SHIFT + LEAF_BITS;
-const L1_BITS: usize = 15;
+// 48 bits covers every mapping a 4-level page-table kernel hands out
+// (x86_64 and aarch64 Linux alike; aarch64 Linux places mmap regions near
+// the top of its 48-bit user space, e.g. 0xffef_b25e_0000). Larger virtual
+// address spaces (LA57, aarch64 LVA) only return higher addresses when a
+// mapping explicitly asks for them, which the heap never does.
+const L1_BITS: usize = 16;
 const L1_LEN: usize = 1 << L1_BITS;
 
 const _: () = assert!(1 << GRANULE_SHIFT == OBJECT_PAGE_ALIGN);
@@ -197,7 +202,7 @@ impl ChunkMap {
         let hi = base >> L1_SHIFT;
         assert!(
             hi < L1_LEN,
-            "heap granule {base:#x} is above the chunk map's 47-bit range"
+            "heap granule {base:#x} is above the chunk map's 48-bit range"
         );
         let slot = &self.l1[hi];
         let mut leaf = slot.load(Ordering::Acquire);

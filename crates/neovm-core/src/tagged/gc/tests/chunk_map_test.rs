@@ -567,3 +567,28 @@ fn chunk_map_concurrent_cycles_keep_the_live_set_while_pages_grow() {
     assert_eq!(n, 20_000);
     heap.assert_object_arenas_coherent();
 }
+
+/// Linux aarch64 places mmap regions near the top of its 48-bit user space
+/// (release v0.0.20's runner handed the heap 0xffef_b25e_0000); the map must
+/// hold those granules, and only addresses at or above 2^48 stay out of range.
+#[test]
+fn the_radix_covers_the_48_bit_user_address_space() {
+    let map = ChunkMap::new();
+    let high = 0xffef_b25e_0000usize;
+    let entry = ChunkEntry::new(ChunkClass::Cons, 7);
+    map.set(high, entry);
+    assert_eq!(map.get(high), entry);
+    assert_eq!(map.get(high + 0xffff), entry);
+    assert_eq!(map.get(high + 0x1_0000), ChunkEntry::NONE);
+    assert_eq!(map.get((1 << 48) - 0x1_0000), ChunkEntry::NONE);
+    assert_eq!(map.get(1 << 48), ChunkEntry::NONE);
+    map.set(high, ChunkEntry::NONE);
+    assert_eq!(map.get(high), ChunkEntry::NONE);
+}
+
+#[test]
+#[should_panic(expected = "above the chunk map's 48-bit range")]
+fn a_granule_at_or_above_2_pow_48_is_refused() {
+    let map = ChunkMap::new();
+    map.set(1 << 48, ChunkEntry::new(ChunkClass::Cons, 1));
+}
