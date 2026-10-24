@@ -488,8 +488,9 @@ fn list_sites_match_the_interpreter_natively() {
     assert!(checked >= 300, "checked {checked}");
 }
 
-/// Short lists stay on the fast path; a long list or
-/// `symbols-with-pos-enabled` reach the builtin, which still answers.
+/// Short lists stay on the fast path -- with `symbols-with-pos-enabled` too,
+/// where the shim's walk (not the builtin) answers; a long list reaches the
+/// builtin, which still answers.
 #[test]
 fn short_list_lookups_stay_on_the_fast_path() {
     use super::dispatch::ARRAY_SHIM_SLOW_CALLS;
@@ -539,12 +540,8 @@ fn short_list_lookups_stay_on_the_fast_path() {
         native(ctx_ptr, &memq, &[Value::symbol("y"), short], "swp memq"),
         "(y z)"
     );
-    assert_eq!(
-        ARRAY_SHIM_SLOW_CALLS.with(|c| c.get()),
-        1,
-        "symbols-with-pos"
-    );
-    // With positions enabled `eq` looks through them, and so must the site.
+    // With positions enabled `eq` looks through them, and so must the site;
+    // the shim's own walk answers a short list without the builtin.
     assert_eq!(
         native(ctx_ptr, &memq, &[positioned, short], "memq, positions on"),
         "(y z)"
@@ -552,6 +549,11 @@ fn short_list_lookups_stay_on_the_fast_path() {
     assert_eq!(
         native(ctx_ptr, &assq, &[positioned, alist], "assq, positions on"),
         "(y . 2)"
+    );
+    assert_eq!(
+        ARRAY_SHIM_SLOW_CALLS.with(|c| c.get()),
+        0,
+        "the shim's walk answers short lists with positions on"
     );
     eval.eval_str("(setq symbols-with-pos-enabled nil)")
         .expect("swp off");

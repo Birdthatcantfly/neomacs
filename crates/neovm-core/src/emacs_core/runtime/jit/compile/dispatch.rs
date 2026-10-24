@@ -421,9 +421,10 @@ fn scan_cdr<const OBSERVE: bool>(cell: Value) -> Value {
     }
 }
 
-/// `(memq ELT LIST)` for a short list, bit-identity only. `None` when
-/// `symbols-with-pos-enabled` (`eq` then looks through positions), the
-/// list is improper before a match, or it is longer than
+/// `(memq ELT LIST)` for a short list: bit identity, and -- while
+/// `symbols-with-pos-enabled` (`eq` then looks through positions) -- GNU
+/// `slow_eq`'s positioned-symbol rule, the same one the builtin applies.
+/// `None` when the list is improper before a match or longer than
 /// [`LIST_SHIM_FAST_STEPS`]; the builtin answers those. A match is found
 /// before the builtin's cycle check could fire: that check fires only after
 /// every distinct cons has been visited.
@@ -432,14 +433,27 @@ fn memq_fast(ctx: &Context, elt: Value, list: Value) -> Option<Value> {
     if !crate::tagged::collection_reads::reads_need_observation() {
         memq_fast_walk::<false>(ctx, elt, list)
     } else {
-        memq_fast_walk::<true>(ctx, elt, list)
+        memq_observed_walk(ctx, elt, list)
     }
 }
 
+/// The observed instantiation answers only while a capture scope is open.
+/// Keep it out of line so the shim's hot body holds just the unobserved
+/// walks and keeps its former prologue; the observation calls themselves
+/// are unchanged.
+#[inline(never)]
+fn memq_observed_walk(ctx: &Context, elt: Value, list: Value) -> Option<Value> {
+    memq_fast_walk::<true>(ctx, elt, list)
+}
+
+/// The flag selects which comparison `eq` means. The flag-off body here must
+/// stay the exact bit-identity scan it was: it answers nearly every compiled
+/// `memq`, and a per-cell flag test or a stack frame would tax them all (the
+/// observed instantiation is out of line for the same reason).
 #[inline(always)]
 fn memq_fast_walk<const OBSERVE: bool>(ctx: &Context, elt: Value, list: Value) -> Option<Value> {
     if ctx.symbols_with_pos_enabled {
-        return None;
+        return memq_swp_walk::<OBSERVE>(elt, list);
     }
     let mut tail = list;
     for _ in 0..LIST_SHIM_FAST_STEPS {
@@ -454,21 +468,71 @@ fn memq_fast_walk<const OBSERVE: bool>(ctx: &Context, elt: Value, list: Value) -
     None
 }
 
+/// GNU `BASE_EQ`: a short-list scan with the flag off (also the shape the
+/// flag-on walk uses when the target is no symbol).
+#[inline(always)]
+fn memq_bits_walk<const OBSERVE: bool>(elt: Value, list: Value) -> Option<Value> {
+    let mut tail = list;
+    for _ in 0..LIST_SHIM_FAST_STEPS {
+        if !tail.is_cons() {
+            return tail.is_nil().then_some(Value::NIL);
+        }
+        if scan_car::<OBSERVE>(tail).bits() == elt.bits() {
+            return Some(tail);
+        }
+        tail = scan_cdr::<OBSERVE>(tail);
+    }
+    None
+}
+
+/// GNU `EQ` while the flag is on (`lisp.h` `EQ` -> `data.c` `slow_eq`): bit
+/// identity, else each side unwraps only if it is itself a symbol with
+/// position. Hoist the target's unwrap out of the loop. A target that is no
+/// symbol after unwrapping can only match by identity (a positioned symbol
+/// unwraps to a symbol), exactly as the builtin's scan decides.
+#[inline(always)]
+fn memq_swp_walk<const OBSERVE: bool>(elt: Value, list: Value) -> Option<Value> {
+    let elt_bare = b::positioned_symbol_scan::<OBSERVE>(elt).unwrap_or(elt);
+    if !elt_bare.is_bare_symbol() {
+        return memq_bits_walk::<OBSERVE>(elt, list);
+    }
+    let mut tail = list;
+    for _ in 0..LIST_SHIM_FAST_STEPS {
+        if !tail.is_cons() {
+            return tail.is_nil().then_some(Value::NIL);
+        }
+        let element = scan_car::<OBSERVE>(tail);
+        if element.bits() == elt.bits() || b::eq_bare_symbol_swp_scan::<OBSERVE>(element, elt_bare)
+        {
+            return Some(tail);
+        }
+        tail = scan_cdr::<OBSERVE>(tail);
+    }
+    None
+}
+
 /// `(assq KEY LIST)` for a short list, as [`memq_fast`]: the first element
-/// that is a cons whose car is KEY's bits.
+/// that is a cons whose car is `eq` to KEY.
 #[inline(always)]
 fn assq_fast(ctx: &Context, key: Value, list: Value) -> Option<Value> {
     if !crate::tagged::collection_reads::reads_need_observation() {
         assq_fast_walk::<false>(ctx, key, list)
     } else {
-        assq_fast_walk::<true>(ctx, key, list)
+        assq_observed_walk(ctx, key, list)
     }
 }
 
+/// [`memq_observed_walk`]'s twin for `assq`.
+#[inline(never)]
+fn assq_observed_walk(ctx: &Context, key: Value, list: Value) -> Option<Value> {
+    assq_fast_walk::<true>(ctx, key, list)
+}
+
+/// The same two rules as [`memq_fast_walk`], on the entry's key.
 #[inline(always)]
 fn assq_fast_walk<const OBSERVE: bool>(ctx: &Context, key: Value, list: Value) -> Option<Value> {
     if ctx.symbols_with_pos_enabled {
-        return None;
+        return assq_swp_walk::<OBSERVE>(key, list);
     }
     let mut tail = list;
     for _ in 0..LIST_SHIM_FAST_STEPS {
@@ -478,6 +542,50 @@ fn assq_fast_walk<const OBSERVE: bool>(ctx: &Context, key: Value, list: Value) -
         let entry = scan_car::<OBSERVE>(tail);
         if entry.is_cons() && scan_car::<OBSERVE>(entry).bits() == key.bits() {
             return Some(entry);
+        }
+        tail = scan_cdr::<OBSERVE>(tail);
+    }
+    None
+}
+
+/// GNU `BASE_EQ`: the flag-off walk, unchanged.
+#[inline(always)]
+fn assq_bits_walk<const OBSERVE: bool>(key: Value, list: Value) -> Option<Value> {
+    let mut tail = list;
+    for _ in 0..LIST_SHIM_FAST_STEPS {
+        if !tail.is_cons() {
+            return tail.is_nil().then_some(Value::NIL);
+        }
+        let entry = scan_car::<OBSERVE>(tail);
+        if entry.is_cons() && scan_car::<OBSERVE>(entry).bits() == key.bits() {
+            return Some(entry);
+        }
+        tail = scan_cdr::<OBSERVE>(tail);
+    }
+    None
+}
+
+/// GNU `EQ` with the flag on, as [`memq_swp_walk`]: the first entry that is
+/// a cons whose key is `eq` to KEY.
+#[inline(always)]
+fn assq_swp_walk<const OBSERVE: bool>(key: Value, list: Value) -> Option<Value> {
+    let key_bare = b::positioned_symbol_scan::<OBSERVE>(key).unwrap_or(key);
+    if !key_bare.is_bare_symbol() {
+        return assq_bits_walk::<OBSERVE>(key, list);
+    }
+    let mut tail = list;
+    for _ in 0..LIST_SHIM_FAST_STEPS {
+        if !tail.is_cons() {
+            return tail.is_nil().then_some(Value::NIL);
+        }
+        let entry = scan_car::<OBSERVE>(tail);
+        if entry.is_cons() {
+            let entry_key = scan_car::<OBSERVE>(entry);
+            if entry_key.bits() == key.bits()
+                || b::eq_bare_symbol_swp_scan::<OBSERVE>(entry_key, key_bare)
+            {
+                return Some(entry);
+            }
         }
         tail = scan_cdr::<OBSERVE>(tail);
     }
@@ -3437,3 +3545,7 @@ pub extern "C" fn neovm_jit_backedge(ctx: *mut u8) -> i64 {
         }
     })
 }
+
+#[cfg(test)]
+#[path = "../tests/list_search_swp_test.rs"]
+mod list_search_swp_tests;
